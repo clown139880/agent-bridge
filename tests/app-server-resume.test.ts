@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import test from "node:test";
 import { CodexAppServerAdapter } from "../apps/bridge/src/app-server.js";
+import type { BridgeToControlMessage } from "../packages/protocol/src/index.js";
 
 function rolloutLine(value: unknown): string {
   return `${JSON.stringify(value)}\n`;
@@ -227,4 +228,89 @@ test("resuming an already idle thread does not replay its previous completed tur
     status: { type: "idle" },
   });
   assert.equal(syncCount, 1);
+});
+
+test("an idle-read race never replays an older completed turn", async () => {
+  const emitted: BridgeToControlMessage[] = [];
+  const adapter = new CodexAppServerAdapter({
+    command: "codex",
+    url: "ws://127.0.0.1:4500",
+    allowedRoots: [process.cwd()],
+    manageServer: false,
+    reconnectMs: 3_000,
+  }, (message) => emitted.push(message));
+  let resolveRead!: (value: unknown) => void;
+  let markReadStarted!: () => void;
+  const readStarted = new Promise<void>((resolve) => { markReadStarted = resolve; });
+  const internals = adapter as unknown as {
+    activeThreads: Set<string>;
+    request(method: string, params: Record<string, unknown>): Promise<unknown>;
+    handleNotification(method: string, params: Record<string, unknown>): Promise<void>;
+  };
+  internals.request = async () => new Promise((resolve) => {
+    resolveRead = resolve;
+    markReadStarted();
+  });
+  internals.activeThreads.add("thread-1");
+
+  const idleNotification = internals.handleNotification("thread/status/changed", {
+    threadId: "thread-1",
+    status: { type: "idle" },
+  });
+  await readStarted;
+  await internals.handleNotification("turn/completed", {
+    threadId: "thread-1",
+    turn: {
+      id: "new-turn",
+      status: "completed",
+      items: [{ type: "agentMessage", text: "new reply" }],
+    },
+  });
+  resolveRead({
+    thread: {
+      turns: [
+        { id: "old-turn", status: "completed", items: [{ type: "agentMessage", text: "old reply" }] },
+        { id: "new-turn", status: "completed", items: [{ type: "agentMessage", text: "new reply" }] },
+      ],
+    },
+  });
+  await idleNotification;
+
+  const completed = emitted.filter((message) => message.type === "agent.completed");
+  assert.equal(completed.length, 1);
+  assert.equal(completed[0] && "summary" in completed[0] ? completed[0].summary : undefined, "new reply");
+});
+
+test("a late real-time completion does not duplicate an idle-read completion", async () => {
+  const emitted: BridgeToControlMessage[] = [];
+  const adapter = new CodexAppServerAdapter({
+    command: "codex",
+    url: "ws://127.0.0.1:4500",
+    allowedRoots: [process.cwd()],
+    manageServer: false,
+    reconnectMs: 3_000,
+  }, (message) => emitted.push(message));
+  const turn = {
+    id: "turn-1",
+    status: "completed" as const,
+    items: [{ type: "agentMessage", text: "only once" }],
+  };
+  const internals = adapter as unknown as {
+    activeThreads: Set<string>;
+    request(method: string, params: Record<string, unknown>): Promise<unknown>;
+    handleNotification(method: string, params: Record<string, unknown>): Promise<void>;
+  };
+  internals.request = async () => ({ thread: { turns: [turn] } });
+  internals.activeThreads.add("thread-1");
+
+  await internals.handleNotification("thread/status/changed", {
+    threadId: "thread-1",
+    status: { type: "idle" },
+  });
+  await internals.handleNotification("turn/completed", { threadId: "thread-1", turn });
+
+  const completed = emitted.filter((message) => message.type === "agent.completed");
+  assert.equal(completed.length, 1);
+  assert.equal(completed[0] && "eventId" in completed[0] ? completed[0].eventId : undefined,
+    "app-server:thread-1:turn-1:terminal");
 });

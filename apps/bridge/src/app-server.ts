@@ -470,15 +470,9 @@ export class CodexAppServerAdapter {
       const turn = params.turn as CodexTurn;
       this.activeTurns.delete(threadId);
       this.activeThreads.delete(threadId);
-      if (turn?.id) this.reportedTurns.add(turn.id);
-      const summary = finalAgentText(turn?.items ?? []);
-      if (turn?.status === "failed") {
-        this.emit({ type: "agent.failed", sessionId: threadId, timestamp: Date.now(), durationMs: turn.durationMs ?? undefined, summary: turn.error?.message ?? summary });
-      } else if (turn?.status === "interrupted") {
-        this.emit({ type: "agent.stopped", sessionId: threadId, timestamp: Date.now(), durationMs: turn.durationMs ?? undefined });
-      } else {
-        this.emit({ type: "agent.completed", sessionId: threadId, timestamp: Date.now(), durationMs: turn?.durationMs ?? undefined, summary });
-      }
+      if (!turn?.id || this.reportedTurns.has(turn.id)) return;
+      this.reportedTurns.add(turn.id);
+      this.emitTerminalTurn(threadId, turn);
     }
   }
 
@@ -488,21 +482,38 @@ export class CodexAppServerAdapter {
         threadId,
         includeTurns: true,
       });
-      const turn = [...(result.thread.turns ?? [])].reverse().find((candidate) =>
-        candidate.status !== "inProgress" && !this.reportedTurns.has(candidate.id));
-      if (!turn) return;
+      // Only inspect the newest turn. Walking backwards into any older
+      // unreported turn can replay stale output when this read races with the
+      // real-time turn/completed notification for the current turn.
+      const turns = result.thread.turns ?? [];
+      const turn = turns.at(-1);
+      if (!turn || turn.status === "inProgress" || this.reportedTurns.has(turn.id)) return;
       this.reportedTurns.add(turn.id);
       for (const item of turn.items ?? []) this.handleCompletedItem(threadId, item);
-      const summary = finalAgentText(turn.items ?? []);
-      if (turn.status === "failed") {
-        this.emit({ type: "agent.failed", sessionId: threadId, timestamp: Date.now(), durationMs: turn.durationMs ?? undefined, summary: turn.error?.message ?? summary });
-      } else if (turn.status === "interrupted") {
-        this.emit({ type: "agent.stopped", sessionId: threadId, timestamp: Date.now(), durationMs: turn.durationMs ?? undefined });
-      } else {
-        this.emit({ type: "agent.completed", sessionId: threadId, timestamp: Date.now(), durationMs: turn.durationMs ?? undefined, summary });
-      }
+      this.emitTerminalTurn(threadId, turn);
     } catch (error) {
       log.warn({ error, threadId }, "Unable to read completed Codex turn");
+    }
+  }
+
+  private emitTerminalTurn(threadId: string, turn: CodexTurn): void {
+    const eventId = `app-server:${threadId}:${turn.id}:terminal`;
+    const summary = finalAgentText(turn.items ?? []);
+    if (turn.status === "failed") {
+      this.emit({
+        type: "agent.failed", eventId, sessionId: threadId, timestamp: Date.now(),
+        durationMs: turn.durationMs ?? undefined, summary: turn.error?.message ?? summary,
+      });
+    } else if (turn.status === "interrupted") {
+      this.emit({
+        type: "agent.stopped", eventId, sessionId: threadId, timestamp: Date.now(),
+        durationMs: turn.durationMs ?? undefined,
+      });
+    } else {
+      this.emit({
+        type: "agent.completed", eventId, sessionId: threadId, timestamp: Date.now(),
+        durationMs: turn.durationMs ?? undefined, summary,
+      });
     }
   }
 
