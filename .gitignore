@@ -1,0 +1,25 @@
+# Dependencies and generated output
+node_modules/
+.pnpm-store/
+dist/
+*.tsbuildinfo
+coverage/
+
+# Runtime state
+data/*.sqlite*
+*.log
+pnpm-debug.log*
+
+# Local credentials and machine-specific configuration
+.env
+.env.*
+!.env.example
+
+# Local agent metadata
+.agents/
+.codex/
+
+# Editor and OS files
+.DS_Store
+.idea/
+.vscode/

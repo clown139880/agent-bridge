@@ -1,0 +1,9 @@
+{
+  "name": "@agent-bridge/bridge",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@agent-bridge/protocol": "workspace:*"
+  }
+}

@@ -1,0 +1,16 @@
+[Unit]
+Description=Local Agent Bridge
+After=network-online.target agent-control-plane.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/agent-bridge
+EnvironmentFile=/root/agent-bridge/.env
+ExecStart=/usr/bin/env pnpm start:bridge
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target

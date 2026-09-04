@@ -1,0 +1,17 @@
+[Unit]
+Description=Agent Bridge for WSL Codex CLI
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/agent-bridge
+EnvironmentFile=%h/agent-bridge/.env.bridge
+ExecStart=/usr/bin/pnpm start:bridge
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

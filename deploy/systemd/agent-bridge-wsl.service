@@ -1,0 +1,20 @@
+[Unit]
+Description=Agent Bridge for WSL Codex CLI
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=agent-bridge
+Group=agent-bridge
+WorkingDirectory=/opt/agent-bridge
+Environment=HOME=/var/lib/agent-bridge
+EnvironmentFile=/etc/agent-bridge/bridge.env
+ExecStart=/usr/bin/pnpm --dir /opt/agent-bridge start:bridge
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+NoNewPrivileges=true
+SyslogIdentifier=agent-bridge-wsl
+
+[Install]
+WantedBy=multi-user.target

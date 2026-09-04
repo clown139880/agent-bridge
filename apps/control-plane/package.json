@@ -1,0 +1,15 @@
+{
+  "name": "@agent-bridge/control-plane",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@agent-bridge/database": "workspace:*",
+    "@agent-bridge/protocol": "workspace:*",
+    "marked": "^18.0.11",
+    "sanitize-html": "^2.17.7"
+  },
+  "devDependencies": {
+    "@types/sanitize-html": "^2.16.1"
+  }
+}
