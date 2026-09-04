@@ -6,7 +6,9 @@ dist/
 coverage/
 
 # Runtime state
-data/*.sqlite*
+data/*
+*.sqlite*
+*.db*
 *.log
 pnpm-debug.log*
 
