@@ -35,6 +35,7 @@ export interface AgentEvent {
 
 export interface SessionDiscoveredMessage {
   type: "session.discovered";
+  requestId?: string;
   sessionId: string;
   nativeSessionId: string;
   agentType: "codex-cli" | "codex-desktop";
@@ -70,6 +71,7 @@ export interface HeartbeatMessage {
 export interface StartAgentMessage {
   type: "start_agent";
   sessionId: string;
+  resumeSessionId?: string;
   agentType: "codex-cli";
   projectPath: string;
   prompt?: string;

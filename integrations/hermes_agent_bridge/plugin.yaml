@@ -1,0 +1,9 @@
+name: agent-bridge-worker
+version: 0.2.0
+description: "Dispatch Hermes Kanban lanes to Agent Bridge and relay approvals through Hermes."
+author: local
+kind: standalone
+provides_hooks:
+  - on_kanban_dispatch_tick
+provides_tools:
+  - agent_bridge_workers

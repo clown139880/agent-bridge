@@ -100,8 +100,8 @@ export class BridgeClient {
           log.info({ machineId: message.machineId }, "Bridge registered");
           break;
         case "start_agent":
-          void this.codex.startSession(message.sessionId, message.projectPath, message.prompt)
-            .catch((error) => this.send({ type: "error", message: error instanceof Error ? error.message : String(error) }));
+          void this.codex.startSession(message.sessionId, message.projectPath, message.prompt, message.resumeSessionId)
+            .catch((error) => this.send({ type: "error", sessionId: message.sessionId, message: error instanceof Error ? error.message : String(error) }));
           break;
         case "agent_input":
           void this.codex.input(message.sessionId, message.text)

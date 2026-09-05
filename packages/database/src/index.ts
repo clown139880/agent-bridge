@@ -27,6 +27,25 @@ export interface SessionRecord {
   updatedAt: number;
 }
 
+export interface WorkerRunRecord {
+  id: string;
+  taskId: string | null;
+  conversationId: string | null;
+  machineId: string;
+  agentType: "codex-cli";
+  projectPath: string;
+  sessionId: string | null;
+  status: AgentStatus;
+  error: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface StoredAgentEvent {
+  sequence: number;
+  event: AgentEvent;
+}
+
 export class Store {
   readonly db: DatabaseSync;
 
@@ -71,12 +90,46 @@ export class Store {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         session_id TEXT NOT NULL REFERENCES sessions(id),
         event_id TEXT,
+        worker_run_id TEXT,
         type TEXT NOT NULL,
         payload TEXT NOT NULL,
         created_at INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS worker_runs (
+        id TEXT PRIMARY KEY,
+        task_id TEXT,
+        conversation_id TEXT,
+        machine_id TEXT NOT NULL REFERENCES machines(id),
+        agent_type TEXT NOT NULL,
+        project_path TEXT NOT NULL,
+        session_id TEXT REFERENCES sessions(id),
+        status TEXT NOT NULL,
+        error TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
     `);
     const eventColumns = this.db.prepare("PRAGMA table_info(events)").all() as Array<{ name: string }>;
+    if (!eventColumns.some((column) => column.name === "worker_run_id")) {
+      this.db.exec("ALTER TABLE events ADD COLUMN worker_run_id TEXT");
+    }
+    this.db.exec(`
+      UPDATE events SET worker_run_id = (
+        SELECT id FROM worker_runs
+        WHERE worker_runs.session_id = events.session_id
+        ORDER BY worker_runs.created_at DESC LIMIT 1
+      ) WHERE worker_run_id IS NULL;
+    `);
+    const workerRunColumns = this.db.prepare("PRAGMA table_info(worker_runs)").all() as Array<{ name: string }>;
+    if (!workerRunColumns.some((column) => column.name === "conversation_id")) {
+      this.db.exec("ALTER TABLE worker_runs ADD COLUMN conversation_id TEXT");
+    }
+    // A Codex thread may back several sequential Worker API runs. Older builds
+    // enforced a one-to-one relationship here.
+    this.db.exec(`
+      DROP INDEX IF EXISTS worker_runs_session_idx;
+      CREATE INDEX IF NOT EXISTS worker_runs_session_idx ON worker_runs(session_id);
+    `);
     if (!eventColumns.some((column) => column.name === "event_id")) {
       this.db.exec("ALTER TABLE events ADD COLUMN event_id TEXT");
     }
@@ -163,10 +216,74 @@ export class Store {
     return rows.map(mapSession);
   }
 
-  addEvent(event: AgentEvent): boolean {
+  listProjectPaths(machineId: string, limit = 8): string[] {
+    const rows = this.db.prepare(`
+      SELECT project_path FROM sessions
+      WHERE machine_id=?
+      GROUP BY project_path
+      ORDER BY MAX(updated_at) DESC
+      LIMIT ?
+    `).all(machineId, limit) as Array<{ project_path: string }>;
+    return rows.map((row) => String(row.project_path));
+  }
+
+  createWorkerRun(run: WorkerRunRecord): void {
+    this.db.prepare(`
+      INSERT INTO worker_runs
+      (id, task_id, conversation_id, machine_id, agent_type, project_path, session_id,
+       status, error, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(run.id, run.taskId, run.conversationId, run.machineId, run.agentType, run.projectPath, run.sessionId,
+      run.status, run.error, run.createdAt, run.updatedAt);
+  }
+
+  getWorkerRun(id: string): WorkerRunRecord | undefined {
+    const row = this.db.prepare("SELECT * FROM worker_runs WHERE id=?").get(id) as Record<string, unknown> | undefined;
+    return row ? mapWorkerRun(row) : undefined;
+  }
+
+  getWorkerRunBySession(sessionId: string): WorkerRunRecord | undefined {
+    const row = this.db.prepare(
+      "SELECT * FROM worker_runs WHERE session_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1",
+    ).get(sessionId) as Record<string, unknown> | undefined;
+    return row ? mapWorkerRun(row) : undefined;
+  }
+
+  getLatestWorkerRunByConversation(conversationId: string, machineId: string, projectPath: string): WorkerRunRecord | undefined {
+    const row = this.db.prepare(`
+      SELECT * FROM worker_runs
+      WHERE conversation_id=? AND machine_id=? AND project_path=? AND session_id IS NOT NULL
+      ORDER BY created_at DESC, rowid DESC LIMIT 1
+    `).get(conversationId, machineId, projectPath) as Record<string, unknown> | undefined;
+    return row ? mapWorkerRun(row) : undefined;
+  }
+
+  attachWorkerRun(id: string, sessionId: string, status: AgentStatus): void {
+    this.db.prepare("UPDATE worker_runs SET session_id=?, status=?, updated_at=? WHERE id=?")
+      .run(sessionId, status, Date.now(), id);
+  }
+
+  updateWorkerRun(id: string, status: AgentStatus, error?: string): void {
+    this.db.prepare("UPDATE worker_runs SET status=?, error=?, updated_at=? WHERE id=?")
+      .run(status, error ?? null, Date.now(), id);
+  }
+
+  listEvents(sessionId: string, after = 0, limit = 100, workerRunId?: string): StoredAgentEvent[] {
+    const sql = `
+      SELECT id, payload FROM events
+      WHERE session_id=? AND id>?${workerRunId ? " AND worker_run_id=?" : ""}
+      ORDER BY id ASC
+      LIMIT ?
+    `;
+    const params = workerRunId ? [sessionId, after, workerRunId, limit] : [sessionId, after, limit];
+    const rows = this.db.prepare(sql).all(...params) as Array<{ id: number; payload: string }>;
+    return rows.map((row) => ({ sequence: Number(row.id), event: JSON.parse(row.payload) as AgentEvent }));
+  }
+
+  addEvent(event: AgentEvent, workerRunId?: string): boolean {
     const result = this.db.prepare(
-      "INSERT OR IGNORE INTO events (session_id, event_id, type, payload, created_at) VALUES (?, ?, ?, ?, ?)",
-    ).run(event.sessionId, event.eventId ?? null, event.type, JSON.stringify(event), event.timestamp);
+      "INSERT OR IGNORE INTO events (session_id, event_id, worker_run_id, type, payload, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+    ).run(event.sessionId, event.eventId ?? null, workerRunId ?? null, event.type, JSON.stringify(event), event.timestamp);
     return result.changes > 0;
   }
 }
@@ -178,5 +295,16 @@ function mapSession(row: Record<string, unknown>): SessionRecord {
     matrixRoomId: String(row.matrix_room_id), matrixThreadId: row.matrix_thread_id ? String(row.matrix_thread_id) : null,
     nativeSessionId: row.native_session_id ? String(row.native_session_id) : null,
     status: row.status as AgentStatus, createdAt: Number(row.created_at), updatedAt: Number(row.updated_at),
+  };
+}
+
+function mapWorkerRun(row: Record<string, unknown>): WorkerRunRecord {
+  return {
+    id: String(row.id), taskId: row.task_id ? String(row.task_id) : null,
+    conversationId: row.conversation_id ? String(row.conversation_id) : null,
+    machineId: String(row.machine_id), agentType: row.agent_type as "codex-cli",
+    projectPath: String(row.project_path), sessionId: row.session_id ? String(row.session_id) : null,
+    status: row.status as AgentStatus, error: row.error ? String(row.error) : null,
+    createdAt: Number(row.created_at), updatedAt: Number(row.updated_at),
   };
 }

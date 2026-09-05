@@ -77,6 +77,39 @@ test("input resumes a persisted thread before starting a turn", async () => {
   });
 });
 
+test("a new run can resume a persisted thread and start its prompt as the next turn", async () => {
+  const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
+  const emitted: BridgeToControlMessage[] = [];
+  const adapter = new CodexAppServerAdapter({
+    command: "codex", url: "ws://127.0.0.1:4500", allowedRoots: [process.cwd()],
+    manageServer: false, reconnectMs: 3_000,
+  }, (message) => emitted.push(message));
+  const internals = adapter as unknown as {
+    readyPromise: Promise<void>;
+    socket: { readyState: number; close(): void };
+    request(method: string, params: Record<string, unknown>): Promise<unknown>;
+  };
+  internals.readyPromise = Promise.resolve();
+  internals.socket = { readyState: 1, close() {} };
+  internals.request = async (method, params) => {
+    calls.push({ method, params });
+    if (method === "thread/resume") {
+      return { thread: { id: "persisted-thread", cwd: process.cwd(), status: { type: "idle" } } };
+    }
+    return {};
+  };
+
+  await adapter.startSession("run-2", process.cwd(), "What did I ask you to remember?", "persisted-thread");
+
+  assert.deepEqual(calls.map((call) => call.method), ["thread/resume", "turn/start"]);
+  assert.deepEqual(calls[1]?.params, {
+    threadId: "persisted-thread",
+    input: [{ type: "text", text: "What did I ask you to remember?", text_elements: [] }],
+  });
+  assert.ok(emitted.some((message) => message.type === "session.discovered"
+    && message.requestId === "run-2" && message.sessionId === "persisted-thread"));
+});
+
 test("subsequent input does not resume an already subscribed thread again", async () => {
   const methods: string[] = [];
   const adapter = new CodexAppServerAdapter({

@@ -15,12 +15,13 @@ import sanitizeHtml from "sanitize-html";
 const log = pino({ name: "matrix" });
 
 export interface MatrixCallbacks {
-  onRoomMessage(body: string, sender: string): Promise<void>;
+  onRoomMessage(body: string, sender: string, eventId: string): Promise<void>;
   onThreadMessage(roomId: string, threadRootId: string, body: string, sender: string): Promise<void>;
   onReaction(targetEventId: string, key: string, sender: string): Promise<void>;
 }
 
 export class MatrixGateway {
+  readonly enabled = true;
   private client!: MatrixClient;
   private roomId = "";
   private startedAt = Date.now();
@@ -61,17 +62,17 @@ export class MatrixGateway {
     this.client?.stopClient();
   }
 
-  async sendRoot(body: string): Promise<string> {
+  async sendRoot(body: string, metadata?: AgentBridgeMetadata): Promise<string> {
     const response = await this.client.sendEvent(
       this.roomId,
       EventType.RoomMessage,
-      markdownMessageContent(MsgType.Text, body),
+      withMetadata(markdownMessageContent(MsgType.Text, body), metadata),
     );
     this.rememberSent(response.event_id);
     return response.event_id;
   }
 
-  async sendThread(threadRootId: string, body: string): Promise<string> {
+  async sendThread(threadRootId: string, body: string, metadata?: AgentBridgeMetadata): Promise<string> {
     const response = await this.client.sendEvent(this.roomId, EventType.RoomMessage, {
       ...markdownMessageContent(MsgType.Text, body),
       "m.relates_to": {
@@ -80,6 +81,7 @@ export class MatrixGateway {
         is_falling_back: true,
         "m.in_reply_to": { event_id: threadRootId },
       },
+      ...(metadata ? { "io.agent-bridge": metadata } : {}),
     } as never);
     this.rememberSent(response.event_id);
     return response.event_id;
@@ -101,13 +103,14 @@ export class MatrixGateway {
     await this.client.redactEvent(this.roomId, eventId);
   }
 
-  async sendNotice(body: string): Promise<void> {
+  async sendNotice(body: string, metadata?: AgentBridgeMetadata): Promise<string> {
     const response = await this.client.sendEvent(
       this.roomId,
       EventType.RoomMessage,
-      markdownMessageContent(MsgType.Notice, body),
+      withMetadata(markdownMessageContent(MsgType.Notice, body), metadata),
     );
     this.rememberSent(response.event_id);
+    return response.event_id;
   }
 
   private async createControlRoom(): Promise<string> {
@@ -143,7 +146,8 @@ export class MatrixGateway {
     if (relation?.rel_type === "m.thread" && relation.event_id) {
       await this.callbacks.onThreadMessage(this.roomId, relation.event_id, content.body, sender);
     } else {
-      await this.callbacks.onRoomMessage(content.body, sender);
+      const eventId = event.getId();
+      if (eventId) await this.callbacks.onRoomMessage(content.body, sender, eventId);
     }
   }
 
@@ -151,6 +155,28 @@ export class MatrixGateway {
     this.sentEventIds.add(eventId);
     setTimeout(() => this.sentEventIds.delete(eventId), 60_000).unref();
   }
+}
+
+export class NoopMatrixGateway {
+  readonly enabled = false;
+
+  async start(): Promise<string> { return ""; }
+  stop(): void {}
+  async sendRoot(): Promise<string> { return ""; }
+  async sendThread(): Promise<string> { return ""; }
+  async sendReaction(): Promise<string> { return ""; }
+  async removeReaction(): Promise<void> {}
+  async sendNotice(): Promise<string> { return ""; }
+}
+
+export type ControlGateway = Pick<MatrixGateway,
+  "start" | "stop" | "sendRoot" | "sendThread" | "sendReaction" | "removeReaction" | "sendNotice"
+> & { enabled?: boolean };
+
+export type AgentBridgeMetadata = Record<string, string | number | boolean | undefined>;
+
+function withMetadata<T extends object>(content: T, metadata?: AgentBridgeMetadata): T & { "io.agent-bridge"?: AgentBridgeMetadata } {
+  return metadata ? { ...content, "io.agent-bridge": metadata } : content;
 }
 
 export function markdownMessageContent(msgtype: MsgType.Text | MsgType.Notice, body: string): {

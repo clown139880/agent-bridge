@@ -1,10 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { createServer, type IncomingMessage, type Server as HttpServer } from "node:http";
+import { createServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from "node:http";
 import { basename } from "node:path";
 import type { Duplex } from "node:stream";
 import pino from "pino";
 import { WebSocket, WebSocketServer } from "ws";
-import { Store, type SessionRecord } from "@agent-bridge/database";
+import { Store, type SessionRecord, type WorkerRunRecord } from "@agent-bridge/database";
 import {
   parseMessage,
   statusForEvent,
@@ -16,23 +16,42 @@ import {
   type RegisterMessage,
   type SessionDiscoveredMessage,
 } from "@agent-bridge/protocol";
-import { MatrixGateway } from "./matrix.js";
+import type { ControlGateway } from "./matrix.js";
 
 const log = pino({ name: "control-plane" });
 
 interface BridgeConnection {
   machineId: string;
+  name: string;
+  capabilities: string[];
   socket: WebSocket;
 }
 
-interface PendingMatrixApproval {
+interface PendingLaunch {
+  sender: string;
+  prompt: string;
+  sourceEventId: string;
+  machineId?: string;
+  agentType: "codex-cli";
+}
+
+interface PendingLaunchSelection {
+  launch: PendingLaunch;
+  messageEventId: string;
+  reactionEventIds: string[];
+  choices: Map<string, { machineId?: string; projectPath?: string; manualPath?: boolean }>;
+}
+
+interface PendingApproval {
   approvalId: string;
   sessionId: string;
   machineId: string;
-  threadId: string;
-  messageEventId: string;
+  threadId?: string;
+  messageEventId?: string;
   reactionEventIds: string[];
   choices: ApprovalChoice[];
+  kind: ApprovalRequestMessage["kind"];
+  summary: string;
 }
 
 const APPROVAL_REACTIONS: ReadonlyArray<{ key: string; choice: ApprovalChoice; label: string }> = [
@@ -41,25 +60,49 @@ const APPROVAL_REACTIONS: ReadonlyArray<{ key: string; choice: ApprovalChoice; l
   { key: "♾️", choice: "allow-session", label: "本 Session 一直允许" },
 ];
 
+const NUMBER_REACTIONS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣"] as const;
+
 export class ControlPlane {
   private readonly http: HttpServer;
   private readonly wss: WebSocketServer;
   private readonly bridges = new Map<string, BridgeConnection>();
-  private readonly approvalsByEvent = new Map<string, PendingMatrixApproval>();
-  private readonly approvalsById = new Map<string, PendingMatrixApproval>();
+  private readonly approvalsByEvent = new Map<string, PendingApproval>();
+  private readonly approvalsById = new Map<string, PendingApproval>();
   private readonly resolvedApprovalIds = new Set<string>();
   private readonly progressNotifiedSessions = new Set<string>();
+  private readonly launchSelectionsByEvent = new Map<string, PendingLaunchSelection>();
+  private readonly launchSelectionsBySender = new Map<string, PendingLaunchSelection>();
+  private readonly launchesAwaitingPath = new Map<string, PendingLaunch>();
+  private readonly launchesByRequestId = new Map<string, PendingLaunch & { machineId: string; projectPath: string }>();
   private roomId = "";
 
   constructor(
     private readonly store: Store,
-    private readonly matrix: MatrixGateway,
-    private readonly options: { host: string; port: number; bridgeToken?: string },
+    private readonly matrix: ControlGateway,
+    private readonly options: {
+      host: string;
+      port: number;
+      bridgeToken?: string;
+      workerApiEnabled?: boolean;
+      workerApiToken?: string;
+    },
   ) {
     this.http = createServer((request, response) => {
       if (request.url === "/health") {
         response.writeHead(200, { "content-type": "application/json" });
         response.end(JSON.stringify({ ok: true, bridges: this.bridges.size, roomId: this.roomId }));
+        return;
+      }
+      if (request.url?.startsWith("/api/v1/")) {
+        if (!this.options.workerApiEnabled) {
+          response.writeHead(404).end();
+          return;
+        }
+        void this.handleWorkerApi(request, response).catch((error) => {
+          log.error({ error }, "Worker API request failed");
+          if (!response.headersSent) this.json(response, 500, { error: "internal_error" });
+          else response.end();
+        });
         return;
       }
       response.writeHead(404).end();
@@ -82,14 +125,14 @@ export class ControlPlane {
     await new Promise<void>((resolve) => this.http.close(() => resolve()));
   }
 
-  async onRoomMessage(body: string): Promise<void> {
+  async onRoomMessage(body: string, sender = "", eventId = ""): Promise<void> {
     const input = body.trim();
     if (input === "!help" || input === "/help") {
       await this.matrix.sendNotice([
         "Agent Control commands:",
-        "!codex <project-path|zoxide-query> [initial prompt] (optional remote start)",
-        "!codex@<machine-id> <project-path|zoxide-query> [initial prompt]",
-        "Use z:<query> to make fuzzy path lookup explicit, for example: !codex z:agent-bridge Fix tests",
+        "直接在频道发送任务即可开始；按表情选择 agent@机器 和工作目录。",
+        "选择“其他目录”后，发送绝对路径或 zoxide 查询（例如 z:agent-bridge）。",
+        "!codex / !codex@machine 仍保留兼容。",
         "!machines",
         "!sessions",
         "Inside a session thread: send text, /log [N], or /stop",
@@ -110,12 +153,32 @@ export class ControlPlane {
         : "No sessions yet.");
       return;
     }
+    if (input === "!cancel" && sender) {
+      await this.cancelLaunch(sender);
+      await this.matrix.sendNotice("已取消启动。", { kind: "launch.cancelled" });
+      return;
+    }
     const match = input.match(/^!codex(?:@([^\s]+))?\s+(\S+)(?:\s+([\s\S]+))?$/);
     if (match) {
       await this.createCodexSession(match[1], match[2], match[3]);
       return;
     }
-    if (input.startsWith("!")) await this.matrix.sendNotice("Unknown command. Send !help for usage.");
+    if (input.startsWith("!")) {
+      await this.matrix.sendNotice("Unknown command. Send !help for usage.");
+      return;
+    }
+    if (!input || !sender || !eventId) return;
+    const awaitingPath = this.launchesAwaitingPath.get(sender);
+    if (awaitingPath) {
+      this.launchesAwaitingPath.delete(sender);
+      await this.startLaunch(awaitingPath, input);
+      return;
+    }
+    if (this.launchSelectionsBySender.has(sender)) {
+      await this.matrix.sendNotice("请先点击上一条选择消息下的表情，或发送 !cancel。", { kind: "launch.reminder" });
+      return;
+    }
+    await this.beginLaunch({ sender, prompt: body, sourceEventId: eventId, agentType: "codex-cli" });
   }
 
   async onThreadMessage(roomId: string, threadId: string, body: string): Promise<void> {
@@ -138,7 +201,13 @@ export class ControlPlane {
     }
   }
 
-  async onReaction(targetEventId: string, key: string): Promise<void> {
+  async onReaction(targetEventId: string, key: string, sender = ""): Promise<void> {
+    const launchSelection = this.launchSelectionsByEvent.get(targetEventId);
+    const launchChoice = launchSelection?.choices.get(key);
+    if (launchSelection && launchChoice && (!sender || launchSelection.launch.sender === sender)) {
+      await this.resolveLaunchSelection(launchSelection, launchChoice);
+      return;
+    }
     const pending = this.approvalsByEvent.get(targetEventId);
     const action = APPROVAL_REACTIONS.find((candidate) => candidate.key === key);
     if (!pending || !action || !pending.choices.includes(action.choice)) return;
@@ -146,7 +215,7 @@ export class ControlPlane {
     await this.removeApprovalReactions(pending);
     const bridge = this.bridges.get(pending.machineId);
     if (!bridge) {
-      await this.matrix.sendThread(pending.threadId, `🔴 Bridge ${pending.machineId} is offline; the approval could not be submitted.`);
+      if (pending.threadId) await this.matrix.sendThread(pending.threadId, `🔴 Bridge ${pending.machineId} is offline; the approval could not be submitted.`);
       return;
     }
     this.send(bridge.socket, {
@@ -156,7 +225,189 @@ export class ControlPlane {
       choice: action.choice,
     });
     this.store.updateSessionStatus(pending.sessionId, "working");
-    await this.matrix.sendThread(pending.threadId, `🔐 已选择：${action.label}。Codex 正在继续。`);
+    const workerRun = this.store.getWorkerRunBySession(pending.sessionId);
+    if (workerRun) this.store.updateWorkerRun(workerRun.id, "working");
+    if (pending.threadId) await this.matrix.sendThread(pending.threadId, `🔐 已选择：${action.label}。Codex 正在继续。`);
+  }
+
+  private async handleWorkerApi(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    const expected = this.options.workerApiToken;
+    if (!expected || request.headers.authorization !== `Bearer ${expected}`) {
+      this.json(response, 401, { error: "unauthorized" });
+      return;
+    }
+    const url = new URL(request.url ?? "/", "http://localhost");
+    if (request.method === "GET" && url.pathname === "/api/v1/workers") {
+      const workers = this.store.listMachines().map((machine) => ({
+        id: `codex@${machine.id}`,
+        machineId: machine.id,
+        name: `Codex @ ${machine.name}`,
+        status: this.bridges.has(machine.id) ? "online" : "offline",
+        platform: machine.platform,
+        hostname: machine.hostname,
+        capabilities: machine.capabilities,
+        workspaces: this.store.listProjectPaths(machine.id),
+        lastSeenAt: machine.lastSeenAt,
+      }));
+      this.json(response, 200, { workers });
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/api/v1/runs") {
+      const body = await readJson(request);
+      const workerId = optionalStringField(body, "workerId");
+      const explicitMachineId = optionalStringField(body, "machineId");
+      const machineId = workerId?.startsWith("codex@") ? workerId.slice("codex@".length) : explicitMachineId;
+      const projectPath = stringField(body, "projectPath");
+      const prompt = stringField(body, "prompt");
+      const requestedRunId = optionalStringField(body, "runId");
+      const taskId = optionalStringField(body, "taskId");
+      const conversationId = optionalStringField(body, "conversationId");
+      const resumeSessionId = optionalStringField(body, "resumeSessionId");
+      if (workerId && (!workerId.startsWith("codex@") || !machineId || (explicitMachineId && explicitMachineId !== machineId))) {
+        this.json(response, 400, { error: "invalid_worker_id", workerId });
+        return;
+      }
+      if (!machineId || !projectPath || !prompt) {
+        this.json(response, 400, { error: "workerId, projectPath and prompt are required" });
+        return;
+      }
+      const bridge = this.bridges.get(machineId);
+      if (!bridge || !bridge.capabilities.includes("codex-cli")) {
+        this.json(response, 409, { error: "worker_offline", machineId });
+        return;
+      }
+      const runId = requestedRunId ?? randomUUID();
+      const existing = this.store.getWorkerRun(runId);
+      if (existing) {
+        if (existing.machineId !== machineId || existing.projectPath !== projectPath
+          || existing.taskId !== (taskId ?? null) || existing.conversationId !== (conversationId ?? null)) {
+          this.json(response, 409, { error: "run_id_conflict", runId });
+          return;
+        }
+        this.json(response, 200, workerRunJson(existing));
+        return;
+      }
+      const priorConversationRun = !resumeSessionId && conversationId
+        ? this.store.getLatestWorkerRunByConversation(conversationId, machineId, projectPath)
+        : undefined;
+      const effectiveResumeSessionId = resumeSessionId ?? priorConversationRun?.sessionId ?? undefined;
+      let resumeSession: SessionRecord | undefined;
+      if (effectiveResumeSessionId) {
+        resumeSession = this.store.getSession(effectiveResumeSessionId);
+        if (!resumeSession) {
+          this.json(response, 404, { error: "resume_session_not_found", resumeSessionId: effectiveResumeSessionId });
+          return;
+        }
+        if (resumeSession.machineId !== machineId || resumeSession.projectPath !== projectPath) {
+          this.json(response, 409, { error: "resume_session_conflict", resumeSessionId: effectiveResumeSessionId });
+          return;
+        }
+        const latestSessionRun = this.store.getWorkerRunBySession(resumeSession.id);
+        const runIsBusy = latestSessionRun
+          ? ["starting", "working", "waiting", "blocked"].includes(latestSessionRun.status)
+          : ["starting", "working", "blocked"].includes(resumeSession.status);
+        if (runIsBusy) {
+          this.json(response, 409, { error: "resume_session_busy", resumeSessionId: effectiveResumeSessionId });
+          return;
+        }
+      }
+      const now = Date.now();
+      this.store.createWorkerRun({
+        id: runId, taskId: taskId ?? null, conversationId: conversationId ?? null,
+        machineId, agentType: "codex-cli", projectPath,
+        sessionId: resumeSession?.id ?? null,
+        status: "starting", error: null, createdAt: now, updatedAt: now,
+      });
+      this.send(bridge.socket, {
+        type: "start_agent", sessionId: runId, resumeSessionId: effectiveResumeSessionId,
+        agentType: "codex-cli", projectPath, prompt,
+      });
+      this.json(response, 202, workerRunJson(this.store.getWorkerRun(runId)!));
+      return;
+    }
+    const match = url.pathname.match(/^\/api\/v1\/runs\/([^/]+)(?:\/(events|input|interrupt))?$/);
+    if (match) {
+      const runId = decodeURIComponent(match[1]!);
+      const action = match[2];
+      const run = this.store.getWorkerRun(runId);
+      if (!run) {
+        this.json(response, 404, { error: "run_not_found", runId });
+        return;
+      }
+      if (request.method === "GET" && !action) {
+        const approvals = [...this.approvalsById.values()]
+          .filter((approval) => approval.sessionId === run.sessionId)
+          .map(({ approvalId, kind, summary, choices }) => ({ approvalId, kind, summary, choices }));
+        this.json(response, 200, { ...workerRunJson(run), approvals });
+        return;
+      }
+      if (request.method === "GET" && action === "events") {
+        const after = Math.max(0, Number(url.searchParams.get("after") ?? "0") || 0);
+        const limit = Math.min(500, Math.max(1, Number(url.searchParams.get("limit") ?? "100") || 100));
+        const events = run.sessionId ? this.store.listEvents(run.sessionId, after, limit, run.id) : [];
+        this.json(response, 200, { runId, events, next: events.at(-1)?.sequence ?? after });
+        return;
+      }
+      if (request.method === "POST" && (action === "input" || action === "interrupt")) {
+        if (!run.sessionId) {
+          this.json(response, 409, { error: "run_not_attached", runId });
+          return;
+        }
+        const bridge = this.bridges.get(run.machineId);
+        if (!bridge) {
+          this.json(response, 409, { error: "worker_offline", machineId: run.machineId });
+          return;
+        }
+        if (action === "input") {
+          const body = await readJson(request);
+          const input = stringField(body, "text");
+          if (!input) {
+            this.json(response, 400, { error: "text is required" });
+            return;
+          }
+          this.send(bridge.socket, { type: "agent_input", sessionId: run.sessionId, text: input });
+        } else {
+          this.send(bridge.socket, { type: "stop_agent", sessionId: run.sessionId });
+        }
+        this.json(response, 202, { runId, accepted: true });
+        return;
+      }
+    }
+    const approvalMatch = url.pathname.match(/^\/api\/v1\/runs\/([^/]+)\/approvals\/([^/]+)$/);
+    if (request.method === "POST" && approvalMatch) {
+      const runId = decodeURIComponent(approvalMatch[1]!);
+      const approvalId = decodeURIComponent(approvalMatch[2]!);
+      const run = this.store.getWorkerRun(runId);
+      const pending = this.approvalsById.get(approvalId);
+      if (!run || !run.sessionId || !pending || pending.sessionId !== run.sessionId) {
+        this.json(response, 404, { error: "approval_not_found" });
+        return;
+      }
+      const body = await readJson(request);
+      const choice = stringField(body, "choice") as ApprovalChoice | undefined;
+      if (!choice || !pending.choices.includes(choice)) {
+        this.json(response, 400, { error: "invalid_choice", choices: pending.choices });
+        return;
+      }
+      const bridge = this.bridges.get(run.machineId);
+      if (!bridge) {
+        this.json(response, 409, { error: "worker_offline", machineId: run.machineId });
+        return;
+      }
+      this.forgetApproval(pending);
+      await this.removeApprovalReactions(pending);
+      this.send(bridge.socket, { type: "approval_response", sessionId: run.sessionId, approvalId, choice });
+      this.store.updateSessionStatus(run.sessionId, "working");
+      this.store.updateWorkerRun(run.id, "working");
+      this.json(response, 202, { runId, approvalId, accepted: true });
+      return;
+    }
+    this.json(response, 404, { error: "not_found" });
+  }
+
+  private json(response: ServerResponse, status: number, body: unknown): void {
+    response.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
+    response.end(JSON.stringify(body));
   }
 
   private handleUpgrade(request: IncomingMessage, socket: Duplex, head: Buffer): void {
@@ -184,7 +435,12 @@ export class ControlPlane {
         machineId = registeredId;
         clearTimeout(registrationTimeout);
         this.bridges.get(registeredId)?.socket.close(1000, "replaced");
-        this.bridges.set(registeredId, { machineId: registeredId, socket });
+        this.bridges.set(registeredId, {
+          machineId: registeredId,
+          name: message.name || registeredId,
+          capabilities: message.capabilities,
+          socket,
+        });
         this.store.upsertMachine({
           id: registeredId, name: message.name || registeredId, platform: message.platform,
           hostname: message.hostname, capabilities: message.capabilities,
@@ -228,6 +484,8 @@ export class ControlPlane {
       if (pending) {
         this.forgetApproval(pending);
         await this.removeApprovalReactions(pending);
+        const run = this.store.getWorkerRunBySession(message.sessionId);
+        if (run) this.store.updateWorkerRun(run.id, "working");
       } else {
         this.resolvedApprovalIds.add(message.approvalId);
         setTimeout(() => this.resolvedApprovalIds.delete(message.approvalId), 60_000).unref();
@@ -236,8 +494,21 @@ export class ControlPlane {
     }
     if (message.type === "error") {
       if (message.sessionId) {
+        const workerRun = this.store.getWorkerRun(message.sessionId)
+          ?? this.store.getWorkerRunBySession(message.sessionId);
+        if (workerRun) {
+          this.store.updateWorkerRun(workerRun.id, "failed", message.message);
+          if (!workerRun.sessionId) return;
+        }
+        const launch = this.launchesByRequestId.get(message.sessionId);
+        if (launch) {
+          this.launchesByRequestId.delete(message.sessionId);
+          await this.matrix.sendThread(launch.sourceEventId, `❌ 启动失败：${message.message}`, { kind: "launch.failed" });
+          return;
+        }
         const session = this.store.getSession(message.sessionId);
         if (session?.matrixThreadId) await this.matrix.sendThread(session.matrixThreadId, `❌ ${message.message}`);
+        else log.warn({ machineId, sessionId: message.sessionId, message: message.message }, "Bridge error for unknown session");
       } else {
         log.warn({ machineId, message: message.message }, "Bridge error");
       }
@@ -249,9 +520,11 @@ export class ControlPlane {
   private async handleAgentEvent(event: AgentEvent): Promise<void> {
     const session = this.store.getSession(event.sessionId);
     if (!session) return;
-    if (!this.store.addEvent(event)) return;
+    const workerRun = this.store.getWorkerRunBySession(event.sessionId);
+    if (!this.store.addEvent(event, workerRun?.id)) return;
     const status = statusForEvent(event.type);
     if (status) this.store.updateSessionStatus(event.sessionId, status);
+    if (status && workerRun) this.store.updateWorkerRun(workerRun.id, status);
     if (!session.matrixThreadId) return;
     if (event.type === "agent.started") this.progressNotifiedSessions.delete(event.sessionId);
     if (event.type === "agent.progress") {
@@ -267,8 +540,23 @@ export class ControlPlane {
 
   private async handleApprovalRequest(machineId: string, message: ApprovalRequestMessage): Promise<void> {
     const session = this.store.getSession(message.sessionId);
-    if (!session?.matrixThreadId) return;
+    if (!session) return;
     this.store.updateSessionStatus(message.sessionId, "blocked");
+    const workerRun = this.store.getWorkerRunBySession(message.sessionId);
+    if (workerRun) this.store.updateWorkerRun(workerRun.id, "blocked");
+    const pending: PendingApproval = {
+      approvalId: message.approvalId,
+      sessionId: message.sessionId,
+      machineId,
+      threadId: session.matrixThreadId ?? undefined,
+      reactionEventIds: [],
+      choices: message.choices,
+      kind: message.kind,
+      summary: message.summary,
+    };
+    if (this.resolvedApprovalIds.delete(message.approvalId)) return;
+    this.approvalsById.set(message.approvalId, pending);
+    if (!session.matrixThreadId) return;
     const messageEventId = await this.matrix.sendThread(session.matrixThreadId, [
       `🔐 Codex 请求授权 · ${approvalKindLabel(message.kind)}`,
       "",
@@ -277,18 +565,8 @@ export class ControlPlane {
       "点击下面的表情选择操作：",
       ...approvalActions(message).map((action) => `${action.key} ${action.label}`),
     ].join("\n"));
-    const pending: PendingMatrixApproval = {
-      approvalId: message.approvalId,
-      sessionId: message.sessionId,
-      machineId,
-      threadId: session.matrixThreadId,
-      messageEventId,
-      reactionEventIds: [],
-      choices: message.choices,
-    };
-    if (this.resolvedApprovalIds.delete(message.approvalId)) return;
+    pending.messageEventId = messageEventId;
     this.approvalsByEvent.set(messageEventId, pending);
-    this.approvalsById.set(message.approvalId, pending);
     for (const action of approvalActions(message)) {
       try {
         pending.reactionEventIds.push(await this.matrix.sendReaction(messageEventId, action.key));
@@ -298,12 +576,12 @@ export class ControlPlane {
     }
   }
 
-  private forgetApproval(pending: PendingMatrixApproval): void {
-    this.approvalsByEvent.delete(pending.messageEventId);
+  private forgetApproval(pending: PendingApproval): void {
+    if (pending.messageEventId) this.approvalsByEvent.delete(pending.messageEventId);
     this.approvalsById.delete(pending.approvalId);
   }
 
-  private async removeApprovalReactions(pending: PendingMatrixApproval): Promise<void> {
+  private async removeApprovalReactions(pending: PendingApproval): Promise<void> {
     const results = await Promise.allSettled(pending.reactionEventIds.map((eventId) => this.matrix.removeReaction(eventId)));
     if (results.some((result) => result.status === "rejected")) {
       log.warn({ approvalId: pending.approvalId }, "Unable to remove one or more approval reactions");
@@ -314,8 +592,13 @@ export class ControlPlane {
     let session = this.store.getSessionByNative(machineId, message.nativeSessionId);
     if (session) {
       this.store.updateSessionStatus(session.id, message.status);
+      const workerRun = message.requestId ? this.store.getWorkerRun(message.requestId) : undefined;
+      if (workerRun && !workerRun.sessionId) this.store.attachWorkerRun(workerRun.id, session.id, message.status);
+      if (!workerRun && !session.matrixThreadId && message.title?.trim()) await this.publishPassiveSession(session, message);
       return;
     }
+    const launch = message.requestId ? this.launchesByRequestId.get(message.requestId) : undefined;
+    const workerRun = message.requestId ? this.store.getWorkerRun(message.requestId) : undefined;
     const now = Date.now();
     session = {
       id: message.sessionId,
@@ -324,26 +607,139 @@ export class ControlPlane {
       projectName: message.projectName || basename(message.projectPath.replace(/[\\/]$/, "")) || message.projectPath,
       projectPath: message.projectPath,
       matrixRoomId: this.roomId,
-      matrixThreadId: null,
+      matrixThreadId: launch?.sourceEventId ?? null,
       nativeSessionId: message.nativeSessionId,
       status: message.status,
       createdAt: message.createdAt || now,
       updatedAt: now,
     };
     this.store.createSession(session);
-    const agentLabel = message.agentType === "codex-desktop" ? "Codex Desktop" : "Codex CLI";
-    const matrixThreadId = await this.matrix.sendRoot([
-      `${statusIcon(message.status)} ${session.projectName} · ${agentLabel}`,
-      "",
-      `Machine: ${machineId}`,
-      `Project: ${session.projectPath}`,
-      `Codex Thread: ${message.nativeSessionId}`,
-      message.title ? `Title: ${message.title}` : undefined,
-      message.promptSummary ? `Prompt: ${message.promptSummary}` : undefined,
-      `Status: ${message.status.toUpperCase()}`,
-    ].filter(Boolean).join("\n"));
-    this.store.setThread(session.id, matrixThreadId);
+    if (workerRun) this.store.attachWorkerRun(workerRun.id, session.id, message.status);
+    if (launch) {
+      this.launchesByRequestId.delete(message.requestId!);
+      const bridge = this.bridges.get(machineId);
+      await this.matrix.sendThread(launch.sourceEventId, [
+        `${statusIcon(message.status)} Codex CLI @ ${bridge?.name ?? machineId}`,
+        session.projectPath,
+      ].join("\n"), sessionMetadata(session));
+    } else if (!workerRun && message.title?.trim()) {
+      await this.publishPassiveSession(session, message);
+    }
     log.info({ machineId, sessionId: session.id, nativeSessionId: message.nativeSessionId }, "Local Codex thread attached");
+  }
+
+  private async publishPassiveSession(session: SessionRecord, message: SessionDiscoveredMessage): Promise<void> {
+    const agentLabel = message.agentType === "codex-desktop" ? "Codex Desktop" : "Codex CLI";
+    const bridge = this.bridges.get(session.machineId);
+    const matrixThreadId = await this.matrix.sendRoot([
+      `${statusIcon(message.status)} ${message.title!.trim()}`,
+      `${agentLabel} @ ${bridge?.name ?? session.machineId} · ${session.projectName}`,
+    ].join("\n"), sessionMetadata(session));
+    this.store.setThread(session.id, matrixThreadId);
+  }
+
+  private async beginLaunch(launch: PendingLaunch): Promise<void> {
+    const targets = [...this.bridges.values()].filter((bridge) => bridge.capabilities.includes("codex-cli"));
+    if (!targets.length) {
+      await this.matrix.sendNotice("当前没有可用的 Codex bridge。", { kind: "launch.unavailable" });
+      return;
+    }
+    if (targets.length === 1) {
+      launch.machineId = targets[0]!.machineId;
+      await this.chooseWorkspace(launch);
+      return;
+    }
+    const choices = new Map<string, { machineId: string }>();
+    const lines = targets.slice(0, NUMBER_REACTIONS.length).map((target, index) => {
+      const key = NUMBER_REACTIONS[index]!;
+      choices.set(key, { machineId: target.machineId });
+      return `${key} Codex CLI @ ${target.name}`;
+    });
+    await this.offerLaunchSelection(launch, "把任务交给谁？\n\n" + lines.join("\n"), choices, "launch.agent-choice");
+  }
+
+  private async chooseWorkspace(launch: PendingLaunch): Promise<void> {
+    const paths = this.store.listProjectPaths(launch.machineId!, NUMBER_REACTIONS.length - 1);
+    if (!paths.length) {
+      this.launchesAwaitingPath.set(launch.sender, launch);
+      await this.matrix.sendNotice("📁 还没有最近目录，请发送绝对路径或 zoxide 查询。", {
+        kind: "launch.path-input", machine_id: launch.machineId,
+      });
+      return;
+    }
+    const choices = new Map<string, { projectPath?: string; manualPath?: boolean }>();
+    const lines = paths.map((path, index) => {
+      const key = NUMBER_REACTIONS[index]!;
+      choices.set(key, { projectPath: path });
+      return `${key} ${path}`;
+    });
+    choices.set("➕", { manualPath: true });
+    lines.push("➕ 新的工作目录（输入路径）");
+    await this.offerLaunchSelection(launch, "在哪个目录工作？\n\n" + lines.join("\n"), choices, "launch.workspace-choice");
+  }
+
+  private async offerLaunchSelection(
+    launch: PendingLaunch,
+    body: string,
+    choices: Map<string, { machineId?: string; projectPath?: string; manualPath?: boolean }>,
+    kind: string,
+  ): Promise<void> {
+    const messageEventId = await this.matrix.sendNotice(body, { kind, source_event_id: launch.sourceEventId });
+    const selection: PendingLaunchSelection = { launch, messageEventId, reactionEventIds: [], choices };
+    this.launchSelectionsByEvent.set(messageEventId, selection);
+    this.launchSelectionsBySender.set(launch.sender, selection);
+    for (const key of choices.keys()) {
+      try {
+        selection.reactionEventIds.push(await this.matrix.sendReaction(messageEventId, key));
+      } catch (error) {
+        log.warn({ error, reaction: key }, "Unable to add launch reaction");
+      }
+    }
+  }
+
+  private async resolveLaunchSelection(
+    selection: PendingLaunchSelection,
+    choice: { machineId?: string; projectPath?: string; manualPath?: boolean },
+  ): Promise<void> {
+    this.launchSelectionsByEvent.delete(selection.messageEventId);
+    this.launchSelectionsBySender.delete(selection.launch.sender);
+    await Promise.allSettled(selection.reactionEventIds.map((eventId) => this.matrix.removeReaction(eventId)));
+    if (choice.machineId) {
+      selection.launch.machineId = choice.machineId;
+      await this.chooseWorkspace(selection.launch);
+    } else if (choice.manualPath) {
+      this.launchesAwaitingPath.set(selection.launch.sender, selection.launch);
+      await this.matrix.sendNotice("📁 请发送绝对路径或 zoxide 查询。", {
+        kind: "launch.path-input", machine_id: selection.launch.machineId,
+      });
+    } else if (choice.projectPath) {
+      await this.startLaunch(selection.launch, choice.projectPath);
+    }
+  }
+
+  private async startLaunch(launch: PendingLaunch, projectPath: string): Promise<void> {
+    const bridge = launch.machineId ? this.bridges.get(launch.machineId) : undefined;
+    if (!bridge) {
+      await this.matrix.sendThread(launch.sourceEventId, "❌ 所选 bridge 已离线。", { kind: "launch.failed" });
+      return;
+    }
+    const requestId = randomUUID();
+    this.launchesByRequestId.set(requestId, { ...launch, machineId: bridge.machineId, projectPath });
+    this.send(bridge.socket, {
+      type: "start_agent", sessionId: requestId, agentType: launch.agentType, projectPath, prompt: launch.prompt,
+    });
+    await this.matrix.sendThread(launch.sourceEventId, `⏳ Codex CLI @ ${bridge.name} · ${projectPath}`, {
+      kind: "launch.starting", request_id: requestId, machine_id: bridge.machineId, project_path: projectPath,
+    });
+  }
+
+  private async cancelLaunch(sender: string): Promise<void> {
+    this.launchesAwaitingPath.delete(sender);
+    const selection = this.launchSelectionsBySender.get(sender);
+    if (!selection) return;
+    this.launchSelectionsBySender.delete(sender);
+    this.launchSelectionsByEvent.delete(selection.messageEventId);
+    await Promise.allSettled(selection.reactionEventIds.map((eventId) => this.matrix.removeReaction(eventId)));
   }
 
   private async createCodexSession(requestedMachine: string | undefined, projectPath: string, prompt?: string): Promise<void> {
@@ -364,8 +760,61 @@ export class ControlPlane {
   }
 }
 
+async function readJson(request: IncomingMessage): Promise<Record<string, unknown>> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of request) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    size += buffer.length;
+    if (size > 1_000_000) throw new Error("request body exceeds 1 MB");
+    chunks.push(buffer);
+  }
+  if (!chunks.length) return {};
+  const value: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("JSON object required");
+  return value as Record<string, unknown>;
+}
+
+function stringField(body: Record<string, unknown>, name: string): string | undefined {
+  const value = body[name];
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function optionalStringField(body: Record<string, unknown>, name: string): string | undefined {
+  const value = body[name];
+  return value === undefined ? undefined : stringField(body, name);
+}
+
+function workerRunJson(run: WorkerRunRecord): Record<string, unknown> {
+  return {
+    runId: run.id,
+    taskId: run.taskId,
+    conversationId: run.conversationId,
+    workerId: `codex@${run.machineId}`,
+    machineId: run.machineId,
+    agent: run.agentType,
+    workspace: run.projectPath,
+    sessionId: run.sessionId,
+    status: run.status,
+    error: run.error,
+    createdAt: run.createdAt,
+    updatedAt: run.updatedAt,
+  };
+}
+
 function statusIcon(status: string): string {
   return ({ starting: "🟢", working: "🔵", waiting: "🟡", blocked: "🔴", completed: "✅", failed: "❌", stopped: "⚫" } as Record<string, string>)[status] ?? "⚪";
+}
+
+function sessionMetadata(session: SessionRecord): Record<string, string> {
+  return {
+    kind: "session",
+    session_id: session.id,
+    native_session_id: session.nativeSessionId ?? "",
+    machine_id: session.machineId,
+    agent_type: session.agentType,
+    project_path: session.projectPath,
+  };
 }
 
 function approvalKindLabel(kind: ApprovalRequestMessage["kind"]): string {

@@ -100,6 +100,7 @@ export class CodexAppServerAdapter {
   private readonly pendingApprovals = new Map<string, PendingApproval>();
   private readonly activeTurns = new Map<string, string>();
   private readonly subscribedThreads = new Set<string>();
+  private readonly threadsById = new Map<string, CodexThread>();
   private readonly activeThreads = new Set<string>();
   private readonly reportedTurns = new Set<string>();
   private readonly logsByThread = new Map<string, string[]>();
@@ -180,14 +181,22 @@ export class CodexAppServerAdapter {
     this.desktopScannerStarted = false;
   }
 
-  async startSession(_requestId: string, projectPath: string, prompt?: string): Promise<void> {
+  async startSession(requestId: string, projectPath: string, prompt?: string, resumeSessionId?: string): Promise<void> {
     await this.ensureReady();
     const cwd = await resolveProjectPath(projectPath, this.options.allowedRoots);
     if (prompt) this.pendingStartPrompts.set(cwd, prompt);
     try {
+      if (resumeSessionId) {
+        const thread = await this.ensureThreadSubscribed(resumeSessionId);
+        const threadCwd = await resolveProjectPath(thread.cwd, this.options.allowedRoots);
+        if (threadCwd !== cwd) throw new Error(`Codex thread ${resumeSessionId} belongs to ${threadCwd}, not ${cwd}`);
+        await this.discoverThread(thread, prompt, requestId);
+        if (prompt) await this.startTurn(thread.id, prompt);
+        return;
+      }
       const result = await this.request<{ thread: CodexThread }>("thread/start", { cwd });
       this.subscribedThreads.add(result.thread.id);
-      await this.discoverThread(result.thread, prompt);
+      await this.discoverThread(result.thread, prompt, requestId);
       if (prompt) await this.startTurn(result.thread.id, prompt);
     } finally {
       if (prompt && this.pendingStartPrompts.get(cwd) === prompt) this.pendingStartPrompts.delete(cwd);
@@ -332,11 +341,13 @@ export class CodexAppServerAdapter {
     }
   }
 
-  private async ensureThreadSubscribed(threadId: string): Promise<void> {
-    if (this.subscribedThreads.has(threadId)) return;
+  private async ensureThreadSubscribed(threadId: string): Promise<CodexThread> {
+    const known = this.threadsById.get(threadId);
+    if (this.subscribedThreads.has(threadId) && known) return known;
     const resumed = await this.request<{ thread: CodexThread }>("thread/resume", { threadId });
     this.subscribedThreads.add(threadId);
     await this.discoverThread(resumed.thread);
+    return resumed.thread;
   }
 
   private async handleMessage(raw: string): Promise<void> {
@@ -517,7 +528,7 @@ export class CodexAppServerAdapter {
     }
   }
 
-  private async discoverThread(thread: CodexThread, initialPrompt?: string): Promise<void> {
+  private async discoverThread(thread: CodexThread, initialPrompt?: string, requestId?: string): Promise<void> {
     if (!thread.id || !thread.cwd || thread.parentThreadId) return;
     let projectPath: string;
     try {
@@ -525,8 +536,10 @@ export class CodexAppServerAdapter {
     } catch {
       return;
     }
+    this.threadsById.set(thread.id, thread);
     const message: SessionDiscoveredMessage = {
       type: "session.discovered",
+      requestId,
       sessionId: thread.id,
       nativeSessionId: thread.id,
       agentType: "codex-cli",

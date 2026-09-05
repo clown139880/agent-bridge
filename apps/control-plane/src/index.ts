@@ -1,28 +1,31 @@
 import pino from "pino";
 import { Store } from "@agent-bridge/database";
 import { config } from "./config.js";
-import { MatrixGateway } from "./matrix.js";
+import { MatrixGateway, NoopMatrixGateway } from "./matrix.js";
 import { ControlPlane } from "./server.js";
 
 const log = pino({ name: "control-plane-main" });
 const store = new Store(config.databasePath);
 let control!: ControlPlane;
-const matrix = new MatrixGateway({
+const callbacks = {
+  onRoomMessage: (body: string, sender: string, eventId: string) => control.onRoomMessage(body, sender, eventId),
+  onThreadMessage: (roomId: string, threadId: string, body: string) => control.onThreadMessage(roomId, threadId, body),
+  onReaction: (targetEventId: string, key: string, sender: string) => control.onReaction(targetEventId, key, sender),
+};
+const matrix = config.matrixEnabled ? new MatrixGateway({
   homeserver: config.matrixHomeserver,
   userId: config.matrixUserId,
   password: config.matrixPassword,
   roomId: config.matrixRoomId,
   roomName: config.matrixRoomName,
   allowedUserId: config.matrixAllowedUserId,
-}, {
-  onRoomMessage: (body) => control.onRoomMessage(body),
-  onThreadMessage: (roomId, threadId, body) => control.onThreadMessage(roomId, threadId, body),
-  onReaction: (targetEventId, key) => control.onReaction(targetEventId, key),
-});
+}, callbacks) : new NoopMatrixGateway();
 control = new ControlPlane(store, matrix, {
   host: config.host,
   port: config.port,
   bridgeToken: config.bridgeToken,
+  workerApiEnabled: config.workerApiEnabled,
+  workerApiToken: config.workerApiToken,
 });
 
 await control.start();

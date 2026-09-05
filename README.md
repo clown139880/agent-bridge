@@ -1,16 +1,20 @@
 # Agent Bridge
 
-通过 Matrix 在手机上查看和控制本机 Codex CLI session。Codex 仍运行在开发机上；Bridge 连接本机 Codex App Server，Control Plane 负责 Matrix、session 路由和 SQLite 持久化。
+把多台机器上的 Codex 暴露成可由 Hermes 调度的远程 worker。Codex 仍运行在开发机上；每台 Bridge 只连接本机 Codex App Server，Control Plane 提供经过认证的 worker API、运行路由和 SQLite 持久化。原有 Matrix gateway 暂时保留为可选兼容层。
 
 当前版本：`0.2.0`
 
 ## 能做什么
 
+- 让 Hermes 枚举 `codex@机器` worker 及其最近 workspace。
+- 通过 headless HTTP API 启动、续写、中断 Codex run，并按游标读取生命周期事件。
+- 将 Hermes `taskId` 与真实 Codex thread 解耦并持久关联；带 `runId` 的重试不会重复启动。
+- 在不配置第二个 Matrix bot 的情况下作为纯执行面运行。
 - 自动发现通过共享 App Server 启动的 Codex thread。
-- 为每个 Codex session 创建一个 Matrix thread。
+- 主动启动时直接把用户的首条 prompt 作为 Matrix thread 根消息；被动发现等 session 有明确标题后再同步。
 - 将完成、失败、等待输入和关键进度同步到 Matrix。
 - 在 Matrix thread 中继续对话、查看日志或停止 turn。
-- 从 Matrix 远程创建 Codex session，支持绝对路径和 zoxide 查询。
+- 在 Matrix 直接发送 prompt，通过 reaction 选择 agent@机器及最近目录，也支持输入绝对路径或 zoxide 查询。
 - 用 Matrix reaction 处理命令、文件修改和额外权限请求。
 - 多台 Bridge 通过带 token 的 WebSocket 接入同一 Control Plane。
 - 使用 SQLite 保存 machine、session 和事件状态。
@@ -25,10 +29,11 @@ Codex CLI/TUI
 Codex App Server
       │
       ▼
-Agent Bridge ───── authenticated WebSocket ─────► Control Plane
+Agent Bridge ───── authenticated WebSocket ─────► Worker Control Plane
                                                        │
-                                                       ├── Matrix room / threads
-                                                       └── SQLite
+                                                       ├── authenticated Worker API ◄── Hermes
+                                                       ├── SQLite
+                                                       └── Matrix（可选兼容层）
 ```
 
 只有 Bridge 到 Control Plane 的连接需要跨机器。App Server 应始终监听 localhost。
@@ -69,6 +74,9 @@ Control Plane 主要变量：
 | `DATABASE_PATH` | SQLite 路径，默认 `./data/control-plane.sqlite` |
 | `CONTROL_HOST` / `CONTROL_PORT` | HTTP/WebSocket 监听地址 |
 | `BRIDGE_TOKEN` | Bridge 注册密钥，跨机器部署时必须使用长随机值 |
+| `MATRIX_ENABLED` | 默认 `true`；Hermes 已接管 Matrix 时设为 `false` |
+| `WORKER_API_ENABLED` | 默认 `false`；设为 `true` 才开放 Hermes worker API |
+| `WORKER_API_TOKEN` | 启用 worker API 时必填的独立 bearer token |
 
 Bridge 主要变量：
 
@@ -85,6 +93,119 @@ Bridge 主要变量：
 | `CODEX_DESKTOP_REPLAY_EXISTING` | 首次启动是否同步既有完成记录，默认关闭以避免刷屏 |
 
 不要提交 `.env`、`.env.bridge`、SQLite 数据库或任何 Matrix/token 凭据；这些路径已写入 `.gitignore`。
+
+## Hermes worker API
+
+当 Hermes 已经连接 Matrix 时，建议让本项目只运行执行面：
+
+```dotenv
+MATRIX_ENABLED=false
+WORKER_API_ENABLED=true
+WORKER_API_TOKEN=<独立长随机值>
+```
+
+API 默认关闭；启用后所有 `/api/v1/*` 请求都必须携带：
+
+```http
+Authorization: Bearer <WORKER_API_TOKEN>
+```
+
+Hermes 可以先读取 worker 和最近使用过的 workspace：
+
+```http
+GET /api/v1/workers
+```
+
+确定 `agent@machine` 与目录后启动 run：
+
+```http
+POST /api/v1/runs
+Content-Type: application/json
+
+{
+  "runId": "Hermes 为本次 claim 生成的稳定 ID",
+  "taskId": "Hermes Kanban task ID",
+  "conversationId": "可选：Hermes/Matrix 逻辑会话 ID",
+  "workerId": "codex@bridge-01",
+  "projectPath": "/workspace/project",
+  "prompt": "完成卡片中的任务，并报告验证结果",
+  "resumeSessionId": "可选：上一 run 返回的 sessionId"
+}
+```
+
+返回 `202` 表示 Bridge 已接受请求。相同 `runId`、task、machine 和 workspace 的重试是幂等的；真实 Codex thread 创建后会异步绑定到该 run。
+传入已完成 run 的 `sessionId` 作为 `resumeSessionId` 时，新 run 会在同一台机器、同一 workspace
+执行 `thread/resume` 和 `turn/start`，因此可以跨 `runId`、跨 `taskId` 延续上下文。目标 session 正在执行，或机器/目录不匹配时请求会被拒绝。
+也可以为连续派发传入稳定的 `conversationId`；Control Plane 会自动续接该逻辑会话在同一机器和 workspace 的最近 thread。
+两者都省略时创建新 Codex thread。
+
+一个最小的两次派发流程是：第一次正常创建 run，等待其完成并保存响应中的 `sessionId`；第二次使用新的 `runId` 和
+`taskId`，同时把保存值作为 `resumeSessionId`。`runId` 仍表示一次独立、幂等的执行，`sessionId` 表示可被多个顺序 run
+复用的真实 Codex thread；每个 run 的事件流仍彼此隔离。
+
+运行控制与观察接口：
+
+| 接口 | 用途 |
+| --- | --- |
+| `GET /api/v1/runs/:runId` | 当前状态、Codex session 以及待处理 approvals |
+| `GET /api/v1/runs/:runId/events?after=N` | 增量读取事件；使用返回的 `next` 作为下一页游标 |
+| `POST /api/v1/runs/:runId/input` | 发送 `{ "text": "..." }`，继续同一 Codex thread |
+| `POST /api/v1/runs/:runId/interrupt` | 中断当前 turn |
+| `POST /api/v1/runs/:runId/approvals/:approvalId` | 提交 `{ "choice": "allow" }` 等授权决定 |
+
+当前这层 API 是 Hermes backend 的稳定边界：Hermes 保持 Kanban claim、lease、依赖与 review 的唯一状态真相；Bridge 只维护远程执行状态。不要把 Control Plane 端口直接暴露到公网，跨机器优先使用内网或 VPN。
+
+长期会话（例如小时脉冲与 Matrix bot）应为“机器 + 项目 + 逻辑会话”使用稳定 `conversationId`，或由上层持久保存最新 `sessionId`。
+Hermes 插件会自动把来源卡片的 `session_id` 作为 `conversationId`，因此同一 Hermes/Matrix 会话产生的两张卡会顺序复用 thread；
+没有来源 session 的卡则使用稳定的 board + task ID，使同一张卡的后续 claim 仍可续接。小时脉冲可使用一个固定逻辑 ID。
+不应复用 `runId`，也不应并发续接同一 session。若上下文需要重置，改用新的 `conversationId` 或省略续接字段创建新 thread。
+
+## Hermes 插件
+
+仓库内的 `integrations/hermes_agent_bridge` 是独立 Hermes 插件，不修改 Hermes core。它提供：
+
+- `agent_bridge_workers`：让 Hermes 查看在线的 `codex@machine` 与最近 workspace。
+- `on_kanban_dispatch_tick` observer：看到分配给 `codex@machine` 的卡片后启动本地 supervisor。
+- supervisor：原子 claim 卡片、启动幂等 Worker API run、续租 heartbeat，并把完成或失败回写 Kanban。
+- approval relay：按 Kanban 通知订阅把远端 Codex approval 送回卡片来源 profile，并复用 Hermes 原生
+  gateway queue 与 Matrix 表情审批；Hermes 不在线或路由不明确时保持阻塞，不会自动放行。
+
+开发安装可把插件目录链接到 Hermes 的用户插件目录：
+
+```bash
+ln -s /root/agent-bridge/integrations/hermes_agent_bridge ~/.hermes/plugins/agent-bridge-worker
+```
+
+本机部署脚本会原子同步 Worker API secret；确认 Hermes 已接管 Matrix 后可同时关闭旧 UI：
+
+```bash
+python3 scripts/deploy-hermes-plugin.py --disable-control-matrix
+```
+
+在 Hermes 的 `config.yaml` 中配置非敏感设置：
+
+```yaml
+plugins:
+  entries:
+    agent-bridge-worker:
+      enabled: true
+      settings:
+        api_url: http://127.0.0.1:8787
+        completion_mode: done
+        max_in_progress: 4
+        api_failure_timeout_seconds: 300
+```
+
+把与 Control Plane `WORKER_API_TOKEN` 相同的值作为 Hermes secret 提供给 gateway：
+
+```dotenv
+AGENT_BRIDGE_WORKER_API_TOKEN=<与 WORKER_API_TOKEN 相同的值>
+```
+
+随后在 `hermes tools` 中启用 `Agent Bridge` toolset，并重启 gateway。外部 worker 卡片必须使用
+`workspace_kind=dir`，且 `workspace_path` 是所选 Bridge 机器看到的绝对路径；插件不会在 Hermes 主机上创建或校验这个远端目录。
+
+默认 `completion_mode: done` 会在 Codex 成功结束时完成卡片；设为 `review` 会让实现任务进入 Hermes review lane，review lane 自身成功后仍会完成卡片。
 
 ## 本地启动
 
@@ -118,8 +239,8 @@ source scripts/codex-remote.zsh
 
 官方 Codex Desktop 不会把其私有 App Server 的实时事件发送给 Bridge，但 Desktop 与
 Codex CLI 可以共享 `CODEX_HOME` 中的 session 历史。设置 `CODEX_DESKTOP_HOME` 后，Bridge
-会只读扫描其中由 `Codex Desktop` 创建的 rollout；新 turn 完成或中断时，它会在 Matrix
-创建或更新对应 thread。用户随后在 Matrix 回复时，Bridge 会先确认 Desktop 没有仍在执行
+会只读扫描其中由 `Codex Desktop` 创建的 rollout；新 turn 完成或中断、且 session 已有明确标题时，
+它才会在 Matrix 创建或更新对应 thread。用户随后在 Matrix 回复时，Bridge 会先确认 Desktop 没有仍在执行
 该 thread，再通过现有 App Server 执行 `thread/resume` 和 `turn/start`。
 
 WSL 示例：
@@ -137,15 +258,25 @@ Windows 项目仍优先使用 Windows-native Bridge；从 WSL 接力时，应确
 
 ## Matrix 使用
 
-房间命令：
+直接在房间发送第一条任务，例如：
+
+```text
+修复不稳定的测试，并说明根因
+```
+
+Control Plane 会在只有一个可用 `agent@机器` 时自动选择，否则给出数字 reaction；随后用 reaction
+选择该机器最近使用的工作目录，或选择 `➕ 新的工作目录` 后发送绝对路径、`z:<query>` 或普通 zoxide query。
+启动后，这条原始任务消息就是 session thread 的根消息。可用 `!cancel` 取消尚未完成的选择流程。
+
+辅助命令：
 
 ```text
 !machines
 !sessions
-!codex /absolute/project/path Fix the failing tests
-!codex@bridge-01 z:agent-bridge Fix the failing tests
 !help
 ```
+
+旧的 `!codex <path> [prompt]` 与 `!codex@<machine> <path> [prompt]` 仍保留兼容。
 
 Session thread 内：
 
@@ -155,7 +286,7 @@ Session thread 内：
 /stop         中断当前 turn
 ```
 
-远程创建 session 时，项目参数可以是绝对路径、`z:<query>` 或普通 zoxide query。解析后的真实路径仍必须位于 `BRIDGE_ALLOWED_ROOTS` 中。
+输入其他目录时，路径可以是绝对路径、`z:<query>` 或普通 zoxide query。解析后的真实路径必须已存在，且位于 `BRIDGE_ALLOWED_ROOTS` 中。
 
 ## Matrix 授权
 
