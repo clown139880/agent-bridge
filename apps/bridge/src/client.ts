@@ -79,6 +79,7 @@ export class BridgeClient {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = setInterval(() => this.send({
         type: "heartbeat", machineId: this.options.machineId, timestamp: Date.now(),
+        ...this.codex.sessionActivity(),
       }), 15_000);
     });
     socket.on("message", (data) => {

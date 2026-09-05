@@ -261,6 +261,18 @@ export class CodexAppServerAdapter {
     return this.logsByThread.get(sessionId)?.slice(-count).join("\n") || "No structured events captured yet.";
   }
 
+  sessionActivity(): {
+    activeSessionIds: string[];
+    waitingSessionIds: string[];
+    blockedSessionIds: string[];
+  } {
+    return {
+      activeSessionIds: [...new Set([...this.activeThreads, ...this.activeTurns.keys()])],
+      waitingSessionIds: [...this.pendingUserInput.keys()],
+      blockedSessionIds: [...new Set([...this.pendingApprovals.values()].map((approval) => approval.sessionId))],
+    };
+  }
+
   private async startInternal(): Promise<void> {
     if (this.options.manageServer && !await this.serverReady()) this.spawnServer();
     if (this.options.manageServer) await this.waitForServer();

@@ -84,6 +84,46 @@ test("Hermes worker API starts and observes a headless Codex run", async () => {
       type: "session.discovered", requestId: "run-1", sessionId: "thread-1", nativeSessionId: "thread-1",
       agentType: "codex-cli", projectPath: "/work/repo", status: "working", createdAt: Date.now(),
     });
+
+    store.db.prepare("UPDATE sessions SET updated_at=1 WHERE id='thread-1'").run();
+    store.db.prepare("UPDATE worker_runs SET updated_at=1 WHERE id='run-1'").run();
+    await internals.handleBridgeMessage("dev", {
+      type: "heartbeat", machineId: "dev", timestamp: Date.now(),
+      activeSessionIds: ["thread-1"], waitingSessionIds: [], blockedSessionIds: [],
+    });
+    const progressingRun = await fetch(`${base}/runs/run-1`, { headers }).then((response) => response.json()) as {
+      status: string; updatedAt: number;
+    };
+    assert.equal(progressingRun.status, "working");
+    assert.ok(progressingRun.updatedAt > 1, "an active long run must advance updatedAt without output events");
+
+    store.db.prepare("UPDATE sessions SET status='blocked', updated_at=1 WHERE id='thread-1'").run();
+    store.db.prepare("UPDATE worker_runs SET status='blocked', error=NULL, updated_at=1 WHERE id='run-1'").run();
+    await internals.handleBridgeMessage("dev", {
+      type: "heartbeat", machineId: "dev", timestamp: Date.now(),
+      activeSessionIds: ["thread-1"], waitingSessionIds: [], blockedSessionIds: [],
+    });
+    const repairedRun = await fetch(`${base}/runs/run-1`, { headers }).then((response) => response.json()) as {
+      status: string; error: string | null; approvals: unknown[];
+    };
+    assert.equal(repairedRun.status, "working", "reasonless blocked state must be repaired from live activity");
+    assert.equal(repairedRun.error, null);
+    assert.deepEqual(repairedRun.approvals, []);
+
+    await internals.handleBridgeMessage("dev", {
+      type: "approval_resolved", sessionId: "thread-1", approvalId: "approval-already-resolved",
+    });
+    await internals.handleBridgeMessage("dev", {
+      type: "approval_request", sessionId: "thread-1", approvalId: "approval-already-resolved",
+      kind: "command", summary: "Already approved locally", choices: ["allow", "deny"],
+    });
+    const racedApprovalRun = await fetch(`${base}/runs/run-1`, { headers }).then((response) => response.json()) as {
+      status: string; error: string | null; approvals: unknown[];
+    };
+    assert.equal(racedApprovalRun.status, "working", "a resolved approval must not leave the run blocked");
+    assert.equal(racedApprovalRun.error, null);
+    assert.deepEqual(racedApprovalRun.approvals, []);
+
     await internals.handleBridgeMessage("dev", {
       type: "approval_request", sessionId: "thread-1", approvalId: "approval-1",
       kind: "command", summary: "Run pnpm test", choices: ["allow", "deny"],
@@ -159,6 +199,21 @@ test("Hermes worker API starts and observes a headless Codex run", async () => {
     const originalEvents = await fetch(`${base}/runs/run-1/events?after=0`, { headers })
       .then((response) => response.json()) as { events: unknown[] };
     assert.equal(originalEvents.events.length, 1, "resumed run events must not leak into the earlier run");
+
+    await internals.handleBridgeMessage("dev", {
+      type: "agent.blocked", sessionId: "thread-1", timestamp: Date.now(), summary: "Unsupported server request is pending",
+    });
+    const explicitlyBlockedRun = await fetch(`${base}/runs/run-2`, { headers })
+      .then((response) => response.json()) as { status: string; error: string | null; approvals: unknown[] };
+    assert.equal(explicitlyBlockedRun.status, "blocked");
+    assert.equal(explicitlyBlockedRun.error, "Unsupported server request is pending");
+    assert.deepEqual(explicitlyBlockedRun.approvals, []);
+
+    await internals.handleBridgeMessage("dev", {
+      type: "agent.output", sessionId: "thread-1", timestamp: Date.now(), text: "Continuing",
+    });
+    assert.equal(store.getWorkerRun("run-2")?.status, "working");
+    assert.equal(store.getWorkerRun("run-2")?.error, null, "progress clears an obsolete blocked reason");
   } finally {
     await control.stop();
     store.db.close();

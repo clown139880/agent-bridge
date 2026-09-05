@@ -66,6 +66,9 @@ export interface HeartbeatMessage {
   type: "heartbeat";
   machineId: string;
   timestamp: number;
+  activeSessionIds?: string[];
+  waitingSessionIds?: string[];
+  blockedSessionIds?: string[];
 }
 
 export interface StartAgentMessage {

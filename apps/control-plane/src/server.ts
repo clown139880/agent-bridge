@@ -464,6 +464,7 @@ export class ControlPlane {
   private async handleBridgeMessage(machineId: string, message: BridgeToControlMessage): Promise<void> {
     if (message.type === "heartbeat") {
       this.store.touchMachine(machineId);
+      this.reconcileSessionActivity(machineId, message);
       return;
     }
     if (message.type === "session.discovered") {
@@ -517,6 +518,36 @@ export class ControlPlane {
     if (message.type.startsWith("agent.")) await this.handleAgentEvent(message as AgentEvent);
   }
 
+  private reconcileSessionActivity(
+    machineId: string,
+    heartbeat: Extract<BridgeToControlMessage, { type: "heartbeat" }>,
+  ): void {
+    // Optional fields keep heartbeats from older bridges compatible.
+    if (!heartbeat.activeSessionIds) return;
+    const waiting = new Set(heartbeat.waitingSessionIds ?? []);
+    const blocked = new Set(heartbeat.blockedSessionIds ?? []);
+    for (const sessionId of heartbeat.activeSessionIds) {
+      const session = this.store.getSession(sessionId);
+      if (!session || session.machineId !== machineId) continue;
+      const run = this.store.getWorkerRunBySession(sessionId);
+      if (!run || ["completed", "failed", "stopped"].includes(run.status)) continue;
+
+      if (waiting.has(sessionId)) {
+        this.store.updateSessionStatus(sessionId, "waiting");
+        this.store.updateWorkerRun(run.id, "waiting");
+      } else if (blocked.has(sessionId)) {
+        const hasApproval = [...this.approvalsById.values()].some((approval) => approval.sessionId === sessionId);
+        this.store.updateSessionStatus(sessionId, "blocked");
+        this.store.updateWorkerRun(run.id, "blocked", hasApproval ? undefined : "Approval pending on bridge");
+      } else if (run.status !== "blocked" || !run.error || run.error === "Approval pending on bridge") {
+        // A persisted blocked row with neither a pending approval nor a reason
+        // is stale. Active bridge state is authoritative and safely repairs it.
+        this.store.updateSessionStatus(sessionId, "working");
+        this.store.updateWorkerRun(run.id, "working");
+      }
+    }
+  }
+
   private async handleAgentEvent(event: AgentEvent): Promise<void> {
     const session = this.store.getSession(event.sessionId);
     if (!session) return;
@@ -524,7 +555,10 @@ export class ControlPlane {
     if (!this.store.addEvent(event, workerRun?.id)) return;
     const status = statusForEvent(event.type);
     if (status) this.store.updateSessionStatus(event.sessionId, status);
-    if (status && workerRun) this.store.updateWorkerRun(workerRun.id, status);
+    if (status && workerRun) {
+      const reason = status === "blocked" ? event.summary || event.text || "Bridge reported that the agent is blocked" : undefined;
+      this.store.updateWorkerRun(workerRun.id, status, reason);
+    }
     if (!session.matrixThreadId) return;
     if (event.type === "agent.started") this.progressNotifiedSessions.delete(event.sessionId);
     if (event.type === "agent.progress") {
@@ -541,6 +575,10 @@ export class ControlPlane {
   private async handleApprovalRequest(machineId: string, message: ApprovalRequestMessage): Promise<void> {
     const session = this.store.getSession(message.sessionId);
     if (!session) return;
+    // App Server can resolve a request locally before a delayed/replayed
+    // approval_request reaches us. Never persist a reasonless blocked state in
+    // that case: there is no pending approval for the API caller to resolve.
+    if (this.resolvedApprovalIds.delete(message.approvalId)) return;
     this.store.updateSessionStatus(message.sessionId, "blocked");
     const workerRun = this.store.getWorkerRunBySession(message.sessionId);
     if (workerRun) this.store.updateWorkerRun(workerRun.id, "blocked");
@@ -554,7 +592,6 @@ export class ControlPlane {
       kind: message.kind,
       summary: message.summary,
     };
-    if (this.resolvedApprovalIds.delete(message.approvalId)) return;
     this.approvalsById.set(message.approvalId, pending);
     if (!session.matrixThreadId) return;
     const messageEventId = await this.matrix.sendThread(session.matrixThreadId, [
