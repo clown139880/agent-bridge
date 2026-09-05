@@ -2,7 +2,15 @@
 
 把多台机器上的 Codex 暴露成可由 Hermes 调度的远程 worker。Codex 仍运行在开发机上；每台 Bridge 只连接本机 Codex App Server，Control Plane 提供经过认证的 worker API、运行路由和 SQLite 持久化。原有 Matrix gateway 暂时保留为可选兼容层。
 
-当前版本：`0.4.0`
+当前版本：`0.4.1`
+
+## 任务完成定义
+
+涉及 Agent Bridge 代码或发布的任务，只有在改动已推送到远程，且 Control Plane 的版本登记已更新、
+bridge 自更新流程已被触发后，才算真正完成。发布时必须按语义化版本规范 bump 版本（本次为 `0.4.1`），
+并在 Control Plane 中将 `BRIDGE_LATEST_VERSION` 登记为该版本；各主机的 bridge 再自行发现、拉取、校验和重启。
+“本地已提交但未推送”或“远程已推送但 Control Plane 尚未登记/通告新版本”都只是中间态，
+不能作为任务的完成结论。若自更新因 active turn、待审批或待输入而延后，任务报告必须记录原因和后续触发路径。
 
 ## 能做什么
 
