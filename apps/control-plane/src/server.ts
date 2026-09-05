@@ -24,6 +24,7 @@ interface BridgeConnection {
   machineId: string;
   name: string;
   capabilities: string[];
+  bridgeVersion?: string;
   socket: WebSocket;
 }
 
@@ -74,6 +75,7 @@ export class ControlPlane {
   private readonly launchSelectionsBySender = new Map<string, PendingLaunchSelection>();
   private readonly launchesAwaitingPath = new Map<string, PendingLaunch>();
   private readonly launchesByRequestId = new Map<string, PendingLaunch & { machineId: string; projectPath: string }>();
+  private readonly updateNotifications = new Set<string>();
   private roomId = "";
 
   constructor(
@@ -85,6 +87,11 @@ export class ControlPlane {
       bridgeToken?: string;
       workerApiEnabled?: boolean;
       workerApiToken?: string;
+      bridgeUpdate?: {
+        latestVersion: string;
+        source: string;
+        publishedAt?: number;
+      };
     },
   ) {
     this.http = createServer((request, response) => {
@@ -439,6 +446,7 @@ export class ControlPlane {
           machineId: registeredId,
           name: message.name || registeredId,
           capabilities: message.capabilities,
+          bridgeVersion: message.bridgeVersion,
           socket,
         });
         this.store.upsertMachine({
@@ -446,6 +454,7 @@ export class ControlPlane {
           hostname: message.hostname, capabilities: message.capabilities,
         });
         this.send(socket, { type: "registered", machineId: registeredId });
+        this.sendUpdateAnnouncement(socket);
         log.info({ machineId: registeredId }, "Bridge registered");
         return;
       }
@@ -465,6 +474,16 @@ export class ControlPlane {
     if (message.type === "heartbeat") {
       this.store.touchMachine(machineId);
       this.reconcileSessionActivity(machineId, message);
+      return;
+    }
+    if (message.type === "bridge_update.check") {
+      const bridge = this.bridges.get(machineId);
+      if (bridge) bridge.bridgeVersion = message.currentVersion;
+      if (bridge) this.sendUpdateAnnouncement(bridge.socket);
+      return;
+    }
+    if (message.type === "bridge_update.status") {
+      await this.handleBridgeUpdateStatus(machineId, message);
       return;
     }
     if (message.type === "session.discovered") {
@@ -518,11 +537,16 @@ export class ControlPlane {
     if (message.type.startsWith("agent.")) await this.handleAgentEvent(message as AgentEvent);
   }
 
+  private sendUpdateAnnouncement(socket: WebSocket): void {
+    if (!this.options.bridgeUpdate) return;
+    this.send(socket, { type: "bridge_update.available", ...this.options.bridgeUpdate });
+  }
+
   private reconcileSessionActivity(
     machineId: string,
     heartbeat: Extract<BridgeToControlMessage, { type: "heartbeat" }>,
   ): void {
-    // Optional fields keep heartbeats from older bridges compatible.
+    // Optional fields keep heartbeats from pre-0.4.1 bridges compatible.
     if (!heartbeat.activeSessionIds) return;
     const waiting = new Set(heartbeat.waitingSessionIds ?? []);
     const blocked = new Set(heartbeat.blockedSessionIds ?? []);
@@ -545,6 +569,43 @@ export class ControlPlane {
         this.store.updateSessionStatus(sessionId, "working");
         this.store.updateWorkerRun(run.id, "working");
       }
+    }
+  }
+
+  private async handleBridgeUpdateStatus(
+    machineId: string,
+    message: Extract<BridgeToControlMessage, { type: "bridge_update.status" }>,
+  ): Promise<void> {
+    if (message.phase === "completed") {
+      const bridge = this.bridges.get(machineId);
+      if (bridge) bridge.bridgeVersion = message.currentVersion;
+    }
+    if (message.phase !== "discovered" && message.phase !== "completed") {
+      log.info({ machineId, phase: message.phase, currentVersion: message.currentVersion,
+        latestVersion: message.latestVersion, reason: message.reason }, "Bridge self-update status");
+      return;
+    }
+    const key = `${message.phase}:${machineId}:${message.latestVersion}`;
+    if (this.updateNotifications.has(key)) return;
+    this.updateNotifications.add(key);
+    if (message.phase === "discovered") {
+      await this.matrix.sendNotice([
+        `🔔 Bridge 更新已发现：${machineId}`,
+        `${message.currentVersion} → ${message.latestVersion}`,
+        message.updatable ? "该 bridge 将按本机策略自行更新。" : `不会自动更新：${message.reason ?? "本机策略不允许"}`,
+      ].join("\n"), {
+        kind: "bridge.update.discovered", machine_id: machineId,
+        current_version: message.currentVersion, latest_version: message.latestVersion,
+        updatable: message.updatable,
+      });
+    } else {
+      await this.matrix.sendNotice([
+        `✅ Bridge 已完成自更新：${machineId}`,
+        `当前版本 ${message.currentVersion}`,
+      ].join("\n"), {
+        kind: "bridge.update.completed", machine_id: machineId,
+        current_version: message.currentVersion, latest_version: message.latestVersion,
+      });
     }
   }
 

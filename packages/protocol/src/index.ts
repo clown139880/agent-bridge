@@ -54,12 +54,46 @@ export interface RegisterMessage {
   platform: NodeJS.Platform;
   hostname: string;
   capabilities: string[];
+  bridgeVersion?: string;
   token?: string;
 }
 
 export interface RegisteredMessage {
   type: "registered";
   machineId: string;
+}
+
+export interface BridgeUpdateAnnouncementMessage {
+  type: "bridge_update.available";
+  latestVersion: string;
+  source: string;
+  publishedAt?: number;
+}
+
+export interface BridgeUpdateCheckMessage {
+  type: "bridge_update.check";
+  currentVersion: string;
+}
+
+export type BridgeUpdatePhase =
+  | "discovered"
+  | "deferred"
+  | "fetching"
+  | "fetched"
+  | "validating"
+  | "restarting"
+  | "completed"
+  | "failed"
+  | "rolled_back";
+
+export interface BridgeUpdateStatusMessage {
+  type: "bridge_update.status";
+  phase: BridgeUpdatePhase;
+  currentVersion: string;
+  latestVersion: string;
+  updatable: boolean;
+  fetched: boolean;
+  reason?: string;
 }
 
 export interface HeartbeatMessage {
@@ -136,6 +170,8 @@ export interface ErrorMessage {
 
 export type BridgeToControlMessage =
   | RegisterMessage
+  | BridgeUpdateCheckMessage
+  | BridgeUpdateStatusMessage
   | HeartbeatMessage
   | SessionDiscoveredMessage
   | AgentEvent
@@ -146,6 +182,7 @@ export type BridgeToControlMessage =
 
 export type ControlToBridgeMessage =
   | RegisteredMessage
+  | BridgeUpdateAnnouncementMessage
   | StartAgentMessage
   | AgentInputMessage
   | ApprovalResponseMessage

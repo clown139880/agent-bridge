@@ -7,6 +7,7 @@ import {
   type RegisterMessage,
 } from "@agent-bridge/protocol";
 import { CodexAppServerAdapter } from "./app-server.js";
+import { BridgeSelfUpdater } from "./self-updater.js";
 
 const log = pino({ name: "bridge-client" });
 
@@ -14,8 +15,10 @@ export class BridgeClient {
   private socket?: WebSocket;
   private reconnectTimer?: NodeJS.Timeout;
   private heartbeatTimer?: NodeJS.Timeout;
+  private updateCheckTimer?: NodeJS.Timeout;
   private stopped = false;
   private readonly codex: CodexAppServerAdapter;
+  private readonly updater: BridgeSelfUpdater;
 
   constructor(private readonly options: {
     url: string;
@@ -32,6 +35,17 @@ export class BridgeClient {
     desktopReplayExisting: boolean;
     allowedRoots: string[];
     reconnectMs: number;
+    version: string;
+    updateEnabled: boolean;
+    updateSource?: string;
+    updateSourceRef: string;
+    updateCheckIntervalMs: number;
+    updateInstallRoot: string;
+    updateCurrentLink: string;
+    updateStatePath: string;
+    updatePackageManager: string;
+    updateRestartExecutable: string;
+    updateRestartArgs: string[];
   }) {
     this.codex = new CodexAppServerAdapter({
       command: options.command,
@@ -43,13 +57,29 @@ export class BridgeClient {
       desktopReplayExisting: options.desktopReplayExisting,
       reconnectMs: options.reconnectMs,
     }, (message) => this.send(message));
+    this.updater = new BridgeSelfUpdater({
+      enabled: options.updateEnabled,
+      currentVersion: options.version,
+      source: options.updateSource,
+      sourceRef: options.updateSourceRef,
+      installRoot: options.updateInstallRoot,
+      currentLink: options.updateCurrentLink,
+      statePath: options.updateStatePath,
+      packageManager: options.updatePackageManager,
+      restartExecutable: options.updateRestartExecutable,
+      restartArgs: options.updateRestartArgs,
+      isBusy: () => !this.codex.isReady() || this.codex.hasActiveSessions(),
+      report: (message) => this.send(message),
+    });
   }
 
   start(): void {
     this.stopped = false;
-    void this.codex.start().catch((error) => {
-      log.error({ error }, "Unable to initialize Codex App Server adapter");
-    });
+    void this.codex.start()
+      .then(() => this.updater.retryIfIdle())
+      .catch((error) => {
+        log.error({ error }, "Unable to initialize Codex App Server adapter");
+      });
     this.connect();
   }
 
@@ -57,6 +87,7 @@ export class BridgeClient {
     this.stopped = true;
     clearTimeout(this.reconnectTimer);
     clearInterval(this.heartbeatTimer);
+    clearInterval(this.updateCheckTimer);
     this.codex.stop();
     this.socket?.close(1000, "bridge shutdown");
   }
@@ -73,6 +104,7 @@ export class BridgeClient {
         hostname: this.options.hostname,
         platform: this.options.platform,
         capabilities: ["codex-cli", "codex-app-server", "local-first", "git"],
+        bridgeVersion: this.options.version,
         token: this.options.token,
       };
       this.send(registration);
@@ -81,6 +113,11 @@ export class BridgeClient {
         type: "heartbeat", machineId: this.options.machineId, timestamp: Date.now(),
         ...this.codex.sessionActivity(),
       }), 15_000);
+      clearInterval(this.updateCheckTimer);
+      this.updateCheckTimer = setInterval(() => {
+        this.send({ type: "bridge_update.check", currentVersion: this.options.version });
+        void this.updater.retryIfIdle();
+      }, this.options.updateCheckIntervalMs);
     });
     socket.on("message", (data) => {
       const message = parseMessage(data.toString());
@@ -88,6 +125,7 @@ export class BridgeClient {
     });
     socket.on("close", (code, reason) => {
       clearInterval(this.heartbeatTimer);
+      clearInterval(this.updateCheckTimer);
       log.warn({ code, reason: reason.toString() }, "Disconnected from control plane");
       if (!this.stopped) this.reconnectTimer = setTimeout(() => this.connect(), this.options.reconnectMs);
     });
@@ -99,6 +137,15 @@ export class BridgeClient {
       switch (message.type) {
         case "registered":
           log.info({ machineId: message.machineId }, "Bridge registered");
+          void this.updater.recoverAfterRestart().catch((error) => {
+            log.error({ error }, "Unable to recover self-update state");
+          });
+          this.send({ type: "bridge_update.check", currentVersion: this.options.version });
+          break;
+        case "bridge_update.available":
+          void this.updater.consider(message).catch((error) => {
+            log.error({ error }, "Unable to process bridge update announcement");
+          });
           break;
         case "start_agent":
           void this.codex.startSession(message.sessionId, message.projectPath, message.prompt, message.resumeSessionId)

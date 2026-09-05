@@ -16,6 +16,17 @@ const client = new BridgeClient({
   desktopReplayExisting: config.desktopReplayExisting,
   allowedRoots: config.allowedRoots,
   reconnectMs: config.reconnectMs,
+  version: config.version,
+  updateEnabled: config.updateEnabled,
+  updateSource: config.updateSource,
+  updateSourceRef: config.updateSourceRef,
+  updateCheckIntervalMs: config.updateCheckIntervalMs,
+  updateInstallRoot: config.updateInstallRoot,
+  updateCurrentLink: config.updateCurrentLink,
+  updateStatePath: config.updateStatePath,
+  updatePackageManager: config.updatePackageManager,
+  updateRestartExecutable: config.updateRestartExecutable,
+  updateRestartArgs: config.updateRestartArgs,
 });
 client.start();
 

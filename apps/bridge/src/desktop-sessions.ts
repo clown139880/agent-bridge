@@ -65,6 +65,10 @@ export class CodexDesktopSessionScanner {
     return Boolean(this.latestThreadFile(threadId)?.activeTurnId);
   }
 
+  hasActiveThreads(): boolean {
+    return [...this.files.values()].some((file) => Boolean(file.activeTurnId));
+  }
+
   getThreadCwd(threadId: string): string | undefined {
     return this.latestThreadFile(threadId)?.cwd;
   }

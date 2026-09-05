@@ -110,6 +110,7 @@ export class CodexAppServerAdapter {
   private readyPromise?: Promise<void>;
   private readonly desktopScanner?: CodexDesktopSessionScanner;
   private desktopScannerStarted = false;
+  private readyForUpdate = false;
 
   constructor(
     private readonly options: {
@@ -171,6 +172,7 @@ export class CodexAppServerAdapter {
 
   stop(): void {
     this.stopping = true;
+    this.readyForUpdate = false;
     clearTimeout(this.reconnectTimer);
     this.socket?.close(1000, "bridge shutdown");
     if (this.child && !this.child.killed) this.child.kill("SIGTERM");
@@ -261,6 +263,14 @@ export class CodexAppServerAdapter {
     return this.logsByThread.get(sessionId)?.slice(-count).join("\n") || "No structured events captured yet.";
   }
 
+  hasActiveSessions(): boolean {
+    return this.activeThreads.size > 0
+      || this.activeTurns.size > 0
+      || this.pendingApprovals.size > 0
+      || this.pendingUserInput.size > 0
+      || Boolean(this.desktopScanner?.hasActiveThreads());
+  }
+
   sessionActivity(): {
     activeSessionIds: string[];
     waitingSessionIds: string[];
@@ -273,11 +283,17 @@ export class CodexAppServerAdapter {
     };
   }
 
+  isReady(): boolean {
+    return this.readyForUpdate;
+  }
+
   private async startInternal(): Promise<void> {
+    this.readyForUpdate = false;
     if (this.options.manageServer && !await this.serverReady()) this.spawnServer();
     if (this.options.manageServer) await this.waitForServer();
     await this.connect();
     await this.restoreLoadedThreads();
+    this.readyForUpdate = true;
   }
 
   private async ensureReady(): Promise<void> {
@@ -336,7 +352,7 @@ export class CodexAppServerAdapter {
     socket.on("close", (code, reason) => this.handleClose(code, reason.toString()));
     socket.on("error", (error) => log.warn({ error }, "App Server WebSocket error"));
     await this.request("initialize", {
-      clientInfo: { name: "agent_bridge", title: "Agent Bridge", version: "0.2.0" },
+      clientInfo: { name: "agent_bridge", title: "Agent Bridge", version: "0.4.0" },
     });
     this.notify("initialized", {});
     log.info({ url: this.options.url }, "Connected to Codex App Server");
@@ -617,6 +633,7 @@ export class CodexAppServerAdapter {
     log.warn({ code, reason }, "Disconnected from Codex App Server");
     this.rejectPending(new Error("Codex App Server disconnected"));
     this.socket = undefined;
+    this.readyForUpdate = false;
     this.pendingUserInput.clear();
     this.clearPendingApprovals();
     this.subscribedThreads.clear();

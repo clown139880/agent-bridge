@@ -1,0 +1,16 @@
+[Unit]
+Description=Local self-updating Agent Bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/agent-bridge/current
+EnvironmentFile=/etc/agent-bridge/bridge.env
+ExecStart=/usr/bin/env pnpm start:bridge
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target

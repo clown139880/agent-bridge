@@ -2,7 +2,7 @@
 
 把多台机器上的 Codex 暴露成可由 Hermes 调度的远程 worker。Codex 仍运行在开发机上；每台 Bridge 只连接本机 Codex App Server，Control Plane 提供经过认证的 worker API、运行路由和 SQLite 持久化。原有 Matrix gateway 暂时保留为可选兼容层。
 
-当前版本：`0.2.0`
+当前版本：`0.4.0`
 
 ## 能做什么
 
@@ -77,6 +77,8 @@ Control Plane 主要变量：
 | `MATRIX_ENABLED` | 默认 `true`；Hermes 已接管 Matrix 时设为 `false` |
 | `WORKER_API_ENABLED` | 默认 `false`；设为 `true` 才开放 Hermes worker API |
 | `WORKER_API_TOKEN` | 启用 worker API 时必填的独立 bearer token |
+| `BRIDGE_LATEST_VERSION` | 可选的 bridge 最新版本注册表；与 `BRIDGE_UPDATE_SOURCE` 一起配置 |
+| `BRIDGE_UPDATE_SOURCE` | 通告中的推荐获取源；Control Plane 只广播字符串，不访问该源 |
 
 Bridge 主要变量：
 
@@ -91,8 +93,50 @@ Bridge 主要变量：
 | `CODEX_DESKTOP_HOME` | 可选；官方 Codex Desktop 的 `.codex` 目录，设置后监控新完成的 turn |
 | `CODEX_DESKTOP_SCAN_INTERVAL_MS` | Desktop rollout 扫描间隔，默认 3000ms |
 | `CODEX_DESKTOP_REPLAY_EXISTING` | 首次启动是否同步既有完成记录，默认关闭以避免刷屏 |
+| `BRIDGE_AUTO_UPDATE` | 本机自动更新开关，默认 `false` |
+| `BRIDGE_UPDATE_SOURCE` | 本机信任并实际拉取的 git 源；不会被 Control Plane 通告覆盖 |
+| `BRIDGE_UPDATE_REF` | 本机拉取的 branch/tag，默认 `main` |
+| `BRIDGE_UPDATE_CHECK_INTERVAL_MS` | 定期向 Control Plane 查询的间隔，最小 10 秒，默认 15 分钟 |
+| `BRIDGE_UPDATE_INSTALL_ROOT` | 本机 release 根目录，默认 `/opt/agent-bridge` |
+| `BRIDGE_UPDATE_CURRENT_LINK` | systemd 启动所使用的 `current` 软链接 |
+| `BRIDGE_UPDATE_STATE_PATH` | 跨重启完成确认状态文件 |
+| `BRIDGE_UPDATE_PACKAGE_MANAGER` | 本机包管理器可执行文件，默认 `pnpm` |
+| `BRIDGE_UPDATE_RESTART_EXECUTABLE` / `BRIDGE_UPDATE_RESTART_ARGS` | 本机重启程序及 JSON 参数数组；不经过 shell |
 
 不要提交 `.env`、`.env.bridge`、SQLite 数据库或任何 Matrix/token 凭据；这些路径已写入 `.gitignore`。
+
+## Bridge 自更新
+
+Control Plane 是只读的版本注册表与通知源：启动时及 bridge 定期查询时，它只通过现有 WebSocket 广播
+`bridge_update.available { latestVersion, source, publishedAt? }`。它没有拉取、写文件、执行命令或重启远端
+机器的接口。bridge 注册会携带自身 `bridgeVersion`，并用
+`bridge_update.status { phase, currentVersion, latestVersion, updatable, fetched, reason? }` 报告进度。
+
+每台机器在自己的 `.env.bridge` 中独立决定是否更新以及信任哪个源。通告中的 `source` 仅供审计；实际传给
+`git clone` 的始终是本机 `BRIDGE_UPDATE_SOURCE`，因此 Control Plane 不能改变拉取目标。启用前需把当前稳定
+release 放在 `BRIDGE_UPDATE_INSTALL_ROOT/releases/`，让 `BRIDGE_UPDATE_CURRENT_LINK` 指向它，并让 systemd
+从该软链接启动（可参考 `deploy/systemd/agent-bridge-self-update.service`）。典型本机配置：
+
+```dotenv
+BRIDGE_AUTO_UPDATE=true
+BRIDGE_UPDATE_SOURCE=ssh://git.example.com/agent-bridge.git
+BRIDGE_UPDATE_REF=main
+BRIDGE_UPDATE_CHECK_INTERVAL_MS=900000
+BRIDGE_UPDATE_INSTALL_ROOT=/opt/agent-bridge
+BRIDGE_UPDATE_RESTART_EXECUTABLE=systemctl
+BRIDGE_UPDATE_RESTART_ARGS=["--no-block","restart","agent-bridge-self-update.service"]
+```
+
+发现新版本后的本机流程为：检查 active Codex turn/待审批/待输入；繁忙则报告 `deferred`，直到全部 idle；
+克隆到全新的 `releases/<version>-<timestamp>`；校验根 `package.json` 版本严格等于通告版本；执行
+`pnpm install --frozen-lockfile` 和 `pnpm check`；原子切换 `current` 软链接；写入 0600 pending 状态；最后由
+bridge 自己调用本机重启命令。新进程读取 pending 状态且版本吻合后才报告 `completed`，Control Plane 随后向
+Matrix/clown 发送“完成自更新”通知。首次 `discovered` 会发送“发现更新”通知，两类通知按机器和目标版本去重。
+
+拉取或校验失败不会触碰旧 `current`，所以旧 release 原样保留；软链接切换后若重启命令失败，会立即切回旧
+release 并报告 `rolled_back`。若新进程启动但版本不吻合，它也会切回旧链接并报告回滚。release staging 不会
+修改正在运行的源码目录；更新只在无 active session 的窗口重启，已完成/idle thread 的 Codex 持久状态仍可在
+重启后恢复。生产启用前应让 systemd 对启动失败保留 `Restart=always`，并监控 `rolled_back`/启动失败日志。
 
 ## Hermes worker API
 

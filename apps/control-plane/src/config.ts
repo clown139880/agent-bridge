@@ -8,6 +8,20 @@ function required(name: string): string {
 
 const matrixEnabled = process.env.MATRIX_ENABLED !== "false";
 const workerApiEnabled = process.env.WORKER_API_ENABLED === "true";
+const bridgeLatestVersion = process.env.BRIDGE_LATEST_VERSION;
+const bridgeUpdateSource = process.env.BRIDGE_UPDATE_SOURCE;
+if (Boolean(bridgeLatestVersion) !== Boolean(bridgeUpdateSource)) {
+  throw new Error("BRIDGE_LATEST_VERSION and BRIDGE_UPDATE_SOURCE must be configured together");
+}
+if (bridgeLatestVersion && !/^v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(bridgeLatestVersion)) {
+  throw new Error("BRIDGE_LATEST_VERSION must be a semantic version");
+}
+const bridgeUpdatePublishedAt = process.env.BRIDGE_UPDATE_PUBLISHED_AT
+  ? Date.parse(process.env.BRIDGE_UPDATE_PUBLISHED_AT)
+  : undefined;
+if (bridgeUpdatePublishedAt !== undefined && !Number.isFinite(bridgeUpdatePublishedAt)) {
+  throw new Error("BRIDGE_UPDATE_PUBLISHED_AT must be an ISO-8601 timestamp");
+}
 
 export const config = {
   matrixEnabled,
@@ -24,4 +38,9 @@ export const config = {
   bridgeToken: process.env.BRIDGE_TOKEN,
   workerApiEnabled,
   workerApiToken: workerApiEnabled ? required("WORKER_API_TOKEN") : undefined,
+  bridgeUpdate: bridgeLatestVersion && bridgeUpdateSource ? {
+    latestVersion: bridgeLatestVersion,
+    source: bridgeUpdateSource,
+    publishedAt: bridgeUpdatePublishedAt,
+  } : undefined,
 };

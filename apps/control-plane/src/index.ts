@@ -26,6 +26,7 @@ control = new ControlPlane(store, matrix, {
   bridgeToken: config.bridgeToken,
   workerApiEnabled: config.workerApiEnabled,
   workerApiToken: config.workerApiToken,
+  bridgeUpdate: config.bridgeUpdate,
 });
 
 await control.start();
