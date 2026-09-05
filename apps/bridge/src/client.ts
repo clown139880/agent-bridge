@@ -109,10 +109,12 @@ export class BridgeClient {
       };
       this.send(registration);
       clearInterval(this.heartbeatTimer);
-      this.heartbeatTimer = setInterval(() => this.send({
-        type: "heartbeat", machineId: this.options.machineId, timestamp: Date.now(),
-        ...this.codex.sessionActivity(),
-      }), 15_000);
+      this.heartbeatTimer = setInterval(() => {
+        const activity = this.codex.isReady() ? this.codex.sessionActivity() : {};
+        this.send({
+          type: "heartbeat", machineId: this.options.machineId, timestamp: Date.now(), ...activity,
+        });
+      }, 15_000);
       clearInterval(this.updateCheckTimer);
       this.updateCheckTimer = setInterval(() => {
         this.send({ type: "bridge_update.check", currentVersion: this.options.version });

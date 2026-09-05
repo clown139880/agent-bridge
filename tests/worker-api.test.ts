@@ -110,6 +110,46 @@ test("Hermes worker API starts and observes a headless Codex run", async () => {
     assert.equal(repairedRun.error, null);
     assert.deepEqual(repairedRun.approvals, []);
 
+    store.createWorkerRun({
+      id: "orphan-run", taskId: "orphan-task", conversationId: null, machineId: "dev",
+      agentType: "codex-cli", projectPath: "/work/repo", sessionId: null,
+      status: "starting", error: null, createdAt: 1, updatedAt: 1,
+    });
+    await internals.handleBridgeMessage("dev", {
+      type: "session.discovered", requestId: "orphan-run", sessionId: "orphan-thread", nativeSessionId: "orphan-thread",
+      agentType: "codex-cli", projectPath: "/work/repo", status: "working", createdAt: 1,
+    });
+    store.db.prepare("UPDATE sessions SET status='blocked' WHERE id='orphan-thread'").run();
+    store.db.prepare("UPDATE worker_runs SET status='blocked', error=NULL WHERE id='orphan-run'").run();
+    const freshReclaim = await fetch(`${base}/runs/orphan-run/reclaim`, {
+      method: "POST", headers, body: "{}",
+    });
+    assert.equal(freshReclaim.status, 409, "a newly blocked run must survive the reclaim grace period");
+    store.db.prepare("UPDATE sessions SET status='blocked', updated_at=1 WHERE id='orphan-thread'").run();
+    store.db.prepare("UPDATE worker_runs SET status='blocked', error=NULL, updated_at=1 WHERE id='orphan-run'").run();
+    const reclaimed = await fetch(`${base}/runs/orphan-run/reclaim`, {
+      method: "POST", headers, body: "{}",
+    });
+    assert.equal(reclaimed.status, 200);
+    assert.equal(store.getWorkerRun("orphan-run")?.status, "failed");
+    assert.deepEqual(sent.at(-1), { type: "stop_agent", sessionId: "orphan-thread" });
+
+    const legacyResume = await fetch(`${base}/runs`, {
+      method: "POST", headers,
+      body: JSON.stringify({
+        runId: "orphan-retry", taskId: "orphan-task", conversationId: "hermes-task:board:orphan-task",
+        workerId: "codex@dev", projectPath: "/work/repo", prompt: "Continue the interrupted task",
+      }),
+    });
+    assert.equal(legacyResume.status, 202);
+    assert.deepEqual(sent.at(-1), {
+      type: "start_agent", sessionId: "orphan-retry", resumeSessionId: "orphan-thread",
+      agentType: "codex-cli", projectPath: "/work/repo", prompt: "Continue the interrupted task",
+    });
+    await internals.handleBridgeMessage("dev", {
+      type: "error", sessionId: "orphan-retry", message: "test cleanup",
+    });
+
     await internals.handleBridgeMessage("dev", {
       type: "approval_resolved", sessionId: "thread-1", approvalId: "approval-already-resolved",
     });
@@ -146,6 +186,10 @@ test("Hermes worker API starts and observes a headless Codex run", async () => {
     await internals.handleBridgeMessage("dev", {
       type: "agent.completed", eventId: "event-1", sessionId: "thread-1", timestamp: Date.now(), summary: "Tests fixed",
     });
+    await internals.handleBridgeMessage("dev", {
+      type: "agent.progress", eventId: "event-1-late", sessionId: "thread-1", timestamp: Date.now(),
+      summary: "late file notification",
+    });
 
     const run = await fetch(`${base}/runs/run-1`, { headers }).then((response) => response.json()) as {
       status: string; sessionId: string;
@@ -156,10 +200,11 @@ test("Hermes worker API starts and observes a headless Codex run", async () => {
     const eventPage = await fetch(`${base}/runs/run-1/events?after=0`, { headers }).then((response) => response.json()) as {
       next: number; events: Array<{ sequence: number; event: { type: string; summary?: string } }>;
     };
-    assert.equal(eventPage.events.length, 1);
+    assert.equal(eventPage.events.length, 2);
     assert.equal(eventPage.events[0]?.event.type, "agent.completed");
     assert.equal(eventPage.events[0]?.event.summary, "Tests fixed");
-    assert.equal(eventPage.next, eventPage.events[0]?.sequence);
+    assert.equal(eventPage.events[1]?.event.type, "agent.progress");
+    assert.equal(eventPage.next, eventPage.events[1]?.sequence);
 
     const resumeResponse = await fetch(`${base}/runs`, {
       method: "POST", headers,
@@ -198,22 +243,34 @@ test("Hermes worker API starts and observes a headless Codex run", async () => {
     ]);
     const originalEvents = await fetch(`${base}/runs/run-1/events?after=0`, { headers })
       .then((response) => response.json()) as { events: unknown[] };
-    assert.equal(originalEvents.events.length, 1, "resumed run events must not leak into the earlier run");
+    assert.equal(originalEvents.events.length, 2, "resumed run events must not leak into the earlier run");
 
-    await internals.handleBridgeMessage("dev", {
-      type: "agent.blocked", sessionId: "thread-1", timestamp: Date.now(), summary: "Unsupported server request is pending",
+    const explicitBlockResponse = await fetch(`${base}/runs`, {
+      method: "POST", headers,
+      body: JSON.stringify({
+        runId: "run-4", taskId: "task-4", workerId: "codex@dev",
+        projectPath: "/work/repo", prompt: "Exercise an explicit blocked state",
+      }),
     });
-    const explicitlyBlockedRun = await fetch(`${base}/runs/run-2`, { headers })
+    assert.equal(explicitBlockResponse.status, 202);
+    await internals.handleBridgeMessage("dev", {
+      type: "session.discovered", requestId: "run-4", sessionId: "thread-4", nativeSessionId: "thread-4",
+      agentType: "codex-cli", projectPath: "/work/repo", status: "working", createdAt: Date.now(),
+    });
+    await internals.handleBridgeMessage("dev", {
+      type: "agent.blocked", sessionId: "thread-4", timestamp: Date.now(), summary: "Unsupported server request is pending",
+    });
+    const explicitlyBlockedRun = await fetch(`${base}/runs/run-4`, { headers })
       .then((response) => response.json()) as { status: string; error: string | null; approvals: unknown[] };
     assert.equal(explicitlyBlockedRun.status, "blocked");
     assert.equal(explicitlyBlockedRun.error, "Unsupported server request is pending");
     assert.deepEqual(explicitlyBlockedRun.approvals, []);
 
     await internals.handleBridgeMessage("dev", {
-      type: "agent.output", sessionId: "thread-1", timestamp: Date.now(), text: "Continuing",
+      type: "agent.output", sessionId: "thread-4", timestamp: Date.now(), text: "Continuing",
     });
-    assert.equal(store.getWorkerRun("run-2")?.status, "working");
-    assert.equal(store.getWorkerRun("run-2")?.error, null, "progress clears an obsolete blocked reason");
+    assert.equal(store.getWorkerRun("run-4")?.status, "working");
+    assert.equal(store.getWorkerRun("run-4")?.error, null, "progress clears an obsolete blocked reason");
   } finally {
     await control.stop();
     store.db.close();

@@ -276,10 +276,14 @@ export class CodexAppServerAdapter {
     waitingSessionIds: string[];
     blockedSessionIds: string[];
   } {
+    const waitingSessionIds = [...this.pendingUserInput.keys()];
+    const blockedSessionIds = [...new Set([...this.pendingApprovals.values()].map((approval) => approval.sessionId))];
     return {
-      activeSessionIds: [...new Set([...this.activeThreads, ...this.activeTurns.keys()])],
-      waitingSessionIds: [...this.pendingUserInput.keys()],
-      blockedSessionIds: [...new Set([...this.pendingApprovals.values()].map((approval) => approval.sessionId))],
+      activeSessionIds: [...new Set([
+        ...this.activeThreads, ...this.activeTurns.keys(), ...waitingSessionIds, ...blockedSessionIds,
+      ])],
+      waitingSessionIds,
+      blockedSessionIds,
     };
   }
 
@@ -374,6 +378,7 @@ export class CodexAppServerAdapter {
     if (this.subscribedThreads.has(threadId) && known) return known;
     const resumed = await this.request<{ thread: CodexThread }>("thread/resume", { threadId });
     this.subscribedThreads.add(threadId);
+    if (resumed.thread.status?.type === "active") this.activeThreads.add(threadId);
     await this.discoverThread(resumed.thread);
     return resumed.thread;
   }

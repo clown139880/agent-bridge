@@ -110,6 +110,27 @@ test("a new run can resume a persisted thread and start its prompt as the next t
     && message.requestId === "run-2" && message.sessionId === "persisted-thread"));
 });
 
+test("a restored active thread is included in the authoritative heartbeat snapshot", async () => {
+  const adapter = new CodexAppServerAdapter({
+    command: "codex", url: "ws://127.0.0.1:4500", allowedRoots: [process.cwd()],
+    manageServer: false, reconnectMs: 3_000,
+  }, () => {});
+  const internals = adapter as unknown as {
+    readyPromise: Promise<void>;
+    socket: { readyState: number; close(): void };
+    request(method: string, params: Record<string, unknown>): Promise<unknown>;
+  };
+  internals.readyPromise = Promise.resolve();
+  internals.socket = { readyState: 1, close() {} };
+  internals.request = async (method) => method === "thread/resume"
+    ? { thread: { id: "active-thread", cwd: process.cwd(), status: { type: "active" } } }
+    : {};
+
+  await adapter.input("active-thread", "continue");
+
+  assert.deepEqual(adapter.sessionActivity().activeSessionIds, ["active-thread"]);
+});
+
 test("subsequent input does not resume an already subscribed thread again", async () => {
   const methods: string[] = [];
   const adapter = new CodexAppServerAdapter({

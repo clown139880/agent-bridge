@@ -62,6 +62,8 @@ const APPROVAL_REACTIONS: ReadonlyArray<{ key: string; choice: ApprovalChoice; l
 ];
 
 const NUMBER_REACTIONS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣"] as const;
+const RECLAIMABLE_BLOCKED_AGE_MS = 300_000;
+const RECLAIM_REASON = "Reclaimed stale reasonless blocked run; bridge reported no actionable approval";
 
 export class ControlPlane {
   private readonly http: HttpServer;
@@ -297,7 +299,12 @@ export class ControlPlane {
       const priorConversationRun = !resumeSessionId && conversationId
         ? this.store.getLatestWorkerRunByConversation(conversationId, machineId, projectPath)
         : undefined;
-      const effectiveResumeSessionId = resumeSessionId ?? priorConversationRun?.sessionId ?? undefined;
+      const priorTaskRun = !resumeSessionId && !priorConversationRun && taskId
+        && conversationId?.startsWith("hermes-task:") && conversationId.endsWith(`:${taskId}`)
+        ? this.store.getLatestLegacyWorkerRunByTask(taskId, machineId, projectPath)
+        : undefined;
+      const effectiveResumeSessionId = resumeSessionId
+        ?? priorConversationRun?.sessionId ?? priorTaskRun?.sessionId ?? undefined;
       let resumeSession: SessionRecord | undefined;
       if (effectiveResumeSessionId) {
         resumeSession = this.store.getSession(effectiveResumeSessionId);
@@ -332,7 +339,7 @@ export class ControlPlane {
       this.json(response, 202, workerRunJson(this.store.getWorkerRun(runId)!));
       return;
     }
-    const match = url.pathname.match(/^\/api\/v1\/runs\/([^/]+)(?:\/(events|input|interrupt))?$/);
+    const match = url.pathname.match(/^\/api\/v1\/runs\/([^/]+)(?:\/(events|input|interrupt|reclaim))?$/);
     if (match) {
       const runId = decodeURIComponent(match[1]!);
       const action = match[2];
@@ -377,6 +384,22 @@ export class ControlPlane {
           this.send(bridge.socket, { type: "stop_agent", sessionId: run.sessionId });
         }
         this.json(response, 202, { runId, accepted: true });
+        return;
+      }
+      if (request.method === "POST" && action === "reclaim") {
+        const hasApproval = [...this.approvalsById.values()].some((approval) => approval.sessionId === run.sessionId);
+        if (run.status !== "blocked" || run.error || hasApproval
+          || run.updatedAt > Date.now() - RECLAIMABLE_BLOCKED_AGE_MS) {
+          this.json(response, 409, { error: "run_not_reclaimable", runId });
+          return;
+        }
+        if (run.sessionId) {
+          this.store.updateSessionStatus(run.sessionId, "failed");
+          const bridge = this.bridges.get(run.machineId);
+          if (bridge) this.send(bridge.socket, { type: "stop_agent", sessionId: run.sessionId });
+        }
+        this.store.updateWorkerRun(run.id, "failed", RECLAIM_REASON);
+        this.json(response, 200, workerRunJson(this.store.getWorkerRun(run.id)!));
         return;
       }
     }
@@ -615,8 +638,12 @@ export class ControlPlane {
     const workerRun = this.store.getWorkerRunBySession(event.sessionId);
     if (!this.store.addEvent(event, workerRun?.id)) return;
     const status = statusForEvent(event.type);
-    if (status) this.store.updateSessionStatus(event.sessionId, status);
-    if (status && workerRun) {
+    const runIsTerminal = workerRun && ["completed", "failed", "stopped"].includes(workerRun.status);
+    // App Server can deliver a final item/progress notification just after
+    // turn/completed. Preserve it in the event stream, but never resurrect a
+    // terminal run or session back to working.
+    if (status && !runIsTerminal) this.store.updateSessionStatus(event.sessionId, status);
+    if (status && workerRun && !runIsTerminal) {
       const reason = status === "blocked" ? event.summary || event.text || "Bridge reported that the agent is blocked" : undefined;
       this.store.updateWorkerRun(workerRun.id, status, reason);
     }

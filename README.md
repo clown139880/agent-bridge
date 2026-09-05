@@ -195,6 +195,7 @@ Content-Type: application/json
 | `GET /api/v1/runs/:runId/events?after=N` | 增量读取事件；使用返回的 `next` 作为下一页游标 |
 | `POST /api/v1/runs/:runId/input` | 发送 `{ "text": "..." }`，继续同一 Codex thread |
 | `POST /api/v1/runs/:runId/interrupt` | 中断当前 turn |
+| `POST /api/v1/runs/:runId/reclaim` | 定向收尾已停滞至少 5 分钟、无原因且无待审批项的 blocked run |
 | `POST /api/v1/runs/:runId/approvals/:approvalId` | 提交 `{ "choice": "allow" }` 等授权决定 |
 
 当前这层 API 是 Hermes backend 的稳定边界：Hermes 保持 Kanban claim、lease、依赖与 review 的唯一状态真相；Bridge 只维护远程执行状态。不要把 Control Plane 端口直接暴露到公网，跨机器优先使用内网或 VPN。
@@ -210,7 +211,7 @@ Hermes 插件会自动把来源卡片的 `session_id` 作为 `conversationId`，
 
 - `agent_bridge_workers`：让 Hermes 查看在线的 `codex@machine` 与最近 workspace。
 - `on_kanban_dispatch_tick` observer：看到分配给 `codex@machine` 的卡片后启动本地 supervisor。
-- supervisor：原子 claim 卡片、启动幂等 Worker API run、续租 heartbeat，并把完成或失败回写 Kanban。
+- supervisor：原子 claim 卡片、启动幂等 Worker API run、续租 heartbeat，并把完成或失败回写 Kanban；对状态和事件游标均停滞 5 分钟的无理由 blocked run，会定向调用 reclaim 后释放 claim。
 - approval relay：按 Kanban 通知订阅把远端 Codex approval 送回卡片来源 profile，并复用 Hermes 原生
   gateway queue 与 Matrix 表情审批；Hermes 不在线或路由不明确时保持阻塞，不会自动放行。
 

@@ -258,6 +258,16 @@ export class Store {
     return row ? mapWorkerRun(row) : undefined;
   }
 
+  getLatestLegacyWorkerRunByTask(taskId: string, machineId: string, projectPath: string): WorkerRunRecord | undefined {
+    const row = this.db.prepare(`
+      SELECT * FROM worker_runs
+      WHERE task_id=? AND machine_id=? AND project_path=? AND session_id IS NOT NULL
+        AND conversation_id IS NULL
+      ORDER BY created_at DESC, rowid DESC LIMIT 1
+    `).get(taskId, machineId, projectPath) as Record<string, unknown> | undefined;
+    return row ? mapWorkerRun(row) : undefined;
+  }
+
   attachWorkerRun(id: string, sessionId: string, status: AgentStatus): void {
     this.db.prepare("UPDATE worker_runs SET session_id=?, status=?, updated_at=? WHERE id=?")
       .run(sessionId, status, Date.now(), id);

@@ -29,6 +29,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--heartbeat-interval", type=float, default=30)
     parser.add_argument("--claim-ttl", type=int, default=900)
     parser.add_argument("--api-failure-timeout", type=float, default=300)
+    parser.add_argument("--stalled-blocked-timeout", type=float, default=300)
     parser.add_argument("--completion-mode", choices=("done", "review"), default="done")
     parser.add_argument("--reviewer")
     parser.add_argument("--worker-prefix", default="codex@")
@@ -136,6 +137,8 @@ def supervise(args: argparse.Namespace) -> int:
         summary = None
         next_heartbeat = time.monotonic()
         poll_failed_since = None
+        blocked_since = None
+        blocked_signature = None
         while True:
             now = time.monotonic()
             if now >= next_heartbeat:
@@ -171,6 +174,22 @@ def supervise(args: argparse.Namespace) -> int:
                     args.completion_mode, args.reviewer,
                 )
                 return 0 if ok else 1
+            approvals = state.get("approvals")
+            signature = (state.get("updatedAt"), cursor)
+            reasonless_blocked = status == "blocked" and not state.get("error") and not approvals
+            if reasonless_blocked:
+                if signature != blocked_signature:
+                    blocked_signature = signature
+                    blocked_since = time.monotonic()
+                elif blocked_since is not None and time.monotonic() - blocked_since >= args.stalled_blocked_timeout:
+                    try:
+                        api.reclaim(stable_run_id)
+                    except WorkerApiError as exc:
+                        logger.warning("stale blocked reclaim failed for %s: %s", stable_run_id, exc)
+                    blocked_since = time.monotonic()
+            else:
+                blocked_since = None
+                blocked_signature = None
             time.sleep(args.poll_interval)
 
 

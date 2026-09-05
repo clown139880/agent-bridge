@@ -74,6 +74,9 @@ class WorkerApi:
     def interrupt(self, run_id: str) -> dict[str, Any]:
         return self._request("POST", f"/api/v1/runs/{quote(run_id, safe='')}/interrupt", {})
 
+    def reclaim(self, run_id: str) -> dict[str, Any]:
+        return self._request("POST", f"/api/v1/runs/{quote(run_id, safe='')}/reclaim", {})
+
     def approve(self, run_id: str, approval_id: str, choice: str) -> dict[str, Any]:
         return self._request(
             "POST",
