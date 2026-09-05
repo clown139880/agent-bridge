@@ -20,7 +20,6 @@ const client = new BridgeClient({
   updateEnabled: config.updateEnabled,
   updateSource: config.updateSource,
   updateSourceRef: config.updateSourceRef,
-  updateCheckIntervalMs: config.updateCheckIntervalMs,
   updateInstallRoot: config.updateInstallRoot,
   updateCurrentLink: config.updateCurrentLink,
   updateStatePath: config.updateStatePath,

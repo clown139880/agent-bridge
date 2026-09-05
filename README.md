@@ -2,12 +2,12 @@
 
 把多台机器上的 Codex 暴露成可由 Hermes 调度的远程 worker。Codex 仍运行在开发机上；每台 Bridge 只连接本机 Codex App Server，Control Plane 提供经过认证的 worker API、运行路由和 SQLite 持久化。原有 Matrix gateway 暂时保留为可选兼容层。
 
-当前版本：`0.4.1`
+当前版本：`0.4.2`
 
 ## 任务完成定义
 
 涉及 Agent Bridge 代码或发布的任务，只有在改动已推送到远程，且 Control Plane 的版本登记已更新、
-bridge 自更新流程已被触发后，才算真正完成。发布时必须按语义化版本规范 bump 版本（本次为 `0.4.1`），
+bridge 自更新流程已被触发后，才算真正完成。发布时必须按语义化版本规范 bump 版本（本次为 `0.4.2`），
 并在 Control Plane 中将 `BRIDGE_LATEST_VERSION` 登记为该版本；各主机的 bridge 再自行发现、拉取、校验和重启。
 “本地已提交但未推送”或“远程已推送但 Control Plane 尚未登记/通告新版本”都只是中间态，
 不能作为任务的完成结论。若自更新因 active turn、待审批或待输入而延后，任务报告必须记录原因和后续触发路径。
@@ -104,19 +104,23 @@ Bridge 主要变量：
 | `BRIDGE_AUTO_UPDATE` | 本机自动更新开关，默认 `false` |
 | `BRIDGE_UPDATE_SOURCE` | 本机信任并实际拉取的 git 源；不会被 Control Plane 通告覆盖 |
 | `BRIDGE_UPDATE_REF` | 本机拉取的 branch/tag，默认 `main` |
-| `BRIDGE_UPDATE_CHECK_INTERVAL_MS` | 定期向 Control Plane 查询的间隔，最小 10 秒，默认 15 分钟 |
 | `BRIDGE_UPDATE_INSTALL_ROOT` | 本机 release 根目录，默认 `/opt/agent-bridge` |
 | `BRIDGE_UPDATE_CURRENT_LINK` | systemd 启动所使用的 `current` 软链接 |
 | `BRIDGE_UPDATE_STATE_PATH` | 跨重启完成确认状态文件 |
 | `BRIDGE_UPDATE_PACKAGE_MANAGER` | 本机包管理器可执行文件，默认 `pnpm` |
 | `BRIDGE_UPDATE_RESTART_EXECUTABLE` / `BRIDGE_UPDATE_RESTART_ARGS` | 本机重启程序及 JSON 参数数组；不经过 shell |
 
+Worker API 在 bridge 版本落后时返回 `update_waiting`，并等目标版本重新注册后才发送 `start_agent`。
+`update_required` / `update_failed` 都是可重试、非成功状态。紧急绕过只能在创建 run 时显式传
+`allow_stale_version: true`，Control Plane 会记录包含机器、run 和版本的审计警告。
+
 不要提交 `.env`、`.env.bridge`、SQLite 数据库或任何 Matrix/token 凭据；这些路径已写入 `.gitignore`。
 
 ## Bridge 自更新
 
-Control Plane 是只读的版本注册表与通知源：启动时及 bridge 定期查询时，它只通过现有 WebSocket 广播
-`bridge_update.available { latestVersion, source, publishedAt? }`。它没有拉取、写文件、执行命令或重启远端
+Control Plane 是只读的版本注册表与通知源：版本发布、bridge 注册/重连、bridge 空闲和 run 派发前，都会通过
+现有 WebSocket 重播 `bridge_update.available { latestVersion, source, publishedAt?, epoch? }`。没有周期版本轮询，
+Control Plane 也没有拉取、写文件、执行命令或重启远端
 机器的接口。bridge 注册会携带自身 `bridgeVersion`，并用
 `bridge_update.status { phase, currentVersion, latestVersion, updatable, fetched, reason? }` 报告进度。
 
@@ -129,13 +133,13 @@ release 放在 `BRIDGE_UPDATE_INSTALL_ROOT/releases/`，让 `BRIDGE_UPDATE_CURRE
 BRIDGE_AUTO_UPDATE=true
 BRIDGE_UPDATE_SOURCE=ssh://git.example.com/agent-bridge.git
 BRIDGE_UPDATE_REF=main
-BRIDGE_UPDATE_CHECK_INTERVAL_MS=900000
 BRIDGE_UPDATE_INSTALL_ROOT=/opt/agent-bridge
 BRIDGE_UPDATE_RESTART_EXECUTABLE=systemctl
-BRIDGE_UPDATE_RESTART_ARGS=["--no-block","restart","agent-bridge-self-update.service"]
+BRIDGE_UPDATE_RESTART_ARGS=["--no-block","restart","agent-bridge-hal.service"]
 ```
 
-发现新版本后的本机流程为：检查 active Codex turn/待审批/待输入；繁忙则报告 `deferred`，直到全部 idle；
+发现新版本后的本机流程为：先关闭本地 start admission 并进入 `draining_for_update`，再检查 active Codex
+turn/待审批/待输入；繁忙则报告 `deferred`，直到最后一项活动结束时主动发送 `bridge.idle`；
 克隆到全新的 `releases/<version>-<timestamp>`；校验根 `package.json` 版本严格等于通告版本；执行
 `pnpm install --frozen-lockfile` 和 `pnpm check`；原子切换 `current` 软链接；写入 0600 pending 状态；最后由
 bridge 自己调用本机重启命令。新进程读取 pending 状态且版本吻合后才报告 `completed`，Control Plane 随后向

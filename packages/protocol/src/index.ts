@@ -1,5 +1,8 @@
 export const AGENT_STATUSES = [
   "starting",
+  "update_waiting",
+  "update_required",
+  "update_failed",
   "working",
   "waiting",
   "blocked",
@@ -68,6 +71,7 @@ export interface BridgeUpdateAnnouncementMessage {
   latestVersion: string;
   source: string;
   publishedAt?: number;
+  epoch?: string;
 }
 
 export interface BridgeUpdateCheckMessage {
@@ -94,6 +98,12 @@ export interface BridgeUpdateStatusMessage {
   updatable: boolean;
   fetched: boolean;
   reason?: string;
+}
+
+export interface BridgeIdleMessage {
+  type: "bridge.idle";
+  machineId: string;
+  timestamp: number;
 }
 
 export interface HeartbeatMessage {
@@ -166,12 +176,14 @@ export interface ErrorMessage {
   type: "error";
   message: string;
   sessionId?: string;
+  code?: "update_required" | "update_failed";
 }
 
 export type BridgeToControlMessage =
   | RegisterMessage
   | BridgeUpdateCheckMessage
   | BridgeUpdateStatusMessage
+  | BridgeIdleMessage
   | HeartbeatMessage
   | SessionDiscoveredMessage
   | AgentEvent

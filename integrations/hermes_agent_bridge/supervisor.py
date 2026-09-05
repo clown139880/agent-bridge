@@ -18,6 +18,9 @@ except ImportError:  # Executed directly by the dispatcher plugin.
 logger = logging.getLogger("hermes.agent_bridge_worker")
 TOKEN_ENV = "AGENT_BRIDGE_WORKER_API_TOKEN"
 TERMINAL_STATUSES = {"completed", "failed", "stopped"}
+# Admission states are intentionally non-terminal: the claim stays alive and
+# must never be interpreted as a successfully dispatched Codex run.
+UPDATE_ADMISSION_STATUSES = {"update_waiting", "update_required", "update_failed"}
 
 
 def _parser() -> argparse.ArgumentParser:

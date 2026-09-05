@@ -28,6 +28,17 @@ interface BridgeConnection {
   socket: WebSocket;
 }
 
+interface PendingRunLaunch {
+  runId: string;
+  machineId: string;
+  projectPath: string;
+  prompt: string;
+  resumeSessionId?: string;
+  targetVersion: string;
+  epoch: string;
+  timeout: NodeJS.Timeout;
+}
+
 interface PendingLaunch {
   sender: string;
   prompt: string;
@@ -78,6 +89,7 @@ export class ControlPlane {
   private readonly launchesAwaitingPath = new Map<string, PendingLaunch>();
   private readonly launchesByRequestId = new Map<string, PendingLaunch & { machineId: string; projectPath: string }>();
   private readonly updateNotifications = new Set<string>();
+  private readonly pendingRunLaunches = new Map<string, PendingRunLaunch>();
   private roomId = "";
 
   constructor(
@@ -93,6 +105,7 @@ export class ControlPlane {
         latestVersion: string;
         source: string;
         publishedAt?: number;
+        admissionTimeoutMs?: number;
       };
     },
   ) {
@@ -131,6 +144,7 @@ export class ControlPlane {
   async stop(): Promise<void> {
     this.matrix.stop();
     for (const bridge of this.bridges.values()) bridge.socket.close(1001, "server shutdown");
+    for (const launch of this.pendingRunLaunches.values()) clearTimeout(launch.timeout);
     await new Promise<void>((resolve) => this.http.close(() => resolve()));
   }
 
@@ -272,6 +286,8 @@ export class ControlPlane {
       const taskId = optionalStringField(body, "taskId");
       const conversationId = optionalStringField(body, "conversationId");
       const resumeSessionId = optionalStringField(body, "resumeSessionId");
+      const allowStaleVersion = body && typeof body === "object"
+        ? (body as Record<string, unknown>).allow_stale_version === true : false;
       if (workerId && (!workerId.startsWith("codex@") || !machineId || (explicitMachineId && explicitMachineId !== machineId))) {
         this.json(response, 400, { error: "invalid_worker_id", workerId });
         return;
@@ -330,12 +346,20 @@ export class ControlPlane {
         id: runId, taskId: taskId ?? null, conversationId: conversationId ?? null,
         machineId, agentType: "codex-cli", projectPath,
         sessionId: resumeSession?.id ?? null,
-        status: "starting", error: null, createdAt: now, updatedAt: now,
+        status: this.bridgeNeedsUpdate(bridge) && !allowStaleVersion ? "update_waiting" : "starting",
+        error: null, createdAt: now, updatedAt: now,
       });
-      this.send(bridge.socket, {
-        type: "start_agent", sessionId: runId, resumeSessionId: effectiveResumeSessionId,
-        agentType: "codex-cli", projectPath, prompt,
-      });
+      if (this.bridgeNeedsUpdate(bridge) && !allowStaleVersion) {
+        this.queueRunForUpdate({ runId, machineId, projectPath, prompt,
+          resumeSessionId: effectiveResumeSessionId });
+        this.sendUpdateAnnouncement(bridge.socket);
+      } else {
+        if (allowStaleVersion && this.bridgeNeedsUpdate(bridge)) {
+          log.warn({ machineId, runId, currentVersion: bridge.bridgeVersion,
+            targetVersion: this.options.bridgeUpdate?.latestVersion }, "Audited stale bridge version override");
+        }
+        this.sendStartAgent(bridge, runId, projectPath, prompt, effectiveResumeSessionId);
+      }
       this.json(response, 202, workerRunJson(this.store.getWorkerRun(runId)!));
       return;
     }
@@ -478,6 +502,7 @@ export class ControlPlane {
         });
         this.send(socket, { type: "registered", machineId: registeredId });
         this.sendUpdateAnnouncement(socket);
+        this.releasePendingRuns(registeredId);
         log.info({ machineId: registeredId }, "Bridge registered");
         return;
       }
@@ -505,7 +530,16 @@ export class ControlPlane {
       if (bridge) this.sendUpdateAnnouncement(bridge.socket);
       return;
     }
+    if (message.type === "bridge.idle") {
+      const bridge = this.bridges.get(machineId);
+      if (bridge) this.sendUpdateAnnouncement(bridge.socket);
+      return;
+    }
     if (message.type === "bridge_update.status") {
+      if ((message.phase === "failed" || message.phase === "rolled_back"
+        || (message.phase === "discovered" && !message.updatable))) {
+        this.markPendingRuns(machineId, "update_failed", message.reason ?? "bridge update failed; retry is required");
+      }
       await this.handleBridgeUpdateStatus(machineId, message);
       return;
     }
@@ -540,7 +574,10 @@ export class ControlPlane {
         const workerRun = this.store.getWorkerRun(message.sessionId)
           ?? this.store.getWorkerRunBySession(message.sessionId);
         if (workerRun) {
-          this.store.updateWorkerRun(workerRun.id, "failed", message.message);
+          this.store.updateWorkerRun(workerRun.id,
+            message.code === "update_required" ? "update_required"
+              : message.code === "update_failed" ? "update_failed" : "failed",
+            message.message);
           if (!workerRun.sessionId) return;
         }
         const launch = this.launchesByRequestId.get(message.sessionId);
@@ -562,7 +599,58 @@ export class ControlPlane {
 
   private sendUpdateAnnouncement(socket: WebSocket): void {
     if (!this.options.bridgeUpdate) return;
-    this.send(socket, { type: "bridge_update.available", ...this.options.bridgeUpdate });
+    const { latestVersion, source, publishedAt } = this.options.bridgeUpdate;
+    this.send(socket, { type: "bridge_update.available", latestVersion, source, publishedAt,
+      epoch: this.updateEpoch() });
+  }
+
+  private bridgeNeedsUpdate(bridge: BridgeConnection): boolean {
+    return Boolean(this.options.bridgeUpdate
+      && (!bridge.bridgeVersion
+        || compareBridgeVersions(bridge.bridgeVersion, this.options.bridgeUpdate.latestVersion) < 0));
+  }
+
+  private updateEpoch(): string {
+    const update = this.options.bridgeUpdate!;
+    return `${update.latestVersion}:${update.publishedAt ?? 0}`;
+  }
+
+  private queueRunForUpdate(input: Omit<PendingRunLaunch, "targetVersion" | "epoch" | "timeout">): void {
+    const update = this.options.bridgeUpdate!;
+    const timeout = setTimeout(() => {
+      const pending = this.pendingRunLaunches.get(input.runId);
+      if (!pending) return;
+      this.store.updateWorkerRun(input.runId, "update_required",
+        `bridge did not register version ${pending.targetVersion} before the update admission timeout`);
+    }, update.admissionTimeoutMs ?? 120_000);
+    timeout.unref();
+    this.pendingRunLaunches.set(input.runId, { ...input, targetVersion: update.latestVersion,
+      epoch: this.updateEpoch(), timeout });
+  }
+
+  private markPendingRuns(machineId: string, status: "update_required" | "update_failed", reason: string): void {
+    for (const pending of this.pendingRunLaunches.values()) {
+      if (pending.machineId === machineId) this.store.updateWorkerRun(pending.runId, status, reason);
+    }
+  }
+
+  private releasePendingRuns(machineId: string): void {
+    const bridge = this.bridges.get(machineId);
+    if (!bridge?.bridgeVersion) return;
+    for (const [runId, pending] of this.pendingRunLaunches) {
+      if (pending.machineId !== machineId
+        || compareBridgeVersions(bridge.bridgeVersion, pending.targetVersion) < 0) continue;
+      clearTimeout(pending.timeout);
+      this.pendingRunLaunches.delete(runId);
+      this.store.updateWorkerRun(runId, "starting");
+      this.sendStartAgent(bridge, runId, pending.projectPath, pending.prompt, pending.resumeSessionId);
+    }
+  }
+
+  private sendStartAgent(bridge: BridgeConnection, runId: string, projectPath: string,
+    prompt: string, resumeSessionId?: string): void {
+    this.send(bridge.socket, { type: "start_agent", sessionId: runId, resumeSessionId,
+      agentType: "codex-cli", projectPath, prompt });
   }
 
   private reconcileSessionActivity(
@@ -928,7 +1016,25 @@ function workerRunJson(run: WorkerRunRecord): Record<string, unknown> {
 }
 
 function statusIcon(status: string): string {
-  return ({ starting: "🟢", working: "🔵", waiting: "🟡", blocked: "🔴", completed: "✅", failed: "❌", stopped: "⚫" } as Record<string, string>)[status] ?? "⚪";
+  return ({ starting: "🟢", update_waiting: "🟠", update_required: "🟠", update_failed: "🔴",
+    working: "🔵", waiting: "🟡", blocked: "🔴", completed: "✅", failed: "❌", stopped: "⚫" } as Record<string, string>)[status] ?? "⚪";
+}
+
+function compareBridgeVersions(left: string, right: string): number {
+  const parse = (value: string): [number, number, number, string] => {
+    const match = value.trim().match(/^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/);
+    if (!match) return [-1, -1, -1, value];
+    return [Number(match[1]), Number(match[2]), Number(match[3]), match[4] ?? ""];
+  };
+  const a = parse(left);
+  const b = parse(right);
+  for (let index = 0; index < 3; index += 1) {
+    if (a[index] !== b[index]) return (a[index] as number) < (b[index] as number) ? -1 : 1;
+  }
+  if (a[3] === b[3]) return 0;
+  if (!a[3]) return 1;
+  if (!b[3]) return -1;
+  return a[3].localeCompare(b[3], undefined, { numeric: true });
 }
 
 function sessionMetadata(session: SessionRecord): Record<string, string> {

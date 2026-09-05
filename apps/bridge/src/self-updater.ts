@@ -32,6 +32,7 @@ export interface SelfUpdaterOptions {
   restartArgs: string[];
   isBusy: () => boolean | Promise<boolean>;
   report: (message: BridgeUpdateStatusMessage) => void;
+  reportIdle?: () => void;
   runCommand?: UpdateCommandRunner;
   restart?: UpdateCommandRunner;
 }
@@ -40,8 +41,26 @@ export class BridgeSelfUpdater {
   private announcement?: BridgeUpdateAnnouncementMessage;
   private running = false;
   private awaitingRestart = false;
+  private state: "idle" | "draining_for_update" | "updating" | "ready" = "idle";
+  private wasBusy = true;
 
   constructor(private readonly options: SelfUpdaterOptions) {}
+
+  admissionState(): "idle" | "draining_for_update" | "updating" | "ready" {
+    return this.state;
+  }
+
+  admitStart(): boolean {
+    return this.state === "idle" || this.state === "ready";
+  }
+
+  async activityChanged(): Promise<void> {
+    const busy = await this.options.isBusy();
+    if (this.wasBusy && !busy) this.options.reportIdle?.();
+    this.wasBusy = busy;
+    if (!busy && this.state === "draining_for_update") await this.retryIfIdle();
+    else if (!busy && this.state === "idle") this.state = "ready";
+  }
 
   async recoverAfterRestart(): Promise<void> {
     const pending = await readJsonFile<PendingUpdateState>(this.options.statePath);
@@ -71,7 +90,13 @@ export class BridgeSelfUpdater {
 
   async consider(announcement: BridgeUpdateAnnouncementMessage): Promise<void> {
     this.announcement = announcement;
-    if (compareVersions(this.options.currentVersion, announcement.latestVersion) >= 0) return;
+    if (compareVersions(this.options.currentVersion, announcement.latestVersion) >= 0) {
+      this.state = "ready";
+      return;
+    }
+    // This synchronous transition is the local admission mutex: once an
+    // update is known, no start_agent can slip in while isBusy() is awaited.
+    this.state = "draining_for_update";
     // The registry source is informational. Only the source configured on this
     // machine is ever passed to git, so a Control Plane cannot redirect pulls.
     const updatable = this.options.enabled && Boolean(this.options.source);
@@ -99,6 +124,7 @@ export class BridgeSelfUpdater {
       this.report("deferred", announcement.latestVersion, false, "active Codex run/session");
       return;
     }
+    this.state = "updating";
     this.running = true;
     let fetched = false;
     let activated = false;
@@ -160,6 +186,7 @@ export class BridgeSelfUpdater {
       }
     } finally {
       this.running = false;
+      if (!this.awaitingRestart) this.state = "draining_for_update";
     }
   }
 

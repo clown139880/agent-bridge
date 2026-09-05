@@ -52,6 +52,7 @@ test("control plane only announces registry data and emits discovered/completed 
     internals.sendUpdateAnnouncement(socket);
     assert.deepEqual(sent, [{
       type: "bridge_update.available", latestVersion: "0.4.0", source: "ssh://trusted/repo", publishedAt: 123,
+      epoch: "0.4.0:123",
     }]);
     await internals.handleBridgeMessage("hal", {
       type: "bridge_update.status", phase: "discovered", currentVersion: "0.3.0",

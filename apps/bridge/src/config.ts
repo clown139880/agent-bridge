@@ -18,12 +18,6 @@ function jsonStringArray(name: string, fallback: string[]): string[] {
   return value;
 }
 
-function positiveNumber(name: string, fallback: number): number {
-  const value = Number(process.env[name] ?? fallback);
-  if (!Number.isFinite(value) || value <= 0) throw new Error(`${name} must be a positive number`);
-  return value;
-}
-
 export const config = {
   controlUrl: process.env.CONTROL_WS_URL ?? "ws://127.0.0.1:8787/bridge",
   bridgeToken: process.env.BRIDGE_TOKEN,
@@ -43,7 +37,6 @@ export const config = {
   updateEnabled: process.env.BRIDGE_AUTO_UPDATE === "true",
   updateSource: process.env.BRIDGE_UPDATE_SOURCE,
   updateSourceRef: process.env.BRIDGE_UPDATE_REF ?? "main",
-  updateCheckIntervalMs: Math.max(10_000, positiveNumber("BRIDGE_UPDATE_CHECK_INTERVAL_MS", 900_000)),
   updateInstallRoot,
   updateCurrentLink: process.env.BRIDGE_UPDATE_CURRENT_LINK ?? `${updateInstallRoot}/current`,
   updateStatePath: process.env.BRIDGE_UPDATE_STATE_PATH ?? `${updateInstallRoot}/update-state.json`,

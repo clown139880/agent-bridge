@@ -80,15 +80,18 @@ test("bridge stages, validates, activates, restarts itself, then reports complet
       latestVersion: "0.4.0", source: "/trusted/local/repository",
     };
     await updater.consider(announcement);
+    assert.equal(updater.admissionState(), "draining_for_update");
+    assert.equal(updater.admitStart(), false, "draining must close admission before the busy check resolves");
     assert.deepEqual(statuses.map(({ phase }) => phase), ["discovered", "deferred"]);
     assert.equal(restartCount, 0, "an active Codex turn must prevent restart");
 
     busy = false;
-    await updater.retryIfIdle();
+    await updater.activityChanged();
     assert.deepEqual(statuses.map(({ phase }) => phase), [
       "discovered", "deferred", "discovered", "fetching", "fetched", "validating", "restarting",
     ]);
     assert.equal(restartCount, 1);
+    assert.equal(updater.admissionState(), "updating");
     assert.match(commands[0]!, /^git clone /);
     assert.ok(commands.some((command) => command === "pnpm install --frozen-lockfile"));
     assert.ok(commands.some((command) => command === "pnpm check"));
@@ -105,6 +108,9 @@ test("bridge stages, validates, activates, restarts itself, then reports complet
       { phase: "completed", currentVersion: "0.4.0" },
     ]);
     assert.equal(existsSync(statePath), false);
+    await restartedUpdater.consider(announcement);
+    assert.equal(restartedUpdater.admissionState(), "ready");
+    assert.equal(restartedUpdater.admitStart(), true);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

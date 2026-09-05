@@ -15,7 +15,6 @@ export class BridgeClient {
   private socket?: WebSocket;
   private reconnectTimer?: NodeJS.Timeout;
   private heartbeatTimer?: NodeJS.Timeout;
-  private updateCheckTimer?: NodeJS.Timeout;
   private stopped = false;
   private readonly codex: CodexAppServerAdapter;
   private readonly updater: BridgeSelfUpdater;
@@ -39,7 +38,6 @@ export class BridgeClient {
     updateEnabled: boolean;
     updateSource?: string;
     updateSourceRef: string;
-    updateCheckIntervalMs: number;
     updateInstallRoot: string;
     updateCurrentLink: string;
     updateStatePath: string;
@@ -56,7 +54,13 @@ export class BridgeClient {
       desktopScanIntervalMs: options.desktopScanIntervalMs,
       desktopReplayExisting: options.desktopReplayExisting,
       reconnectMs: options.reconnectMs,
-    }, (message) => this.send(message));
+    }, (message) => {
+      this.send(message);
+      if (message.type === "agent.completed" || message.type === "agent.failed"
+        || message.type === "agent.stopped" || message.type === "approval_resolved") {
+        queueMicrotask(() => void this.updater.activityChanged());
+      }
+    });
     this.updater = new BridgeSelfUpdater({
       enabled: options.updateEnabled,
       currentVersion: options.version,
@@ -70,13 +74,14 @@ export class BridgeClient {
       restartArgs: options.updateRestartArgs,
       isBusy: () => !this.codex.isReady() || this.codex.hasActiveSessions(),
       report: (message) => this.send(message),
+      reportIdle: () => this.send({ type: "bridge.idle", machineId: this.options.machineId, timestamp: Date.now() }),
     });
   }
 
   start(): void {
     this.stopped = false;
     void this.codex.start()
-      .then(() => this.updater.retryIfIdle())
+      .then(() => this.updater.activityChanged())
       .catch((error) => {
         log.error({ error }, "Unable to initialize Codex App Server adapter");
       });
@@ -87,7 +92,6 @@ export class BridgeClient {
     this.stopped = true;
     clearTimeout(this.reconnectTimer);
     clearInterval(this.heartbeatTimer);
-    clearInterval(this.updateCheckTimer);
     this.codex.stop();
     this.socket?.close(1000, "bridge shutdown");
   }
@@ -115,11 +119,6 @@ export class BridgeClient {
           type: "heartbeat", machineId: this.options.machineId, timestamp: Date.now(), ...activity,
         });
       }, 15_000);
-      clearInterval(this.updateCheckTimer);
-      this.updateCheckTimer = setInterval(() => {
-        this.send({ type: "bridge_update.check", currentVersion: this.options.version });
-        void this.updater.retryIfIdle();
-      }, this.options.updateCheckIntervalMs);
     });
     socket.on("message", (data) => {
       const message = parseMessage(data.toString());
@@ -127,7 +126,6 @@ export class BridgeClient {
     });
     socket.on("close", (code, reason) => {
       clearInterval(this.heartbeatTimer);
-      clearInterval(this.updateCheckTimer);
       log.warn({ code, reason: reason.toString() }, "Disconnected from control plane");
       if (!this.stopped) this.reconnectTimer = setTimeout(() => this.connect(), this.options.reconnectMs);
     });
@@ -142,7 +140,6 @@ export class BridgeClient {
           void this.updater.recoverAfterRestart().catch((error) => {
             log.error({ error }, "Unable to recover self-update state");
           });
-          this.send({ type: "bridge_update.check", currentVersion: this.options.version });
           break;
         case "bridge_update.available":
           void this.updater.consider(message).catch((error) => {
@@ -150,6 +147,11 @@ export class BridgeClient {
           });
           break;
         case "start_agent":
+          if (!this.updater.admitStart()) {
+            this.send({ type: "error", sessionId: message.sessionId, code: "update_required",
+              message: `bridge update admission state is ${this.updater.admissionState()}` });
+            break;
+          }
           void this.codex.startSession(message.sessionId, message.projectPath, message.prompt, message.resumeSessionId)
             .catch((error) => this.send({ type: "error", sessionId: message.sessionId, message: error instanceof Error ? error.message : String(error) }));
           break;

@@ -4,7 +4,14 @@ from dataclasses import dataclass
 
 import pytest
 
-from integrations.hermes_agent_bridge.supervisor import _conversation_id, _event_summary, _remote_workspace, _settle
+from integrations.hermes_agent_bridge.supervisor import (
+    TERMINAL_STATUSES,
+    UPDATE_ADMISSION_STATUSES,
+    _conversation_id,
+    _event_summary,
+    _remote_workspace,
+    _settle,
+)
 
 
 @dataclass
@@ -44,6 +51,10 @@ def test_event_summary_advances_cursor_and_keeps_latest_useful_text():
 def test_conversation_id_prefers_originating_session_with_per_card_fallback():
     assert _conversation_id(_Task("dir", "/work/repo", session_id="matrix:room:thread"), "main") == "matrix:room:thread"
     assert _conversation_id(_Task("dir", "/work/repo", id="t_9"), "main") == "hermes-task:main:t_9"
+
+
+def test_update_admission_states_never_settle_a_hermes_claim():
+    assert UPDATE_ADMISSION_STATUSES.isdisjoint(TERMINAL_STATUSES)
 
 
 def test_completed_remote_run_closes_the_owned_kanban_run(tmp_path, monkeypatch):
