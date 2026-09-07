@@ -1,7 +1,7 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, realpathSync } from "node:fs";
-import { basename, isAbsolute, relative, resolve, sep } from "node:path";
+import { basename, isAbsolute } from "node:path";
 import { promisify } from "node:util";
 import pino from "pino";
 import WebSocket from "ws";
@@ -15,6 +15,7 @@ import type {
   UserInputQuestion,
 } from "@agent-bridge/protocol";
 import { CodexDesktopSessionScanner } from "./desktop-sessions.js";
+import { isPathWithinRoots } from "./path-utils.js";
 
 const log = pino({ name: "codex-app-server" });
 const execFileAsync = promisify(execFile);
@@ -435,7 +436,7 @@ export class CodexAppServerAdapter {
     socket.on("close", (code, reason) => this.handleClose(code, reason.toString()));
     socket.on("error", (error) => log.warn({ error }, "App Server WebSocket error"));
     await this.request("initialize", {
-      clientInfo: { name: "agent_bridge", title: "Agent Bridge", version: "0.5.1" },
+      clientInfo: { name: "agent_bridge", title: "Agent Bridge", version: "0.5.2" },
     });
     this.notify("initialized", {});
     log.info({ url: this.options.url }, "Connected to Codex App Server");
@@ -892,13 +893,9 @@ export async function resolveProjectPath(
 
   if (!isAbsolute(candidate) || !existsSync(candidate)) throw new Error(`Invalid project path: ${candidate}`);
   const path = realpathSync(candidate);
-  const allowed = allowedRoots.some((root) => {
-    if (!isAbsolute(root) || !existsSync(root)) return false;
-    const relation = relative(realpathSync(root), path);
-    return relation === "" || (!relation.startsWith(`..${sep}`) && relation !== "..");
-  });
+  const allowed = isPathWithinRoots(path, allowedRoots);
   if (!allowed) throw new Error(`Project path is outside BRIDGE_ALLOWED_ROOTS: ${path}`);
-  return resolve(path);
+  return path;
 }
 
 function approvalKind(method: string): ApprovalKind | undefined {

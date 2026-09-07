@@ -1,5 +1,6 @@
 import { closeSync, fstatSync, openSync, readSync, readdirSync, realpathSync, statSync } from "node:fs";
-import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, isAbsolute, join } from "node:path";
+import { isPathWithinRoots } from "./path-utils.js";
 import pino from "pino";
 import type { BridgeToControlMessage } from "@agent-bridge/protocol";
 
@@ -268,21 +269,7 @@ function normalizeDesktopPath(value: string): string {
 
 function isAllowedProjectPath(path: string, roots: string[]): boolean {
   if (!isAbsolute(path)) return false;
-  let target: string;
-  try {
-    target = realpathSync(path);
-  } catch {
-    return false;
-  }
-  return roots.some((root) => {
-    try {
-      const base = realpathSync(resolve(root));
-      const rel = relative(base, target);
-      return rel === "" || (!rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel));
-    } catch {
-      return false;
-    }
-  });
+  return isPathWithinRoots(path, roots);
 }
 
 function readRange(path: string, start: number, end: number): string {

@@ -2,7 +2,7 @@
 
 把多台机器上的 Codex 暴露成可由 Hermes 调度的远程 worker。Codex 仍运行在开发机上；每台 Bridge 只连接本机 Codex App Server，Control Plane 提供经过认证的 worker API、运行路由和 SQLite 持久化。原有 Matrix gateway 暂时保留为可选兼容层。
 
-当前版本：`0.5.1`
+当前版本：`0.5.2`
 
 ## 任务完成定义
 

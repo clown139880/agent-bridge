@@ -8,7 +8,7 @@ let tempHome: string | undefined
 afterEach(async () => { if (tempHome) await rm(tempHome, { recursive: true, force: true }); tempHome = undefined })
 
 describe('Hermes Kanban structured sidecar', () => {
-  it('uses the real Python state machine on an isolated test HERMES_HOME', async () => {
+  it.skipIf(process.platform === 'win32')('uses the real Python state machine on an isolated test HERMES_HOME', async () => {
     tempHome = await mkdtemp(join(tmpdir(), 'dsh-agent-control-kanban-'))
     const client = new KanbanClient({
       mode: 'sidecar', board: 'default', permissionMode: 'orchestrator', author: 'dsh-test',

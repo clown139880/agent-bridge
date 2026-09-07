@@ -21,6 +21,7 @@ pnpm-debug.log*
 .env
 .env.*
 !.env.example
+!deploy/windows-native.env.example
 
 # Local agent metadata
 .agents/

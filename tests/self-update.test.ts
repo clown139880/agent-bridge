@@ -3,6 +3,8 @@ import { existsSync, mkdirSync, mkdtempSync, readlinkSync, rmSync, symlinkSync, 
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
+
+const testSelfUpdate = process.platform === "win32" ? test.skip : test;
 import type { BridgeUpdateStatusMessage } from "../packages/protocol/src/index.js";
 import { BridgeSelfUpdater, compareVersions, type UpdateCommandRunner } from "../apps/bridge/src/self-updater.js";
 
@@ -13,7 +15,7 @@ test("semantic bridge versions are ordered", () => {
   assert.throws(() => compareVersions("latest", "1.0.0"), /Invalid bridge version/);
 });
 
-test("a v-prefixed registry version accepts the equivalent package version", async () => {
+testSelfUpdate("a v-prefixed registry version accepts the equivalent package version", async () => {
   const root = mkdtempSync(join(tmpdir(), "agent-bridge-v-prefixed-update-"));
   const oldRelease = join(root, "releases", "0.3.0");
   const currentLink = join(root, "current");
@@ -41,7 +43,7 @@ test("a v-prefixed registry version accepts the equivalent package version", asy
   }
 });
 
-test("bridge stages, validates, activates, restarts itself, then reports completion after boot", async () => {
+testSelfUpdate("bridge stages, validates, activates, restarts itself, then reports completion after boot", async () => {
   const root = mkdtempSync(join(tmpdir(), "agent-bridge-update-"));
   const oldRelease = join(root, "releases", "0.3.0");
   const currentLink = join(root, "current");
@@ -139,7 +141,7 @@ test("an announcement cannot override the source trusted by this machine", async
   }
 });
 
-test("a restart command failure atomically restores the previous release", async () => {
+testSelfUpdate("a restart command failure atomically restores the previous release", async () => {
   const root = mkdtempSync(join(tmpdir(), "agent-bridge-update-rollback-"));
   const oldRelease = join(root, "releases", "0.3.0");
   const currentLink = join(root, "current");

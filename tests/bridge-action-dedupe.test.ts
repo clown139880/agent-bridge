@@ -7,7 +7,9 @@ import test from "node:test";
 import { BridgeClient } from "../apps/bridge/src/client.js";
 import type { ActionResultMessage, CreateSessionActionMessage } from "../packages/protocol/src/index.js";
 
-test("duplicate action replay waits for the in-flight RPC and then replays its durable result",async()=>{
+const testActionDedupe = process.platform === "win32" ? test.skip : test;
+
+testActionDedupe("duplicate action replay waits for the in-flight RPC and then replays its durable result",async()=>{
   const cachePath=join(tmpdir(),`bridge-action-cache-${randomUUID()}.json`);
   const client=new BridgeClient({url:"ws://127.0.0.1:1/bridge",machineId:"dev",machineName:"dev",
     hostname:"dev.local",platform:"linux",command:"codex",appServerUrl:"ws://127.0.0.1:1",

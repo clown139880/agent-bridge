@@ -2,11 +2,13 @@ import "dotenv/config";
 import { readFileSync } from "node:fs";
 import { hostname, platform } from "node:os";
 import { config as loadEnv } from "dotenv";
+import { splitAllowedRoots } from "./path-utils.js";
 
 loadEnv({ path: process.env.BRIDGE_ENV_FILE ?? ".env.bridge", override: true, quiet: true });
 
 const packageVersion = (JSON.parse(readFileSync(new URL("../../../package.json", import.meta.url), "utf8")) as { version: string }).version;
-const updateInstallRoot = process.env.BRIDGE_UPDATE_INSTALL_ROOT ?? "/opt/agent-bridge";
+const isWindows = platform() === "win32";
+const updateInstallRoot = process.env.BRIDGE_UPDATE_INSTALL_ROOT ?? (isWindows ? `${process.env.LOCALAPPDATA ?? process.cwd()}\\agent-bridge` : "/opt/agent-bridge");
 function positiveNumber(name: string, fallback: number): number {
   const value=Number(process.env[name]??fallback);if(!Number.isFinite(value)||value<=0)throw new Error(`${name} must be positive`);return value;
 }
@@ -34,7 +36,8 @@ export const config = {
   desktopHome: process.env.CODEX_DESKTOP_HOME,
   desktopScanIntervalMs: Number(process.env.CODEX_DESKTOP_SCAN_INTERVAL_MS ?? "3000"),
   desktopReplayExisting: process.env.CODEX_DESKTOP_REPLAY_EXISTING === "true",
-  allowedRoots: (process.env.BRIDGE_ALLOWED_ROOTS ?? process.cwd()).split(":").filter(Boolean),
+  allowedRoots: splitAllowedRoots(process.env.BRIDGE_ALLOWED_ROOTS, platform()).length
+    ? splitAllowedRoots(process.env.BRIDGE_ALLOWED_ROOTS, platform()) : [process.cwd()],
   reconnectMs: Number(process.env.BRIDGE_RECONNECT_MS ?? "3000"),
   version: process.env.BRIDGE_VERSION ?? packageVersion,
   updateEnabled: process.env.BRIDGE_AUTO_UPDATE === "true",
@@ -46,6 +49,6 @@ export const config = {
   actionCachePath: process.env.BRIDGE_ACTION_CACHE_PATH ?? `${updateInstallRoot}/action-cache.json`,
   actionCacheTtlMs: positiveNumber("BRIDGE_ACTION_CACHE_RETENTION_MS", 86_400_000),
   updatePackageManager: process.env.BRIDGE_UPDATE_PACKAGE_MANAGER ?? "pnpm",
-  updateRestartExecutable: process.env.BRIDGE_UPDATE_RESTART_EXECUTABLE ?? "systemctl",
-  updateRestartArgs: jsonStringArray("BRIDGE_UPDATE_RESTART_ARGS", ["--no-block", "restart", "agent-bridge.service"]),
+  updateRestartExecutable: process.env.BRIDGE_UPDATE_RESTART_EXECUTABLE ?? (isWindows ? "powershell.exe" : "systemctl"),
+  updateRestartArgs: jsonStringArray("BRIDGE_UPDATE_RESTART_ARGS", isWindows ? ["-NoProfile", "-File", "restart-bridge.ps1"] : ["--no-block", "restart", "agent-bridge.service"]),
 };
