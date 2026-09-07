@@ -1,6 +1,6 @@
 # Agent Control API 契约（v1）
 
-> 状态：**已在当前工作树实现，尚未发布/部署**。仓库版本按本卡边界仍为 `0.4.2`。
+> 状态：**已随 Agent Bridge 0.5.0 发布并部署**；后续 0.5.x 保持本页 v1 兼容契约。
 > 本文同时记录 Hermes Worker API；标为“现有”的行为已经过 `apps/control-plane/src/server.ts`、
 > `packages/protocol/src/index.ts`、`packages/database/src/index.ts` 与 Hermes 集成交叉核对。
 

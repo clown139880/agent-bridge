@@ -2,12 +2,12 @@
 
 把多台机器上的 Codex 暴露成可由 Hermes 调度的远程 worker。Codex 仍运行在开发机上；每台 Bridge 只连接本机 Codex App Server，Control Plane 提供经过认证的 worker API、运行路由和 SQLite 持久化。原有 Matrix gateway 暂时保留为可选兼容层。
 
-当前版本：`0.5.0`
+当前版本：`0.5.1`
 
 ## 任务完成定义
 
 涉及 Agent Bridge 代码或发布的任务，只有在改动已推送到远程，且 Control Plane 的版本登记已更新、
-bridge 自更新流程已被触发后，才算真正完成。发布时必须按语义化版本规范 bump 版本（本次为 `0.5.0`），
+bridge 自更新流程已被触发后，才算真正完成。发布时必须按语义化版本规范 bump 版本（本次为 `0.5.1`），
 并在 Control Plane 中将 `BRIDGE_LATEST_VERSION` 登记为该版本；各主机的 bridge 再自行发现、拉取、校验和重启。
 “本地已提交但未推送”或“远程已推送但 Control Plane 尚未登记/通告新版本”都只是中间态，
 不能作为任务的完成结论。若自更新因 active turn、待审批或待输入而延后，任务报告必须记录原因和后续触发路径。
@@ -341,18 +341,19 @@ Codex CLI 可以共享 `CODEX_HOME` 中的 session 历史。设置 `CODEX_DESKTO
 它才会在 Matrix 创建或更新对应 thread。用户随后在 Matrix 回复时，Bridge 会先确认 Desktop 没有仍在执行
 该 thread，再通过现有 App Server 执行 `thread/resume` 和 `turn/start`。
 
-WSL 示例：
+推荐由与 Desktop 同一操作系统上的原生 Bridge 负责这类 session。Windows Desktop 应由
+Windows-native Bridge 使用 Windows cwd 和工具链接力；WSL Bridge 保持 WSL-only，不读取挂载在
+`/mnt/c` 下的 Desktop `CODEX_HOME`，避免跨 Windows/WSL 的 SQLite/WAL 锁、路径和执行环境混用。
 
-```bash
-CODEX_DESKTOP_HOME=/mnt/c/Users/<windows-user>/.codex
-BRIDGE_ALLOWED_ROOTS=/mnt/c/Users/<windows-user>/Workspace
+Windows-native Bridge 示例：
+
+```dotenv
+CODEX_DESKTOP_HOME=C:\Users\<windows-user>\.codex
+BRIDGE_ALLOWED_ROOTS=C:\Users\<windows-user>\Workspace
 ```
 
 启用监控时，Bridge 会把 `CODEX_DESKTOP_HOME` 同时作为其托管 App Server 的 `CODEX_HOME`，
-并在 Matrix 续接的首个 turn 上用映射后的 WSL 项目路径覆盖 Desktop 保存的 Windows cwd。
-Windows 项目仍优先使用 Windows-native Bridge；从 WSL 接力时，应确保所配置的
-`CODEX_COMMAND` 能读取这份共享历史。不要同时从 Desktop 和 Matrix 向同一个活跃 turn 输入；扫描器检测到
-未结束的 Desktop turn 时会拒绝接管。
+并在接力前确认 Desktop 没有仍在执行该 thread。不要同时从 Desktop 和其他控制端向同一个活跃 turn 输入。
 
 ## Matrix 使用
 
@@ -433,6 +434,19 @@ systemd=true
 ```bash
 systemctl --user disable --now agent-bridge-wsl-user.service 2>/dev/null || true
 ```
+
+WSL-only 配置只允许 Linux workspace，并且必须让 `CODEX_DESKTOP_HOME` 保持未设置：
+
+```dotenv
+MACHINE_ID=dev-wsl
+MACHINE_NAME=dev-wsl
+BRIDGE_ALLOWED_ROOTS=/home/<linux-user>/Workspace
+CODEX_COMMAND=/home/<linux-user>/.local/share/pnpm/bin/codex
+CODEX_APP_SERVER_MANAGED=true
+# 不要设置 CODEX_DESKTOP_HOME；Windows Desktop 由 Windows-native Bridge 负责。
+```
+
+可复制 [`deploy/wsl-only.env.example`](deploy/wsl-only.env.example) 作为无凭据模板。
 
 仓库中的系统级 unit 使用专用的 `agent-bridge` 用户、`/opt/agent-bridge` 代码目录和
 `/etc/agent-bridge/bridge.env` 配置文件。请按本机环境创建用户和目录，或复制 unit 后调整这些值。

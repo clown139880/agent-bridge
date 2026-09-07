@@ -435,7 +435,7 @@ export class CodexAppServerAdapter {
     socket.on("close", (code, reason) => this.handleClose(code, reason.toString()));
     socket.on("error", (error) => log.warn({ error }, "App Server WebSocket error"));
     await this.request("initialize", {
-      clientInfo: { name: "agent_bridge", title: "Agent Bridge", version: "0.5.0" },
+      clientInfo: { name: "agent_bridge", title: "Agent Bridge", version: "0.5.1" },
     });
     this.notify("initialized", {});
     log.info({ url: this.options.url }, "Connected to Codex App Server");
