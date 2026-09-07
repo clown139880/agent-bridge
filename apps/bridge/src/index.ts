@@ -23,6 +23,8 @@ const client = new BridgeClient({
   updateInstallRoot: config.updateInstallRoot,
   updateCurrentLink: config.updateCurrentLink,
   updateStatePath: config.updateStatePath,
+  actionCachePath: config.actionCachePath,
+  actionCacheTtlMs: config.actionCacheTtlMs,
   updatePackageManager: config.updatePackageManager,
   updateRestartExecutable: config.updateRestartExecutable,
   updateRestartArgs: config.updateRestartArgs,

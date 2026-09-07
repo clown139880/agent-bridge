@@ -26,6 +26,10 @@ control = new ControlPlane(store, matrix, {
   bridgeToken: config.bridgeToken,
   workerApiEnabled: config.workerApiEnabled,
   workerApiToken: config.workerApiToken,
+  controlApiReadToken: config.controlApiReadToken,
+  controlApiWriteToken: config.controlApiWriteToken,
+  retention: config.retention,
+  sse: config.sse,
   bridgeUpdate: config.bridgeUpdate,
 });
 

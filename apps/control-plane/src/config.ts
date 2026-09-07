@@ -8,6 +8,13 @@ function required(name: string): string {
 
 const matrixEnabled = process.env.MATRIX_ENABLED !== "false";
 const workerApiEnabled = process.env.WORKER_API_ENABLED === "true";
+const controlApiReadToken = process.env.CONTROL_API_READ_TOKEN;
+const controlApiWriteToken = process.env.CONTROL_API_WRITE_TOKEN;
+const duration = (name: string, fallback: number): number => {
+  const value = Number(process.env[name] ?? fallback);
+  if (!Number.isFinite(value) || value <= 0) throw new Error(`${name} must be a positive number of milliseconds`);
+  return value;
+};
 const bridgeLatestVersion = process.env.BRIDGE_LATEST_VERSION;
 const bridgeUpdateSource = process.env.BRIDGE_UPDATE_SOURCE;
 if (Boolean(bridgeLatestVersion) !== Boolean(bridgeUpdateSource)) {
@@ -38,6 +45,19 @@ export const config = {
   bridgeToken: process.env.BRIDGE_TOKEN,
   workerApiEnabled,
   workerApiToken: workerApiEnabled ? required("WORKER_API_TOKEN") : undefined,
+  controlApiReadToken,
+  controlApiWriteToken,
+  retention: {
+    sessionEventsMs: duration("CONTROL_SESSION_EVENT_RETENTION_MS", 30 * 86_400_000),
+    streamEventsMs: duration("CONTROL_STREAM_RETENTION_MS", 7 * 86_400_000),
+    actionsMs: duration("CONTROL_ACTION_RETENTION_MS", 86_400_000),
+  },
+  sse: {
+    keepaliveMs: duration("CONTROL_SSE_KEEPALIVE_MS", 15_000),
+    pollMs: duration("CONTROL_SSE_POLL_MS", 250),
+    maxBackpressure: Math.max(1, Number(process.env.CONTROL_SSE_MAX_BACKPRESSURE ?? "3")),
+    actionTimeoutMs: duration("CONTROL_ACTION_TIMEOUT_MS", 30_000),
+  },
   bridgeUpdate: bridgeLatestVersion && bridgeUpdateSource ? {
     latestVersion: bridgeLatestVersion,
     source: bridgeUpdateSource,

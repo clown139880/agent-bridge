@@ -1,0 +1,16 @@
+- insert:
+    - id: agent-control
+      name: dsh-agent-control-plugin
+      config:
+        bridge:
+          mode: live
+          origin: http://127.0.0.1:8787
+          tokenEnv: AGENT_BRIDGE_CONTROL_TOKEN
+          timeoutMs: 15000
+        kanban:
+          mode: sidecar
+          board: default
+          hermesRoot: /root/.hermes/hermes-agent
+          hermesHome: /root/.hermes
+          permissionMode: orchestrator
+          author: dsh-orchestrator

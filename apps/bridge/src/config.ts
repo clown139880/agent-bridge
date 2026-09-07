@@ -7,6 +7,9 @@ loadEnv({ path: process.env.BRIDGE_ENV_FILE ?? ".env.bridge", override: true, qu
 
 const packageVersion = (JSON.parse(readFileSync(new URL("../../../package.json", import.meta.url), "utf8")) as { version: string }).version;
 const updateInstallRoot = process.env.BRIDGE_UPDATE_INSTALL_ROOT ?? "/opt/agent-bridge";
+function positiveNumber(name: string, fallback: number): number {
+  const value=Number(process.env[name]??fallback);if(!Number.isFinite(value)||value<=0)throw new Error(`${name} must be positive`);return value;
+}
 
 function jsonStringArray(name: string, fallback: string[]): string[] {
   const raw = process.env[name];
@@ -40,6 +43,8 @@ export const config = {
   updateInstallRoot,
   updateCurrentLink: process.env.BRIDGE_UPDATE_CURRENT_LINK ?? `${updateInstallRoot}/current`,
   updateStatePath: process.env.BRIDGE_UPDATE_STATE_PATH ?? `${updateInstallRoot}/update-state.json`,
+  actionCachePath: process.env.BRIDGE_ACTION_CACHE_PATH ?? `${updateInstallRoot}/action-cache.json`,
+  actionCacheTtlMs: positiveNumber("BRIDGE_ACTION_CACHE_RETENTION_MS", 86_400_000),
   updatePackageManager: process.env.BRIDGE_UPDATE_PACKAGE_MANAGER ?? "pnpm",
   updateRestartExecutable: process.env.BRIDGE_UPDATE_RESTART_EXECUTABLE ?? "systemctl",
   updateRestartArgs: jsonStringArray("BRIDGE_UPDATE_RESTART_ARGS", ["--no-block", "restart", "agent-bridge.service"]),

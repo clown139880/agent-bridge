@@ -192,6 +192,19 @@ export class CodexDesktopSessionScanner {
         timestamp: Date.now(),
         summary: terminalType === "agent.completed" ? state.lastAssistantText : undefined,
       });
+      this.options.emit({
+        type: "session.event",
+        eventId: `${eventId}:structured`,
+        eventType: terminalType === "agent.completed" ? "turn.completed" : "turn.interrupted",
+        sessionId: state.threadId,
+        turnId,
+        timestamp: Date.now(),
+        payload: {
+          status: terminalType === "agent.completed" ? "completed" : "interrupted",
+          summary: terminalType === "agent.completed" ? state.lastAssistantText : undefined,
+          historyCompleteness: "terminal-only",
+        },
+      });
     }
   }
 }

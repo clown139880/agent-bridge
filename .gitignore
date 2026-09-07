@@ -14,6 +14,7 @@ data/*
 *.sqlite*
 *.db*
 *.log
+action-cache.json*
 pnpm-debug.log*
 
 # Local credentials and machine-specific configuration

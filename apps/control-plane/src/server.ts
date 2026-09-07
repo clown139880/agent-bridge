@@ -1,10 +1,10 @@
-import { randomUUID } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from "node:http";
 import { basename } from "node:path";
 import type { Duplex } from "node:stream";
 import pino from "pino";
 import { WebSocket, WebSocketServer } from "ws";
-import { Store, type SessionRecord, type WorkerRunRecord } from "@agent-bridge/database";
+import { AgentControlStore, Store, type SessionRecord, type WorkerRunRecord } from "@agent-bridge/database";
 import {
   parseMessage,
   statusForEvent,
@@ -15,18 +15,14 @@ import {
   type ControlToBridgeMessage,
   type RegisterMessage,
   type SessionDiscoveredMessage,
+  type SessionActivityStatus,
+  type SessionState,
 } from "@agent-bridge/protocol";
 import type { ControlGateway } from "./matrix.js";
+import { AgentControlApi } from "./api/router.js";
+import { BridgeRegistry, type BridgeConnection } from "./bridge-registry.js";
 
 const log = pino({ name: "control-plane" });
-
-interface BridgeConnection {
-  machineId: string;
-  name: string;
-  capabilities: string[];
-  bridgeVersion?: string;
-  socket: WebSocket;
-}
 
 interface PendingRunLaunch {
   runId: string;
@@ -79,7 +75,10 @@ const RECLAIM_REASON = "Reclaimed stale reasonless blocked run; bridge reported 
 export class ControlPlane {
   private readonly http: HttpServer;
   private readonly wss: WebSocketServer;
-  private readonly bridges = new Map<string, BridgeConnection>();
+  private readonly registry = new BridgeRegistry();
+  private readonly bridges = this.registry.connections;
+  private readonly controlStore: AgentControlStore;
+  private readonly controlApi: AgentControlApi;
   private readonly approvalsByEvent = new Map<string, PendingApproval>();
   private readonly approvalsById = new Map<string, PendingApproval>();
   private readonly resolvedApprovalIds = new Set<string>();
@@ -91,6 +90,7 @@ export class ControlPlane {
   private readonly updateNotifications = new Set<string>();
   private readonly pendingRunLaunches = new Map<string, PendingRunLaunch>();
   private roomId = "";
+  private cleanupTimer?: NodeJS.Timeout;
 
   constructor(
     private readonly store: Store,
@@ -101,6 +101,10 @@ export class ControlPlane {
       bridgeToken?: string;
       workerApiEnabled?: boolean;
       workerApiToken?: string;
+      controlApiReadToken?: string;
+      controlApiWriteToken?: string;
+      retention?: { sessionEventsMs: number; streamEventsMs: number; actionsMs: number };
+      sse?: { keepaliveMs: number; pollMs: number; maxBackpressure: number; actionTimeoutMs?: number };
       bridgeUpdate?: {
         latestVersion: string;
         source: string;
@@ -109,6 +113,15 @@ export class ControlPlane {
       };
     },
   ) {
+    this.controlStore = new AgentControlStore(store.db, options.retention ?? {
+      sessionEventsMs: 30 * 86_400_000, streamEventsMs: 7 * 86_400_000, actionsMs: 86_400_000,
+    });
+    this.controlApi = new AgentControlApi(store, this.controlStore, this.registry, {
+      workerToken: options.workerApiToken, readToken: options.controlApiReadToken,
+      writeToken: options.controlApiWriteToken, sseKeepaliveMs: options.sse?.keepaliveMs ?? 15_000,
+      ssePollMs: options.sse?.pollMs ?? 250, sseMaxBackpressure: options.sse?.maxBackpressure ?? 3,
+      actionTimeoutMs: options.sse?.actionTimeoutMs ?? 30_000,
+    });
     this.http = createServer((request, response) => {
       if (request.url === "/health") {
         response.writeHead(200, { "content-type": "application/json" });
@@ -116,11 +129,16 @@ export class ControlPlane {
         return;
       }
       if (request.url?.startsWith("/api/v1/")) {
-        if (!this.options.workerApiEnabled) {
+        if (!this.options.workerApiEnabled && !this.options.controlApiReadToken && !this.options.controlApiWriteToken) {
           response.writeHead(404).end();
           return;
         }
-        void this.handleWorkerApi(request, response).catch((error) => {
+        const apiPath = new URL(request.url, "http://localhost").pathname;
+        const legacyRoute = (request.method === "POST" && apiPath === "/api/v1/runs")
+          || /^\/api\/v1\/runs\/[^/]+(?:\/.*)?$/.test(apiPath);
+        void (legacyRoute ? this.handleWorkerApi(request, response)
+          : this.controlApi.handle(request, response).then((handled) => handled
+            ? undefined : this.handleWorkerApi(request, response))).catch((error) => {
           log.error({ error }, "Worker API request failed");
           if (!response.headersSent) this.json(response, 500, { error: "internal_error" });
           else response.end();
@@ -138,11 +156,15 @@ export class ControlPlane {
     this.roomId = await this.matrix.start();
     await new Promise<void>((resolve) => this.http.listen(this.options.port, this.options.host, resolve));
     setInterval(() => this.store.markStaleMachinesOffline(Date.now() - 45_000), 15_000).unref();
+    this.controlStore.cleanup();
+    this.cleanupTimer = setInterval(() => this.controlStore.cleanup(), 60 * 60_000);
+    this.cleanupTimer.unref();
     log.info({ host: this.options.host, port: this.options.port, roomId: this.roomId }, "Control plane listening");
   }
 
   async stop(): Promise<void> {
     this.matrix.stop();
+    clearInterval(this.cleanupTimer);
     for (const bridge of this.bridges.values()) bridge.socket.close(1001, "server shutdown");
     for (const launch of this.pendingRunLaunches.values()) clearTimeout(launch.timeout);
     await new Promise<void>((resolve) => this.http.close(() => resolve()));
@@ -241,21 +263,40 @@ export class ControlPlane {
       if (pending.threadId) await this.matrix.sendThread(pending.threadId, `🔴 Bridge ${pending.machineId} is offline; the approval could not be submitted.`);
       return;
     }
+    const projected=this.controlStore.pending(pending.approvalId);
+    if(projected&&!this.controlStore.reservePending(pending.approvalId,`matrix:${targetEventId}`)) {
+      if(pending.threadId)await this.matrix.sendThread(pending.threadId,"ℹ️ This approval was already handled by another client.");
+      return;
+    }
     this.send(bridge.socket, {
       type: "approval_response",
       sessionId: pending.sessionId,
       approvalId: pending.approvalId,
       choice: action.choice,
     });
+    this.controlStore.resolvePending(pending.approvalId,
+      action.choice === "deny" ? "denied" : "accepted", { choice: action.choice });
     this.store.updateSessionStatus(pending.sessionId, "working");
     const workerRun = this.store.getWorkerRunBySession(pending.sessionId);
     if (workerRun) this.store.updateWorkerRun(workerRun.id, "working");
     if (pending.threadId) await this.matrix.sendThread(pending.threadId, `🔐 已选择：${action.label}。Codex 正在继续。`);
   }
 
+  private bearerMatch(header: string | undefined, token: string | undefined): boolean {
+    if (!header || !token) return false;
+    const prefix = "Bearer ";
+    if (!header.startsWith(prefix)) return false;
+    const a = Buffer.from(header.slice(prefix.length));
+    const b = Buffer.from(token);
+    return a.length === b.length && timingSafeEqual(a, b);
+  }
+
   private async handleWorkerApi(request: IncomingMessage, response: ServerResponse): Promise<void> {
-    const expected = this.options.workerApiToken;
-    if (!expected || request.headers.authorization !== `Bearer ${expected}`) {
+    const authorization = request.headers.authorization;
+    const allowed = this.bearerMatch(authorization, this.options.workerApiToken)
+      || this.bearerMatch(authorization, this.options.controlApiWriteToken)
+      || (request.method === "GET" && this.bearerMatch(authorization, this.options.controlApiReadToken));
+    if (!allowed) {
       this.json(response, 401, { error: "unauthorized" });
       return;
     }
@@ -448,9 +489,15 @@ export class ControlPlane {
         this.json(response, 409, { error: "worker_offline", machineId: run.machineId });
         return;
       }
+      const projected=this.controlStore.pending(approvalId);
+      if(projected&&!this.controlStore.reservePending(approvalId,`legacy:${runId}:${approvalId}`)) {
+        this.json(response,409,{error:"approval_already_resolved",runId,approvalId});
+        return;
+      }
       this.forgetApproval(pending);
       await this.removeApprovalReactions(pending);
       this.send(bridge.socket, { type: "approval_response", sessionId: run.sessionId, approvalId, choice });
+      this.controlStore.resolvePending(approvalId, choice === "deny" ? "denied" : "accepted", { choice });
       this.store.updateSessionStatus(run.sessionId, "working");
       this.store.updateWorkerRun(run.id, "working");
       this.json(response, 202, { runId, approvalId, accepted: true });
@@ -493,6 +540,8 @@ export class ControlPlane {
           machineId: registeredId,
           name: message.name || registeredId,
           capabilities: message.capabilities,
+          features: message.features,
+          protocolVersion: message.protocolVersion,
           bridgeVersion: message.bridgeVersion,
           socket,
         });
@@ -500,9 +549,12 @@ export class ControlPlane {
           id: registeredId, name: message.name || registeredId, platform: message.platform,
           hostname: message.hostname, capabilities: message.capabilities,
         });
+        this.controlStore.updateMachineConnection(registeredId, message.bridgeVersion,
+          message.protocolVersion, message.features);
         this.send(socket, { type: "registered", machineId: registeredId });
         this.sendUpdateAnnouncement(socket);
         this.releasePendingRuns(registeredId);
+        this.replayControlActions(registeredId);
         log.info({ machineId: registeredId }, "Bridge registered");
         return;
       }
@@ -513,12 +565,48 @@ export class ControlPlane {
     });
     socket.on("close", () => {
       clearTimeout(registrationTimeout);
-      if (machineId && this.bridges.get(machineId)?.socket === socket) this.bridges.delete(machineId);
+      if (machineId && this.registry.remove(machineId, socket)) {
+        try { this.controlStore.markMachineOffline(machineId); }
+        catch (error) { log.debug({ error, machineId }, "Unable to persist bridge disconnect during shutdown"); }
+      }
     });
     socket.on("error", (error) => log.warn({ error, machineId }, "Bridge socket error"));
   }
 
   private async handleBridgeMessage(machineId: string, message: BridgeToControlMessage): Promise<void> {
+    if (message.type === "state.snapshot") {
+      for (const session of message.sessions) this.controlStore.upsertSession(machineId, session);
+      for (const approval of message.approvals) await this.handleApprovalRequest(machineId,
+        { type: "approval_request", ...approval });
+      for (const input of message.userInputs) this.controlStore.upsertUserInput(machineId, input);
+      if (message.complete) {
+        const pendingIds = new Set([...message.approvals.map((item) => item.approvalId),
+          ...message.userInputs.map((item) => item.requestId)]);
+        const rows = this.store.db.prepare("SELECT id FROM pending_requests WHERE machine_id=? AND status='pending'")
+          .all(machineId) as Array<{ id: string }>;
+        for (const row of rows) if (!pendingIds.has(row.id)) this.controlStore.resolvePending(row.id, "expired");
+      }
+      return;
+    }
+    if (message.type === "session.event") {
+      this.controlStore.appendSessionEvent(machineId, message);
+      const status = activityForStructuredEvent(message.eventType);
+      if (status) this.controlStore.updateSessionActivity(message.sessionId, status.activity,
+        status.active ? message.turnId : undefined, status.lastTurn);
+      return;
+    }
+    if (message.type === "user_input_request") {
+      this.controlStore.upsertUserInput(machineId, message);
+      return;
+    }
+    if (message.type === "user_input_resolved") {
+      this.controlStore.resolvePending(message.requestId, "resolved_elsewhere");
+      return;
+    }
+    if (message.type === "action.result") {
+      this.controlStore.completeAction(message);
+      return;
+    }
     if (message.type === "heartbeat") {
       this.store.touchMachine(machineId);
       this.reconcileSessionActivity(machineId, message);
@@ -557,6 +645,9 @@ export class ControlPlane {
       return;
     }
     if (message.type === "approval_resolved") {
+      this.controlStore.resolvePending(message.approvalId,
+        message.choice === "deny" ? "denied" : message.choice ? "accepted" : "resolved_elsewhere",
+        message.choice ? { choice: message.choice } : undefined);
       const pending = this.approvalsById.get(message.approvalId);
       if (pending) {
         this.forgetApproval(pending);
@@ -651,6 +742,29 @@ export class ControlPlane {
     prompt: string, resumeSessionId?: string): void {
     this.send(bridge.socket, { type: "start_agent", sessionId: runId, resumeSessionId,
       agentType: "codex-cli", projectPath, prompt });
+  }
+
+  private replayControlActions(machineId: string): void {
+    for (const { action, request, path } of this.controlStore.pendingActions(machineId)) {
+      if (action.kind === "create_session") this.registry.send(machineId, { type: "action.create_session",
+        actionId: action.actionId, projectPath: String(request.workspace),
+        input: typeof request.input === "string" ? request.input : undefined });
+      else if (action.kind === "submit_turn" && action.sessionId) this.registry.send(machineId, {
+        type: "action.submit_turn", actionId: action.actionId, sessionId: action.sessionId,
+        input: String(request.input), delivery: (request.delivery ?? "auto") as "auto"|"steer"|"start_turn",
+        expectedTurnId: typeof request.expectedTurnId === "string" ? request.expectedTurnId : undefined });
+      else if (action.kind === "interrupt_turn" && action.sessionId) this.registry.send(machineId, {
+        type: "action.interrupt_turn", actionId: action.actionId, sessionId: action.sessionId,
+        expectedTurnId: typeof request.expectedTurnId === "string" ? request.expectedTurnId : undefined });
+      else if (action.kind === "resolve_approval" && action.sessionId) this.registry.send(machineId, {
+        type: "action.resolve_approval", actionId: action.actionId, sessionId: action.sessionId,
+        approvalId: decodeURIComponent(path.split("/").at(-2)!),
+        choice: request.choice as ApprovalChoice });
+      else if (action.kind === "resolve_user_input" && action.sessionId) this.registry.send(machineId, {
+        type: "action.resolve_user_input", actionId: action.actionId, sessionId: action.sessionId,
+        requestId: decodeURIComponent(path.split("/").at(-2)!),
+        answers: request.answers as Record<string, { answers: string[] }> });
+    }
   }
 
   private reconcileSessionActivity(
@@ -751,10 +865,15 @@ export class ControlPlane {
   private async handleApprovalRequest(machineId: string, message: ApprovalRequestMessage): Promise<void> {
     const session = this.store.getSession(message.sessionId);
     if (!session) return;
+    if (this.approvalsById.has(message.approvalId)) {
+      this.controlStore.upsertApproval(machineId, message);
+      return;
+    }
     // App Server can resolve a request locally before a delayed/replayed
     // approval_request reaches us. Never persist a reasonless blocked state in
     // that case: there is no pending approval for the API caller to resolve.
     if (this.resolvedApprovalIds.delete(message.approvalId)) return;
+    this.controlStore.upsertApproval(machineId, message);
     this.store.updateSessionStatus(message.sessionId, "blocked");
     const workerRun = this.store.getWorkerRunBySession(message.sessionId);
     if (workerRun) this.store.updateWorkerRun(workerRun.id, "blocked");
@@ -808,6 +927,7 @@ export class ControlPlane {
       const workerRun = message.requestId ? this.store.getWorkerRun(message.requestId) : undefined;
       if (workerRun && !workerRun.sessionId) this.store.attachWorkerRun(workerRun.id, session.id, message.status);
       if (!workerRun && !session.matrixThreadId && message.title?.trim()) await this.publishPassiveSession(session, message);
+      this.controlStore.upsertSession(machineId, stateForDiscovery(message));
       return;
     }
     const launch = message.requestId ? this.launchesByRequestId.get(message.requestId) : undefined;
@@ -838,6 +958,7 @@ export class ControlPlane {
     } else if (!workerRun && message.title?.trim()) {
       await this.publishPassiveSession(session, message);
     }
+    this.controlStore.upsertSession(machineId, stateForDiscovery(message));
     log.info({ machineId, sessionId: session.id, nativeSessionId: message.nativeSessionId }, "Local Codex thread attached");
   }
 
@@ -1080,4 +1201,31 @@ function formatDuration(ms: number): string {
   const seconds = Math.round(ms / 1000);
   const minutes = Math.floor(seconds / 60);
   return minutes ? `${minutes}m ${seconds % 60}s` : `${seconds}s`;
+}
+
+function stateForDiscovery(message: SessionDiscoveredMessage): SessionState {
+  const active = message.status === "working" || message.status === "starting";
+  const activityStatus: SessionActivityStatus = active ? "active"
+    : message.status === "blocked" ? "waiting_for_approval"
+      : message.status === "failed" ? "error" : "idle";
+  const lastTurnStatus = message.status === "completed" ? "completed"
+    : message.status === "failed" ? "failed" : message.status === "stopped" ? "interrupted" : undefined;
+  return { sessionId: message.sessionId, nativeSessionId: message.nativeSessionId,
+    agentType: message.agentType, projectPath: message.projectPath,
+    projectName: message.projectName || basename(message.projectPath.replace(/[\\/]$/, "")) || message.projectPath,
+    title: message.title, promptSummary: message.promptSummary, activityStatus,
+    lastTurnStatus, createdAt: message.createdAt, updatedAt: Date.now(), source: message.agentType === "codex-desktop"
+      ? "desktop-rollout" : "app-server", historyCompleteness: message.agentType === "codex-desktop"
+      ? "terminal-only" : "loaded-only" };
+}
+
+function activityForStructuredEvent(type: string):
+  { activity: SessionActivityStatus; active: boolean; lastTurn?: "completed"|"failed"|"interrupted" } | undefined {
+  if (type === "turn.started") return { activity: "active", active: true };
+  if (type === "approval.requested") return { activity: "waiting_for_approval", active: true };
+  if (type === "user_input.requested") return { activity: "waiting_for_input", active: true };
+  if (type === "turn.completed") return { activity: "idle", active: false, lastTurn: "completed" };
+  if (type === "turn.failed") return { activity: "idle", active: false, lastTurn: "failed" };
+  if (type === "turn.interrupted") return { activity: "idle", active: false, lastTurn: "interrupted" };
+  return undefined;
 }

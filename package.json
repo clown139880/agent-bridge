@@ -1,6 +1,6 @@
 {
   "name": "agent-bridge",
-  "version": "0.4.2",
+  "version": "0.5.0",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@11.3.0",
@@ -8,13 +8,14 @@
     "node": ">=22.12"
   },
   "scripts": {
-    "build": "tsc -b",
+    "build": "tsc -b && pnpm --filter dsh-agent-control-plugin build",
     "check": "tsc -b --pretty false",
     "dev:control": "tsx watch apps/control-plane/src/index.ts",
     "dev:bridge": "tsx watch apps/bridge/src/index.ts",
     "start:control": "node --import tsx apps/control-plane/src/index.ts",
     "start:bridge": "node --import tsx apps/bridge/src/index.ts",
-    "test": "node --import tsx --test tests/**/*.test.ts"
+    "test": "node --import tsx --test tests/**/*.test.ts && pnpm --filter dsh-agent-control-plugin test",
+    "plugin:lint": "pnpm --filter dsh-agent-control-plugin lint"
   },
   "dependencies": {
     "dotenv": "^17.2.2",

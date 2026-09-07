@@ -1,7 +1,10 @@
 import { mkdirSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { AgentEvent, AgentStatus, AgentType } from "@agent-bridge/protocol";
+import { migrateDatabase } from "./migrations.js";
+export * from "./control.js";
 
 export interface MachineRecord {
   id: string;
@@ -57,87 +60,7 @@ export class Store {
   }
 
   private migrate(): void {
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS machines (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        platform TEXT NOT NULL,
-        hostname TEXT NOT NULL,
-        status TEXT NOT NULL,
-        capabilities TEXT NOT NULL,
-        last_seen_at INTEGER NOT NULL,
-        created_at INTEGER NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS sessions (
-        id TEXT PRIMARY KEY,
-        machine_id TEXT NOT NULL REFERENCES machines(id),
-        agent_type TEXT NOT NULL,
-        project_name TEXT NOT NULL,
-        project_path TEXT NOT NULL,
-        matrix_room_id TEXT NOT NULL,
-        matrix_thread_id TEXT,
-        native_session_id TEXT,
-        status TEXT NOT NULL,
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS sessions_thread_idx
-        ON sessions(matrix_room_id, matrix_thread_id);
-      CREATE UNIQUE INDEX IF NOT EXISTS sessions_native_idx
-        ON sessions(machine_id, native_session_id)
-        WHERE native_session_id IS NOT NULL;
-      CREATE TABLE IF NOT EXISTS events (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        session_id TEXT NOT NULL REFERENCES sessions(id),
-        event_id TEXT,
-        worker_run_id TEXT,
-        type TEXT NOT NULL,
-        payload TEXT NOT NULL,
-        created_at INTEGER NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS worker_runs (
-        id TEXT PRIMARY KEY,
-        task_id TEXT,
-        conversation_id TEXT,
-        machine_id TEXT NOT NULL REFERENCES machines(id),
-        agent_type TEXT NOT NULL,
-        project_path TEXT NOT NULL,
-        session_id TEXT REFERENCES sessions(id),
-        status TEXT NOT NULL,
-        error TEXT,
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL
-      );
-    `);
-    const eventColumns = this.db.prepare("PRAGMA table_info(events)").all() as Array<{ name: string }>;
-    if (!eventColumns.some((column) => column.name === "worker_run_id")) {
-      this.db.exec("ALTER TABLE events ADD COLUMN worker_run_id TEXT");
-    }
-    this.db.exec(`
-      UPDATE events SET worker_run_id = (
-        SELECT id FROM worker_runs
-        WHERE worker_runs.session_id = events.session_id
-        ORDER BY worker_runs.created_at DESC LIMIT 1
-      ) WHERE worker_run_id IS NULL;
-    `);
-    const workerRunColumns = this.db.prepare("PRAGMA table_info(worker_runs)").all() as Array<{ name: string }>;
-    if (!workerRunColumns.some((column) => column.name === "conversation_id")) {
-      this.db.exec("ALTER TABLE worker_runs ADD COLUMN conversation_id TEXT");
-    }
-    // A Codex thread may back several sequential Worker API runs. Older builds
-    // enforced a one-to-one relationship here.
-    this.db.exec(`
-      DROP INDEX IF EXISTS worker_runs_session_idx;
-      CREATE INDEX IF NOT EXISTS worker_runs_session_idx ON worker_runs(session_id);
-    `);
-    if (!eventColumns.some((column) => column.name === "event_id")) {
-      this.db.exec("ALTER TABLE events ADD COLUMN event_id TEXT");
-    }
-    this.db.exec(`
-      CREATE UNIQUE INDEX IF NOT EXISTS events_upstream_idx
-        ON events(session_id, event_id)
-        WHERE event_id IS NOT NULL;
-    `);
+    migrateDatabase(this.db);
   }
 
   upsertMachine(machine: Omit<MachineRecord, "status" | "lastSeenAt">): void {
@@ -228,13 +151,16 @@ export class Store {
   }
 
   createWorkerRun(run: WorkerRunRecord): void {
-    this.db.prepare(`
+    this.db.exec("BEGIN IMMEDIATE");
+    try { this.db.prepare(`
       INSERT INTO worker_runs
       (id, task_id, conversation_id, machine_id, agent_type, project_path, session_id,
        status, error, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(run.id, run.taskId, run.conversationId, run.machineId, run.agentType, run.projectPath, run.sessionId,
       run.status, run.error, run.createdAt, run.updatedAt);
+      this.addRunStream(run.id); this.db.exec("COMMIT");
+    } catch (error) { try { this.db.exec("ROLLBACK"); } catch {} throw error; }
   }
 
   getWorkerRun(id: string): WorkerRunRecord | undefined {
@@ -269,19 +195,23 @@ export class Store {
   }
 
   attachWorkerRun(id: string, sessionId: string, status: AgentStatus): void {
-    this.db.prepare("UPDATE worker_runs SET session_id=?, status=?, updated_at=? WHERE id=?")
-      .run(sessionId, status, Date.now(), id);
+    this.db.exec("BEGIN IMMEDIATE"); try {
+      this.db.prepare("UPDATE worker_runs SET session_id=?, status=?, updated_at=? WHERE id=?")
+        .run(sessionId, status, Date.now(), id); this.addRunStream(id); this.db.exec("COMMIT");
+    } catch (error) { try { this.db.exec("ROLLBACK"); } catch {} throw error; }
   }
 
   updateWorkerRun(id: string, status: AgentStatus, error?: string): void {
-    this.db.prepare("UPDATE worker_runs SET status=?, error=?, updated_at=? WHERE id=?")
-      .run(status, error ?? null, Date.now(), id);
+    this.db.exec("BEGIN IMMEDIATE"); try {
+      this.db.prepare("UPDATE worker_runs SET status=?, error=?, updated_at=? WHERE id=?")
+        .run(status, error ?? null, Date.now(), id); this.addRunStream(id); this.db.exec("COMMIT");
+    } catch (caught) { try { this.db.exec("ROLLBACK"); } catch {} throw caught; }
   }
 
   listEvents(sessionId: string, after = 0, limit = 100, workerRunId?: string): StoredAgentEvent[] {
     const sql = `
       SELECT id, payload FROM events
-      WHERE session_id=? AND id>?${workerRunId ? " AND worker_run_id=?" : ""}
+      WHERE session_id=? AND id>? AND event_schema=1${workerRunId ? " AND worker_run_id=?" : ""}
       ORDER BY id ASC
       LIMIT ?
     `;
@@ -295,6 +225,15 @@ export class Store {
       "INSERT OR IGNORE INTO events (session_id, event_id, worker_run_id, type, payload, created_at) VALUES (?, ?, ?, ?, ?, ?)",
     ).run(event.sessionId, event.eventId ?? null, workerRunId ?? null, event.type, JSON.stringify(event), event.timestamp);
     return result.changes > 0;
+  }
+
+  private addRunStream(id: string): void {
+    const run=this.getWorkerRun(id);if(!run)return;
+    const payload={runId:run.id,taskId:run.taskId,conversationId:run.conversationId,workerId:`codex@${run.machineId}`,
+      machineId:run.machineId,agent:run.agentType,workspace:run.projectPath,sessionId:run.sessionId,status:run.status,
+      error:run.error,createdAt:run.createdAt,updatedAt:run.updatedAt};
+    this.db.prepare(`INSERT INTO stream_events(event_id,type,resource_kind,resource_id,session_id,payload,created_at)
+      VALUES (?,'run.upserted','run',?,?,?,?)`).run(randomUUID(),id,run.sessionId,JSON.stringify(payload),Date.now());
   }
 }
 

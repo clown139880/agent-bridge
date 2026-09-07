@@ -2,12 +2,12 @@
 
 把多台机器上的 Codex 暴露成可由 Hermes 调度的远程 worker。Codex 仍运行在开发机上；每台 Bridge 只连接本机 Codex App Server，Control Plane 提供经过认证的 worker API、运行路由和 SQLite 持久化。原有 Matrix gateway 暂时保留为可选兼容层。
 
-当前版本：`0.4.2`
+当前版本：`0.5.0`
 
 ## 任务完成定义
 
 涉及 Agent Bridge 代码或发布的任务，只有在改动已推送到远程，且 Control Plane 的版本登记已更新、
-bridge 自更新流程已被触发后，才算真正完成。发布时必须按语义化版本规范 bump 版本（本次为 `0.4.2`），
+bridge 自更新流程已被触发后，才算真正完成。发布时必须按语义化版本规范 bump 版本（本次为 `0.5.0`），
 并在 Control Plane 中将 `BRIDGE_LATEST_VERSION` 登记为该版本；各主机的 bridge 再自行发现、拉取、校验和重启。
 “本地已提交但未推送”或“远程已推送但 Control Plane 尚未登记/通告新版本”都只是中间态，
 不能作为任务的完成结论。若自更新因 active turn、待审批或待输入而延后，任务报告必须记录原因和后续触发路径。
@@ -85,6 +85,12 @@ Control Plane 主要变量：
 | `MATRIX_ENABLED` | 默认 `true`；Hermes 已接管 Matrix 时设为 `false` |
 | `WORKER_API_ENABLED` | 默认 `false`；设为 `true` 才开放 Hermes worker API |
 | `WORKER_API_TOKEN` | 启用 worker API 时必填的独立 bearer token |
+| `CONTROL_API_READ_TOKEN` / `CONTROL_API_WRITE_TOKEN` | Agent Control Host 的只读/读写 token；浏览器不得持有 |
+| `CONTROL_SESSION_EVENT_RETENTION_MS` | 结构化 session event 保留期，默认 30 天 |
+| `CONTROL_STREAM_RETENTION_MS` | SSE outbox 补读窗口，默认 7 天 |
+| `CONTROL_ACTION_RETENTION_MS` | action/idempotency 保留期，默认 24 小时 |
+| `CONTROL_ACTION_TIMEOUT_MS` | Bridge action ack 超时，默认 30 秒 |
+| `CONTROL_SSE_KEEPALIVE_MS` / `CONTROL_SSE_POLL_MS` | SSE keepalive 与 outbox 轮询间隔 |
 | `BRIDGE_LATEST_VERSION` | 可选的 bridge 最新版本注册表；与 `BRIDGE_UPDATE_SOURCE` 一起配置 |
 | `BRIDGE_UPDATE_SOURCE` | 通告中的推荐获取源；Control Plane 只广播字符串，不访问该源 |
 
@@ -107,6 +113,8 @@ Bridge 主要变量：
 | `BRIDGE_UPDATE_INSTALL_ROOT` | 本机 release 根目录，默认 `/opt/agent-bridge` |
 | `BRIDGE_UPDATE_CURRENT_LINK` | systemd 启动所使用的 `current` 软链接 |
 | `BRIDGE_UPDATE_STATE_PATH` | 跨重启完成确认状态文件 |
+| `BRIDGE_ACTION_CACHE_PATH` | action 去重结果缓存，默认位于 update install root，原子写入且权限为 0600 |
+| `BRIDGE_ACTION_CACHE_RETENTION_MS` | Bridge action 去重缓存保留期，默认 24 小时 |
 | `BRIDGE_UPDATE_PACKAGE_MANAGER` | 本机包管理器可执行文件，默认 `pnpm` |
 | `BRIDGE_UPDATE_RESTART_EXECUTABLE` / `BRIDGE_UPDATE_RESTART_ARGS` | 本机重启程序及 JSON 参数数组；不经过 shell |
 
@@ -149,6 +157,39 @@ Matrix/clown 发送“完成自更新”通知。首次 `discovered` 会发送�
 release 并报告 `rolled_back`。若新进程启动但版本不吻合，它也会切回旧链接并报告回滚。release staging 不会
 修改正在运行的源码目录；更新只在无 active session 的窗口重启，已完成/idle thread 的 Codex 持久状态仍可在
 重启后恢复。生产启用前应让 systemd 对启动失败保留 `Restart=always`，并监控 `rolled_back`/启动失败日志。
+
+## Agent Control Session API
+
+Agent Control API 与 Hermes Worker API 共用 `/api/v1`，但提供 session-oriented 的查询、控制和实时状态。
+推荐只让 DSH Host/backend 持有 token；浏览器 Client 通过 Host RPC 使用这些能力，不直接连接 Control Plane。
+
+```dotenv
+CONTROL_API_READ_TOKEN=<只读长随机 token>
+CONTROL_API_WRITE_TOKEN=<读写长随机 token>
+```
+
+主要入口：
+
+| 接口 | 用途 |
+| --- | --- |
+| `GET /api/v1/snapshot` | workers、近期 sessions、pending approvals/input 与无竞态 SSE 水位 |
+| `GET /api/v1/sessions` | 按机器、状态、workspace、task/conversation 等游标分页 |
+| `GET /api/v1/sessions/:id/events` | 跨 run 的结构化 turn/message/tool 事件 |
+| `POST /api/v1/sessions` | 幂等创建 session，可不带首条 input |
+| `POST /api/v1/sessions/:id/turns` | active turn steer；idle session start new turn |
+| `POST /api/v1/sessions/:id/interrupt` | 按 `expectedTurnId` 中断当前 turn |
+| `GET/POST /api/v1/approvals*` | 查询并原子处理 approval |
+| `GET/POST /api/v1/user-input*` | 查询并提交结构化回答；secret input 必须在本机处理 |
+| `GET /api/v1/stream` | 带 `Last-Event-ID` 补读的 SSE 状态流 |
+
+所有新增 POST 都必须发送 `Idempotency-Key`。异步响应为 ActionReceipt，可用
+`GET /api/v1/actions/:id` 或 SSE 的 `action.updated` 跟踪。先读取 snapshot 的 `streamCursor`，再连接
+`/api/v1/stream?cursor=...`，可以避免首屏查询与订阅之间漏事件。完整契约见
+[`docs/agent-control-api.md`](docs/agent-control-api.md)。
+
+Bridge 会优先使用 App Server `thread/list` 枚举近期 thread，并为首批 thread 补入最近 50 个 turn；不支持
+该方法时明确降级为 `thread/loaded/list`。Codex Desktop rollout 仍只有 terminal-only 历史，不伪装成完整
+对话。结构化 command output 截断为 64 KiB，file changes 最多 200 项。
 
 ## Hermes worker API
 
@@ -449,9 +490,27 @@ apps/control-plane   Matrix、WebSocket server、session routing
 apps/bridge          Codex App Server adapter、Bridge client
 packages/protocol    Bridge ↔ Control Plane 消息类型
 packages/database    SQLite store
+integrations/dsh-agent-control   DSH Agent Control 插件（out-of-tree DSH plugin）
 deploy/systemd       Linux/WSL service units
-tests                Node test runner 测试
+tests                Node Test runner 测试
 scripts              本地辅助脚本
 ```
+
+## DSH Agent Control 插件
+
+`integrations/dsh-agent-control` 是一个 out-of-tree DSH 插件，为 DSH Web 客户端
+添加 Agent Control sidebar 和 Hermes Kanban 控制面板。它不修改 DSH 本体，通过
+`cordis.patch.yml` 注入一个 Host 服务和 24 个 model tool。该插件已在 monorepo 中
+作为 workspace 成员管理；`pnpm install`、`pnpm check`、`pnpm test`、`pnpm build`
+均覆盖它（分别 55 Bridge + 13 DSH = 68 项测试通过）。
+
+安装到 DSH Web profile：
+
+```bash
+dsh plugin --profile agent-control add file:/root/agent-bridge/integrations/dsh-agent-control
+dsh --profile agent-control web
+```
+
+插件详细文档见 `integrations/dsh-agent-control/README.md`。
 
 Codex App Server WebSocket transport 仍属于实验接口。升级 Codex CLI 后应先运行测试，并实际验证 approval request/response schema。

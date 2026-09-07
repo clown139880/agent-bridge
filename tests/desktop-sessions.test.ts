@@ -49,7 +49,7 @@ test("Desktop scanner baselines history, reports new completions, and tracks act
   await scanner.refresh();
 
   assert.equal(scanner.isThreadActive("session-1"), false);
-  assert.equal(emitted.length, 2);
+  assert.equal(emitted.length, 3);
   assert.equal(emitted[0]?.type, "session.discovered");
   assert.equal(emitted[0] && "agentType" in emitted[0] ? emitted[0].agentType : undefined, "codex-desktop");
   assert.deepEqual(emitted[1], {
@@ -59,9 +59,11 @@ test("Desktop scanner baselines history, reports new completions, and tracks act
     timestamp: emitted[1] && "timestamp" in emitted[1] ? emitted[1].timestamp : undefined,
     summary: "Finished from Desktop",
   });
+  assert.equal(emitted[2]?.type, "session.event");
+  assert.equal(emitted[2]?.type === "session.event" ? emitted[2].eventType : undefined, "turn.completed");
 
   await scanner.refresh();
-  assert.equal(emitted.length, 2);
+  assert.equal(emitted.length, 3);
   scanner.stop();
   rmSync(root, { recursive: true, force: true });
 });

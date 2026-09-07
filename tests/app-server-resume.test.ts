@@ -161,6 +161,24 @@ test("subsequent input does not resume an already subscribed thread again", asyn
   assert.deepEqual(methods, ["thread/resume", "turn/start", "turn/start"]);
 });
 
+test("session action serializes steer and enforces expectedTurnId", async () => {
+  const calls:Array<{method:string;params:Record<string,unknown>}>=[],emitted:BridgeToControlMessage[]=[];
+  const adapter=new CodexAppServerAdapter({command:"codex",url:"ws://127.0.0.1:4500",allowedRoots:[process.cwd()],
+    manageServer:false,reconnectMs:3000},message=>emitted.push(message));
+  const internals=adapter as unknown as {readyPromise:Promise<void>;socket:{readyState:number;close():void};
+    request(method:string,params:Record<string,unknown>):Promise<unknown>;activeTurns:Map<string,string>;
+    subscribedThreads:Set<string>;threadsById:Map<string,{id:string;cwd:string}>};
+  internals.readyPromise=Promise.resolve();internals.socket={readyState:1,close(){}};
+  internals.activeTurns.set("thread","turn-current");internals.subscribedThreads.add("thread");
+  internals.threadsById.set("thread",{id:"thread",cwd:process.cwd()});
+  internals.request=async(method,params)=>{calls.push({method,params});return {};};
+  await assert.rejects(adapter.submitTurnAction("a1","thread","stale","auto","turn-old"),
+    (error:any)=>error.code==="turn_changed");
+  const result=await adapter.submitTurnAction("a2","thread","continue","auto","turn-current");
+  assert.equal(result.resolvedAction,"steer");assert.equal(calls[0]?.method,"turn/steer");
+  assert.ok(emitted.some(message=>message.type==="session.event"&&message.eventType==="message.completed"));
+});
+
 test("Matrix input resumes a completed Desktop thread in its mapped project directory", async () => {
   const root = join(tmpdir(), `agent-bridge-resume-${randomUUID()}`);
   const project = join(root, "project");

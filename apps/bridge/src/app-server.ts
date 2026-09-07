@@ -1,5 +1,5 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, realpathSync } from "node:fs";
 import { basename, isAbsolute, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
@@ -11,6 +11,8 @@ import type {
   ApprovalKind,
   BridgeToControlMessage,
   SessionDiscoveredMessage,
+  SessionState,
+  UserInputQuestion,
 } from "@agent-bridge/protocol";
 import { CodexDesktopSessionScanner } from "./desktop-sessions.js";
 
@@ -31,6 +33,7 @@ interface CodexThread {
   preview?: string;
   name?: string | null;
   createdAt?: number;
+  updatedAt?: number;
   parentThreadId?: string | null;
   status?: { type?: string; activeFlags?: string[] };
 }
@@ -44,6 +47,7 @@ interface CodexTurn {
 }
 
 interface ThreadItem {
+  id?: string;
   type: string;
   text?: string;
   phase?: string | null;
@@ -56,6 +60,7 @@ interface ThreadItem {
   tool?: string;
   server?: string;
   error?: unknown;
+  content?: Array<{ type?: string; text?: string }>;
 }
 
 interface PendingRequest {
@@ -64,31 +69,26 @@ interface PendingRequest {
   timer: NodeJS.Timeout;
 }
 
-interface UserInputOption {
-  label: string;
-  description: string;
-}
-
-interface UserInputQuestion {
-  id: string;
-  header: string;
-  question: string;
-  isOther: boolean;
-  isSecret: boolean;
-  options: UserInputOption[] | null;
-}
-
 interface PendingUserInput {
+  publicId: string;
   requestId: number | string;
+  sessionId: string;
   questions: UserInputQuestion[];
+  requestedAt: number;
 }
 
 interface PendingApproval {
+  approvalId: string;
   requestId: number | string;
   sessionId: string;
   method: string;
   params: Record<string, unknown>;
   answered: boolean;
+  turnId?: string;
+  requestedAt: number;
+  kind: ApprovalKind;
+  summary: string;
+  choices: ApprovalChoice[];
 }
 
 export class CodexAppServerAdapter {
@@ -105,12 +105,14 @@ export class CodexAppServerAdapter {
   private readonly reportedTurns = new Set<string>();
   private readonly logsByThread = new Map<string, string[]>();
   private readonly pendingStartPrompts = new Map<string, string>();
+  private readonly sessionChains = new Map<string, Promise<unknown>>();
   private reconnectTimer?: NodeJS.Timeout;
   private stopping = false;
   private readyPromise?: Promise<void>;
   private readonly desktopScanner?: CodexDesktopSessionScanner;
   private desktopScannerStarted = false;
   private readyForUpdate = false;
+  private inventoryComplete = false;
 
   constructor(
     private readonly options: {
@@ -183,7 +185,7 @@ export class CodexAppServerAdapter {
     this.desktopScannerStarted = false;
   }
 
-  async startSession(requestId: string, projectPath: string, prompt?: string, resumeSessionId?: string): Promise<void> {
+  async startSession(requestId: string, projectPath: string, prompt?: string, resumeSessionId?: string): Promise<string> {
     await this.ensureReady();
     const cwd = await resolveProjectPath(projectPath, this.options.allowedRoots);
     if (prompt) this.pendingStartPrompts.set(cwd, prompt);
@@ -194,12 +196,13 @@ export class CodexAppServerAdapter {
         if (threadCwd !== cwd) throw new Error(`Codex thread ${resumeSessionId} belongs to ${threadCwd}, not ${cwd}`);
         await this.discoverThread(thread, prompt, requestId);
         if (prompt) await this.startTurn(thread.id, prompt);
-        return;
+        return thread.id;
       }
       const result = await this.request<{ thread: CodexThread }>("thread/start", { cwd });
       this.subscribedThreads.add(result.thread.id);
       await this.discoverThread(result.thread, prompt, requestId);
       if (prompt) await this.startTurn(result.thread.id, prompt);
+      return result.thread.id;
     } finally {
       if (prompt && this.pendingStartPrompts.get(cwd) === prompt) this.pendingStartPrompts.delete(cwd);
     }
@@ -235,6 +238,82 @@ export class CodexAppServerAdapter {
         ...(desktopCwd ? { cwd: desktopCwd } : {}),
       });
     }
+  }
+
+  async createSessionAction(actionId: string, projectPath: string, input?: string): Promise<{ sessionId: string; turnId?: string }> {
+    const sessionId = await this.startSession(actionId, projectPath, input);
+    return { sessionId, turnId: this.activeTurns.get(sessionId) };
+  }
+
+  submitTurnAction(actionId: string, sessionId: string, text: string,
+    delivery: "auto" | "steer" | "start_turn", expectedTurnId?: string): Promise<{
+      sessionId: string; turnId?: string; resolvedAction: "steer" | "start_turn" }> {
+    return this.serial(sessionId, async () => {
+      await this.ensureReady();
+      if (this.pendingUserInput.has(sessionId)) throw domainError("user_input_pending", "structured user input is pending");
+      if ([...this.pendingApprovals.values()].some((item) => item.sessionId === sessionId && !item.answered))
+        throw domainError("approval_pending", "approval is pending");
+      await this.ensureThreadSubscribed(sessionId);
+      const activeTurnId = this.activeTurns.get(sessionId);
+      if (expectedTurnId && expectedTurnId !== activeTurnId) throw domainError("turn_changed", "active turn changed");
+      if (delivery === "steer" && !activeTurnId) throw domainError("no_active_turn", "session has no active turn");
+      if (delivery === "start_turn" && activeTurnId) throw domainError("turn_already_active", "session already has an active turn");
+      const resolvedAction = activeTurnId ? "steer" : "start_turn";
+      const input = [{ type: "text", text, text_elements: [] }];
+      if (activeTurnId) await this.request("turn/steer", { threadId: sessionId, expectedTurnId: activeTurnId, input });
+      else {
+        const result = await this.request<{ turn?: CodexTurn }>("turn/start", { threadId: sessionId, input });
+        if (result.turn?.id) this.activeTurns.set(sessionId, result.turn.id);
+      }
+      this.emitSessionEvent("message.completed", sessionId, `action:${actionId}:user`,
+        { role: "user", text }, this.activeTurns.get(sessionId));
+      return { sessionId, turnId: this.activeTurns.get(sessionId), resolvedAction };
+    });
+  }
+
+  interruptAction(sessionId: string, expectedTurnId?: string): Promise<{ sessionId: string; turnId: string }> {
+    return this.serial(sessionId, async () => {
+      await this.ensureReady(); const activeTurnId=this.activeTurns.get(sessionId);
+      if (!activeTurnId) throw domainError("no_active_turn", "session has no active turn");
+      if (expectedTurnId && expectedTurnId !== activeTurnId) throw domainError("turn_changed", "active turn changed");
+      await this.request("turn/interrupt", { threadId: sessionId, turnId: activeTurnId });
+      return { sessionId, turnId: activeTurnId };
+    });
+  }
+
+  async respondUserInput(sessionId: string, publicId: string,
+    answers: Record<string, { answers: string[] }>): Promise<void> {
+    await this.ensureReady(); const pending=this.pendingUserInput.get(sessionId);
+    if (!pending || pending.publicId !== publicId) throw domainError("user_input_already_resolved", "user input is no longer pending");
+    if (pending.questions.some((question) => question.isSecret)) throw domainError("secret_input_unsupported", "secret input must be answered locally");
+    this.respond(pending.requestId, { answers }); this.pendingUserInput.delete(sessionId);
+  }
+
+  stateSnapshot(): { sessions: SessionState[]; approvals: Array<Record<string, unknown>>; userInputs: Array<Record<string, unknown>> } {
+    const now=Date.now();
+    const sessions=[...this.threadsById.values()].filter(thread=>!thread.parentThreadId).map(thread=>({
+      sessionId:thread.id,nativeSessionId:thread.id,agentType:"codex-cli" as const,projectPath:thread.cwd,
+      projectName:basename(thread.cwd),title:thread.name??undefined,activityStatus:this.pendingUserInput.has(thread.id)
+        ? "waiting_for_input" as const : [...this.pendingApprovals.values()].some(item=>item.sessionId===thread.id&&!item.answered)
+          ? "waiting_for_approval" as const : this.activeTurns.has(thread.id)||this.activeThreads.has(thread.id)
+            ? "active" as const : "idle" as const,activeTurnId:this.activeTurns.get(thread.id),
+      lastTurnStatus:undefined,createdAt:(thread.createdAt??Math.floor(now/1000))*1000,
+      updatedAt:(thread.updatedAt??thread.createdAt??Math.floor(now/1000))*1000,
+      source:"app-server" as const,historyCompleteness:this.inventoryComplete ? "full" as const : "loaded-only" as const}));
+    const approvals=[...this.pendingApprovals.values()].filter(item=>!item.answered).map(item=>({approvalId:item.approvalId,
+      sessionId:item.sessionId,turnId:item.turnId,kind:item.kind,summary:item.summary,choices:item.choices,requestedAt:item.requestedAt}));
+    const userInputs=[...this.pendingUserInput.values()].map(item=>({requestId:item.publicId,sessionId:item.sessionId,
+      turnId:this.activeTurns.get(item.sessionId),questions:item.questions,requestedAt:item.requestedAt}));
+    return {sessions,approvals,userInputs};
+  }
+
+  private serial<T>(sessionId: string, work: () => Promise<T>): Promise<T> {
+    const previous=this.sessionChains.get(sessionId)??Promise.resolve();
+    const result=previous.catch(()=>undefined).then(work);
+    const tracked=result.then(()=>undefined,()=>undefined)
+      .finally(()=>{if(this.sessionChains.get(sessionId)===tracked)this.sessionChains.delete(sessionId);});
+    this.sessionChains.set(sessionId,tracked);
+    return result;
   }
 
   async approve(sessionId: string, approvalId: string, choice: ApprovalChoice): Promise<void> {
@@ -356,13 +435,33 @@ export class CodexAppServerAdapter {
     socket.on("close", (code, reason) => this.handleClose(code, reason.toString()));
     socket.on("error", (error) => log.warn({ error }, "App Server WebSocket error"));
     await this.request("initialize", {
-      clientInfo: { name: "agent_bridge", title: "Agent Bridge", version: "0.4.1" },
+      clientInfo: { name: "agent_bridge", title: "Agent Bridge", version: "0.5.0" },
     });
     this.notify("initialized", {});
     log.info({ url: this.options.url }, "Connected to Codex App Server");
   }
 
   private async restoreLoadedThreads(): Promise<void> {
+    let listed = false;
+    try {
+      let cursor: string | undefined;
+      for (let page = 0; page < 5; page += 1) {
+        const result = await this.request<{ data?: CodexThread[]; nextCursor?: string | null }>("thread/list", {
+          limit: 100, ...(cursor ? { cursor } : {}), sortKey: "updated_at",
+        });
+        if (!Array.isArray(result.data)) break;
+        listed = true;
+        this.inventoryComplete = true;
+        for (const thread of result.data) {
+          await this.discoverThread(thread);
+          if (page === 0) await this.hydrateThreadHistory(thread.id);
+        }
+        cursor = result.nextCursor ?? undefined;
+        if (!cursor) break;
+      }
+    } catch (error) {
+      log.info({ error }, "thread/list unavailable; inventory is limited to loaded threads");
+    }
     const result = await this.request<{ data: string[] }>("thread/loaded/list", { limit: 100 });
     for (const threadId of result.data) {
       try {
@@ -371,6 +470,37 @@ export class CodexAppServerAdapter {
         log.warn({ error, threadId }, "Unable to restore loaded Codex thread");
       }
     }
+    if (!listed) log.warn("Session inventory is limited to thread/loaded/list");
+  }
+
+  private async hydrateThreadHistory(threadId: string): Promise<void> {
+    try {
+      const result=await this.request<{thread:CodexThread&{turns?:CodexTurn[]}}>("thread/read",{threadId,includeTurns:true});
+      const turns=(result.thread.turns??[]).slice(-50);
+      for(const turn of turns){
+        for(const item of turn.items??[])this.emitHistoricalItem(threadId,turn.id,item);
+        if(turn.status!=="inProgress"){
+          const type=turn.status==="failed"?"turn.failed":turn.status==="interrupted"?"turn.interrupted":"turn.completed";
+          this.emitSessionEvent(type,threadId,`app-server:${threadId}:${turn.id}:history-terminal`,{
+            status:turn.status==="interrupted"?"interrupted":turn.status,summary:finalAgentText(turn.items??[]),
+            error:turn.error?.message,durationMs:turn.durationMs??undefined},turn.id);
+          this.reportedTurns.add(turn.id);
+        }
+      }
+    }catch(error){log.debug({error,threadId},"Unable to hydrate thread history");}
+  }
+
+  private emitHistoricalItem(threadId:string,turnId:string,item:ThreadItem):void{
+    const itemId=item.id??createHash("sha256").update(JSON.stringify(item)).digest("hex").slice(0,24);
+    const text=item.text??item.content?.map(part=>part.text??"").join("\n").trim();
+    if((item.type==="agentMessage"||item.type==="userMessage")&&text)this.emitSessionEvent("message.completed",threadId,
+      `app-server:${threadId}:${turnId}:${itemId}:history-message`,{role:item.type==="userMessage"?"user":"assistant",text:truncateEventText(text)},turnId,itemId);
+    else if(item.type==="commandExecution")this.emitSessionEvent("command.completed",threadId,
+      `app-server:${threadId}:${turnId}:${itemId}:history-command`,{command:item.command??"command",cwd:item.cwd,
+        status:item.status??"unknown",exitCode:item.exitCode??null,output:truncateEventText(item.aggregatedOutput??"")},turnId,itemId);
+    else if(item.type==="fileChange")this.emitSessionEvent("file_change.completed",threadId,
+      `app-server:${threadId}:${turnId}:${itemId}:history-file-change`,{changes:(item.changes??[]).slice(0,200),
+        truncated:(item.changes?.length??0)>200},turnId,itemId);
   }
 
   private async ensureThreadSubscribed(threadId: string): Promise<CodexThread> {
@@ -417,22 +547,32 @@ export class CodexAppServerAdapter {
         this.respond(message.id!, { answers: {} });
         return;
       }
-      this.pendingUserInput.set(threadId, { requestId: message.id!, questions });
+      const publicId = randomUUID();
+      const requestedAt = Date.now();
+      this.pendingUserInput.set(threadId, { publicId, requestId: message.id!, sessionId: threadId, questions, requestedAt });
       const summary = formatUserInputRequest(questions);
       this.appendLog(threadId, summary);
       this.emit({ type: "agent.waiting", sessionId: threadId, timestamp: Date.now(), summary });
+      this.emit({ type: "user_input_request", sessionId: threadId, requestId: publicId,
+        turnId: this.activeTurns.get(threadId), questions, requestedAt });
+      this.emitSessionEvent("user_input.requested", threadId, `user-input:${publicId}:requested`,
+        { requestId: publicId, questions }, this.activeTurns.get(threadId));
       return;
     }
     const kind = approvalKind(message.method ?? "");
     if (kind) {
       const approvalId = randomUUID();
       const summary = approvalSummary(message.method!, params);
+      const choices = approvalChoicesFor(message.method!, params);
+      const requestedAt = Date.now();
       this.pendingApprovals.set(approvalId, {
+        approvalId,
         requestId: message.id!,
         sessionId: threadId,
         method: message.method!,
         params,
         answered: false,
+        turnId: this.activeTurns.get(threadId), requestedAt, kind, summary, choices,
       });
       this.appendLog(threadId, summary);
       this.emit({
@@ -441,8 +581,11 @@ export class CodexAppServerAdapter {
         approvalId,
         kind,
         summary,
-        choices: approvalChoicesFor(message.method!, params),
+        choices,
+        turnId: this.activeTurns.get(threadId), requestedAt,
       });
+      this.emitSessionEvent("approval.requested", threadId, `approval:${approvalId}:requested`,
+        { approvalId, kind, summary, choices }, this.activeTurns.get(threadId));
       return;
     }
     const summary = approvalSummary(message.method ?? "approval", params);
@@ -469,11 +612,16 @@ export class CodexAppServerAdapter {
       const pending = this.pendingUserInput.get(threadId);
       if (pending && (requestId === undefined || pending.requestId === requestId)) {
         this.pendingUserInput.delete(threadId);
+        this.emit({ type: "user_input_resolved", sessionId: threadId, requestId: pending.publicId, resolvedAt: Date.now() });
+        this.emitSessionEvent("user_input.resolved", threadId, `user-input:${pending.publicId}:resolved`,
+          { requestId: pending.publicId }, this.activeTurns.get(threadId));
       }
       for (const [approvalId, approval] of this.pendingApprovals) {
         if (approval.sessionId === threadId && (requestId === undefined || approval.requestId === requestId)) {
           this.pendingApprovals.delete(approvalId);
-          this.emit({ type: "approval_resolved", sessionId: threadId, approvalId });
+          this.emit({ type: "approval_resolved", sessionId: threadId, approvalId, resolvedAt: Date.now() });
+          this.emitSessionEvent("approval.resolved", threadId, `approval:${approvalId}:resolved`,
+            { approvalId }, this.activeTurns.get(threadId));
         }
       }
       return;
@@ -498,6 +646,8 @@ export class CodexAppServerAdapter {
     if (method === "turn/started") {
       const turn = params.turn as CodexTurn;
       if (turn?.id) this.activeTurns.set(threadId, turn.id);
+      if (turn?.id) this.emitSessionEvent("turn.started", threadId, `app-server:${threadId}:${turn.id}:started`,
+        { status: "in_progress" }, turn.id);
       if (!this.activeThreads.has(threadId)) {
         this.activeThreads.add(threadId);
         this.appendLog(threadId, "Turn started");
@@ -548,16 +698,25 @@ export class CodexAppServerAdapter {
         type: "agent.failed", eventId, sessionId: threadId, timestamp: Date.now(),
         durationMs: turn.durationMs ?? undefined, summary: turn.error?.message ?? summary,
       });
+      this.emitSessionEvent("turn.failed", threadId, `${eventId}:structured`, {
+        status: "failed", error: turn.error?.message, summary, durationMs: turn.durationMs ?? undefined,
+      }, turn.id);
     } else if (turn.status === "interrupted") {
       this.emit({
         type: "agent.stopped", eventId, sessionId: threadId, timestamp: Date.now(),
         durationMs: turn.durationMs ?? undefined,
       });
+      this.emitSessionEvent("turn.interrupted", threadId, `${eventId}:structured`, {
+        status: "interrupted", durationMs: turn.durationMs ?? undefined,
+      }, turn.id);
     } else {
       this.emit({
         type: "agent.completed", eventId, sessionId: threadId, timestamp: Date.now(),
         durationMs: turn.durationMs ?? undefined, summary,
       });
+      this.emitSessionEvent("turn.completed", threadId, `${eventId}:structured`, {
+        status: "completed", summary, durationMs: turn.durationMs ?? undefined,
+      }, turn.id);
     }
   }
 
@@ -587,20 +746,30 @@ export class CodexAppServerAdapter {
   }
 
   private handleCompletedItem(threadId: string, item: ThreadItem): void {
+    const turnId=this.activeTurns.get(threadId);
+    const itemId=item.id??createHash("sha256").update(JSON.stringify(item)).digest("hex").slice(0,24);
     if (item.type === "agentMessage" && item.text) {
       this.appendLog(threadId, item.text);
       this.emit({ type: "agent.output", sessionId: threadId, timestamp: Date.now(), text: item.text });
+      this.emitSessionEvent("message.completed", threadId, `app-server:${threadId}:${itemId}:message`,
+        { role: "assistant", text: truncateEventText(item.text) }, turnId, itemId);
     } else if (item.type === "commandExecution") {
       const summary = `$ ${item.command ?? "command"}${item.exitCode !== null && item.exitCode !== undefined ? `\nExit: ${item.exitCode}` : ""}`;
       this.appendLog(threadId, `${summary}${item.aggregatedOutput ? `\n${item.aggregatedOutput}` : ""}`);
       if (item.status === "failed" || (item.exitCode !== null && item.exitCode !== undefined && item.exitCode !== 0)) {
         this.emit({ type: "agent.progress", sessionId: threadId, timestamp: Date.now(), summary });
       }
+      this.emitSessionEvent("command.completed", threadId, `app-server:${threadId}:${itemId}:command`, {
+        command: item.command ?? "command", cwd: item.cwd, status: item.status ?? "unknown",
+        exitCode: item.exitCode ?? null, output: truncateEventText(item.aggregatedOutput ?? ""),
+      }, turnId, itemId);
     } else if (item.type === "fileChange") {
       const count = item.changes?.length ?? 0;
       const summary = `${count} file change${count === 1 ? "" : "s"} applied`;
       this.appendLog(threadId, summary);
       this.emit({ type: "agent.progress", sessionId: threadId, timestamp: Date.now(), summary });
+      this.emitSessionEvent("file_change.completed", threadId, `app-server:${threadId}:${itemId}:file-change`,
+        { changes: (item.changes ?? []).slice(0, 200), summary, truncated: (item.changes?.length ?? 0) > 200 }, turnId, itemId);
     }
   }
 
@@ -680,6 +849,12 @@ export class CodexAppServerAdapter {
       this.emit({ type: "approval_resolved", sessionId: approval.sessionId, approvalId });
     }
     this.pendingApprovals.clear();
+  }
+
+  private emitSessionEvent(eventType: import("@agent-bridge/protocol").StructuredSessionEventType,
+    sessionId: string, eventId: string, payload: Record<string, unknown>, turnId?: string, itemId?: string): void {
+    this.emit({ type: "session.event", eventType, sessionId, eventId, timestamp: Date.now(),
+      turnId, itemId, payload });
   }
 
 }
@@ -831,4 +1006,13 @@ function normalizeUserInputAnswer(value: string, question: UserInputQuestion): s
 
 function finalAgentText(items: ThreadItem[]): string | undefined {
   return [...items].reverse().find((item) => item.type === "agentMessage" && item.text)?.text;
+}
+
+const MAX_EVENT_TEXT = 64 * 1024;
+function truncateEventText(text: string): string {
+  return text.length <= MAX_EVENT_TEXT ? text : `${text.slice(0, MAX_EVENT_TEXT)}\n…[truncated]`;
+}
+
+function domainError(code: string, message: string): Error & { code: string; retryable: boolean } {
+  return Object.assign(new Error(message), { code, retryable: false });
 }

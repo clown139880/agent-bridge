@@ -1,0 +1,30 @@
+{
+  "workers": [
+    {
+      "id": "codex@hal",
+      "machineId": "hal",
+      "name": "Codex @ HAL",
+      "status": "online",
+      "capabilities": ["codex-app-server", "turn-steer"],
+      "workspaces": ["/work/agent-bridge"],
+      "lastSeenAt": 1788770000000
+    }
+  ],
+  "sessions": [
+    {
+      "id": "thr_active",
+      "workerId": "codex@hal",
+      "agentType": "codex",
+      "title": "Bridge API",
+      "status": "active",
+      "workspace": "/work/agent-bridge",
+      "activeTurnId": "turn_44",
+      "lastActivityAt": 1788770000000,
+      "taskId": "t_bridge"
+    }
+  ],
+  "approvals": [],
+  "userInput": [],
+  "streamCursor": "mock:1",
+  "truncated": { "sessions": false }
+}

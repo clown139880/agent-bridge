@@ -1,0 +1,16 @@
+- id: agent-control
+  config:
+    bridge:
+      mode: mock
+      origin: http://unused.invalid
+      tokenEnv: UNUSED
+      timeoutMs: 1000
+    kanban:
+      mode: mock
+      board: test
+      permissionMode: read-only
+      author: dsh-test
+      hermesRoot: /unused
+      hermesHome: /unused
+      python: python3
+      timeoutMs: 1000

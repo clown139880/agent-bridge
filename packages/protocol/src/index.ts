@@ -14,6 +14,16 @@ export const AGENT_STATUSES = [
 
 export type AgentStatus = (typeof AGENT_STATUSES)[number];
 export type AgentType = "codex-cli" | "codex-desktop" | "claude-code" | "opencode";
+export const BRIDGE_PROTOCOL_VERSION = 2;
+
+export type SessionActivityStatus =
+  | "creating" | "active" | "waiting_for_approval" | "waiting_for_input"
+  | "idle" | "offline" | "error" | "unknown";
+export type TurnStatus = "in_progress" | "completed" | "failed" | "interrupted" | "unknown";
+export type PendingResolutionStatus = "pending" | "accepted" | "denied" | "resolved_elsewhere" | "expired";
+export type ActionKind = "create_session" | "submit_turn" | "interrupt_turn"
+  | "resolve_approval" | "resolve_user_input";
+export type ActionStatus = "accepted" | "succeeded" | "failed";
 
 export type AgentEventType =
   | "agent.started"
@@ -58,6 +68,8 @@ export interface RegisterMessage {
   hostname: string;
   capabilities: string[];
   bridgeVersion?: string;
+  protocolVersion?: number;
+  features?: string[];
   token?: string;
 }
 
@@ -157,12 +169,131 @@ export interface ApprovalRequestMessage {
   kind: ApprovalKind;
   summary: string;
   choices: ApprovalChoice[];
+  turnId?: string;
+  requestedAt?: number;
 }
 
 export interface ApprovalResolvedMessage {
   type: "approval_resolved";
   sessionId: string;
   approvalId: string;
+  choice?: ApprovalChoice;
+  resolvedAt?: number;
+}
+
+export interface UserInputOption { label: string; description: string; }
+export interface UserInputQuestion {
+  id: string;
+  header: string;
+  question: string;
+  isOther: boolean;
+  isSecret: boolean;
+  options: UserInputOption[] | null;
+}
+
+export interface UserInputRequestMessage {
+  type: "user_input_request";
+  sessionId: string;
+  requestId: string;
+  turnId?: string;
+  questions: UserInputQuestion[];
+  requestedAt: number;
+}
+
+export interface UserInputResolvedMessage {
+  type: "user_input_resolved";
+  sessionId: string;
+  requestId: string;
+  resolvedAt: number;
+}
+
+export interface SessionState {
+  sessionId: string;
+  nativeSessionId: string;
+  agentType: "codex-cli" | "codex-desktop";
+  projectPath: string;
+  projectName: string;
+  title?: string;
+  promptSummary?: string;
+  activityStatus: SessionActivityStatus;
+  activeTurnId?: string;
+  lastTurnStatus?: TurnStatus;
+  createdAt: number;
+  updatedAt: number;
+  source: "app-server" | "desktop-rollout";
+  historyCompleteness: "full" | "loaded-only" | "terminal-only";
+}
+
+export interface StateSnapshotMessage {
+  type: "state.snapshot";
+  generation: string;
+  sessions: SessionState[];
+  approvals: Array<Omit<ApprovalRequestMessage, "type">>;
+  userInputs: Array<Omit<UserInputRequestMessage, "type">>;
+  complete: boolean;
+}
+
+export type StructuredSessionEventType =
+  | "session.discovered" | "session.updated" | "turn.started" | "turn.completed"
+  | "turn.failed" | "turn.interrupted" | "message.completed" | "command.completed"
+  | "file_change.completed" | "progress" | "approval.requested" | "approval.resolved"
+  | "user_input.requested" | "user_input.resolved" | "error";
+
+export interface StructuredSessionEventMessage {
+  type: "session.event";
+  eventId: string;
+  eventType: StructuredSessionEventType;
+  sessionId: string;
+  timestamp: number;
+  turnId?: string;
+  itemId?: string;
+  payload: Record<string, unknown>;
+}
+
+export interface CreateSessionActionMessage {
+  type: "action.create_session";
+  actionId: string;
+  projectPath: string;
+  input?: string;
+}
+export interface SubmitTurnActionMessage {
+  type: "action.submit_turn";
+  actionId: string;
+  sessionId: string;
+  input: string;
+  delivery: "auto" | "steer" | "start_turn";
+  expectedTurnId?: string;
+}
+export interface InterruptTurnActionMessage {
+  type: "action.interrupt_turn";
+  actionId: string;
+  sessionId: string;
+  expectedTurnId?: string;
+}
+export interface ResolveApprovalActionMessage {
+  type: "action.resolve_approval";
+  actionId: string;
+  sessionId: string;
+  approvalId: string;
+  choice: ApprovalChoice;
+}
+export interface ResolveUserInputActionMessage {
+  type: "action.resolve_user_input";
+  actionId: string;
+  sessionId: string;
+  requestId: string;
+  answers: Record<string, { answers: string[] }>;
+}
+export interface ActionResultMessage {
+  type: "action.result";
+  actionId: string;
+  kind: ActionKind;
+  status: "succeeded" | "failed";
+  sessionId?: string;
+  turnId?: string;
+  resolvedAction?: "steer" | "start_turn";
+  error?: { code: string; message: string; retryable: boolean };
+  timestamp: number;
 }
 
 export interface ApprovalResponseMessage {
@@ -189,6 +320,11 @@ export type BridgeToControlMessage =
   | AgentEvent
   | ApprovalRequestMessage
   | ApprovalResolvedMessage
+  | UserInputRequestMessage
+  | UserInputResolvedMessage
+  | StateSnapshotMessage
+  | StructuredSessionEventMessage
+  | ActionResultMessage
   | LogResponseMessage
   | ErrorMessage;
 
@@ -198,6 +334,11 @@ export type ControlToBridgeMessage =
   | StartAgentMessage
   | AgentInputMessage
   | ApprovalResponseMessage
+  | CreateSessionActionMessage
+  | SubmitTurnActionMessage
+  | InterruptTurnActionMessage
+  | ResolveApprovalActionMessage
+  | ResolveUserInputActionMessage
   | StopAgentMessage
   | LogRequestMessage
   | ErrorMessage;
