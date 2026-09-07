@@ -7,7 +7,7 @@ import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 
 import type { FormEvent, ReactNode } from 'react'
 import css from './workspace.module.css'
 
-const API = '/api/agent-control'
+const RPC_CHANNEL = '/agent-control'
 type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue }
 type RecordValue = Record<string, JsonValue>
 
@@ -34,14 +34,13 @@ function useController(controller: WorkspaceController): boolean {
   return useSyncExternalStore(controller.subscribe, controller.snapshot, controller.snapshot)
 }
 
+type RpcConnection = { rpc: { call(channel: string, endpoint: string, payload: unknown): Promise<{ ok: boolean; value?: JsonValue; error?: { message?: string; code?: string } }> } }
+let connection: RpcConnection | undefined
 async function call(domain: 'overview' | 'bridge' | 'kanban', operation: string, args?: RecordValue): Promise<JsonValue> {
-  const response = await fetch(API, {
-    method: 'POST', headers: { 'content-type': 'application/json' }, cache: 'no-store',
-    body: JSON.stringify({ domain, operation, ...(args ? { args } : {}) }),
-  })
-  const envelope = await response.json() as { ok: boolean; data?: JsonValue; error?: { message?: string; code?: string } }
-  if (!response.ok || !envelope.ok) throw new Error(envelope.error?.message ?? envelope.error?.code ?? `HTTP ${response.status}`)
-  return envelope.data ?? null
+  if (!connection) throw new Error('Agent Control connection is not ready')
+  const envelope = await connection.rpc.call(RPC_CHANNEL, 'dispatch', { domain, operation, ...(args ? { args } : {}) })
+  if (!envelope.ok) throw new Error(envelope.error?.message ?? envelope.error?.code ?? 'Agent Control request failed')
+  return envelope.value ?? null
 }
 
 function asRecord(value: JsonValue | undefined): RecordValue { return value && typeof value === 'object' && !Array.isArray(value) ? value : {} }
@@ -232,8 +231,9 @@ function WorkspaceOverlay({ controller }: Injected) {
   </div>
 }
 
-export const inject = ['slots']
+export const inject = ['slots', 'connection']
 export function apply(ctx: ClientContext): void {
+  connection = (ctx as unknown as { connection: RpcConnection }).connection
   const controller = new WorkspaceController()
   ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({ name: 'sidebar.footer.action', id: 'agent-control', order: 20, inject: (): Injected => ({ controller }) }, FooterAction))
   ctx.slots.inject('shell.overlay', () => ctx.slots.register({ name: 'shell.overlay', id: 'agent-control', order: 10, inject: (): Injected => ({ controller }) }, WorkspaceOverlay))

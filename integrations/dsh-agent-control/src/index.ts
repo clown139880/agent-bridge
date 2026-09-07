@@ -14,6 +14,7 @@ export { MUTATING_TOOL_NAMES, TOOL_SPECS } from './tools.js'
 export const name = 'agent-control'
 export const inject = ['tools', 'systemPrompt', 'connection']
 export const AGENT_CONTROL_PATH = '/api/agent-control'
+const AGENT_CONTROL_RPC_CHANNEL = '/agent-control'
 export interface Config extends AgentControlConfig {}
 
 export const Config: Schema<Config> = Schema.object({
@@ -22,7 +23,7 @@ export const Config: Schema<Config> = Schema.object({
 }) as Schema<Config>
 
 declare module '@deepseek-ai/cordis' { interface Context { agentControl: AgentControlService } }
-interface ConnectionFace { fetch: { register(route: { path: string; methods: readonly 'POST'[]; requestBody: 'buffered'; fetch(request: Request): Promise<Response> }): () => Promise<void> } }
+interface ConnectionFace { rpc: { handle(channel: string, handler: (endpoint: string, payload: unknown, signal: AbortSignal) => Promise<unknown>, options: { authority: 'trusted-host' | 'loopback' }): () => Promise<void> } }
 
 export function apply(ctx: Context, config: Config): void {
   const service = new AgentControlService(config)
@@ -42,15 +43,14 @@ export function apply(ctx: Context, config: Config): void {
     ? { kind: 'ask', reason: `${execution.name} changes external Agent Bridge or Hermes state.` }
     : next())
   const connection = Reflect.get(ctx, 'connection') as ConnectionFace
-  connection.fetch.register({ path: AGENT_CONTROL_PATH, methods: ['POST'], requestBody: 'buffered', fetch: async (request) => {
+  connection.rpc.handle(AGENT_CONTROL_RPC_CHANNEL, async (_endpoint, payload, signal) => {
     try {
-      const length = Number(request.headers.get('content-length') ?? '0')
-      if (length > 1_048_576) return errorResponse(new ControlError('body_too_large', 'Request body exceeds 1 MiB.', 413))
-      if (!request.headers.get('content-type')?.toLowerCase().startsWith('application/json')) return Response.json({ ok: false, error: { code: 'unsupported_media_type', message: 'Use application/json.', status: 415 } } satisfies DashboardResponse, { status: 415 })
-      const body = await request.json() as Partial<DashboardRequest>
-      if ((body.domain !== 'overview' && body.domain !== 'bridge' && body.domain !== 'kanban') || typeof body.operation !== 'string') return Response.json({ ok: false, error: { code: 'invalid_parameter', message: 'domain and operation are required.', status: 400 } } satisfies DashboardResponse, { status: 400 })
-      const data = await service.dispatch({ domain: body.domain, operation: body.operation, ...(body.args ? { args: body.args } : {}) }, request.signal)
-      return Response.json({ ok: true, data } satisfies DashboardResponse, { headers: { 'cache-control': 'no-store' } })
-    } catch (error) { return errorResponse(error) }
-  } })
+      const body = payload as Partial<DashboardRequest>
+      if ((body.domain !== 'overview' && body.domain !== 'bridge' && body.domain !== 'kanban') || typeof body.operation !== 'string') throw new ControlError('invalid_parameter', 'domain and operation are required.', 400)
+      return { ok: true, value: await service.dispatch({ domain: body.domain, operation: body.operation, ...(body.args ? { args: body.args } : {}) }, signal) }
+    } catch (error) {
+      const response = errorResponse(error)
+      return { ok: false, error: { code: response.status.toString(), message: await response.text(), details: {} } }
+    }
+  }, { authority: 'trusted-host' })
 }
