@@ -19,11 +19,45 @@ export interface Config extends AgentControlConfig {}
 
 export const Config: Schema<Config> = Schema.object({
   bridge: Schema.object({ mode: Schema.union(['live', 'mock']).default('live'), origin: Schema.string().default('http://127.0.0.1:8787'), tokenEnv: Schema.string().default('AGENT_BRIDGE_CONTROL_TOKEN'), token: Schema.string().role('secret'), timeoutMs: Schema.number().min(100).default(15000) }).required(),
-  kanban: Schema.object({ mode: Schema.union(['sidecar', 'http', 'mock']).default('sidecar'), board: Schema.string().default('default'), permissionMode: Schema.union(['read-only', 'orchestrator', 'operator']).default('orchestrator'), author: Schema.string().default('dsh-orchestrator'), hermesRoot: Schema.string().default('/root/.hermes/hermes-agent'), hermesHome: Schema.string().default('/root/.hermes'), python: Schema.string().default('python3'), baseUrl: Schema.string(), tokenEnv: Schema.string(), timeoutMs: Schema.number().min(100).default(15000) }).required(),
+  kanban: Schema.object({ mode: Schema.union(['sidecar', 'ssh', 'http', 'mock']).default('sidecar'), board: Schema.string().default('default'), permissionMode: Schema.union(['read-only', 'orchestrator', 'operator']).default('orchestrator'), author: Schema.string().default('dsh-orchestrator'), hermesRoot: Schema.string().default('/root/.hermes/hermes-agent'), hermesHome: Schema.string().default('/root/.hermes'), python: Schema.string().default('python3'), sshCommand: Schema.string().default('ssh'), sshHost: Schema.string(), remoteScript: Schema.string(), baseUrl: Schema.string(), tokenEnv: Schema.string(), timeoutMs: Schema.number().min(100).default(15000) }).required(),
 }) as Schema<Config>
 
 declare module '@deepseek-ai/cordis' { interface Context { agentControl: AgentControlService } }
 interface ConnectionFace { rpc: { handle(channel: string, handler: (endpoint: string, payload: unknown, signal: AbortSignal) => Promise<unknown>, options: { authority: 'trusted-host' | 'loopback' }): () => Promise<void> } }
+
+type RpcResult<T = unknown> =
+  | { ok: true; value: T }
+  | { ok: false; error: { code: 'bad-request' | 'internal'; message: string; details: Record<string, unknown> } }
+
+export function createAgentControlRpcHandler(service: AgentControlService) {
+  return async (_endpoint: string, payload: unknown, signal: AbortSignal): Promise<RpcResult> => {
+    try {
+      const body = payload as Partial<DashboardRequest>
+      if ((body.domain !== 'overview' && body.domain !== 'bridge' && body.domain !== 'kanban') || typeof body.operation !== 'string') {
+        throw new ControlError('invalid_parameter', 'domain and operation are required.', 400)
+      }
+      const value = await service.dispatch({
+        domain: body.domain,
+        operation: body.operation,
+        ...(body.args ? { args: body.args } : {}),
+      }, signal)
+      return { ok: true, value }
+    } catch (error) {
+      // Connection validates a closed transport error union. Agent Control's
+      // domain codes (for example bridge_unavailable) belong in the message,
+      // never in the transport discriminator.
+      const response = errorResponse(error)
+      return {
+        ok: false,
+        error: {
+          code: response.status === 400 ? 'bad-request' : 'internal',
+          message: await response.text(),
+          details: {},
+        },
+      }
+    }
+  }
+}
 
 export function apply(ctx: Context, config: Config): void {
   const service = new AgentControlService(config)
@@ -42,18 +76,13 @@ export function apply(ctx: Context, config: Config): void {
   ctx.on('tools/pre-execute', async (execution, next) => MUTATING_TOOL_NAMES.has(execution.name)
     ? { kind: 'ask', reason: `${execution.name} changes external Agent Bridge or Hermes state.` }
     : next())
-  const connection = Reflect.get(ctx, 'connection') as ConnectionFace
-  connection.rpc.handle(AGENT_CONTROL_RPC_CHANNEL, async (_endpoint, payload, signal) => {
-    try {
-      const body = payload as Partial<DashboardRequest>
-      if ((body.domain !== 'overview' && body.domain !== 'bridge' && body.domain !== 'kanban') || typeof body.operation !== 'string') throw new ControlError('invalid_parameter', 'domain and operation are required.', 400)
-      return { ok: true, value: await service.dispatch({ domain: body.domain, operation: body.operation, ...(body.args ? { args: body.args } : {}) }, signal) }
-    } catch (error) {
-      // DSH's RPC transport validates its own closed error union. Do not pass
-      // Agent Control domain codes through it; those belong in the message.
-      const response = errorResponse(error)
-      const message = await response.text()
-      return { ok: false, error: { code: response.status === 400 ? 'bad-request' : 'internal', message, details: {} } }
-    }
-  }, { authority: 'trusted-host' })
+  // Register through the dependency-scoped fiber, matching DSH's built-in
+  // plugins. This makes channel lifetime and hot reload disposal deterministic.
+  ctx.inject(['connection'], (scoped) => {
+    const connection = Reflect.get(scoped, 'connection') as ConnectionFace
+    scoped.effect(
+      () => connection.rpc.handle(AGENT_CONTROL_RPC_CHANNEL, createAgentControlRpcHandler(service), { authority: 'trusted-host' }),
+      'agent-control: rpc channel',
+    )
+  })
 }

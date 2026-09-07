@@ -26,4 +26,11 @@ describe('client components', () => {
     const source = readFileSync(new URL('../src/client/index.tsx', import.meta.url), 'utf8')
     expect(source).not.toMatch(/Authorization|Bearer|AGENT_BRIDGE|WORKER_API_TOKEN|127\.0\.0\.1:8787|hermesRoot|hermesHome/)
   })
+
+  it('uses the Agent Bridge sessionId contract for session operations', () => {
+    const source = readFileSync(new URL('../src/client/index.tsx', import.meta.url), 'utf8')
+    expect(source).toContain("session['sessionId']")
+    expect(source).not.toContain("session['id']")
+    expect(source).not.toContain("selected['id']")
+  })
 })

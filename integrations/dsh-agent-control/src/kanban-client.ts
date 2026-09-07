@@ -8,13 +8,16 @@ import type { JsonObject, JsonValue, KanbanCall } from './types.js'
 
 export type PermissionMode = 'read-only' | 'orchestrator' | 'operator'
 export interface KanbanConfig {
-  mode: 'sidecar' | 'http' | 'mock'
+  mode: 'sidecar' | 'ssh' | 'http' | 'mock'
   board: string
   permissionMode: PermissionMode
   author: string
   hermesRoot: string
   hermesHome: string
   python: string
+  sshCommand?: string
+  sshHost?: string
+  remoteScript?: string
   baseUrl?: string
   tokenEnv?: string
   timeoutMs: number
@@ -89,7 +92,17 @@ class Sidecar {
     delete env['HERMES_KANBAN_TASK']
     delete env['HERMES_KANBAN_RUN_ID']
     delete env['HERMES_KANBAN_CLAIM_LOCK']
-    this.child = spawn(this.config.python, [script, '--hermes-root', this.config.hermesRoot], {
+    const remote = this.config.mode === 'ssh'
+    const command = remote ? (this.config.sshCommand ?? 'ssh') : this.config.python
+    const args = remote
+      ? [
+          '-o', 'BatchMode=yes',
+          this.config.sshHost!,
+          'env', `HERMES_HOME=${this.config.hermesHome}`, `HERMES_KANBAN_HOME=${this.config.hermesHome}`,
+          this.config.python, this.config.remoteScript!, '--hermes-root', this.config.hermesRoot,
+        ]
+      : [script, '--hermes-root', this.config.hermesRoot]
+    this.child = spawn(command, args, {
       stdio: ['pipe', 'pipe', 'pipe'],
       env: { ...env, HERMES_HOME: this.config.hermesHome, HERMES_KANBAN_HOME: this.config.hermesHome, PYTHONUNBUFFERED: '1' },
     })
@@ -129,6 +142,9 @@ export class KanbanClient {
   constructor(private readonly config: KanbanConfig) {
     this.sidecar = new Sidecar(config)
     if (config.mode === 'http' && !config.baseUrl) throw new ControlError('kanban_config_invalid', 'kanban.baseUrl is required in HTTP mode.', 500)
+    if (config.mode === 'ssh' && (!config.sshHost || !config.remoteScript)) {
+      throw new ControlError('kanban_config_invalid', 'kanban.sshHost and kanban.remoteScript are required in SSH mode.', 500)
+    }
   }
 
   dispose(): void { this.sidecar.dispose() }
@@ -147,7 +163,7 @@ export class KanbanClient {
 
   private rawCall(operation: KanbanCall['operation'], args: JsonObject, signal?: AbortSignal): Promise<JsonValue> {
     if (this.config.mode === 'mock') return Promise.resolve(this.mock({ operation, args }))
-    if (this.config.mode === 'sidecar') return this.sidecar.call(operation, args, signal)
+    if (this.config.mode === 'sidecar' || this.config.mode === 'ssh') return this.sidecar.call(operation, args, signal)
     return this.http(operation, args, signal)
   }
 

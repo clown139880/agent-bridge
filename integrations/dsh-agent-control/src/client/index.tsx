@@ -46,6 +46,13 @@ async function call(domain: 'overview' | 'bridge' | 'kanban', operation: string,
 function asRecord(value: JsonValue | undefined): RecordValue { return value && typeof value === 'object' && !Array.isArray(value) ? value : {} }
 function asArray(value: JsonValue | undefined): JsonValue[] { return Array.isArray(value) ? value : [] }
 function str(value: JsonValue | undefined, fallback = '—'): string { return typeof value === 'string' || typeof value === 'number' ? String(value) : fallback }
+function sessionTitle(session: RecordValue): string {
+  const title = typeof session['title'] === 'string' ? session['title'].trim() : ''
+  if (title) return title
+  const project = typeof session['projectName'] === 'string' && session['projectName'].trim() ? session['projectName'].trim() : 'Session'
+  const id = typeof session['sessionId'] === 'string' ? session['sessionId'].slice(0, 8) : 'unknown'
+  return `${project} · ${id}`
+}
 function statusClass(status: string): string { return `${css.status} ${css[`status_${status}`] ?? ''}` }
 
 function Empty({ children }: { children: ReactNode }) { return <div className={css.empty}>{children}</div> }
@@ -73,9 +80,9 @@ function Overview({ data }: { data: RecordValue }) {
         <div><strong>{str(worker['name'])}</strong><small>{str(worker['hostname'])} · {asArray(worker['capabilities']).length} capabilities</small></div>
         <span className={css.rowMeta}>{str(worker['status'])}</span>
       </div>)}</section>
-      <section className={css.panel}><h2>Recent sessions</h2>{sessions.slice(0, 6).map(session => <div className={css.row} key={str(session['id'])}>
+      <section className={css.panel}><h2>Recent sessions</h2>{sessions.slice(0, 6).map(session => <div className={css.row} key={str(session['sessionId'])}>
         <span className={statusClass(str(session['status']))} />
-        <div><strong>{str(session['title'], str(session['id']))}</strong><small>{str(session['workspace'])}</small></div>
+        <div><strong>{sessionTitle(session)}</strong><small>{str(session['workspace'])}</small></div>
         <span className={css.rowMeta}>{str(session['status'])}</span>
       </div>)}</section>
     </div>
@@ -92,22 +99,25 @@ function Sessions({ snapshot, refresh, initialSessionId }: { snapshot: RecordVal
   const sessions = asArray(bridge['sessions']).map(asRecord)
   const approvals = asArray(bridge['approvals']).map(asRecord)
   const inputs = asArray(bridge['userInput']).map(asRecord)
-  const [selected, setSelected] = useState<RecordValue | undefined>(sessions.find(item => item['id'] === initialSessionId) ?? sessions[0])
+  const [selected, setSelected] = useState<RecordValue | undefined>(sessions.find(item => item['sessionId'] === initialSessionId) ?? sessions[0])
   const [events, setEvents] = useState<JsonValue[]>([])
   const [message, setMessage] = useState('')
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState('')
   const load = useCallback(async (session: RecordValue) => {
     setSelected(session); setNotice('');
-    try { const result = asRecord(await call('bridge', 'session_events', { sessionId: str(session['id']), limit: 200 })); setEvents(asArray(result['data'])) }
+    try { const result = asRecord(await call('bridge', 'session_events', { sessionId: str(session['sessionId']), limit: 200 })); setEvents(asArray(result['data'])) }
     catch (error) { setNotice(error instanceof Error ? error.message : 'Failed to load events') }
   }, [])
-  useEffect(() => { const target = sessions.find(item => item['id'] === initialSessionId); if (target) void load(target) }, [initialSessionId])
+  useEffect(() => {
+    const target = sessions.find(item => item['sessionId'] === initialSessionId) ?? (initialSessionId ? undefined : sessions[0])
+    if (target) void load(target)
+  }, [initialSessionId])
   const send = async (event: FormEvent) => {
     event.preventDefault(); if (!selected || !message.trim() || busy) return
     setBusy(true); setNotice('')
     try {
-      const args: RecordValue = { sessionId: str(selected['id']), input: message.trim(), delivery: 'auto' }
+      const args: RecordValue = { sessionId: str(selected['sessionId']), input: message.trim(), delivery: 'auto' }
       if (typeof selected['activeTurnId'] === 'string') args['expectedTurnId'] = selected['activeTurnId']
       const result = asRecord(await call('bridge', 'submit_turn', args))
       setNotice(`Accepted: ${str(result['resolvedAction'], str(result['status']))}`); setMessage(''); await refresh()
@@ -115,17 +125,17 @@ function Sessions({ snapshot, refresh, initialSessionId }: { snapshot: RecordVal
   }
   const interrupt = async () => {
     if (!selected || busy) return; setBusy(true)
-    try { await call('bridge', 'interrupt_turn', { sessionId: str(selected['id']), ...(typeof selected['activeTurnId'] === 'string' ? { expectedTurnId: selected['activeTurnId'] } : {}) }); setNotice('Interrupt accepted.'); await refresh() }
+    try { await call('bridge', 'interrupt_turn', { sessionId: str(selected['sessionId']), ...(typeof selected['activeTurnId'] === 'string' ? { expectedTurnId: selected['activeTurnId'] } : {}) }); setNotice('Interrupt accepted.'); await refresh() }
     catch (error) { setNotice(error instanceof Error ? error.message : 'Interrupt failed') } finally { setBusy(false) }
   }
   return <div className={css.split}>
-    <aside className={css.listPane}><div className={css.listHeading}>Sessions <span>{sessions.length}</span></div>{sessions.length === 0 ? <Empty>No sessions.</Empty> : sessions.map(session => <button className={`${css.sessionItem} ${selected?.['id'] === session['id'] ? css.selected : ''}`} key={str(session['id'])} onClick={() => void load(session)} type="button">
-      <span className={statusClass(str(session['status']))} /><span><strong>{str(session['title'], str(session['id']))}</strong><small>{str(session['workerId'])}<br />{str(session['workspace'])}</small></span>
+    <aside className={css.listPane}><div className={css.listHeading}>Sessions <span>{sessions.length}</span></div>{sessions.length === 0 ? <Empty>No sessions.</Empty> : sessions.map(session => <button className={`${css.sessionItem} ${selected?.['sessionId'] === session['sessionId'] ? css.selected : ''}`} key={str(session['sessionId'])} onClick={() => void load(session)} type="button">
+      <span className={statusClass(str(session['status']))} /><span><strong>{sessionTitle(session)}</strong><small>{str(session['workerId'])}<br />{str(session['workspace'])}</small></span>
     </button>)}</aside>
     <main className={css.detailPane}>{!selected ? <Empty>Select a session.</Empty> : <>
-      <header className={css.detailHeader}><div><h2>{str(selected['title'], str(selected['id']))}</h2><p>{str(selected['workspace'])} · {str(selected['workerId'])}</p></div><div className={css.headerActions}><span className={css.badge}>{str(selected['status'])}</span><button disabled={busy || !selected['activeTurnId']} onClick={() => void interrupt()} type="button">Interrupt</button></div></header>
-      {approvals.filter(item => item['sessionId'] === selected['id']).map(item => <PendingCard key={str(item['id'])} item={item} refresh={refresh} />)}
-      {inputs.filter(item => item['sessionId'] === selected['id']).map(item => <UserInputCard key={str(item['id'])} item={item} refresh={refresh} />)}
+      <header className={css.detailHeader}><div><h2>{sessionTitle(selected)}</h2><p>{str(selected['workspace'])} · {str(selected['workerId'])}</p></div><div className={css.headerActions}><span className={css.badge}>{str(selected['status'])}</span><button disabled={busy || !selected['activeTurnId']} onClick={() => void interrupt()} type="button">Interrupt</button></div></header>
+      {approvals.filter(item => item['sessionId'] === selected['sessionId']).map(item => <PendingCard key={str(item['id'])} item={item} refresh={refresh} />)}
+      {inputs.filter(item => item['sessionId'] === selected['sessionId']).map(item => <UserInputCard key={str(item['id'])} item={item} refresh={refresh} />)}
       <div className={css.timeline}>{events.length === 0 ? <Empty>No retained events, or the session has not been opened.</Empty> : events.map((event, index) => { const item = asRecord(event); return <article className={css.event} key={str(item['id'], String(index))}><div><span>{str(item['type'], 'event')}</span><time>{str(item['createdAt'], '')}</time></div><pre>{JSON.stringify(item['payload'] ?? item, null, 2)}</pre></article> })}</div>
       {notice && <div className={css.notice}>{notice}</div>}
       <form className={css.composer} onSubmit={event => void send(event)}><textarea value={message} onChange={event => setMessage(event.target.value)} placeholder={selected['status'] === 'active' ? 'Steer the active turn…' : 'Start a new turn…'} /><button disabled={busy || !message.trim()}>{busy ? 'Sending…' : 'Send'}</button></form>
@@ -193,7 +203,7 @@ function TaskDrawer({ data, associatedSessions, openSession, close, refresh }: {
       {task['status'] === 'blocked' && <button type="button" disabled={busy} onClick={() => { setBusy(true); void call('kanban', 'unblock', { taskId: str(task['id']) }).then(refresh).catch(error => setNotice(error instanceof Error ? error.message : 'Unblock failed')).finally(() => setBusy(false)) }}>Unblock</button>}
     </div>
     {notice && <div className={css.notice}>{notice}</div>}
-    {associatedSessions.length > 0 && <><h3>Agent Bridge sessions</h3>{associatedSessions.map(session => <button className={css.sessionLink} type="button" key={str(session['id'])} onClick={() => openSession(str(session['id']))}>{str(session['title'], str(session['id']))} · {str(session['status'])}</button>)}</>}
+    {associatedSessions.length > 0 && <><h3>Agent Bridge sessions</h3>{associatedSessions.map(session => <button className={css.sessionLink} type="button" key={str(session['sessionId'])} onClick={() => openSession(str(session['sessionId']))}>{sessionTitle(session)} · {str(session['status'])}</button>)}</>}
     <h3>Dependencies</h3><p>Parents: {asArray(links['parents']).map(String).join(', ') || 'none'}<br />Children: {asArray(links['children']).map(String).join(', ') || 'none'}</p>
     <h3>Runs</h3>{runs.length === 0 ? <Empty>No runs.</Empty> : runs.map(run => <div className={css.run} key={str(run['id'])}><strong>Run {str(run['id'])}</strong><span>{str(run['outcome'], str(run['status']))}</span><p>{str(run['summary'], '')}</p></div>)}
     <h3>Comments</h3>{comments.map(item => <div className={css.comment} key={str(item['id'])}><strong>{str(item['author'])}</strong><p>{str(item['body'])}</p></div>)}
