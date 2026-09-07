@@ -3,7 +3,7 @@ import Schema from '@deepseek-ai/schemastery'
 import { ControlError, errorResponse } from './errors.js'
 import { AgentControlService, type AgentControlConfig } from './service.js'
 import { MUTATING_TOOL_NAMES, registerTools } from './tools.js'
-import type { DashboardRequest, DashboardResponse } from './types.js'
+import type { DashboardRequest } from './types.js'
 
 export * from './bridge-client.js'
 export * from './errors.js'
@@ -49,8 +49,11 @@ export function apply(ctx: Context, config: Config): void {
       if ((body.domain !== 'overview' && body.domain !== 'bridge' && body.domain !== 'kanban') || typeof body.operation !== 'string') throw new ControlError('invalid_parameter', 'domain and operation are required.', 400)
       return { ok: true, value: await service.dispatch({ domain: body.domain, operation: body.operation, ...(body.args ? { args: body.args } : {}) }, signal) }
     } catch (error) {
+      // DSH's RPC transport validates its own closed error union. Do not pass
+      // Agent Control domain codes through it; those belong in the message.
       const response = errorResponse(error)
-      return { ok: false, error: { code: response.status.toString(), message: await response.text(), details: {} } }
+      const message = await response.text()
+      return { ok: false, error: { code: response.status === 400 ? 'bad-request' : 'internal', message, details: {} } }
     }
   }, { authority: 'trusted-host' })
 }
