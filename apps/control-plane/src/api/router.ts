@@ -130,11 +130,11 @@ export class AgentControlApi {
   }
 
   private createAction(principal:Principal,key:string,path:string,body:unknown,kind:ActionKind,machineId:string,
-    sessionId?:string):{action:ActionRow;existing:boolean}{
-    return this.actions.create({principal:principal.id,key,path,body,kind,machineId,sessionId});
+    sessionId?:string,method:"POST"|"DELETE"="POST"):{action:ActionRow;existing:boolean}{
+    return this.actions.create({principal:principal.id,key,path,body,kind,machineId,sessionId,method});
   }
-  private existingAction(principal:Principal,key:string,path:string,body:unknown):ActionRow|undefined{
-    return this.actions.existing(principal.id,key,path,body);
+  private existingAction(principal:Principal,key:string,path:string,body:unknown,method:"POST"|"DELETE"="POST"):ActionRow|undefined{
+    return this.actions.existing(principal.id,key,method,path,body);
   }
 
   private dispatch(action:ActionRow,message:ControlToBridgeMessage):void {
@@ -158,14 +158,19 @@ export class AgentControlApi {
 
   private async sessionRoute(request:IncomingMessage,response:ServerResponse,url:URL,principal:Principal,
     sessionId:string,action?:string):Promise<void>{
-    const session=this.store.session(sessionId);if(!session)throw new ApiProblem(404,"session_not_found","session not found");
-    if(request.method==="GET"&&!action){const bridge=this.bridges.get(String(session.machineId));session.capabilities=[...new Set([...(bridge?.capabilities??[]),...(bridge?.features??[])])];this.ok(response,session);return;}
     if(request.method==="DELETE"&&!action){
+      const key=this.requireKey(request),body=await jsonBody(request),path=`/api/v1/sessions/${sessionId}`;
+      const prior=this.existingAction(principal,key,path,body,"DELETE");if(prior){this.ok(response,actionJson(prior),202);return;}
+      const session=this.store.session(sessionId);if(!session)throw new ApiProblem(404,"session_not_found","session not found");
       if(["creating","active","waiting_for_approval","waiting_for_input"].includes(String(session.status)))
         throw new ApiProblem(409,"session_active","interrupt or resolve the active session before deleting it");
-      if(!this.store.deleteSession(sessionId))throw new ApiProblem(404,"session_not_found","session not found");
-      this.ok(response,{sessionId,deleted:true});return;
+      const machineId=String(session.machineId);this.requireActionBridge(machineId);
+      const created=this.createAction(principal,key,path,body,"delete_session",machineId,sessionId,"DELETE");
+      if(!created.existing)this.dispatch(created.action,{type:"action.delete_session",actionId:created.action.actionId,sessionId});
+      this.ok(response,actionJson(this.store.action(created.action.actionId)!),202);return;
     }
+    const session=this.store.session(sessionId);if(!session)throw new ApiProblem(404,"session_not_found","session not found");
+    if(request.method==="GET"&&!action){const bridge=this.bridges.get(String(session.machineId));session.capabilities=[...new Set([...(bridge?.capabilities??[]),...(bridge?.features??[])])];this.ok(response,session);return;}
     if(request.method==="GET"&&action==="runs"){this.sessionRuns(sessionId,url,response);return;}
     if(request.method==="GET"&&action==="events"){
       try{const tail=url.searchParams.get("tail")==="true";const page=tail

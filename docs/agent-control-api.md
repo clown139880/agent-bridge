@@ -47,6 +47,7 @@ DSH Host 插件保存 Control token 并代理请求/事件；浏览器 Client �
 | 新增 | `GET` | `/sessions` | 查询所有近期或活动 Codex sessions |
 | 新增 | `POST` | `/sessions` | 创建 Codex session，可同时启动首个 turn |
 | 新增 | `GET` | `/sessions/{sessionId}` | session 详情和关联关系 |
+| 新增 | `DELETE` | `/sessions/{sessionId}` | 通过 Bridge 永久删除 Codex thread |
 | 新增 | `GET` | `/sessions/{sessionId}/runs` | session 关联的 Worker runs |
 | 新增 | `GET` | `/sessions/{sessionId}/events` | session 全量结构化事件/对话 |
 | 新增 | `POST` | `/sessions/{sessionId}/turns` | 自动或显式 steer/start-new-turn |
@@ -267,7 +268,7 @@ export type KnownSessionEvent =
   | (SessionEvent & { type: "progress"; payload: ProgressPayload });
 
 export type ActionKind = "create_session" | "submit_turn" | "interrupt_turn"
-  | "resolve_approval" | "resolve_user_input";
+  | "resolve_approval" | "resolve_user_input" | "delete_session";
 export type ActionStatus = "accepted" | "succeeded" | "failed";
 export interface ActionReceipt {
   actionId: string;
@@ -439,6 +440,15 @@ interface CreateSessionRequest {
 #### `GET /sessions/{sessionId}/runs`（新增）
 
 参数 `limit`、`cursor`，200 返回 `Page<Run>`，按 `createdAt desc`。
+
+#### `DELETE /sessions/{sessionId}`（新增）
+
+请求必须带 `Content-Type: application/json`、空对象 body 和 `Idempotency-Key`。Control Plane 创建可靠的
+`delete_session` action，由目标 Bridge 调用 Codex App Server `thread/delete`；202 返回 `ActionReceipt`。
+只有 Codex 确认成功后才删除本地 session、events、pending requests 和 runs，并写 tombstone 防止旧 inventory
+复活。action receipt 和 idempotency key 按正常保留期保留，因此删除成功后的相同 key 重试仍返回原回执。
+Codex 会同时永久删除该 thread 派生的后代 thread，并通过 `thread/deleted` 逐项通知；UI 必须在确认框中
+明确说明该影响。活动中或存在待处理交互的 session 返回 409，Bridge 仍会在执行前进行同样的权威检查。
 
 #### `GET /sessions/{sessionId}/events`（新增）
 

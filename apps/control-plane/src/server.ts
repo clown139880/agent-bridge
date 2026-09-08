@@ -615,6 +615,12 @@ export class ControlPlane {
     }
     if (message.type === "action.result") {
       this.controlStore.completeAction(message);
+      if (message.kind === "delete_session" && message.status === "succeeded" && message.sessionId)
+        this.controlStore.deleteSession(message.sessionId);
+      return;
+    }
+    if (message.type === "session.deleted") {
+      this.controlStore.deleteSession(message.sessionId);
       return;
     }
     if (message.type === "heartbeat") {
@@ -776,6 +782,8 @@ export class ControlPlane {
         type: "action.resolve_user_input", actionId: action.actionId, sessionId: action.sessionId,
         requestId: decodeURIComponent(path.split("/").at(-2)!),
         answers: request.answers as Record<string, { answers: string[] }> });
+      else if (action.kind === "delete_session" && action.sessionId) this.registry.send(machineId, {
+        type: "action.delete_session", actionId: action.actionId, sessionId: action.sessionId });
     }
   }
 

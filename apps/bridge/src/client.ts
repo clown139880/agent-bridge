@@ -199,6 +199,7 @@ export class BridgeClient {
         case "action.interrupt_turn":
         case "action.resolve_approval":
         case "action.resolve_user_input":
+        case "action.delete_session":
           void this.handleAction(message);
           break;
         case "error":
@@ -242,7 +243,7 @@ export class BridgeClient {
     }
     const kind=({"action.create_session":"create_session","action.submit_turn":"submit_turn",
       "action.interrupt_turn":"interrupt_turn","action.resolve_approval":"resolve_approval",
-      "action.resolve_user_input":"resolve_user_input"} as const)[message.type];
+      "action.resolve_user_input":"resolve_user_input","action.delete_session":"delete_session"} as const)[message.type];
     this.actionResults.set(message.actionId,{type:"action.result",actionId:message.actionId,kind,status:"failed",
       sessionId:"sessionId" in message?message.sessionId:undefined,
       error:{code:"action_outcome_unknown",message:"bridge restarted while action outcome was unknown",retryable:true},timestamp:Date.now()});
@@ -262,9 +263,12 @@ export class BridgeClient {
       }else if(message.type==="action.resolve_approval"){
         await this.codex.approve(message.sessionId,message.approvalId,message.choice);
         result={type:"action.result",actionId:message.actionId,kind,status:"succeeded",sessionId:message.sessionId,timestamp:Date.now()};
-      }else{
+      }else if(message.type==="action.resolve_user_input"){
         await this.codex.respondUserInput(message.sessionId,message.requestId,message.answers);
         result={type:"action.result",actionId:message.actionId,kind,status:"succeeded",sessionId:message.sessionId,timestamp:Date.now()};
+      }else{
+        const value=await this.codex.deleteSessionAction(message.sessionId);
+        result={type:"action.result",actionId:message.actionId,kind,status:"succeeded",...value,timestamp:Date.now()};
       }
     }catch(error){const value=error as Error&{code?:string;retryable?:boolean};result={type:"action.result",actionId:message.actionId,
       kind,status:"failed",sessionId:"sessionId" in message?message.sessionId:undefined,

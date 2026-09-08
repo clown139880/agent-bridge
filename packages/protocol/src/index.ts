@@ -22,7 +22,7 @@ export type SessionActivityStatus =
 export type TurnStatus = "in_progress" | "completed" | "failed" | "interrupted" | "unknown";
 export type PendingResolutionStatus = "pending" | "accepted" | "denied" | "resolved_elsewhere" | "expired";
 export type ActionKind = "create_session" | "submit_turn" | "interrupt_turn"
-  | "resolve_approval" | "resolve_user_input";
+  | "resolve_approval" | "resolve_user_input" | "delete_session";
 export type ActionStatus = "accepted" | "succeeded" | "failed";
 
 export type AgentEventType =
@@ -307,6 +307,11 @@ export interface ResolveUserInputActionMessage {
   requestId: string;
   answers: Record<string, { answers: string[] }>;
 }
+export interface DeleteSessionActionMessage {
+  type: "action.delete_session";
+  actionId: string;
+  sessionId: string;
+}
 export interface ActionResultMessage {
   type: "action.result";
   actionId: string;
@@ -316,6 +321,12 @@ export interface ActionResultMessage {
   turnId?: string;
   resolvedAction?: "steer" | "start_turn";
   error?: { code: string; message: string; retryable: boolean };
+  timestamp: number;
+}
+
+export interface SessionDeletedMessage {
+  type: "session.deleted";
+  sessionId: string;
   timestamp: number;
 }
 
@@ -347,6 +358,7 @@ export type BridgeToControlMessage =
   | UserInputResolvedMessage
   | StateSnapshotMessage
   | StructuredSessionEventMessage
+  | SessionDeletedMessage
   | ActionResultMessage
   | LogResponseMessage
   | ModelCatalogResponseMessage
@@ -363,6 +375,7 @@ export type ControlToBridgeMessage =
   | InterruptTurnActionMessage
   | ResolveApprovalActionMessage
   | ResolveUserInputActionMessage
+  | DeleteSessionActionMessage
   | StopAgentMessage
   | LogRequestMessage
   | ModelCatalogRequestMessage

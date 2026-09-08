@@ -52,7 +52,7 @@ export class BridgeClient {
       case 'snapshot': return this.request('GET', `/snapshot?${query(args, ['sessionLimit'])}`, undefined, undefined, signal)
       case 'sessions': return this.request('GET', `/sessions?${query(args, ['workerId', 'status', 'workspace', 'taskId', 'runId', 'segment', 'dayStart', 'sort', 'order', 'limit', 'cursor'])}`, undefined, undefined, signal)
       case 'session': return this.request('GET', `/sessions/${this.segment(textArg(args, 'sessionId')!)}`, undefined, undefined, signal)
-      case 'delete_session': return this.request('DELETE', `/sessions/${this.segment(textArg(args, 'sessionId')!)}`, undefined, undefined, signal)
+      case 'delete_session': return this.request('DELETE', `/sessions/${this.segment(textArg(args, 'sessionId')!)}`, {}, randomUUID(), signal)
       case 'session_events': {
         const id = this.segment(textArg(args, 'sessionId')!)
         return this.request('GET', `/sessions/${id}/events?${query(args, ['after', 'before', 'tail', 'limit', 'type'])}`, undefined, undefined, signal)
@@ -177,7 +177,7 @@ export class BridgeClient {
       case 'delete_session': {
         const sessionId = textArg(args, 'sessionId')!
         this.mockDeletedSessions.add(sessionId)
-        return { sessionId, deleted: true }
+        return { actionId: `mock-${randomUUID()}`, kind: 'delete_session', status: 'succeeded', sessionId }
       }
       case 'session_events': return page([...mockSessionEvents, ...this.mockSubmittedEvents].filter(item => item['sessionId'] === args['sessionId']), true)
       case 'submit_turn': {

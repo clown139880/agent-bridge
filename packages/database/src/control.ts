@@ -479,8 +479,8 @@ export class AgentControlStore {
       this.db.prepare(`INSERT INTO deleted_sessions(session_id,machine_id,deleted_at) VALUES(?,?,?)
         ON CONFLICT(session_id) DO UPDATE SET machine_id=excluded.machine_id,deleted_at=excluded.deleted_at`)
         .run(id, row.machine_id, now);
-      this.db.prepare("DELETE FROM idempotency_keys WHERE action_id IN (SELECT id FROM actions WHERE session_id=?)").run(id);
-      this.db.prepare("DELETE FROM actions WHERE session_id=?").run(id);
+      // Keep action receipts and idempotency keys until their normal retention
+      // deadline so callers can observe the result of the delete action.
       this.db.prepare("DELETE FROM pending_requests WHERE session_id=?").run(id);
       this.db.prepare("DELETE FROM events WHERE session_id=?").run(id);
       this.db.prepare("DELETE FROM worker_runs WHERE session_id=?").run(id);

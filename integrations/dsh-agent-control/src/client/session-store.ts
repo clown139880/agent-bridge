@@ -237,14 +237,12 @@ export class SessionStore {
     if (detail.busy || detail.action?.['status'] === 'accepted') return false
     this.patchDetail(id, { busy: true, notice: '' })
     try {
-      const result = asRecord(await this.rpc('delete_session', { sessionId: id }))
-      if (result['deleted'] !== true || result['sessionId'] !== id) throw new Error('Bridge returned an invalid deletion result.')
-      const sessions = this.state.sessions.filter(row => row['sessionId'] !== id)
-      const details = { ...this.state.details }; delete details[id]
-      const deletedIndex = this.state.sessions.findIndex(row => row['sessionId'] === id)
-      const next = sessions[Math.min(Math.max(deletedIndex, 0), sessions.length - 1)]
-      this.patch({ sessions, details, selected: this.state.selected === id && next ? requiredId(next, 'sessionId') : this.state.selected === id ? undefined : this.state.selected })
-      return true
+      const action = asRecord(await this.rpc('delete_session', { sessionId: id }))
+      requiredId(action, 'actionId')
+      if (action['kind'] !== 'delete_session' || action['sessionId'] !== id) throw new Error('Bridge returned an invalid deletion receipt.')
+      this.patchDetail(id, { action, notice: action['status'] === 'accepted' ? 'Deletion accepted. Waiting for Codex…' : '' })
+      this.settle(id, action)
+      return action['status'] === 'succeeded'
     } catch (error) {
       this.patchDetail(id, { notice: errorText(error) })
       return false
@@ -281,8 +279,20 @@ export class SessionStore {
   }
   private submitted = new Map<string, { actionId: string; draft: string }>()
   private checking = new Set<string>()
+  private removeSession(id: string): void {
+    const sessions = this.state.sessions.filter(row => row['sessionId'] !== id)
+    const details = { ...this.state.details }; delete details[id]
+    const deletedIndex = this.state.sessions.findIndex(row => row['sessionId'] === id)
+    const next = sessions[Math.min(Math.max(deletedIndex, 0), sessions.length - 1)]
+    this.patch({ sessions, details, selected: this.state.selected === id && next ? requiredId(next, 'sessionId') : this.state.selected === id ? undefined : this.state.selected })
+  }
   private settle(id: string, action: JsonObject): void {
     const status = action['status']
+    if (action['kind'] === 'delete_session') {
+      if (status === 'succeeded') this.removeSession(id)
+      else if (status === 'failed') this.patchDetail(id, { notice: `Deletion failed: ${str(asRecord(action['error'])['message'], 'Unknown error')}` })
+      return
+    }
     const sent = this.submitted.get(id)
     if (status === 'succeeded' && sent && sent.actionId === action['actionId']) {
       if (this.detail(id).draft === sent.draft) this.patchDetail(id, { draft: '' })
@@ -301,7 +311,7 @@ export class SessionStore {
       if (requiredId(action, 'actionId') !== previous['actionId']) throw new Error('Unexpected action receipt.')
       this.patchDetail(id, { action, notice: `Action ${str(action['status'])} · ${str(action['actionId'])}` })
       this.settle(id, action)
-      if (action['status'] !== 'accepted') { await this.refreshDetail(id); await this.refreshLatestEvents(id) }
+      if (action['status'] !== 'accepted' && this.state.sessions.some(row => row['sessionId'] === id)) { await this.refreshDetail(id); await this.refreshLatestEvents(id) }
     } catch (error) { if (this.valid(generation)) this.patchDetail(id, { notice: `Action outcome unconfirmed: ${errorText(error)}. Refresh to check again.` }) }
     finally { this.checking.delete(id) }
   }

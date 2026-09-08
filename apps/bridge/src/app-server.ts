@@ -312,6 +312,17 @@ export class CodexAppServerAdapter {
     this.respond(pending.requestId, { answers }); this.pendingUserInput.delete(sessionId);
   }
 
+  async deleteSessionAction(sessionId: string): Promise<{ sessionId: string }> {
+    await this.ensureReady();
+    if (this.activeTurns.has(sessionId) || this.activeThreads.has(sessionId))
+      throw domainError("session_active", "interrupt the active turn before deleting this session");
+    if ([...this.pendingApprovals.values()].some((approval) => approval.sessionId === sessionId)
+      || this.pendingUserInput.has(sessionId))
+      throw domainError("session_pending", "resolve pending interaction before deleting this session");
+    await this.request("thread/delete", { threadId: sessionId });
+    return { sessionId };
+  }
+
   stateSnapshot(): { sessions: SessionState[]; approvals: Array<Record<string, unknown>>; userInputs: Array<Record<string, unknown>> } {
     const now=Date.now();
     const sessions=[...this.threadsById.values()].filter(thread=>!thread.parentThreadId).map(thread=>({
@@ -684,6 +695,17 @@ export class CodexAppServerAdapter {
     }
     const threadId = typeof params.threadId === "string" ? params.threadId : undefined;
     if (!threadId) return;
+    if (method === "thread/deleted") {
+      this.threadsById.delete(threadId);
+      this.subscribedThreads.delete(threadId);
+      this.activeThreads.delete(threadId);
+      this.activeTurns.delete(threadId);
+      this.pendingUserInput.delete(threadId);
+      for (const [approvalId, approval] of this.pendingApprovals)
+        if (approval.sessionId === threadId) this.pendingApprovals.delete(approvalId);
+      this.emit({ type: "session.deleted", sessionId: threadId, timestamp: Date.now() });
+      return;
+    }
     if (method === "serverRequest/resolved") {
       const requestId = typeof params.requestId === "string" || typeof params.requestId === "number"
         ? params.requestId
