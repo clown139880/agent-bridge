@@ -13,6 +13,7 @@ const terminalLabels: TerminalBlockLabels = {
   expandAria: count => `Show ${count} hidden lines`, expand: count => `Show ${count} more lines`,
 }
 type ExternalChatEventProps =
+  | { kind: 'error'; message: string; code?: string }
   | { kind: 'user'; text: string }
   | { kind: 'assistant'; text: string }
   | { kind: 'command'; command: string; status?: string; output?: string; exitCode?: number }
@@ -36,6 +37,9 @@ function EventBody({ event, summaryOnly }: { event: JsonObject; summaryOnly: boo
   }
   if (ExternalChatEvent && type === 'file_change.completed') {
     return <ExternalChatEvent kind="file-change" changes={asArray(payload['changes'])} {...(typeof payload['summary'] === 'string' ? { summary: payload['summary'] } : {})} {...(payload['truncated'] === true ? { truncated: true } : {})} />
+  }
+  if (ExternalChatEvent && type === 'turn.failed') {
+    return <ExternalChatEvent kind="error" message={str(payload['error'], str(payload['summary'], 'Turn failed'))} {...(typeof payload['code'] === 'string' ? { code: payload['code'] } : {})} />
   }
   if (type === 'message.completed') return <div className={css.messageBody} data-role={str(payload['role'])}>
     <strong className={css.messageRole}>{str(payload['role'])}</strong>

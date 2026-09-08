@@ -1,5 +1,7 @@
 import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
+import * as ApprovalUi from '@deepseek-ai/dsh-client-ui-approval/client'
 import * as ConversationUi from '@deepseek-ai/dsh-client-ui-conversation/client'
+import * as QuestionsUi from '@deepseek-ai/dsh-client-ui-user-questions/client'
 import * as WorkspaceUi from '@deepseek-ai/dsh-client-ui-workspace/client'
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import type { ComponentType, ReactNode, RefAttributes, UIEventHandler } from 'react'
@@ -18,6 +20,11 @@ interface ExternalConversationProps {
   className?: string | undefined; scrollAriaLabel?: string; onScroll?: UIEventHandler<HTMLDivElement>
 }
 const ExternalConversationSurface = (ConversationUi as unknown as { ExternalConversationSurface?: ComponentType<ExternalConversationProps & RefAttributes<HTMLDivElement>> }).ExternalConversationSurface
+interface ExternalApprovalProps { requestKey: string; summary: string; detail?: ReactNode; choices: readonly string[]; disabled?: boolean; onDecide(choice: string): void | Promise<void> }
+const ExternalApprovalPanel = (ApprovalUi as unknown as { ExternalApprovalPanel?: ComponentType<ExternalApprovalProps> }).ExternalApprovalPanel
+interface ExternalQuestionItem { id: string; header?: string; question: string; detail?: string; multiSelect?: boolean; externalAllowOther?: boolean; options?: readonly { label: string; description?: string }[] }
+interface ExternalQuestionProps { requestKey: string; questions: readonly ExternalQuestionItem[]; disabled?: boolean; onAnswer(answers: Record<string, { answers: string[] }>): void | Promise<void> }
+const ExternalQuestionPanel = (QuestionsUi as unknown as { ExternalQuestionPanel?: ComponentType<ExternalQuestionProps> }).ExternalQuestionPanel
 type ExternalSessionBrowserGroup = { key: string; label: string; cwd?: string; expanded: boolean; canCreate?: boolean; totalCount?: number; hiddenCount?: number; showingMore?: boolean; sessions: Array<{ id: string; title: string; status: string; updatedAt: number; pinned?: boolean; pinnable?: boolean; source?: string }> }
 interface ExternalSessionBrowserProps { groups: ExternalSessionBrowserGroup[]; currentId?: string; locale?: string; query?: string; groupBy?: 'workspace' | 'flat'; orderBy?: 'manual' | 'updated'; onQueryChange?(value: string): void; onGroupByChange?(value: 'workspace' | 'flat'): void; onOrderByChange?(value: 'manual' | 'updated'): void; onToggle(key: string): void; onCreate?(key: string): void; onOpen(id: string): void; onShowMore?(key: string, expanded: boolean): void; onPin?(id: string): void }
 const ExternalSessionBrowser = (WorkspaceUi as unknown as { ExternalSessionBrowser?: ComponentType<ExternalSessionBrowserProps> }).ExternalSessionBrowser
@@ -220,8 +227,12 @@ export function Sessions({ store, views: providedViews, refreshToken, initialSes
   const history = selectedId && detail ? <>
     {detail.error && <div className={css.notice} role="alert">{detail.error}<Button size="sm" onClick={() => void store.refreshDetail(selectedId)}>Retry session</Button></div>}
     {selected?.['historyCompleteness'] === 'terminal-only' && <div className={css.coverageNotice}>This source provides turn summaries only. Messages and tool details are not available.</div>}
-    {detail.approvals.map(item => <ApprovalCard key={str(item['id'])} item={item} disabled={Boolean(busy || !canAct)} decide={choice => void store.act(selectedId, 'resolve_approval', { approvalId: str(item['id']), choice })} />)}
-    {detail.inputs.map(item => <InputCard key={str(item['id'])} item={item} disabled={Boolean(busy || !canAct)} submit={answers => void store.act(selectedId, 'respond_user_input', { requestId: str(item['id']), answers })} />)}
+    {detail.approvals.map(item => <ApprovalCard key={str(item['id'])} item={item} disabled={Boolean(busy || !canAct)} decide={async choice => {
+      if (!await store.act(selectedId, 'resolve_approval', { approvalId: str(item['id']), choice })) throw new Error(store.snapshot().details[selectedId]?.notice || 'Approval could not be submitted.')
+    }} />)}
+    {detail.inputs.map(item => <InputCard key={str(item['id'])} item={item} disabled={Boolean(busy || !canAct)} submit={async answers => {
+      if (!await store.act(selectedId, 'respond_user_input', { requestId: str(item['id']), answers })) throw new Error(store.snapshot().details[selectedId]?.notice || 'Answers could not be submitted.')
+    }} />)}
     {detail.eventsError && <div className={css.notice} role="alert">{detail.eventsError}<Button size="sm" onClick={() => void store.loadEvents(selectedId, true)}>Reload available history</Button></div>}
     {detail.events.length === 0 && <p className={css.empty}>{detail.eventsLoading ? 'Loading latest history…' : detail.loaded ? 'No retained events.' : 'History has not loaded.'}</p>}
     {detail.hasMore && <Button size="sm" className={css.loadEarlier} disabled={detail.eventsLoading} onClick={() => void store.loadEvents(selectedId)}>{detail.eventsLoading ? 'Loading…' : 'Load earlier messages'}</Button>}
@@ -316,16 +327,28 @@ export function Sessions({ store, views: providedViews, refreshToken, initialSes
   </div>
 }
 
-function ApprovalCard({ item, disabled, decide }: { item: JsonObject; disabled: boolean; decide(choice: string): void }) {
-  return <div className={css.pending}><div><strong>Action required</strong><span>{str(item['summary'], str(item['kind']))}</span></div>{asArray(item['choices']).map(choice => typeof choice === 'string' && <Button size="sm" disabled={disabled} key={choice} type="button" onClick={() => decide(choice)}>{choice}</Button>)}</div>
+function ApprovalCard({ item, disabled, decide }: { item: JsonObject; disabled: boolean; decide(choice: string): void | Promise<void> }) {
+  const choices = asArray(item['choices']).filter((choice): choice is string => typeof choice === 'string')
+  const summary = str(item['summary'], str(item['kind']))
+  return ExternalApprovalPanel
+    ? <ExternalApprovalPanel requestKey={str(item['id'])} summary={summary.split('\n')[0] ?? summary} detail={summary.includes('\n') ? summary.split('\n').slice(1).join('\n') : undefined} choices={choices} disabled={disabled} onDecide={decide} />
+    : <div className={css.pending}><div><strong>Action required</strong><span>{summary}</span></div>{choices.map(choice => <Button size="sm" disabled={disabled} key={choice} type="button" onClick={() => void decide(choice)}>{choice}</Button>)}</div>
 }
-function InputCard({ item, disabled, submit }: { item: JsonObject; disabled: boolean; submit(answers: JsonObject): void }) {
+function InputCard({ item, disabled, submit }: { item: JsonObject; disabled: boolean; submit(answers: JsonObject): void | Promise<void> }) {
   const questions = asArray(item['questions']).map(asRecord)
+  const nativeQuestions: ExternalQuestionItem[] = questions.map(question => ({
+    id: str(question['id']),
+    ...(typeof question['header'] === 'string' && question['header'] ? { header: question['header'] } : {}),
+    question: str(question['question'], 'Input required'),
+    externalAllowOther: question['isOther'] === true,
+    ...(Array.isArray(question['options']) && question['options'].length > 0 ? { options: question['options'].map(asRecord).map(option => ({ label: str(option['label']), ...(typeof option['description'] === 'string' && option['description'] ? { description: option['description'] } : {}) })) } : {}),
+  }))
   const [answers, setAnswers] = useState<Record<string, string>>({})
   const hasSecret = questions.some(question => question['isSecret'] === true)
+  if (ExternalQuestionPanel && !hasSecret && nativeQuestions.length > 0) return <ExternalQuestionPanel requestKey={str(item['id'])} questions={nativeQuestions} disabled={disabled} onAnswer={submit} />
   return <form className={css.inputCard} onSubmit={event => {
     event.preventDefault(); if (hasSecret || disabled) return
-    submit(Object.fromEntries(questions.map(question => [str(question['id']), { answers: [answers[str(question['id'])] ?? ''] }])))
+    void submit(Object.fromEntries(questions.map(question => [str(question['id']), { answers: [answers[str(question['id'])] ?? ''] }])))
   }}><strong>Agent needs input</strong>
     {questions.map(question => { const key = str(question['id']); const options = asArray(question['options']).map(asRecord); return <label key={key}><span>{str(question['header'])}: {str(question['question'])}</span>{question['isSecret'] === true ? <em>Secret input must be answered in the trusted local agent UI.</em> : <><input disabled={disabled} list={options.length ? `answers-${str(item['id'])}-${key}` : undefined} value={answers[key] ?? ''} onChange={event => setAnswers(current => ({ ...current, [key]: event.target.value }))} />{options.length > 0 && <datalist id={`answers-${str(item['id'])}-${key}`}>{options.map(option => <option key={str(option['label'])} value={str(option['label'])}>{str(option['description'], '')}</option>)}</datalist>}</>}</label> })}
     <Button size="sm" type="submit" disabled={disabled || hasSecret || questions.some(question => !(answers[str(question['id'])] ?? '').trim())}>{hasSecret ? 'Local handling required' : 'Submit answers'}</Button>

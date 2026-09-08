@@ -251,15 +251,15 @@ export class SessionStore {
     }
   }
 
-  async act(id: string, operation: 'submit_turn' | 'interrupt_turn' | 'resolve_approval' | 'respond_user_input', args: JsonObject = {}): Promise<void> {
+  async act(id: string, operation: 'submit_turn' | 'interrupt_turn' | 'resolve_approval' | 'respond_user_input', args: JsonObject = {}): Promise<boolean> {
     const detail = this.detail(id)
-    if (detail.busy || detail.action?.['status'] === 'accepted') return
+    if (detail.busy || detail.action?.['status'] === 'accepted') return false
     const input = detail.draft.trim()
-    if (operation === 'submit_turn' && !input) return
-    if (!detail.session || detail.error) { this.patchDetail(id, { notice: 'Session information is unavailable. Refresh and try again.' }); return }
-    if (detail.session['status'] === 'offline' || !Array.isArray(detail.session['capabilities']) || !detail.session['capabilities'].includes('session-actions')) return
+    if (operation === 'submit_turn' && !input) return false
+    if (!detail.session || detail.error) { this.patchDetail(id, { notice: 'Session information is unavailable. Refresh and try again.' }); return false }
+    if (detail.session['status'] === 'offline' || !Array.isArray(detail.session['capabilities']) || !detail.session['capabilities'].includes('session-actions')) return false
     const turn = detail.session['activeTurnId']
-    if (operation === 'interrupt_turn' && typeof turn !== 'string') return
+    if (operation === 'interrupt_turn' && typeof turn !== 'string') return false
     const model = detail.model.trim()
     const payload = operation === 'submit_turn' ? { sessionId: id, input, delivery: 'auto', ...(typeof turn === 'string' ? { expectedTurnId: turn } : model ? { model } : {}) }
       : operation === 'interrupt_turn' ? { sessionId: id, ...(typeof turn === 'string' ? { expectedTurnId: turn } : {}) } : args
@@ -272,9 +272,11 @@ export class SessionStore {
       if (operation === 'submit_turn') this.submitted.set(id, { actionId: requiredId(action, 'actionId'), draft: detail.draft })
       this.settle(id, action)
       if (this.active) { await this.refreshDetail(id); await this.refreshLatestEvents(id) }
+      return true
     } catch (error) {
       this.patchDetail(id, { notice: errorText(error) })
       if (this.active) await this.refreshDetail(id)
+      return false
     } finally { this.patchDetail(id, { busy: false }) }
   }
   private submitted = new Map<string, { actionId: string; draft: string }>()

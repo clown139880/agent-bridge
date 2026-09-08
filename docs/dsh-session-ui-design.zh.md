@@ -30,6 +30,19 @@
 
 本阶段刻意不优先安排全文搜索、跨来源手动排序持久化或通用运维增强；它们不能阻塞上述统一体验主线。
 
+## 本轮执行记录（2026-09-09）
+
+步骤 1 已完成：已上线但未提交的工作由 `e7455c9` 收为可复现基线。此前“功能已上线、工作树仍不干净”
+是因为 DSH 插件从未提交源码直接生成 `lib` 并复制到运行 profile，Windows Bridge 也直接运行工作区源码；
+部署链不要求 Git commit。真实会话删除随后由 `7ecf953` 完成：Control Plane 的可靠异步 action 最终调用
+Codex `thread/delete`，收到上游确认后才清理投影并保留幂等回执。
+
+步骤 2 正在执行：产品 assembly 为 DSH resident Approval、User Questions 和 Chat error renderer 提供
+target-neutral external surface。Bridge 只投影请求数据、choices、questions、错误和动作回调；approval 保留
+`allow`、`deny`、`allow-session` 动态能力，user input 保留多题导航、原生选项/自定义答案、焦点和滚动行为。
+Bridge 尚未提供的整组取消与跳过能力由 surface 显式禁用，secret input 仍要求在可信本地 agent UI 中处理。
+旧版 DSH 没有这些 external exports 时继续使用现有兼容卡片。当前验收只运行 build/typecheck，不运行测试。
+
 ## 第十二轮：运行中主操作与模型控件 seat（2026-09-08，已部署）
 
 `ExternalComposer` 增加 `running/onStop`。运行中的普通 Bridge 会话在空草稿时，原生蓝色主按钮显示 Stop 并调用带 `expectedTurnId` 的 `interrupt_turn`；输入文字后同一按钮恢复 Send，通过现有 auto/steer 提交。兼容 textarea 路径也保持同样行为，详情菜单中的 Interrupt 继续作为次级入口。
