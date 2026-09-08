@@ -118,6 +118,15 @@ export class CodexAppServerAdapter {
   private desktopScannerStarted = false;
   private readyForUpdate = false;
   private inventoryComplete = false;
+  async models(): Promise<import('@agent-bridge/protocol').CodexModelInfo[]> {
+    const rows: import('@agent-bridge/protocol').CodexModelInfo[] = [];
+    let cursor: string | null = null;
+    do {
+      const page: { data?: import('@agent-bridge/protocol').CodexModelInfo[]; nextCursor?: string | null } = await this.request('model/list', { limit: 100, includeHidden: false, ...(cursor ? { cursor } : {}) });
+      rows.push(...(page.data ?? [])); cursor = page.nextCursor ?? null;
+    } while (cursor && rows.length < 1000);
+    return rows;
+  }
 
   constructor(
     private readonly options: {
@@ -691,6 +700,16 @@ export class CodexAppServerAdapter {
       this.emitSessionEvent("model.rerouted",threadId,
         `app-server:${threadId}:${turnId??"unknown"}:model-rerouted:${toModel??"unknown"}`,
         {model:toModel,fromModel,toModel,reason:params.reason},turnId);
+      return;
+    }
+    if(method==="thread/tokenUsage/updated"){
+      const usage=params.tokenUsage as {total?:{totalTokens?:number;inputTokens?:number;outputTokens?:number;reasoningOutputTokens?:number};modelContextWindow?:number|null}|undefined;
+      // App Server also reports threads outside the configured Bridge roots.
+      // Do not publish usage until the thread has passed discovery, otherwise
+      // Control Plane correctly rejects an event for an unknown session.
+      if(this.threadsById.has(threadId)&&usage?.total&&typeof usage.modelContextWindow==="number")this.emitSessionEvent("context.updated",threadId,
+        `app-server:${threadId}:context:${this.activeTurns.get(threadId)??"idle"}:${usage.total.totalTokens??0}`,{usedTokens:usage.total.totalTokens??0,contextWindow:usage.modelContextWindow,
+          inputTokens:usage.total.inputTokens??0,outputTokens:usage.total.outputTokens??0,reasoningTokens:usage.total.reasoningOutputTokens??0},this.activeTurns.get(threadId));
       return;
     }
     if (method === "item/completed") {

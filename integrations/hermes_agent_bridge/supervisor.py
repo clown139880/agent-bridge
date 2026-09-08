@@ -6,6 +6,7 @@ import argparse
 import logging
 import os
 from pathlib import Path
+import re
 import socket
 import time
 from typing import Any
@@ -21,6 +22,12 @@ TERMINAL_STATUSES = {"completed", "failed", "stopped"}
 # Admission states are intentionally non-terminal: the claim stays alive and
 # must never be interpreted as a successfully dispatched Codex run.
 UPDATE_ADMISSION_STATUSES = {"update_waiting", "update_required", "update_failed"}
+_RESUME_MARKER = "<!-- agent-bridge-worker"
+_RESUME_DIRECTIVE = re.compile(
+    r"<!-- agent-bridge-worker\r?\n"
+    r"resume-session-id: ([^\s]+)\r?\n"
+    r"-->",
+)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -52,8 +59,23 @@ def _remote_workspace(task) -> str:
 
 
 def _conversation_id(task, board: str) -> str:
-    """Keep cards from one Hermes session together, with a per-card fallback."""
-    return getattr(task, "session_id", None) or f"hermes-task:{board}:{task.id}"
+    """Keep retries for one card together without coupling separate Matrix cards."""
+    return f"hermes-task:{board}:{task.id}"
+
+
+def _resume_session_id(body: str | None) -> str | None:
+    """Return the opt-in Control Plane session ID from a strictly formed directive."""
+    text = body or ""
+    marker_count = text.count(_RESUME_MARKER)
+    if marker_count == 0:
+        return None
+    matches = list(_RESUME_DIRECTIVE.finditer(text))
+    if marker_count != 1 or len(matches) != 1:
+        raise ValueError(
+            "invalid agent-bridge-worker resume directive; expected exactly:\n"
+            "<!-- agent-bridge-worker\nresume-session-id: <Control Plane sessionId>\n-->"
+        )
+    return matches[0].group(1)
 
 
 def _prompt(conn, task_id: str, source_status: str) -> str:
@@ -121,6 +143,7 @@ def supervise(args: argparse.Namespace) -> int:
         try:
             workspace = _remote_workspace(claimed)
             prompt = _prompt(conn, task.id, source_status)
+            resume_session_id = _resume_session_id(claimed.body)
             stable_run_id = f"hermes-{args.board}-{task.id}-{run_id}"
             api = WorkerApi(args.api_url, token)
             api.start(
@@ -129,6 +152,7 @@ def supervise(args: argparse.Namespace) -> int:
                 worker_id=claimed.assignee,
                 project_path=workspace,
                 prompt=prompt,
+                resume_session_id=resume_session_id,
                 conversation_id=_conversation_id(claimed, args.board),
             )
         except (ValueError, WorkerApiError) as exc:

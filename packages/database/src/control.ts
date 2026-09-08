@@ -442,6 +442,21 @@ export class AgentControlStore {
     return {data,hasMore,nextCursor:last?`e:${last.id}`:(after??null)};
   }
 
+  sessionEventsTail(sessionId: string, before: string | undefined, limit: number, types: string[]):
+    { data: unknown[]; nextCursor: string | null; hasMore: boolean } {
+    let sequence: number | undefined;
+    if(before){const match=before.match(/^e:(\d+)$/);if(!match)throw new Error("invalid_cursor");sequence=Number(match[1]);}
+    const where=["session_id=?","event_schema=2"],params:any[]=[sessionId];
+    if(sequence!==undefined){where.push("id<?");params.push(sequence);}
+    if(types.length){where.push(`type IN (${types.map(()=>"?").join(",")})`);params.push(...types);}
+    const rows=this.db.prepare(`SELECT id,payload FROM events WHERE ${where.join(" AND ")} ORDER BY id DESC LIMIT ?`)
+      .all(...params,limit+1) as Array<{id:number;payload:string}>;
+    const hasMore=rows.length>limit;if(hasMore)rows.pop();
+    rows.reverse();
+    const data=rows.map(row=>parseJson(row.payload,{}));const first=rows.at(0);
+    return {data,hasMore,nextCursor:hasMore&&first?`e:${first.id}`:null};
+  }
+
   cleanup(now = Date.now()): void {
     this.transaction(() => {
       this.db.prepare("DELETE FROM stream_events WHERE created_at<?").run(now-this.retention.streamEventsMs);
@@ -469,7 +484,13 @@ export class AgentControlStore {
       createdAt:Number(row.created_at),updatedAt:Number(row.updated_at),source:String(row.source??"app-server"),
       historyCompleteness:String(row.history_completeness??"loaded-only")};
     if(detail){const runs=this.db.prepare("SELECT * FROM worker_runs WHERE session_id=? ORDER BY created_at DESC,id DESC LIMIT 20")
-      .all(String(row.id)) as Record<string,unknown>[];Object.assign(result,{capabilities:[],runs:runs.map(r=>({runId:String(r.id),taskId:r.task_id?String(r.task_id):null,conversationId:r.conversation_id?String(r.conversation_id):null,status:String(r.status),createdAt:Number(r.created_at),updatedAt:Number(r.updated_at)})),matrixRoomId:row.matrix_room_id?String(row.matrix_room_id):null,matrixThreadId:row.matrix_thread_id?String(row.matrix_thread_id):null,error:row.last_error?{error:{code:"session_error",message:String(row.last_error),requestId:"",retryable:true}}:null});}
+      .all(String(row.id)) as Record<string,unknown>[];
+      const contextRow=this.db.prepare("SELECT payload FROM events WHERE session_id=? AND event_schema=2 AND type='context.updated' ORDER BY id DESC LIMIT 1")
+        .get(String(row.id)) as {payload:string}|undefined;
+      const contextEvent=parseJson<Record<string,unknown>>(contextRow?.payload,{});
+      const context=contextEvent.payload&&typeof contextEvent.payload==="object"&&!Array.isArray(contextEvent.payload)
+        ? contextEvent.payload as Record<string,unknown>:undefined;
+      Object.assign(result,{capabilities:[],runs:runs.map(r=>({runId:String(r.id),taskId:r.task_id?String(r.task_id):null,conversationId:r.conversation_id?String(r.conversation_id):null,status:String(r.status),createdAt:Number(r.created_at),updatedAt:Number(r.updated_at)})),...(context?{context}:{}),matrixRoomId:row.matrix_room_id?String(row.matrix_room_id):null,matrixThreadId:row.matrix_thread_id?String(row.matrix_thread_id):null,error:row.last_error?{error:{code:"session_error",message:String(row.last_error),requestId:"",retryable:true}}:null});}
     return result;
   }
 

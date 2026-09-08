@@ -41,3 +41,29 @@ def test_dispatch_tick_does_nothing_without_secret(monkeypatch):
         board="main",
         result=SimpleNamespace(skipped_nonspawnable=["task-a"]),
     )
+
+
+def test_register_exposes_all_read_only_discovery_tools(monkeypatch):
+    monkeypatch.delenv(plugin._TOKEN_ENV, raising=False)
+    registered = []
+
+    class Context:
+        profile_name = "test"
+
+        def get_config(self, _name, default=None):
+            return default
+
+        def register_hook(self, *_args, **_kwargs):
+            pass
+
+        def register_tool(self, **kwargs):
+            registered.append(kwargs)
+
+    plugin.register(Context())
+
+    assert [item["name"] for item in registered] == [
+        "agent_bridge_workers",
+        "agent_bridge_sessions",
+        "agent_bridge_session_context",
+    ]
+    assert all(item["toolset"] == "agent_bridge" for item in registered)

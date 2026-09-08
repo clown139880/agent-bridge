@@ -113,6 +113,35 @@ def _workers_tool(settings: dict[str, Any], _args: dict[str, Any], **_kwargs) ->
     return json.dumps({"success": True, "workers": workers}, ensure_ascii=False)
 
 
+def _sessions_tool(settings: dict[str, Any], args: dict[str, Any], **_kwargs) -> str:
+    token = os.environ.get(_TOKEN_ENV)
+    if not token:
+        return json.dumps({"success": False, "error": f"{_TOKEN_ENV} is not set"})
+    try:
+        page = WorkerApi(settings["api_url"], token).sessions(
+            worker_id=args.get("workerId"),
+            workspace=args.get("workspace"),
+            q=args.get("q"),
+            task_id=args.get("taskId"),
+            active=args.get("active"),
+            limit=args.get("limit"),
+        )
+    except WorkerApiError as exc:
+        return json.dumps({"success": False, "error": str(exc)})
+    return json.dumps({"success": True, **page}, ensure_ascii=False)
+
+
+def _session_context_tool(settings: dict[str, Any], args: dict[str, Any], **_kwargs) -> str:
+    token = os.environ.get(_TOKEN_ENV)
+    if not token:
+        return json.dumps({"success": False, "error": f"{_TOKEN_ENV} is not set"})
+    try:
+        context = WorkerApi(settings["api_url"], token).session_context(args["sessionId"])
+    except WorkerApiError as exc:
+        return json.dumps({"success": False, "error": str(exc)})
+    return json.dumps({"success": True, **context}, ensure_ascii=False)
+
+
 _WORKERS_SCHEMA = {
     "name": "agent_bridge_workers",
     "description": (
@@ -120,6 +149,39 @@ _WORKERS_SCHEMA = {
         "a Hermes Kanban task to a non-profile lane such as codex@machine."
     ),
     "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+}
+
+_SESSIONS_SCHEMA = {
+    "name": "agent_bridge_sessions",
+    "description": (
+        "Read Agent Bridge sessions so a user can select an existing Codex session to resume. "
+        "Filters are optional and do not modify session state."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "workerId": {"type": "string", "description": "Worker ID such as codex@machine."},
+            "workspace": {"type": "string", "description": "Exact remote workspace path."},
+            "q": {"type": "string", "description": "Free-text session search."},
+            "taskId": {"type": "string", "description": "Exact task ID."},
+            "active": {"type": "boolean", "description": "Filter active or inactive sessions."},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 200},
+        },
+        "additionalProperties": False,
+    },
+}
+
+_SESSION_CONTEXT_SCHEMA = {
+    "name": "agent_bridge_session_context",
+    "description": "Read one Agent Bridge session and the tail of its events without changing state.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "sessionId": {"type": "string", "minLength": 1, "description": "Control Plane session ID."},
+        },
+        "required": ["sessionId"],
+        "additionalProperties": False,
+    },
 }
 
 
@@ -158,4 +220,24 @@ def register(ctx) -> None:
         requires_env=[_TOKEN_ENV],
         description="List remote Codex workers exposed by Agent Bridge.",
         emoji="🌉",
+    )
+    ctx.register_tool(
+        name="agent_bridge_sessions",
+        toolset="agent_bridge",
+        schema=_SESSIONS_SCHEMA,
+        handler=lambda args, **kw: _sessions_tool(settings, args, **kw),
+        check_fn=lambda: bool(os.environ.get(_TOKEN_ENV)),
+        requires_env=[_TOKEN_ENV],
+        description="Search remote Codex sessions exposed by Agent Bridge.",
+        emoji="🔎",
+    )
+    ctx.register_tool(
+        name="agent_bridge_session_context",
+        toolset="agent_bridge",
+        schema=_SESSION_CONTEXT_SCHEMA,
+        handler=lambda args, **kw: _session_context_tool(settings, args, **kw),
+        check_fn=lambda: bool(os.environ.get(_TOKEN_ENV)),
+        requires_env=[_TOKEN_ENV],
+        description="Read one remote Codex session and its recent events.",
+        emoji="🧵",
     )

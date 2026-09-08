@@ -190,6 +190,10 @@ export class BridgeClient {
         case "log_request":
           this.send({ type: "log_response", sessionId: message.sessionId, text: this.codex.logs(message.sessionId, message.lines) });
           break;
+        case "model_catalog_request":
+          void this.codex.models().then(models => this.send({ type: "model_catalog_response", requestId: message.requestId, models }))
+            .catch(error => this.send({ type: "model_catalog_response", requestId: message.requestId, error: error instanceof Error ? error.message : String(error) }));
+          break;
         case "action.create_session":
         case "action.submit_turn":
         case "action.interrupt_turn":

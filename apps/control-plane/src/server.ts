@@ -598,6 +598,10 @@ export class ControlPlane {
         status.active ? message.turnId : undefined, status.lastTurn);
       return;
     }
+    if (message.type === "model_catalog_response") {
+      this.registry.resolveModels(machineId, message.requestId, message.error ? { error: message.error, models: [] } : { models: message.models ?? [] });
+      return;
+    }
     if (message.type === "user_input_request") {
       this.controlStore.upsertUserInput(machineId, message);
       return;

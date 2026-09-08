@@ -162,6 +162,22 @@ export interface LogResponseMessage {
   text: string;
 }
 
+export interface CodexModelInfo {
+  id: string;
+  model: string;
+  displayName: string;
+  isDefault?: boolean;
+  defaultReasoningEffort?: string;
+  supportedReasoningEfforts?: Array<{ reasoningEffort: string; description?: string }>;
+}
+export interface ModelCatalogRequestMessage { type: "model_catalog_request"; requestId: string; }
+export interface ModelCatalogResponseMessage {
+  type: "model_catalog_response";
+  requestId: string;
+  models?: CodexModelInfo[];
+  error?: string;
+}
+
 export type ApprovalKind = "command" | "file-change" | "permissions";
 export type ApprovalChoice = "allow" | "deny" | "allow-session";
 
@@ -240,7 +256,7 @@ export type StructuredSessionEventType =
   | "session.discovered" | "session.updated" | "turn.started" | "turn.completed"
   | "turn.failed" | "turn.interrupted" | "message.completed" | "command.completed"
   | "file_change.completed" | "progress" | "approval.requested" | "approval.resolved"
-  | "user_input.requested" | "user_input.resolved" | "model.rerouted" | "error";
+  | "user_input.requested" | "user_input.resolved" | "model.rerouted" | "context.updated" | "error";
 
 export interface StructuredSessionEventMessage {
   type: "session.event";
@@ -331,6 +347,7 @@ export type BridgeToControlMessage =
   | StructuredSessionEventMessage
   | ActionResultMessage
   | LogResponseMessage
+  | ModelCatalogResponseMessage
   | ErrorMessage;
 
 export type ControlToBridgeMessage =
@@ -346,6 +363,7 @@ export type ControlToBridgeMessage =
   | ResolveUserInputActionMessage
   | StopAgentMessage
   | LogRequestMessage
+  | ModelCatalogRequestMessage
   | ErrorMessage;
 
 export function parseMessage(raw: string): { type: string; [key: string]: unknown } | undefined {

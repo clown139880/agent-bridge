@@ -49,6 +49,9 @@ export class AgentControlApi {
       if(request.method!=="GET"&&!principal.write)throw new ApiProblem(403,"forbidden","write scope is required");
       if(request.method==="GET"&&!principal.read)throw new ApiProblem(403,"forbidden","read scope is required");
       if(request.method==="GET"&&url.pathname==="/api/v1/workers"){this.workers(response);return true;}
+      const workerModels=url.pathname.match(/^\/api\/v1\/workers\/([^/]+)\/models$/);
+      if(request.method==="GET"&&workerModels){const workerId=decodeURIComponent(workerModels[1]!);const machineId=workerId.startsWith('codex@')?workerId.slice(6):workerId;
+        try{this.ok(response,await this.bridges.requestModels(machineId));}catch(error){throw new ApiProblem(503,'model_catalog_unavailable',error instanceof Error?error.message:String(error));}return true;}
       if(request.method==="GET"&&url.pathname==="/api/v1/snapshot"){this.snapshot(url,response);return true;}
       if(request.method==="GET"&&url.pathname==="/api/v1/sessions"){this.sessions(url,response);return true;}
       if(request.method==="POST"&&url.pathname==="/api/v1/sessions"){await this.createSession(request,response,principal);return true;}
@@ -155,8 +158,11 @@ export class AgentControlApi {
     if(request.method==="GET"&&!action){const bridge=this.bridges.get(String(session.machineId));session.capabilities=[...new Set([...(bridge?.capabilities??[]),...(bridge?.features??[])])];this.ok(response,session);return;}
     if(request.method==="GET"&&action==="runs"){this.sessionRuns(sessionId,url,response);return;}
     if(request.method==="GET"&&action==="events"){
-      try{const page=this.store.sessionEvents(sessionId,url.searchParams.get("after")??undefined,
-        integer(url.searchParams.get("limit"),"limit",100,1,500),url.searchParams.getAll("type"));
+      try{const tail=url.searchParams.get("tail")==="true";const page=tail
+        ?this.store.sessionEventsTail(sessionId,url.searchParams.get("before")??undefined,
+          integer(url.searchParams.get("limit"),"limit",100,1,500),url.searchParams.getAll("type"))
+        :this.store.sessionEvents(sessionId,url.searchParams.get("after")??undefined,
+          integer(url.searchParams.get("limit"),"limit",100,1,500),url.searchParams.getAll("type"));
         this.ok(response,{...page,streamCursor:this.store.streamCursor()});}catch(error){this.cursorError(error);}return;
     }
     if(request.method==="POST"&&action==="turns"){await this.submitTurn(request,response,principal,session);return;}

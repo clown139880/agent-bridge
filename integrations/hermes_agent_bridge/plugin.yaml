@@ -7,3 +7,5 @@ provides_hooks:
   - on_kanban_dispatch_tick
 provides_tools:
   - agent_bridge_workers
+  - agent_bridge_sessions
+  - agent_bridge_session_context

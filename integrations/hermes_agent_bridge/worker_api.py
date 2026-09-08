@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
 
@@ -49,6 +49,31 @@ class WorkerApi:
         if not isinstance(workers, list):
             raise WorkerApiError("Agent Bridge workers response is malformed")
         return [item for item in workers if isinstance(item, dict)]
+
+    def sessions(self, *, worker_id: str | None = None, workspace: str | None = None,
+                 q: str | None = None, task_id: str | None = None,
+                 active: bool | None = None, limit: int | None = None) -> dict[str, Any]:
+        query: list[tuple[str, str]] = []
+        for name, value in (
+            ("workerId", worker_id),
+            ("workspace", workspace),
+            ("q", q),
+            ("taskId", task_id),
+        ):
+            if value is not None:
+                query.append((name, value))
+        if active is not None:
+            query.append(("active", "true" if active else "false"))
+        if limit is not None:
+            query.append(("limit", str(limit)))
+        suffix = f"?{urlencode(query)}" if query else ""
+        return self._request("GET", f"/api/v1/sessions{suffix}")
+
+    def session_context(self, session_id: str) -> dict[str, Any]:
+        encoded = quote(session_id, safe="")
+        session = self._request("GET", f"/api/v1/sessions/{encoded}")
+        events = self._request("GET", f"/api/v1/sessions/{encoded}/events?tail=true")
+        return {"session": session, "events": events}
 
     def start(self, *, run_id: str, task_id: str, worker_id: str, project_path: str, prompt: str,
               resume_session_id: str | None = None, conversation_id: str | None = None) -> dict[str, Any]:
