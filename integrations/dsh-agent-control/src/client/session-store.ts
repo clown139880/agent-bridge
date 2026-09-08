@@ -134,7 +134,7 @@ export class SessionStore {
   async loadSessions(more = false): Promise<void> {
     if (this.state.loading || (more && !this.state.hasMore)) return
     const generation = this.generation
-    const dayStart = new Date().setHours(0, 0, 0, 0)
+    const recentSince = Date.now() - 24 * 60 * 60 * 1000
     let cursor = more ? this.state.cursor : null
     let rows: JsonObject[] = more ? this.state.sessions : []
     const seen = new Set<string>()
@@ -143,7 +143,7 @@ export class SessionStore {
       if (!more) rows = []
       do {
         const page = readPage(await this.rpc('sessions', {
-          segment: more ? 'history' : 'recent', dayStart, sort: 'updatedAt', order: 'desc', limit: 200,
+          segment: more ? 'history' : 'recent', dayStart: recentSince, sort: 'updatedAt', order: 'desc', limit: 200,
           ...(cursor ? { cursor } : {}),
         }), 'sessionId')
         if (!this.valid(generation)) return
@@ -161,7 +161,7 @@ export class SessionStore {
         const attention = new Set(['creating', 'active', 'waiting_for_approval', 'waiting_for_input', 'error'])
         const retainedHistory = this.state.sessions.filter(row => {
           const updated = typeof row['updatedAt'] === 'number' ? row['updatedAt'] : 0
-          return updated < dayStart && !attention.has(str(row['status']))
+          return updated < recentSince && !attention.has(str(row['status']))
         })
         this.patch({ sessions: mergeRecords(rows, retainedHistory, 'sessionId'), cursor: this.state.cursor,
           hasMore: this.historyLoaded ? this.state.hasMore : true, loaded: true })

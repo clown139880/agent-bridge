@@ -43,6 +43,11 @@ target-neutral external surface。Bridge 只投影请求数据、choices、quest
 Bridge 尚未提供的整组取消与跳过能力由 surface 显式禁用，secret input 仍要求在可信本地 agent UI 中处理。
 旧版 DSH 没有这些 external exports 时继续使用现有兼容卡片。当前验收只运行 build/typecheck，不运行测试。
 
+Session 浏览器随后调整为滚动 24 小时窗口：最近 24 小时的会话直接显示，更早历史才进入继续加载／展开入口，
+不再以本地当天零点作为边界。项目视图增加 `expanded → active-only → collapsed` 三态；只有存在进行中
+会话的项目才经过 active-only，且该状态持续只展示 active／待审批／待输入会话。会话级收藏已移除，pin
+迁移到项目级并用于项目排序。视图存储升级到 v3，旧版遗留的全折叠状态不会继续污染新默认值。
+
 ## 第十二轮：运行中主操作与模型控件 seat（2026-09-08，已部署）
 
 `ExternalComposer` 增加 `running/onStop`。运行中的普通 Bridge 会话在空草稿时，原生蓝色主按钮显示 Stop 并调用带 `expectedTurnId` 的 `interrupt_turn`；输入文字后同一按钮恢复 Send，通过现有 auto/steer 提交。兼容 textarea 路径也保持同样行为，详情菜单中的 Interrupt 继续作为次级入口。

@@ -25,9 +25,12 @@ const ExternalApprovalPanel = (ApprovalUi as unknown as { ExternalApprovalPanel?
 interface ExternalQuestionItem { id: string; header?: string; question: string; detail?: string; multiSelect?: boolean; externalAllowOther?: boolean; options?: readonly { label: string; description?: string }[] }
 interface ExternalQuestionProps { requestKey: string; questions: readonly ExternalQuestionItem[]; disabled?: boolean; onAnswer(answers: Record<string, { answers: string[] }>): void | Promise<void> }
 const ExternalQuestionPanel = (QuestionsUi as unknown as { ExternalQuestionPanel?: ComponentType<ExternalQuestionProps> }).ExternalQuestionPanel
-type ExternalSessionBrowserGroup = { key: string; label: string; cwd?: string; expanded: boolean; canCreate?: boolean; totalCount?: number; hiddenCount?: number; showingMore?: boolean; sessions: Array<{ id: string; title: string; status: string; updatedAt: number; pinned?: boolean; pinnable?: boolean; source?: string }> }
-interface ExternalSessionBrowserProps { groups: ExternalSessionBrowserGroup[]; currentId?: string; locale?: string; query?: string; groupBy?: 'workspace' | 'flat'; orderBy?: 'manual' | 'updated'; onQueryChange?(value: string): void; onGroupByChange?(value: 'workspace' | 'flat'): void; onOrderByChange?(value: 'manual' | 'updated'): void; onToggle(key: string): void; onCreate?(key: string): void; onOpen(id: string): void; onShowMore?(key: string, expanded: boolean): void; onPin?(id: string): void }
+type GroupMode = 'expanded' | 'active' | 'collapsed'
+type ExternalSessionBrowserGroup = { key: string; label: string; cwd?: string; expanded: boolean; mode?: GroupMode; pinned?: boolean; canCreate?: boolean; totalCount?: number; hiddenCount?: number; showingMore?: boolean; sessions: Array<{ id: string; title: string; status: string; updatedAt: number; source?: string }> }
+interface ExternalSessionBrowserProps { groups: ExternalSessionBrowserGroup[]; currentId?: string; locale?: string; query?: string; groupBy?: 'workspace' | 'flat'; orderBy?: 'manual' | 'updated'; onQueryChange?(value: string): void; onGroupByChange?(value: 'workspace' | 'flat'): void; onOrderByChange?(value: 'manual' | 'updated'): void; onToggle(key: string): void; onCreate?(key: string): void; onOpen(id: string): void; onShowMore?(key: string, expanded: boolean): void; onPinGroup?(key: string): void }
 const ExternalSessionBrowser = (WorkspaceUi as unknown as { ExternalSessionBrowser?: ComponentType<ExternalSessionBrowserProps> }).ExternalSessionBrowser
+const RECENT_WINDOW_MS = 24 * 60 * 60 * 1000
+const activeStatus = (status: string): boolean => ['active', 'waiting_for_approval', 'waiting_for_input'].includes(status)
 
 export interface NativeSessionSummary {
   id: string; displayTitle: string; cwd?: string; running: boolean; completed?: boolean; blank: boolean; updatedAt: number
@@ -68,31 +71,30 @@ export function UnifiedSessions({ store, views, nativeSessions, nativeWorkspaces
     const archived = new Set(workspaces.archivedSessionIds)
     const result: UnifiedGroup[] = workspaces.items.map(workspace => ({
       key: `workspace:${workspace.workspaceId}`, label: workspace.title, baseLabel: workspace.title, environments: ['local DSH'], cwd: workspace.path,
-      expanded: !view.collapsed.includes(`workspace:${workspace.workspaceId}`), canCreate: true,
+      expanded: views.groupMode(`workspace:${workspace.workspaceId}`) !== 'collapsed', canCreate: true,
       nativeWorkspaceId: workspace.workspaceId, sessions: workspace.sessionIds.flatMap(id => {
         const session = native.byId[id]
         if (!session || archived.has(id) || (session.blank && native.current !== id)) return []
-        return [{ id: `dsh:${id}`, rawId: id, source: 'DSH' as const, pinnable: false, title: session.displayTitle, status: session.running ? 'active' : session.completed ? 'completed' : 'idle', updatedAt: session.updatedAt }]
+        return [{ id: `dsh:${id}`, rawId: id, source: 'DSH' as const, title: session.displayTitle, status: session.running ? 'active' : session.completed ? 'completed' : 'idle', updatedAt: session.updatedAt }]
       }),
     }))
     const accounted = new Set(workspaces.items.flatMap(workspace => [...workspace.sessionIds]))
     const ungrouped = native.ids.flatMap(id => {
       const session = native.byId[id]
       if (accounted.has(id) || !session || archived.has(id) || (session.blank && native.current !== id)) return []
-      return [{ id: `dsh:${id}`, rawId: id, source: 'DSH' as const, pinnable: false, title: session.displayTitle, status: session.running ? 'active' : session.completed ? 'completed' : 'idle', updatedAt: session.updatedAt }]
+      return [{ id: `dsh:${id}`, rawId: id, source: 'DSH' as const, title: session.displayTitle, status: session.running ? 'active' : session.completed ? 'completed' : 'idle', updatedAt: session.updatedAt }]
     })
-    if (ungrouped.length) result.push({ key: 'native:ungrouped', label: 'Other conversations', baseLabel: 'Other conversations', environments: ['local DSH'], expanded: !view.collapsed.includes('native:ungrouped'), sessions: ungrouped })
+    if (ungrouped.length) result.push({ key: 'native:ungrouped', label: 'Other conversations', baseLabel: 'Other conversations', environments: ['local DSH'], expanded: views.groupMode('native:ungrouped') !== 'collapsed', sessions: ungrouped })
     for (const bridgeGroup of groupSessions(bridge.sessions, query, true, false, view.sort)) {
       // A path can exist on several machines. Keep each Bridge worker in its own
       // group so the heading identifies the environment for every row below it.
       const key = `bridge:${bridgeGroup.key}`
       const baseLabel = bridgeGroup.title.split(/[\\/]/).filter(Boolean).at(-1) || bridgeGroup.title
-      const target: UnifiedGroup = { key, label: baseLabel, baseLabel, environments: [`@${bridgeGroup.worker.replace(/^codex@/, '')}`], cwd: bridgeGroup.title, expanded: !view.collapsed.includes(key), canCreate: store.canCreate(bridgeGroup.worker), bridgeWorker: bridgeGroup.worker, sessions: [] }
+      const target: UnifiedGroup = { key, label: baseLabel, baseLabel, environments: [`@${bridgeGroup.worker.replace(/^codex@/, '')}`], cwd: bridgeGroup.title, expanded: views.groupMode(key) !== 'collapsed', canCreate: store.canCreate(bridgeGroup.worker), bridgeWorker: bridgeGroup.worker, sessions: [] }
       result.push(target)
       target.sessions.push(...bridgeGroup.sessions.map(session => ({
         id: `bridge:${str(session['sessionId'])}`, rawId: str(session['sessionId']), source: 'Bridge' as const,
         title: sessionTitle(session), status: str(session['status'], 'idle'), updatedAt: typeof session['updatedAt'] === 'number' ? session['updatedAt'] : 0,
-        pinned: view.pinned.includes(str(session['sessionId'])), pinnable: true,
       })))
     }
     for (const group of result) {
@@ -100,21 +102,26 @@ export function UnifiedSessions({ store, views, nativeSessions, nativeWorkspaces
       group.sessions = group.sessions.filter(row => !needle || [row.title, group.label, group.cwd ?? '', row.source].some(value => value.toLocaleLowerCase().includes(needle)))
       if (view.sort === 'updatedAt') group.sessions.sort((a, b) => b.updatedAt - a.updatedAt || a.id.localeCompare(b.id))
       group.latestAt = Math.max(0, ...group.sessions.map(row => row.updatedAt))
-      const dayStart = new Date().setHours(0, 0, 0, 0)
-      const essential = group.sessions.filter(row => row.updatedAt >= dayStart || row.status === 'active' || row.status === 'waiting_for_approval' || row.status === 'waiting_for_input' || row.status === 'error' || row.id === `dsh:${native.current ?? ''}` || row.id === `bridge:${bridge.selected ?? ''}` || row.pinned)
+      const recentSince = Date.now() - RECENT_WINDOW_MS
+      const essential = group.sessions.filter(row => row.updatedAt >= recentSince || activeStatus(row.status) || row.status === 'error' || row.id === `dsh:${native.current ?? ''}` || row.id === `bridge:${bridge.selected ?? ''}`)
       const all = !view.grouped || query.trim() || expanded.includes(group.key)
       group.totalCount = group.sessions.length; group.hiddenCount = all ? 0 : group.sessions.length - essential.length; group.showingMore = expanded.includes(group.key)
       if (!all) group.sessions = essential
+      const mode = views.groupMode(group.key)
+      group.mode = mode; group.expanded = mode !== 'collapsed'; group.pinned = view.pinnedGroups.includes(group.key)
+      if (mode === 'active') { group.sessions = group.sessions.filter(row => activeStatus(row.status)); group.hiddenCount = 0; group.showingMore = false }
     }
     const visible = result.filter(group => group.totalCount || !needle).sort((a, b) => {
       const active = (group: UnifiedGroup) => group.sessions.some(row => ['active', 'waiting_for_approval', 'waiting_for_input', 'error'].includes(row.status)) ? 1 : 0
+      const aPin = view.pinnedGroups.indexOf(a.key); const bPin = view.pinnedGroups.indexOf(b.key)
+      if (aPin >= 0 || bPin >= 0) return aPin < 0 ? 1 : bPin < 0 ? -1 : aPin - bPin
       return active(b) - active(a) || (b.latestAt ?? 0) - (a.latestAt ?? 0)
     })
     if (view.grouped) return visible
     const sessions = visible.flatMap(group => group.sessions)
     if (view.sort === 'updatedAt') sessions.sort((a, b) => b.updatedAt - a.updatedAt || a.id.localeCompare(b.id))
     return [{ key: 'unified:flat', label: 'Conversations', expanded: true, totalCount: sessions.length, hiddenCount: 0, sessions }]
-  }, [bridge.sessions, bridge.selected, expanded, native, query, store, view.collapsed, view.grouped, view.pinned, view.sort, workspaces])
+  }, [bridge.sessions, bridge.selected, expanded, native, query, store, view.activeOnly, view.collapsed, view.grouped, view.pinnedGroups, view.sort, views, workspaces])
   const currentId = bridgeSelected && bridge.selected ? `bridge:${bridge.selected}` : native.current ? `dsh:${native.current}` : undefined
   const open = (id: string) => id.startsWith('bridge:') ? openBridge(id.slice(7)) : openNative(id.slice(4))
   const create = async (key: string) => {
@@ -136,9 +143,9 @@ export function UnifiedSessions({ store, views, nativeSessions, nativeWorkspaces
     {ExternalSessionBrowser ? <ExternalSessionBrowser groups={groups} {...(currentId ? { currentId } : {})} locale={typeof navigator === 'undefined' ? 'en' : navigator.language}
       query={query} groupBy={view.grouped ? 'workspace' : 'flat'} orderBy={view.sort === 'updatedAt' ? 'updated' : 'manual'} onQueryChange={setQuery}
       onGroupByChange={value => views.setGrouped(value === 'workspace')} onOrderByChange={value => views.setSort(value === 'updated' ? 'updatedAt' : 'createdAt')}
-      onToggle={key => views.toggleCollapsed(key)} onOpen={open} onCreate={key => void create(key)}
+      onToggle={key => { const group = groups.find(item => item.key === key); views.toggleGroup(key, Boolean(group?.sessions.some(row => activeStatus(row.status)))) }} onOpen={open} onCreate={key => void create(key)}
       onShowMore={(key, value) => setExpanded(keys => value ? [...new Set([...keys, key])] : keys.filter(item => item !== key))}
-      onPin={id => { if (id.startsWith('bridge:')) views.togglePin(id.slice(7)) }} /> : <p className={css.empty}>Unified browser requires TokensCowork 0.4.5.</p>}
+      onPinGroup={key => views.toggleGroupPin(key)} /> : <p className={css.empty}>Unified browser requires TokensCowork 0.4.5.</p>}
     {bridge.hasMore && <Button size="sm" className={css.loadMore} disabled={bridge.loading} onClick={() => void store.loadSessions(true)}>{bridge.loading ? 'Loading…' : 'Load more Bridge sessions'}</Button>}
   </div>
 }
@@ -151,7 +158,7 @@ export function Sessions({ store, views: providedViews, refreshToken, initialSes
   const listPane = useRef<HTMLElement>(null)
   const [locateRequest, setLocateRequest] = useState(0)
   const locatedRequest = useRef(0)
-  const { grouped, attention, collapsed, pinned, sort } = view
+  const { grouped, attention, collapsed, activeOnly, pinnedGroups, sort } = view
   const [raw, setRaw] = useState(false)
   const [expandedGroups, setExpandedGroups] = useState<string[]>([])
   useEffect(() => {
@@ -183,13 +190,10 @@ export function Sessions({ store, views: providedViews, refreshToken, initialSes
     }, 5000)
     return () => window.clearInterval(timer)
   }, [store, surface])
-  const groups = useMemo(() => {
-    const result = groupSessions(state.sessions, query, grouped, attention, sort)
-    const all = result.flatMap(group => group.sessions)
-    const pinnedRows = pinned.flatMap(id => all.filter(row => row['sessionId'] === id))
-    if (!pinnedRows.length) return result
-    return [{ key: 'pinned', title: 'Pinned', worker: '', sessions: pinnedRows }, ...result.map(group => ({ ...group, sessions: group.sessions.filter(row => !pinned.includes(str(row['sessionId']))) })).filter(group => group.sessions.length)]
-  }, [state.sessions, query, grouped, attention, pinned, sort])
+  const groups = useMemo(() => groupSessions(state.sessions, query, grouped, attention, sort).sort((a, b) => {
+    const aPin = pinnedGroups.indexOf(a.key); const bPin = pinnedGroups.indexOf(b.key)
+    return aPin < 0 && bPin < 0 ? 0 : aPin < 0 ? 1 : bPin < 0 ? -1 : aPin - bPin
+  }), [state.sessions, query, grouped, attention, pinnedGroups, sort])
   const selectedId = state.selected
   const selectedGroupKey = groups.find(item => item.sessions.some(row => row['sessionId'] === selectedId))?.key
   const detail = selectedId ? state.details[selectedId] : undefined
@@ -221,8 +225,7 @@ export function Sessions({ store, views: providedViews, refreshToken, initialSes
   }, [locateRequest, collapsed])
   const detailActions = selectedId && detail ? <><span className={`${css.status} ${css[`status_${str(selected?.['status'])}`] ?? ''}`} aria-hidden="true" /><span className={css.headerStatus}>{str(selected?.['status'], 'Loading')}</span><Button size="sm" className={css.headerIcon} type="button" aria-label="New conversation in this project" title="New conversation in this project" disabled={!selected || !store.canCreate(str(selected['workerId'])) || state.creation?.busy || state.creation?.action?.['status'] === 'accepted'} onClick={() => selected && void store.createSession(str(selected['workerId']), str(selected['workspace'], ''))}>＋</Button>{onRefresh && <Button size="sm" className={css.headerIcon} type="button" aria-label="Refresh Bridge" title="Refresh Bridge" onClick={onRefresh}>↻</Button>}<details className={css.sessionMenu}><summary aria-label="Conversation actions" title="Conversation actions">•••</summary><div><span className={css.sessionMenuMeta}>History · {detail.events.length}{detail.hasMore ? '+' : ''} events · {str(selected?.['historyCompleteness'], 'coverage unknown')}</span><label className={css.sessionMenuToggle}><input type="checkbox" checked={raw} onChange={event => setRaw(event.target.checked)} /> Show raw events</label><Button size="sm" type="button" disabled={busy || !canAct || !selected?.['activeTurnId']} onClick={() => void store.act(selectedId, 'interrupt_turn')}>Interrupt turn</Button><Button size="sm" type="button" className={css.deleteSession} disabled={Boolean(busy || !canDelete)} title={canDelete ? 'Permanently remove this Bridge session and its retained data' : 'Interrupt or resolve the session before deleting it'} onClick={async () => {
     if (!selected || !window.confirm(`Permanently delete “${sessionTitle(selected)}” from Codex?\n\nCodex will also delete conversations spawned from it. This cannot be undone.`)) return
-    const deleted = await store.deleteSession(selectedId)
-    if (deleted && pinned.includes(selectedId)) views.togglePin(selectedId)
+    await store.deleteSession(selectedId)
   }}>Delete conversation</Button>{onBack && <Button size="sm" type="button" onClick={onBack}>Back to DSH sessions</Button>}</div></details></> : null
   const history = selectedId && detail ? <>
     {detail.error && <div className={css.notice} role="alert">{detail.error}<Button size="sm" onClick={() => void store.refreshDetail(selectedId)}>Retry session</Button></div>}
@@ -247,24 +250,24 @@ export function Sessions({ store, views: providedViews, refreshToken, initialSes
       onChange={value => store.setDraft(selectedId, value)} onSend={() => void store.act(selectedId, 'submit_turn')} onStop={() => void store.act(selectedId, 'interrupt_turn')} />
   </> : null
   const sharedBrowserGroups: ExternalSessionBrowserGroup[] = groups.map(group => {
-    const supportsSummary = grouped && group.key !== 'pinned' && !query.trim() && !attention
-    const dayStart = new Date().setHours(0, 0, 0, 0)
-    const summaryRows = supportsSummary ? group.sessions.filter(session => (typeof session['updatedAt'] === 'number' && session['updatedAt'] >= dayStart) || ['active', 'waiting_for_approval', 'waiting_for_input', 'error'].includes(str(session['status'])) || session['sessionId'] === selectedId || pinned.includes(str(session['sessionId']))) : group.sessions
+    const supportsSummary = grouped && !query.trim() && !attention
+    const recentSince = Date.now() - RECENT_WINDOW_MS
+    const summaryRows = supportsSummary ? group.sessions.filter(session => (typeof session['updatedAt'] === 'number' && session['updatedAt'] >= recentSince) || activeStatus(str(session['status'])) || session['status'] === 'error' || session['sessionId'] === selectedId) : group.sessions
     const showingMore = expandedGroups.includes(group.key)
-    const rows = showingMore || !supportsSummary ? group.sessions : summaryRows
+    const mode = views.groupMode(group.key)
+    const rows = mode === 'active' ? group.sessions.filter(session => activeStatus(str(session['status']))) : showingMore || !supportsSummary ? group.sessions : summaryRows
     return {
       key: group.key,
       label: `${surface === 'list' ? group.title.split(/[\\/]/).filter(Boolean).at(-1) || group.title : group.title}${group.worker ? ` · @${group.worker.replace(/^codex@/, '')}` : ''}`,
       ...(group.title === 'No workspace' ? {} : { cwd: group.title }),
-      expanded: !collapsed.includes(group.key),
+      expanded: mode !== 'collapsed', mode, pinned: pinnedGroups.includes(group.key),
       canCreate: Boolean(group.worker && group.title !== 'No workspace' && store.canCreate(group.worker) && !state.creation?.busy && state.creation?.action?.['status'] !== 'accepted'),
       totalCount: group.sessions.length,
-      hiddenCount: supportsSummary ? group.sessions.length - summaryRows.length : 0,
-      showingMore,
+      hiddenCount: mode === 'active' ? 0 : supportsSummary ? group.sessions.length - summaryRows.length : 0,
+      showingMore: mode === 'active' ? false : showingMore,
       sessions: rows.map(session => ({
         id: str(session['sessionId']), title: sessionTitle(session), status: str(session['status'], 'idle'),
         updatedAt: typeof session[sort] === 'number' ? session[sort] : 0,
-        pinned: pinned.includes(str(session['sessionId'])),
       })),
     }
   })
@@ -289,26 +292,28 @@ export function Sessions({ store, views: providedViews, refreshToken, initialSes
       {state.loaded && groups.length === 0 && <p className={css.empty}>{query || attention ? 'No matches in loaded sessions.' : 'No sessions.'}</p>}
       {ExternalSessionBrowser ? <ExternalSessionBrowser
         groups={sharedBrowserGroups} {...(selectedId ? { currentId: selectedId } : {})} locale={typeof navigator === 'undefined' ? 'en' : navigator.language}
-        onToggle={key => views.toggleCollapsed(key)} onOpen={id => store.select(id)} onPin={id => views.togglePin(id)}
+        onToggle={key => { const group = groups.find(item => item.key === key); views.toggleGroup(key, Boolean(group?.sessions.some(row => activeStatus(str(row['status']))))) }} onOpen={id => store.select(id)} onPinGroup={key => views.toggleGroupPin(key)}
         onShowMore={(key, expanded) => setExpandedGroups(keys => expanded ? [...new Set([...keys, key])] : keys.filter(item => item !== key))}
         onCreate={key => { const group = groups.find(item => item.key === key); if (group?.worker && group.title !== 'No workspace') void store.createSession(group.worker, group.title) }}
       /> : groups.map(group => {
-        const compact = grouped && group.key !== 'pinned' && !query.trim() && !attention && !expandedGroups.includes(group.key)
-        const dayStart = new Date().setHours(0, 0, 0, 0)
-        const visible = compact ? group.sessions.filter(session => (typeof session['updatedAt'] === 'number' && session['updatedAt'] >= dayStart) || ['active', 'waiting_for_approval', 'waiting_for_input', 'error'].includes(str(session['status'])) || session['sessionId'] === selectedId || pinned.includes(str(session['sessionId']))) : group.sessions
+        const mode = views.groupMode(group.key)
+        const compact = grouped && !query.trim() && !attention && !expandedGroups.includes(group.key)
+        const recentSince = Date.now() - RECENT_WINDOW_MS
+        const visible = mode === 'active' ? group.sessions.filter(session => activeStatus(str(session['status']))) : compact ? group.sessions.filter(session => (typeof session['updatedAt'] === 'number' && session['updatedAt'] >= recentSince) || activeStatus(str(session['status'])) || session['status'] === 'error' || session['sessionId'] === selectedId) : group.sessions
         const hiddenCount = group.sessions.length - visible.length
         return <section key={group.key}>
         <div className={css.projectHeading}>
-        <Button size="sm" className={css.groupHeading} type="button" aria-expanded={!collapsed.includes(group.key)} onClick={() => views.toggleCollapsed(group.key)} title={group.title}>
-          <span>{collapsed.includes(group.key) ? '▸' : '▾'} {surface === 'list' ? group.title.split(/[\\/]/).filter(Boolean).at(-1) || group.title : group.title}</span><small>{group.worker} · {group.sessions.length}</small>
+        <Button size="sm" className={css.groupHeading} type="button" aria-expanded={mode !== 'collapsed'} onClick={() => views.toggleGroup(group.key, group.sessions.some(session => activeStatus(str(session['status']))))} title={group.title}>
+          <span>{mode === 'collapsed' ? '▸' : mode === 'active' ? '●' : '▾'} {surface === 'list' ? group.title.split(/[\\/]/).filter(Boolean).at(-1) || group.title : group.title}</span><small>{mode === 'active' ? 'Active only · ' : ''}{group.worker} · {group.sessions.length}</small>
         </Button>
+        <Button size="sm" type="button" className={css.pinButton} aria-label={`${pinnedGroups.includes(group.key) ? 'Unpin' : 'Pin'} project ${group.title}`} aria-pressed={pinnedGroups.includes(group.key)} onClick={() => views.toggleGroupPin(group.key)}>{pinnedGroups.includes(group.key) ? '★' : '☆'}</Button>
         {group.worker && group.title !== 'No workspace' && <Button size="sm" className={css.newProjectSession} type="button" aria-label={`New conversation in ${group.title}`} title={store.canCreate(group.worker) ? `New conversation · ${group.worker} · ${group.title}` : 'Worker offline or session creation unavailable'} disabled={!store.canCreate(group.worker) || state.creation?.busy || state.creation?.action?.['status'] === 'accepted'} onClick={() => void store.createSession(group.worker, group.title)}>＋</Button>}
         </div>
-        {!collapsed.includes(group.key) && visible.map(session => <div className={css.sessionRow} key={str(session['sessionId'])}><Button size="sm" className={`${css.sessionItem} ${selectedId === session['sessionId'] ? css.selected : ''}`} onClick={() => store.select(str(session['sessionId']))} type="button" aria-current={selectedId === session['sessionId'] ? 'true' : undefined}>
+        {mode !== 'collapsed' && visible.map(session => <div className={css.sessionRow} key={str(session['sessionId'])}><Button size="sm" className={`${css.sessionItem} ${selectedId === session['sessionId'] ? css.selected : ''}`} onClick={() => store.select(str(session['sessionId']))} type="button" aria-current={selectedId === session['sessionId'] ? 'true' : undefined}>
           <span className={`${css.status} ${css[`status_${str(session['status'])}`] ?? ''}`} /><span><strong>{sessionTitle(session)}</strong><small>{str(session['status'])} · {str(session['source'], 'Bridge')}</small><small title={sort === 'createdAt' ? 'Created' : 'Updated'}>{eventTime(session[sort]) || 'Time unavailable'}</small></span>
-        </Button><Button size="sm" type="button" className={css.pinButton} aria-label={`${pinned.includes(str(session['sessionId'])) ? 'Unpin' : 'Pin'} ${sessionTitle(session)}`} aria-pressed={pinned.includes(str(session['sessionId']))} onClick={() => views.togglePin(str(session['sessionId']))}>{pinned.includes(str(session['sessionId'])) ? '★' : '☆'}</Button></div>)}
-        {!collapsed.includes(group.key) && hiddenCount > 0 && <Button size="sm" type="button" className={css.showOlder} onClick={() => setExpandedGroups(keys => [...keys, group.key])}>Show {hiddenCount} older conversation{hiddenCount === 1 ? '' : 's'}</Button>}
-        {!collapsed.includes(group.key) && expandedGroups.includes(group.key) && group.key !== 'pinned' && group.sessions.length > 0 && <Button size="sm" type="button" className={css.showOlder} onClick={() => setExpandedGroups(keys => keys.filter(key => key !== group.key))}>Hide older conversations</Button>}
+        </Button></div>)}
+        {mode === 'expanded' && hiddenCount > 0 && <Button size="sm" type="button" className={css.showOlder} onClick={() => setExpandedGroups(keys => [...keys, group.key])}>Show {hiddenCount} older conversation{hiddenCount === 1 ? '' : 's'}</Button>}
+        {mode === 'expanded' && expandedGroups.includes(group.key) && group.sessions.length > 0 && <Button size="sm" type="button" className={css.showOlder} onClick={() => setExpandedGroups(keys => keys.filter(key => key !== group.key))}>Hide older conversations</Button>}
       </section>})}
       {state.hasMore && <Button size="sm" className={css.loadMore} disabled={state.loading} onClick={() => void store.loadSessions(true)}>{state.loading ? 'Loading…' : 'Load more sessions'}</Button>}
     </aside>}

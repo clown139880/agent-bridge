@@ -4,12 +4,13 @@ export interface SessionViewState {
   grouped: boolean
   attention: boolean
   collapsed: string[]
-  pinned: string[]
+  activeOnly: string[]
+  pinnedGroups: string[]
   positions: Record<string, ReadingPosition>
 }
 type StorageFace = Pick<Storage, 'getItem' | 'setItem'>
-const KEY = 'dsh-agent-control:session-view:v2'
-const defaults = (): SessionViewState => ({ sort: 'updatedAt', grouped: true, attention: false, collapsed: [], pinned: [], positions: {} })
+const KEY = 'dsh-agent-control:session-view:v3'
+const defaults = (): SessionViewState => ({ sort: 'updatedAt', grouped: true, attention: false, collapsed: [], activeOnly: [], pinnedGroups: [], positions: {} })
 const strings = (value: unknown): string[] => Array.isArray(value) ? [...new Set(value.filter((item): item is string => typeof item === 'string' && item.length > 0 && item.length < 4096))].slice(0, 100) : []
 function browserStorage(): StorageFace | undefined {
   try { return typeof window === 'undefined' ? undefined : window.localStorage } catch { return undefined }
@@ -28,7 +29,7 @@ function read(storage: StorageFace | undefined): SessionViewState {
         Object.defineProperty(positions, id, { value: { eventId: position['eventId'], offset: Math.max(-10000, Math.min(10000, position['offset'])) }, enumerable: true, configurable: true, writable: true })
       }
     }
-    return { sort: data['sort'] === 'createdAt' ? 'createdAt' : 'updatedAt', grouped: data['grouped'] !== false, attention: data['attention'] === true, collapsed: strings(data['collapsed']), pinned: strings(data['pinned']), positions }
+    return { sort: data['sort'] === 'createdAt' ? 'createdAt' : 'updatedAt', grouped: data['grouped'] !== false, attention: data['attention'] === true, collapsed: strings(data['collapsed']), activeOnly: strings(data['activeOnly']), pinnedGroups: strings(data['pinnedGroups']), positions }
   } catch { return defaults() }
 }
 
@@ -48,11 +49,19 @@ export class SessionViewStore {
   setSort(sort: 'createdAt' | 'updatedAt'): void { this.publish({ ...this.value, sort }) }
   setAttention(attention: boolean): void { this.publish({ ...this.value, attention }) }
   setGroupsCollapsed(keys: string[], collapse: boolean): void {
-    this.publish({ ...this.value, collapsed: collapse ? [...new Set([...this.value.collapsed, ...keys])].slice(-100) : this.value.collapsed.filter(key => !keys.includes(key)) })
+    this.publish({ ...this.value, collapsed: collapse ? [...new Set([...this.value.collapsed, ...keys])].slice(-100) : this.value.collapsed.filter(key => !keys.includes(key)), activeOnly: this.value.activeOnly.filter(key => !keys.includes(key)) })
   }
-  toggleCollapsed(key: string): void { this.publish({ ...this.value, collapsed: this.value.collapsed.includes(key) ? this.value.collapsed.filter(item => item !== key) : [...this.value.collapsed, key].slice(-100) }) }
-  revealGroup(key: string): void { if (this.value.collapsed.includes(key)) this.toggleCollapsed(key) }
-  togglePin(id: string): void { this.publish({ ...this.value, pinned: this.value.pinned.includes(id) ? this.value.pinned.filter(item => item !== id) : [id, ...this.value.pinned].slice(0, 100) }) }
+  groupMode(key: string): 'expanded' | 'active' | 'collapsed' { return this.value.collapsed.includes(key) ? 'collapsed' : this.value.activeOnly.includes(key) ? 'active' : 'expanded' }
+  toggleGroup(key: string, hasActive: boolean): void {
+    const mode = this.groupMode(key)
+    const next = mode === 'expanded' && hasActive ? 'active' : mode === 'expanded' || mode === 'active' ? 'collapsed' : 'expanded'
+    this.publish({ ...this.value,
+      collapsed: next === 'collapsed' ? [...new Set([...this.value.collapsed, key])].slice(-100) : this.value.collapsed.filter(item => item !== key),
+      activeOnly: next === 'active' ? [...new Set([...this.value.activeOnly, key])].slice(-100) : this.value.activeOnly.filter(item => item !== key),
+    })
+  }
+  revealGroup(key: string): void { if (this.value.collapsed.includes(key)) this.publish({ ...this.value, collapsed: this.value.collapsed.filter(item => item !== key) }) }
+  toggleGroupPin(key: string): void { this.publish({ ...this.value, pinnedGroups: this.value.pinnedGroups.includes(key) ? this.value.pinnedGroups.filter(item => item !== key) : [key, ...this.value.pinnedGroups].slice(0, 100) }) }
   savePosition(id: string, position: ReadingPosition): void {
     const entries = Object.entries(this.value.positions).filter(([key]) => key !== id)
     this.publish({ ...this.value, positions: Object.fromEntries([...entries, [id, position]].slice(-100)) })

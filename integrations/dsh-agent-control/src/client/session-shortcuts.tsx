@@ -8,12 +8,8 @@ import css from './workspace.module.css'
 export function SessionShortcuts({ store, views, openSession, wide }: { store: SessionStore; views: SessionViewStore; openSession(id: string): void; wide: boolean }) {
   const [expanded, setExpanded] = useState(false)
   const data = useSyncExternalStore(store.subscribe, store.snapshot, store.snapshot)
-  const view = useSyncExternalStore(views.subscribe, views.snapshot, views.snapshot)
-  const recent = [...data.sessions].sort((a, b) => {
-    const aPin = view.pinned.indexOf(str(a['sessionId'])); const bPin = view.pinned.indexOf(str(b['sessionId']))
-    if (aPin >= 0 || bPin >= 0) return aPin < 0 ? 1 : bPin < 0 ? -1 : aPin - bPin
-    return Number(b['updatedAt'] ?? 0) - Number(a['updatedAt'] ?? 0)
-  }).slice(0, 5)
+  void views
+  const recent = [...data.sessions].sort((a, b) => Number(b['updatedAt'] ?? 0) - Number(a['updatedAt'] ?? 0)).slice(0, 5)
   return <div className={css.shortcutRoot}>
     <button type="button" className={css.footerButton} aria-label="Recent Bridge sessions" aria-expanded={expanded && wide} onClick={() => {
       if (!wide) { openSession(''); return }
@@ -25,9 +21,9 @@ export function SessionShortcuts({ store, views, openSession, wide }: { store: S
       {data.loading && <small>Loading…</small>}
       {!data.loading && !data.error && recent.length === 0 && <small>No sessions.</small>}
       {recent.map(row => <button key={str(row['sessionId'])} type="button" title={`${str(row['workerId'])} · ${str(row['workspace'])}`} onClick={() => openSession(str(row['sessionId']))}>
-        <strong>{view.pinned.includes(str(row['sessionId'])) ? '★ ' : ''}{sessionTitle(row)}</strong><small>{str(row['status'])} · {str(row['workerId'])}</small>
+        <strong>{sessionTitle(row)}</strong><small>{str(row['status'])} · {str(row['workerId'])}</small>
       </button>)}
-      <small>Recent / pinned · {data.sessions.length}{data.hasMore ? '+' : ''} loaded</small>
+      <small>Recent · {data.sessions.length}{data.hasMore ? '+' : ''} loaded</small>
     </div>}
   </div>
 }
