@@ -154,6 +154,9 @@ export class ControlPlane {
   }
 
   async start(): Promise<void> {
+    // No bridge is live yet after a control-plane restart. Reset transient state
+    // without changing the timestamp of the session's last real activity.
+    this.controlStore.resetTransientSessionActivity();
     this.roomId = await this.matrix.start();
     await new Promise<void>((resolve) => this.http.listen(this.options.port, this.options.host, resolve));
     setInterval(() => this.store.markStaleMachinesOffline(Date.now() - 45_000), 15_000).unref();
@@ -930,13 +933,16 @@ export class ControlPlane {
   }
 
   private async handleSessionDiscovered(machineId: string, message: SessionDiscoveredMessage): Promise<void> {
+    if (this.controlStore.isSessionDeleted(message.sessionId)) return;
     let session = this.store.getSessionByNative(machineId, message.nativeSessionId);
     if (session) {
       this.store.updateSessionStatus(session.id, message.status);
       const workerRun = message.requestId ? this.store.getWorkerRun(message.requestId) : undefined;
       if (workerRun && !workerRun.sessionId) this.store.attachWorkerRun(workerRun.id, session.id, message.status);
       if (!workerRun && !session.matrixThreadId && message.title?.trim()) await this.publishPassiveSession(session, message);
-      this.controlStore.upsertSession(machineId, stateForDiscovery(message));
+      const previousUpdatedAt=this.controlStore.session(message.sessionId)?.updatedAt;
+      this.controlStore.upsertSession(machineId, stateForDiscovery(message,
+        typeof previousUpdatedAt==="number"?previousUpdatedAt:undefined));
       return;
     }
     const launch = message.requestId ? this.launchesByRequestId.get(message.requestId) : undefined;
@@ -953,7 +959,7 @@ export class ControlPlane {
       nativeSessionId: message.nativeSessionId,
       status: message.status,
       createdAt: message.createdAt || now,
-      updatedAt: now,
+      updatedAt: message.createdAt || now,
     };
     this.store.createSession(session);
     if (workerRun) this.store.attachWorkerRun(workerRun.id, session.id, message.status);
@@ -967,7 +973,9 @@ export class ControlPlane {
     } else if (!workerRun && message.title?.trim()) {
       await this.publishPassiveSession(session, message);
     }
-    this.controlStore.upsertSession(machineId, stateForDiscovery(message));
+    const previousUpdatedAt=this.controlStore.session(message.sessionId)?.updatedAt;
+    this.controlStore.upsertSession(machineId, stateForDiscovery(message,
+      typeof previousUpdatedAt==="number"?previousUpdatedAt:undefined));
     log.info({ machineId, sessionId: session.id, nativeSessionId: message.nativeSessionId }, "Local Codex thread attached");
   }
 
@@ -1212,7 +1220,7 @@ function formatDuration(ms: number): string {
   return minutes ? `${minutes}m ${seconds % 60}s` : `${seconds}s`;
 }
 
-function stateForDiscovery(message: SessionDiscoveredMessage): SessionState {
+function stateForDiscovery(message: SessionDiscoveredMessage, previousUpdatedAt?: number): SessionState {
   const active = message.status === "working" || message.status === "starting";
   const activityStatus: SessionActivityStatus = active ? "active"
     : message.status === "blocked" ? "waiting_for_approval"
@@ -1223,7 +1231,7 @@ function stateForDiscovery(message: SessionDiscoveredMessage): SessionState {
     agentType: message.agentType, projectPath: message.projectPath,
     projectName: message.projectName || basename(message.projectPath.replace(/[\\/]$/, "")) || message.projectPath,
     title: message.title, promptSummary: message.promptSummary, activityStatus,
-    lastTurnStatus, createdAt: message.createdAt, updatedAt: Date.now(), source: message.agentType === "codex-desktop"
+    lastTurnStatus, createdAt: message.createdAt, updatedAt: message.updatedAt ?? previousUpdatedAt ?? message.createdAt, source: message.agentType === "codex-desktop"
       ? "desktop-rollout" : "app-server", historyCompleteness: message.agentType === "codex-desktop"
       ? "terminal-only" : "loaded-only" };
 }

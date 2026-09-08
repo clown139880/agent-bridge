@@ -18,6 +18,13 @@ describe('AgentControlService', () => {
     service.dispose()
   })
 
+  it('allows the native model selector to request a worker catalog', async () => {
+    const service = new AgentControlService(config())
+    const result = await service.dispatch({ domain: 'bridge', operation: 'models', args: { workerId: 'codex@hal' } }) as { models: unknown[] }
+    expect(result.models).toHaveLength(2)
+    service.dispose()
+  })
+
   it('enforces Kanban permission modes before transport', async () => {
     const readOnly = new AgentControlService(config('read-only'))
     await expect(readOnly.dispatch({ domain: 'kanban', operation: 'comment', args: { taskId: 't1', body: 'x' } })).rejects.toMatchObject({ code: 'kanban_forbidden' })

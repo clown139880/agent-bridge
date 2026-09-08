@@ -322,6 +322,7 @@ export class CodexAppServerAdapter {
             ? "active" as const : "idle" as const,activeTurnId:this.activeTurns.get(thread.id),
       lastTurnStatus:undefined,createdAt:(thread.createdAt??Math.floor(now/1000))*1000,
       updatedAt:(thread.updatedAt??thread.createdAt??Math.floor(now/1000))*1000,
+      promptSummary:summarizePrompt(thread.preview),
       source:"app-server" as const,historyCompleteness:this.inventoryComplete ? "full" as const : "loaded-only" as const}));
     const approvals=[...this.pendingApprovals.values()].filter(item=>!item.answered).map(item=>({approvalId:item.approvalId,
       sessionId:item.sessionId,turnId:item.turnId,kind:item.kind,summary:item.summary,choices:item.choices,requestedAt:item.requestedAt}));
@@ -844,6 +845,7 @@ export class CodexAppServerAdapter {
       promptSummary: summarizePrompt(initialPrompt || thread.preview),
       status: thread.status?.type === "active" ? "working" : "waiting",
       createdAt: (thread.createdAt ?? Math.floor(Date.now() / 1000)) * 1000,
+      updatedAt: (thread.updatedAt ?? thread.createdAt ?? Math.floor(Date.now() / 1000)) * 1000,
       model: thread.model,
     };
     this.emit(message);

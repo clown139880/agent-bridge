@@ -117,12 +117,13 @@ test("a 0.4.2 database upgrades transactionally to the Agent Control schema", ()
   `);legacy.close();
   const store=new Store(path);
   const version=store.db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get() as {version:number};
-  assert.equal(version.version,2);
+  assert.equal(version.version,4);
   const tables=(store.db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{name:string}>).map(row=>row.name);
-  for(const table of ["pending_requests","actions","idempotency_keys","stream_events"])assert.ok(tables.includes(table));
-  const session=store.db.prepare("SELECT activity_status,source FROM sessions WHERE id='thread'").get() as any;
+  for(const table of ["pending_requests","actions","idempotency_keys","stream_events","deleted_sessions"])assert.ok(tables.includes(table));
+  const session=store.db.prepare("SELECT activity_status,source,last_response_at,updated_at FROM sessions WHERE id='thread'").get() as any;
   assert.equal(session.activity_status,"idle");assert.equal(session.source,"app-server");
+  assert.equal(session.last_response_at,null);assert.equal(session.updated_at,1);
   // Reopening proves the versioned migration is idempotent.
-  store.db.close();const reopened=new Store(path);assert.equal((reopened.db.prepare("SELECT COUNT(*) AS n FROM schema_migrations").get() as any).n,3);
+  store.db.close();const reopened=new Store(path);assert.equal((reopened.db.prepare("SELECT COUNT(*) AS n FROM schema_migrations").get() as any).n,5);
   reopened.db.close();rmSync(path,{force:true});
 });

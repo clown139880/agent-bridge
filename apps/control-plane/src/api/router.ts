@@ -109,10 +109,14 @@ export class AgentControlApi {
     const statuses=url.searchParams.getAll("status"),validStatuses=new Set(["creating","active","waiting_for_approval","waiting_for_input","idle","offline","error","unknown"]);
     if(statuses.some(value=>!validStatuses.has(value)))throw new ApiProblem(400,"invalid_parameter","invalid session status");
     const updatedAfter=url.searchParams.get("updatedAfter");if(updatedAfter!==null&&!Number.isFinite(Number(updatedAfter)))throw new ApiProblem(400,"invalid_parameter","updatedAfter must be epoch milliseconds");
+    const segment=url.searchParams.get("segment")??"all";if(!["recent","history","all"].includes(segment))throw new ApiProblem(400,"invalid_parameter","invalid segment");
+    const dayStart=url.searchParams.get("dayStart");if(dayStart!==null&&!Number.isFinite(Number(dayStart)))throw new ApiProblem(400,"invalid_parameter","dayStart must be epoch milliseconds");
+    if(segment!=="all"&&dayStart===null)throw new ApiProblem(400,"invalid_parameter","dayStart is required for segmented session lists");
     try{const page=this.store.listSessions({statuses,agents:url.searchParams.getAll("agent"),workerId,machineId,
       workspace:url.searchParams.get("workspace")??undefined,taskId:url.searchParams.get("taskId")??undefined,
       conversationId:url.searchParams.get("conversationId")??undefined,active:active===null?undefined:active==="true",
       updatedAfter:updatedAfter!==null?Number(updatedAfter):undefined,
+      dayStart:dayStart!==null?Number(dayStart):undefined,segment:segment as "recent"|"history"|"all",
       q:url.searchParams.get("q")??undefined,sort:sort as "updatedAt"|"createdAt",order:order as "asc"|"desc",
       limit:integer(url.searchParams.get("limit"),"limit",50,1,200),cursor:url.searchParams.get("cursor")??undefined});
       this.ok(response,{...page,streamCursor:this.store.streamCursor()});}catch(error){this.cursorError(error);}
@@ -156,6 +160,12 @@ export class AgentControlApi {
     sessionId:string,action?:string):Promise<void>{
     const session=this.store.session(sessionId);if(!session)throw new ApiProblem(404,"session_not_found","session not found");
     if(request.method==="GET"&&!action){const bridge=this.bridges.get(String(session.machineId));session.capabilities=[...new Set([...(bridge?.capabilities??[]),...(bridge?.features??[])])];this.ok(response,session);return;}
+    if(request.method==="DELETE"&&!action){
+      if(["creating","active","waiting_for_approval","waiting_for_input"].includes(String(session.status)))
+        throw new ApiProblem(409,"session_active","interrupt or resolve the active session before deleting it");
+      if(!this.store.deleteSession(sessionId))throw new ApiProblem(404,"session_not_found","session not found");
+      this.ok(response,{sessionId,deleted:true});return;
+    }
     if(request.method==="GET"&&action==="runs"){this.sessionRuns(sessionId,url,response);return;}
     if(request.method==="GET"&&action==="events"){
       try{const tail=url.searchParams.get("tail")==="true";const page=tail

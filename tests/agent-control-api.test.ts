@@ -37,6 +37,9 @@ async function fixture() {
     source:"app-server",historyCompleteness:"full"},{sessionId:"thread-older",nativeSessionId:"thread-older",agentType:"codex-cli",
     projectPath:"/work/old",projectName:"old",activityStatus:"idle",createdAt:500,updatedAt:1500,
     source:"app-server",historyCompleteness:"loaded-only"}]});
+  await internals.handleBridgeMessage("dev",{type:"session.event",eventId:"initial-reply",eventType:"message.completed",
+    sessionId:"thread-1",turnId:"initial-turn",itemId:"initial-answer",timestamp:2000,
+    payload:{role:"assistant",text:"Initial answer"}});
   return {path,store,control,internals,sent,base,headers,async close(){await control.stop();store.db.close();rmSync(path,{force:true});}};
 }
 
@@ -48,6 +51,10 @@ test("Agent Control REST exposes snapshot, pagination, actions, idempotency and 
     assert.equal(first.data.length,1);assert.equal(first.hasMore,true);assert.ok(first.nextCursor);
     const second=await fetch(`${f.base}/sessions?limit=1&cursor=${encodeURIComponent(first.nextCursor)}`,{headers:f.headers}).then(r=>r.json()) as any;
     assert.equal(second.data[0].sessionId,"thread-older");
+    const recent=await fetch(`${f.base}/sessions?segment=recent&dayStart=1750&limit=10`,{headers:f.headers}).then(r=>r.json()) as any;
+    assert.deepEqual(recent.data.map((row:any)=>row.sessionId),["thread-1"]);
+    const history=await fetch(`${f.base}/sessions?segment=history&dayStart=1750&limit=10`,{headers:f.headers}).then(r=>r.json()) as any;
+    assert.deepEqual(history.data.map((row:any)=>row.sessionId),["thread-older"]);
     const workers=await fetch(`${f.base}/workers`,{headers:{authorization:"Bearer read"}}).then(r=>r.json()) as any;
     assert.equal(workers.workers[0].bridgeVersion,"0.4.2");assert.ok(Array.isArray(workers.workers[0].recentWorkspaces));
     const forbidden=await fetch(`${f.base}/sessions/thread-1/turns`,{method:"POST",headers:{authorization:"Bearer read","content-type":"application/json","idempotency-key":"read-cannot-write"},body:'{"input":"x"}'});
@@ -70,6 +77,18 @@ test("Agent Control REST exposes snapshot, pagination, actions, idempotency and 
 
     await f.internals.handleBridgeMessage("dev",{type:"session.event",eventId:"turn-start",eventType:"turn.started",
       sessionId:"thread-1",turnId:"turn-1",timestamp:Date.now(),payload:{status:"in_progress"}});
+    await f.internals.handleBridgeMessage("dev",{type:"session.event",eventId:"context-42",eventType:"context.updated",
+      sessionId:"thread-1",turnId:"turn-1",timestamp:Date.now(),payload:{usedTokens:42,contextWindow:128000}});
+    const latestEvents=await fetch(`${f.base}/sessions/thread-1/events?tail=true&limit=1`,{headers:f.headers}).then(r=>r.json()) as any;
+    assert.equal(latestEvents.data[0].eventId,"context-42");assert.equal(latestEvents.hasMore,true);assert.match(latestEvents.nextCursor,/^e:\d+$/);
+    const earlierEvents=await fetch(`${f.base}/sessions/thread-1/events?tail=true&limit=1&before=${encodeURIComponent(latestEvents.nextCursor)}`,{headers:f.headers}).then(r=>r.json()) as any;
+    assert.equal(earlierEvents.data[0].eventId,"turn-start");assert.equal(earlierEvents.hasMore,true);
+    const firstReply=await fetch(`${f.base}/sessions/thread-1/events?tail=true&limit=1&before=${encodeURIComponent(earlierEvents.nextCursor)}`,{headers:f.headers}).then(r=>r.json()) as any;
+    assert.equal(firstReply.data[0].eventId,"initial-reply");assert.equal(firstReply.hasMore,false);
+    assert.notEqual(earlierEvents.data[0].eventId,latestEvents.data[0].eventId);
+    const sessionDetail=await fetch(`${f.base}/sessions/thread-1`,{headers:f.headers}).then(r=>r.json()) as any;
+    assert.deepEqual(sessionDetail.context,{usedTokens:42,contextWindow:128000});
+    assert.equal(sessionDetail.updatedAt,2000);assert.equal(sessionDetail.lastResponseAt,2000);
     const repeatAfterStateChange=await fetch(`${f.base}/sessions/thread-1/turns`,{method:"POST",
       headers:{...f.headers,"idempotency-key":"turn-one"},body:JSON.stringify({input:"continue",delivery:"auto",model:"deepseek-v3"})});
     assert.equal(repeatAfterStateChange.status,202);
@@ -137,6 +156,31 @@ test("thread/updated asynchronously refreshes the persisted session title", asyn
   } finally {
     await f.close();
   }
+});
+
+test("deleting an idle session clears retained data and prevents inventory resurrection", async () => {
+  const f = await fixture();
+  try {
+    await f.internals.handleBridgeMessage("dev", { type:"session.event", eventId:"old-event", eventType:"message.completed",
+      sessionId:"thread-older", turnId:"old-turn", itemId:"old-message", timestamp:1600,
+      payload:{role:"user",text:"remove me"} });
+    f.internals.controlStore.updateSessionActivity("thread-1", "active", "turn-live");
+    const active = await fetch(`${f.base}/sessions/thread-1`, { method:"DELETE", headers:f.headers });
+    assert.equal(active.status, 409);
+    assert.equal((await active.json() as any).error.code, "session_active");
+
+    const response = await fetch(`${f.base}/sessions/thread-older`, { method:"DELETE", headers:f.headers });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { sessionId:"thread-older", deleted:true });
+    assert.equal(f.internals.controlStore.session("thread-older"), undefined);
+    assert.equal((f.store.db.prepare("SELECT COUNT(*) AS n FROM events WHERE session_id=?").get("thread-older") as {n:number}).n, 0);
+    assert.equal(f.internals.controlStore.isSessionDeleted("thread-older"), true);
+
+    f.internals.controlStore.upsertSession("dev", { sessionId:"thread-older", nativeSessionId:"thread-older",
+      agentType:"codex-cli", projectPath:"/work/old", projectName:"old", activityStatus:"idle",
+      createdAt:500, updatedAt:1700, source:"app-server", historyCompleteness:"full" });
+    assert.equal(f.internals.controlStore.session("thread-older"), undefined);
+  } finally { await f.close(); }
 });
 
 test("snapshot cursor followed by SSE does not miss a committed session event",async()=>{

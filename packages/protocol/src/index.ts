@@ -58,6 +58,8 @@ export interface SessionDiscoveredMessage {
   promptSummary?: string;
   status: AgentStatus;
   createdAt: number;
+  /** Last real thread activity. Inventory and reconnect time must not replace it. */
+  updatedAt?: number;
   model?: string;
 }
 

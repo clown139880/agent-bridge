@@ -6,7 +6,7 @@ import type { BridgeCall, DashboardRequest, JsonValue, KanbanCall } from './type
 export interface AgentControlConfig { bridge: BridgeConfig; kanban: KanbanConfig }
 
 const BRIDGE_OPERATIONS = new Set<BridgeCall['operation']>([
-  'workers', 'snapshot', 'sessions', 'session', 'session_events', 'create_session', 'submit_turn',
+  'workers', 'models', 'snapshot', 'sessions', 'session', 'delete_session', 'session_events', 'create_session', 'submit_turn',
   'interrupt_turn', 'approvals', 'approval', 'resolve_approval', 'user_input', 'user_input_request',
   'respond_user_input', 'action',
 ])

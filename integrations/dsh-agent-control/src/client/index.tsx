@@ -1,22 +1,38 @@
+import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import type { FormEvent, ReactNode } from 'react'
 import css from './workspace.module.css'
+import { Sessions, UnifiedSessions, type NativeSessionSource, type NativeWorkspaceSource } from './sessions.js'
+import { SessionStore, type BridgeRpc } from './session-store.js'
+import { SessionViewStore } from './session-view-state.js'
 
 const RPC_CHANNEL = '/agent-control'
 type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue }
 type RecordValue = Record<string, JsonValue>
 
 export class WorkspaceController {
+  readonly sessions: SessionStore
+  readonly views = new SessionViewStore()
+  constructor(rpc: BridgeRpc = (operation, args) => call('bridge', operation, args), loadNativeModelCatalog?: () => Promise<JsonValue>) { this.sessions = new SessionStore(rpc, loadNativeModelCatalog) }
+  private requestedSession: { id: string } | undefined
   private openValue = false
+  private bridgeValue = false
+  private panelValue: 'overview' | 'tasks' = 'overview'
   private readonly listeners = new Set<() => void>()
   subscribe = (listener: () => void): (() => void) => { this.listeners.add(listener); return () => this.listeners.delete(listener) }
   snapshot = (): boolean => this.openValue
-  open = (): void => { this.openValue = true; this.emit() }
+  bridgeSnapshot = (): boolean => this.bridgeValue
+  panelSnapshot = (): 'overview' | 'tasks' => this.panelValue
+  sessionSnapshot = (): { id: string } | undefined => this.requestedSession
+  openSession = (id: string): void => { this.requestedSession = { id }; this.openValue = false; this.bridgeValue = true; this.sessions.activate(); if (id) this.sessions.select(id); this.emit() }
+  showNative = (): void => { this.bridgeValue = false; this.openValue = false; this.emit() }
+  open = (): void => { this.panelValue = 'overview'; this.openValue = true; this.emit() }
+  openKanban = (): void => { this.panelValue = 'tasks'; this.openValue = true; this.emit() }
   close = (): void => { this.openValue = false; this.emit() }
   private emit(): void { for (const listener of this.listeners) listener() }
 }
@@ -25,9 +41,61 @@ interface Injected { controller: WorkspaceController }
 type FooterProps = PropsRuntime<'sidebar.footer.action'> & Injected
 
 export function FooterAction({ wide, controller }: FooterProps) {
-  return <button className={css.footerButton} type="button" onClick={controller.open} aria-label="Open Agent Control">
+  useEffect(() => { controller.sessions.activate(); void controller.sessions.loadSessions() }, [controller])
+  return <div><Button size="sm" className={css.footerButton} type="button" onClick={controller.open} aria-label="Open Agent Control">
     <span aria-hidden="true">⌘</span>{wide && <span>Agent Control</span>}
-  </button>
+  </Button><Button size="sm" type="button" className={css.footerButton} aria-label="Open Kanban" onClick={controller.openKanban}><span aria-hidden="true">▦</span>{wide && <span>Kanban</span>}</Button></div>
+}
+
+interface UnifiedInjected extends Injected { nativeSessions: NativeSessionSource; nativeWorkspaces: NativeWorkspaceSource }
+export function BridgeSidebar({ controller, nativeSessions, nativeWorkspaces, wide, expandSidebar }: UnifiedInjected & { wide: boolean; expandSidebar(): void }) {
+  const requestedExpansion = useRef(false)
+  const bridgeSelected = useSyncExternalStore(controller.subscribe, controller.bridgeSnapshot, controller.bridgeSnapshot)
+  useEffect(() => {
+    if (!wide && !requestedExpansion.current) { requestedExpansion.current = true; expandSidebar() }
+  }, [wide, expandSidebar])
+  if (!wide) return <Button size="sm" className={css.footerButton} type="button" onClick={expandSidebar} aria-label="Expand Bridge sessions">B</Button>
+  return <div className={css.integratedSidebar}><UnifiedSessions store={controller.sessions} views={controller.views} nativeSessions={nativeSessions} nativeWorkspaces={nativeWorkspaces} bridgeSelected={bridgeSelected} openBridge={controller.openSession} openNative={id => { controller.showNative(); nativeSessions.open(id) }} /></div>
+}
+
+export function BridgeConversation({ controller }: Injected) {
+  const column = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!column.current || typeof ResizeObserver === 'undefined') return
+    const element = column.current
+    const update = () => element.style.setProperty('--dsh-conversation-column-width', `${element.clientWidth}px`)
+    update()
+    const observer = new ResizeObserver(update); observer.observe(element)
+    return () => observer.disconnect()
+  }, [])
+  return <div ref={column} className={css.integratedConversation} aria-label="Bridge conversation" title="Session UI · Round 20"><Sessions store={controller.sessions} views={controller.views} surface="detail" refreshToken={null} onRefresh={() => void controller.sessions.refresh()} onBack={controller.showNative} /></div>
+}
+
+/** Scoped single-slot shadows: removing each registration restores DSH's original occupant. */
+export function installBridgeSurfaces(ctx: ClientContext, controller: WorkspaceController): void {
+  const bind = (mount: () => () => void): (() => void) => {
+    let dispose: (() => void) | undefined
+    const update = () => {
+      if (controller.bridgeSnapshot() && !dispose) dispose = mount()
+      else if (!controller.bridgeSnapshot() && dispose) { dispose(); dispose = undefined }
+    }
+    const unsubscribe = controller.subscribe(update)
+    update()
+    return () => { unsubscribe(); dispose?.() }
+  }
+  const nativeSessions = ctx.get('sessions') as unknown as NativeSessionSource | undefined
+  const nativeWorkspaces = ctx.get('workspaces') as unknown as NativeWorkspaceSource | undefined
+  if (nativeSessions?.list && nativeWorkspaces?.list) ctx.slots.inject('sidebar.workspaces', () => ctx.slots.register({ name: 'sidebar.workspaces', priority: -100, inject: () => ({ controller, nativeSessions, nativeWorkspaces }) }, BridgeSidebar))
+  ctx.slots.inject('conversation', () => bind(() => { ctx.layout.closeDetails(); return ctx.slots.register({ name: 'conversation', priority: -100, inject: () => ({ controller }) }, BridgeConversation) }))
+  ctx.effect(() => {
+    const native = nativeSessions
+    if (!native?.list) return () => {}
+    let current = native.list.getSnapshot().current
+    return native.list.subscribe(() => {
+      const next = native.list!.getSnapshot().current
+      if (next !== current) { current = next; if (controller.bridgeSnapshot()) controller.showNative() }
+    })
+  })
 }
 
 function useController(controller: WorkspaceController): boolean {
@@ -57,7 +125,7 @@ function statusClass(status: string): string { return `${css.status} ${css[`stat
 
 function Empty({ children }: { children: ReactNode }) { return <div className={css.empty}>{children}</div> }
 function ErrorBanner({ error, retry }: { error: string; retry(): void }) {
-  return <div className={css.error} role="alert"><span>{error}</span><button type="button" onClick={retry}>Retry</button></div>
+  return <div className={css.error} role="alert"><span>{error}</span><Button size="sm" type="button" onClick={retry}>Retry</Button></div>
 }
 
 function Overview({ data }: { data: RecordValue }) {
@@ -94,85 +162,6 @@ function Metric({ label, value, tone }: { label: string; value: number; tone?: s
   return <div className={`${css.metric} ${tone ? css[`tone_${tone}`] : ''}`}><span>{label}</span><strong>{value}</strong></div>
 }
 
-function Sessions({ snapshot, refresh, initialSessionId }: { snapshot: RecordValue; refresh(): Promise<void>; initialSessionId?: string | undefined }) {
-  const bridge = asRecord(snapshot['bridge'])
-  const sessions = asArray(bridge['sessions']).map(asRecord)
-  const approvals = asArray(bridge['approvals']).map(asRecord)
-  const inputs = asArray(bridge['userInput']).map(asRecord)
-  const [selected, setSelected] = useState<RecordValue | undefined>(sessions.find(item => item['sessionId'] === initialSessionId) ?? sessions[0])
-  const [events, setEvents] = useState<JsonValue[]>([])
-  const [message, setMessage] = useState('')
-  const [model, setModel] = useState('')
-  const [busy, setBusy] = useState(false)
-  const [notice, setNotice] = useState('')
-  const load = useCallback(async (session: RecordValue) => {
-    setSelected(session); setNotice('');
-    try { const result = asRecord(await call('bridge', 'session_events', { sessionId: str(session['sessionId']), limit: 200 })); setEvents(asArray(result['data'])) }
-    catch (error) { setNotice(error instanceof Error ? error.message : 'Failed to load events') }
-  }, [])
-  useEffect(() => {
-    const target = sessions.find(item => item['sessionId'] === initialSessionId) ?? (initialSessionId ? undefined : sessions[0])
-    if (target) void load(target)
-  }, [initialSessionId])
-  const send = async (event: FormEvent) => {
-    event.preventDefault(); if (!selected || !message.trim() || busy) return
-    setBusy(true); setNotice('')
-    try {
-      const args: RecordValue = { sessionId: str(selected['sessionId']), input: message.trim(), delivery: 'auto' }
-      if (typeof selected['activeTurnId'] === 'string') args['expectedTurnId'] = selected['activeTurnId']
-      else if (model.trim()) args['model'] = model.trim()
-      const result = asRecord(await call('bridge', 'submit_turn', args))
-      setNotice(`Accepted: ${str(result['resolvedAction'], str(result['status']))}`); setMessage(''); await refresh()
-    } catch (error) { setNotice(error instanceof Error ? error.message : 'Send failed') } finally { setBusy(false) }
-  }
-  const interrupt = async () => {
-    if (!selected || busy) return; setBusy(true)
-    try { await call('bridge', 'interrupt_turn', { sessionId: str(selected['sessionId']), ...(typeof selected['activeTurnId'] === 'string' ? { expectedTurnId: selected['activeTurnId'] } : {}) }); setNotice('Interrupt accepted.'); await refresh() }
-    catch (error) { setNotice(error instanceof Error ? error.message : 'Interrupt failed') } finally { setBusy(false) }
-  }
-  return <div className={css.split}>
-    <aside className={css.listPane}><div className={css.listHeading}>Sessions <span>{sessions.length}</span></div>{sessions.length === 0 ? <Empty>No sessions.</Empty> : sessions.map(session => <button className={`${css.sessionItem} ${selected?.['sessionId'] === session['sessionId'] ? css.selected : ''}`} key={str(session['sessionId'])} onClick={() => void load(session)} type="button">
-      <span className={statusClass(str(session['status']))} /><span><strong>{sessionTitle(session)}</strong><small>{str(session['workerId'])}<br />{str(session['workspace'])}</small></span>
-    </button>)}</aside>
-    <main className={css.detailPane}>{!selected ? <Empty>Select a session.</Empty> : <>
-      <header className={css.detailHeader}><div><h2>{sessionTitle(selected)}</h2><p>{str(selected['workspace'])} · {str(selected['workerId'])}</p></div><div className={css.headerActions}><span className={css.badge}>{str(selected['status'])}</span><button disabled={busy || !selected['activeTurnId']} onClick={() => void interrupt()} type="button">Interrupt</button></div></header>
-      {approvals.filter(item => item['sessionId'] === selected['sessionId']).map(item => <PendingCard key={str(item['id'])} item={item} refresh={refresh} />)}
-      {inputs.filter(item => item['sessionId'] === selected['sessionId']).map(item => <UserInputCard key={str(item['id'])} item={item} refresh={refresh} />)}
-      <div className={css.timeline}>{events.length === 0 ? <Empty>No retained events, or the session has not been opened.</Empty> : events.map((event, index) => { const item = asRecord(event); return <article className={css.event} key={str(item['id'], String(index))}><div><span>{str(item['type'], 'event')}</span><time>{str(item['createdAt'], '')}</time></div><pre>{JSON.stringify(item['payload'] ?? item, null, 2)}</pre></article> })}</div>
-      {notice && <div className={css.notice}>{notice}</div>}
-      <form className={css.composer} onSubmit={event => void send(event)}><input aria-label="Model" value={model} disabled={typeof selected['activeTurnId'] === 'string'} onChange={event => setModel(event.target.value)} placeholder="Model (empty = default)" /><textarea value={message} onChange={event => setMessage(event.target.value)} placeholder={selected['status'] === 'active' ? 'Steer the active turn…' : 'Start a new turn…'} /><button disabled={busy || !message.trim()}>{busy ? 'Sending…' : 'Send'}</button></form>
-    </>}</main>
-  </div>
-}
-
-function PendingCard({ item, refresh }: { item: RecordValue; refresh(): Promise<void> }) {
-  const [busy, setBusy] = useState(false)
-  const choices = asArray(item['choices']).filter((choice): choice is string => typeof choice === 'string')
-  const decide = async (choice: string) => { setBusy(true); try { await call('bridge', 'resolve_approval', { approvalId: str(item['id']), choice }); await refresh() } finally { setBusy(false) } }
-  return <div className={css.pending}><div><strong>Action required</strong><span>{str(item['summary'], str(item['kind']))}</span></div>{choices.map(choice => <button disabled={busy} key={choice} type="button" onClick={() => void decide(choice)}>{choice}</button>)}</div>
-}
-
-function UserInputCard({ item, refresh }: { item: RecordValue; refresh(): Promise<void> }) {
-  const questions = asArray(item['questions']).map(asRecord)
-  const [answers, setAnswers] = useState<Record<string, string>>({})
-  const [busy, setBusy] = useState(false)
-  const [notice, setNotice] = useState('')
-  const hasSecret = questions.some(question => question['isSecret'] === true)
-  const submit = async (event: FormEvent) => {
-    event.preventDefault()
-    if (hasSecret) return
-    const structured: RecordValue = {}
-    for (const question of questions) structured[str(question['id'])] = { answers: [answers[str(question['id'])] ?? ''] }
-    setBusy(true)
-    try { await call('bridge', 'respond_user_input', { requestId: str(item['id']), answers: structured }); await refresh() }
-    catch (error) { setNotice(error instanceof Error ? error.message : 'Response failed') } finally { setBusy(false) }
-  }
-  return <form className={css.inputCard} onSubmit={event => void submit(event)}><strong>Agent needs input</strong>
-    {questions.map(question => { const options = asArray(question['options']).map(asRecord); const key = str(question['id']); return <label key={key}><span>{str(question['header'])}: {str(question['question'])}</span>{question['isSecret'] === true ? <em>Secret input must be answered in the trusted local agent UI.</em> : options.length > 0 ? <select value={answers[key] ?? ''} onChange={event => setAnswers(current => ({ ...current, [key]: event.target.value }))}><option value="">Choose…</option>{options.map(option => <option key={str(option['label'])} value={str(option['label'])}>{str(option['label'])}</option>)}</select> : <input value={answers[key] ?? ''} onChange={event => setAnswers(current => ({ ...current, [key]: event.target.value }))} />}</label> })}
-    {notice && <span>{notice}</span>}<button type="submit" disabled={busy || hasSecret || questions.some(question => !(answers[str(question['id'])] ?? '').trim())}>{busy ? 'Submitting…' : hasSecret ? 'Local handling required' : 'Submit answers'}</button>
-  </form>
-}
-
 function Tasks({ snapshot, refresh, openSession }: { snapshot: RecordValue; refresh(): Promise<void>; openSession(sessionId: string): void }) {
   const board = asRecord(snapshot['board'])
   const bridgeSessions = asArray(asRecord(snapshot['bridge'])['sessions']).map(asRecord)
@@ -180,73 +169,98 @@ function Tasks({ snapshot, refresh, openSession }: { snapshot: RecordValue; refr
   const assignees = asArray(board['assignees']).filter((item): item is string => typeof item === 'string')
   const [detail, setDetail] = useState<RecordValue>()
   const [createOpen, setCreateOpen] = useState(false)
+  const [showEmpty, setShowEmpty] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const openTask = async (taskId: string) => { try { setDetail(asRecord(await call('kanban', 'show', { taskId }))); setError('') } catch (cause) { setError(cause instanceof Error ? cause.message : 'Task load failed') } }
   return <div className={css.taskPage}>
-    <div className={css.taskToolbar}><span>{columns.reduce((sum, column) => sum + asArray(column['tasks']).length, 0)} visible tasks</span><button type="button" onClick={() => setCreateOpen(true)}>Create task</button></div>
+    <div className={css.taskToolbar}><span>{columns.reduce((sum, column) => sum + asArray(column['tasks']).length, 0)} tasks</span><label><input type="checkbox" checked={showEmpty} onChange={event => setShowEmpty(event.target.checked)} /> Show empty columns</label><Button size="sm" type="button" onClick={() => setCreateOpen(true)}>Create task</Button></div>
     {error && <div className={css.notice}>{error}</div>}
-    <div className={css.board}>{columns.map(column => <section className={css.kanbanColumn} key={str(column['name'])}><header><span>{str(column['name'])}</span><strong>{asArray(column['tasks']).length}</strong></header>{asArray(column['tasks']).map(value => { const task = asRecord(value); return <button type="button" className={css.taskCard} key={str(task['id'])} onClick={() => void openTask(str(task['id']))}><strong>{str(task['title'])}</strong><small>{str(task['id'])}</small><footer><span>{str(task['assignee'], 'unassigned')}</span><span>P{str(task['priority'], '0')}</span></footer></button> })}</section>)}</div>
+    {!showEmpty && columns.every(column => asArray(column['tasks']).length === 0) && <Empty>No tasks in this board.</Empty>}<div className={css.board}>{columns.filter(column => showEmpty || asArray(column['tasks']).length > 0).map(column => <section className={css.kanbanColumn} key={str(column['name'])}><header><span>{str(column['name'])}</span><strong>{asArray(column['tasks']).length}</strong></header>{asArray(column['tasks']).map(value => { const task = asRecord(value); return <Button size="sm" type="button" className={css.taskCard} key={str(task['id'])} onClick={() => void openTask(str(task['id']))}><strong>{str(task['title'])}</strong><small>{str(task['id'])}</small><footer><span>{str(task['assignee'], 'unassigned')}</span><span>P{str(task['priority'], '0')}</span></footer></Button> })}</section>)}</div>
     {detail && <TaskDrawer data={detail} associatedSessions={bridgeSessions.filter(session => session['taskId'] === asRecord(detail['task'])['id'])} openSession={openSession} close={() => setDetail(undefined)} refresh={async () => { await refresh(); await openTask(str(asRecord(detail['task'])['id'])) }} />}
-    {createOpen && <CreateTask assignees={assignees} busy={busy} close={() => setCreateOpen(false)} submit={async args => { setBusy(true); try { await call('kanban', 'create', args); setCreateOpen(false); await refresh() } catch (cause) { setError(cause instanceof Error ? cause.message : 'Create failed') } finally { setBusy(false) } }} />}
+    {createOpen && <CreateTask assignees={assignees} busy={busy} error={error} close={() => setCreateOpen(false)} submit={async args => { setBusy(true); try { await call('kanban', 'create', args); setCreateOpen(false); await refresh() } catch (cause) { setError(cause instanceof Error ? cause.message : 'Create failed') } finally { setBusy(false) } }} />}
   </div>
 }
 
 function TaskDrawer({ data, associatedSessions, openSession, close, refresh }: { data: RecordValue; associatedSessions: RecordValue[]; openSession(sessionId: string): void; close(): void; refresh(): Promise<void> }) {
   const task = asRecord(data['task']); const comments = asArray(data['comments']).map(asRecord); const runs = asArray(data['runs']).map(asRecord); const links = asRecord(data['links'])
   const [comment, setComment] = useState(''); const [busy, setBusy] = useState(false); const [notice, setNotice] = useState('')
-  const post = async (event: FormEvent) => { event.preventDefault(); if (!comment.trim()) return; setBusy(true); try { await call('kanban', 'comment', { taskId: str(task['id']), body: comment.trim() }); setComment(''); await refresh() } finally { setBusy(false) } }
+  const post = async (event: FormEvent) => { event.preventDefault(); if (!comment.trim()) return; setBusy(true); try { await call('kanban', 'comment', { taskId: str(task['id']), body: comment.trim() }); setComment(''); await refresh() } catch (cause) { setNotice(cause instanceof Error ? cause.message : 'Comment failed') } finally { setBusy(false) } }
   return <div className={css.drawerBackdrop} onMouseDown={event => { if (event.target === event.currentTarget) close() }}><aside className={css.drawer}>
-    <header><div><small>{str(task['id'])}</small><h2>{str(task['title'])}</h2></div><button type="button" onClick={close}>×</button></header>
+    <header><div><small>{str(task['id'])}</small><h2>{str(task['title'])}</h2></div><Button size="sm" type="button" onClick={close}>×</Button></header>
     <div className={css.taskFacts}><span>{str(task['status'])}</span><span>{str(task['assignee'], 'unassigned')}</span><span>P{str(task['priority'], '0')}</span></div>
     <p className={css.body}>{str(task['body'], 'No description.')}</p>
     <div className={css.taskActions}>
-      {(task['status'] === 'ready' || task['status'] === 'running') && <button type="button" disabled={busy} onClick={() => { const summary = window.prompt('Review handoff summary'); if (!summary?.trim()) return; setBusy(true); void call('kanban', 'request_review', { taskId: str(task['id']), summary: summary.trim(), force: false }).then(refresh).catch(error => setNotice(error instanceof Error ? error.message : 'Review request failed')).finally(() => setBusy(false)) }}>Request review</button>}
-      {task['status'] === 'blocked' && <button type="button" disabled={busy} onClick={() => { setBusy(true); void call('kanban', 'unblock', { taskId: str(task['id']) }).then(refresh).catch(error => setNotice(error instanceof Error ? error.message : 'Unblock failed')).finally(() => setBusy(false)) }}>Unblock</button>}
+      {(task['status'] === 'ready' || task['status'] === 'running') && <Button size="sm" type="button" disabled={busy} onClick={() => { const summary = window.prompt('Review handoff summary'); if (!summary?.trim()) return; setBusy(true); void call('kanban', 'request_review', { taskId: str(task['id']), summary: summary.trim(), force: false }).then(refresh).catch(error => setNotice(error instanceof Error ? error.message : 'Review request failed')).finally(() => setBusy(false)) }}>Request review</Button>}
+      {task['status'] === 'blocked' && <Button size="sm" type="button" disabled={busy} onClick={() => { setBusy(true); void call('kanban', 'unblock', { taskId: str(task['id']) }).then(refresh).catch(error => setNotice(error instanceof Error ? error.message : 'Unblock failed')).finally(() => setBusy(false)) }}>Unblock</Button>}
     </div>
     {notice && <div className={css.notice}>{notice}</div>}
-    {associatedSessions.length > 0 && <><h3>Agent Bridge sessions</h3>{associatedSessions.map(session => <button className={css.sessionLink} type="button" key={str(session['sessionId'])} onClick={() => openSession(str(session['sessionId']))}>{sessionTitle(session)} · {str(session['status'])}</button>)}</>}
+    {associatedSessions.length > 0 && <><h3>Agent Bridge sessions</h3>{associatedSessions.map(session => <Button size="sm" className={css.sessionLink} type="button" key={str(session['sessionId'])} onClick={() => openSession(str(session['sessionId']))}>{sessionTitle(session)} · {str(session['status'])}</Button>)}</>}
     <h3>Dependencies</h3><p>Parents: {asArray(links['parents']).map(String).join(', ') || 'none'}<br />Children: {asArray(links['children']).map(String).join(', ') || 'none'}</p>
     <h3>Runs</h3>{runs.length === 0 ? <Empty>No runs.</Empty> : runs.map(run => <div className={css.run} key={str(run['id'])}><strong>Run {str(run['id'])}</strong><span>{str(run['outcome'], str(run['status']))}</span><p>{str(run['summary'], '')}</p></div>)}
     <h3>Comments</h3>{comments.map(item => <div className={css.comment} key={str(item['id'])}><strong>{str(item['author'])}</strong><p>{str(item['body'])}</p></div>)}
-    <form className={css.commentForm} onSubmit={event => void post(event)}><textarea value={comment} onChange={event => setComment(event.target.value)} placeholder="Add a durable comment…" /><button disabled={busy || !comment.trim()}>Comment</button></form>
+    <form className={css.commentForm} onSubmit={event => void post(event)}><textarea value={comment} onChange={event => setComment(event.target.value)} placeholder="Add a durable comment…" /><Button size="sm" type="submit" disabled={busy || !comment.trim()}>Comment</Button></form>
   </aside></div>
 }
 
-function CreateTask({ assignees, busy, close, submit }: { assignees: string[]; busy: boolean; close(): void; submit(args: RecordValue): Promise<void> }) {
+function CreateTask({ assignees, busy, error, close, submit }: { assignees: string[]; busy: boolean; error: string; close(): void; submit(args: RecordValue): Promise<void> }) {
   const [title, setTitle] = useState(''); const [body, setBody] = useState(''); const [assignee, setAssignee] = useState(''); const [workspace, setWorkspace] = useState('')
   return <div className={css.drawerBackdrop}><form className={css.modal} onSubmit={event => { event.preventDefault(); void submit({ title: title.trim(), body, ...(assignee ? { assignee } : {}), workspaceKind: workspace ? 'dir' : 'scratch', ...(workspace ? { workspacePath: workspace } : {}), priority: 0, goalMode: false }) }}>
-    <header><h2>Create task</h2><button type="button" onClick={close}>×</button></header>
+    <header><h2>Create task</h2><Button size="sm" type="button" onClick={close}>×</Button></header>
+    {error && <div role="alert">{error}</div>}
     <label>Title<input required value={title} onChange={event => setTitle(event.target.value)} /></label>
     <label>Description<textarea value={body} onChange={event => setBody(event.target.value)} /></label>
     <label>Assignee<select value={assignee} onChange={event => setAssignee(event.target.value)}><option value="">Unassigned</option>{assignees.map(name => <option key={name}>{name}</option>)}</select></label>
     <label>Workspace (optional absolute dir)<input value={workspace} onChange={event => setWorkspace(event.target.value)} /></label>
-    <button className={css.primary} disabled={busy || !title.trim()}>{busy ? 'Creating…' : 'Create'}</button>
+    <Button size="sm" type="submit" className={css.primary} disabled={busy || !title.trim()}>{busy ? 'Creating…' : 'Create'}</Button>
   </form></div>
 }
 
 function WorkspaceOverlay({ controller }: Injected) {
   const open = useController(controller)
+  const panel = useSyncExternalStore(controller.subscribe, controller.panelSnapshot, controller.panelSnapshot)
+  const sessionStore = controller.sessions
   const [tab, setTab] = useState<'overview' | 'sessions' | 'tasks'>('overview')
+  useEffect(() => { if (open) setTab(panel) }, [panel, open])
   const [data, setData] = useState<RecordValue>()
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
-  const [linkedSession, setLinkedSession] = useState<string>()
-  const refresh = useCallback(async () => { setLoading(true); try { setData(asRecord(await call('overview', 'snapshot'))); setError('') } catch (cause) { setError(cause instanceof Error ? cause.message : 'Agent Control unavailable') } finally { setLoading(false) } }, [])
-  useEffect(() => { if (open) void refresh() }, [open, refresh])
+  const requestEpoch = useRef(0)
+  const refresh = useCallback(async () => {
+    const epoch = ++requestEpoch.current
+    setLoading(true)
+    try {
+      const result = tab === 'tasks' ? { board: await call('kanban', 'list'), bridge: { sessions: sessionStore.snapshot().sessions } } : asRecord(await call('overview', 'snapshot'))
+      if (epoch !== requestEpoch.current) return
+      setData(result); setError('')
+    } catch (cause) { if (epoch === requestEpoch.current) setError(cause instanceof Error ? cause.message : 'Agent Control unavailable') }
+    finally { if (epoch === requestEpoch.current) setLoading(false) }
+  }, [tab, sessionStore])
+  useEffect(() => { if (open && tab !== 'sessions') void refresh() }, [open, refresh, tab])
   useEffect(() => { if (!open) return; const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape') controller.close() }; window.addEventListener('keydown', onKey); return () => window.removeEventListener('keydown', onKey) }, [controller, open])
-  const content = useMemo(() => { if (!data) return null; if (tab === 'sessions') return <Sessions snapshot={data} refresh={refresh} initialSessionId={linkedSession} />; if (tab === 'tasks') return <Tasks snapshot={data} refresh={refresh} openSession={sessionId => { setLinkedSession(sessionId); setTab('sessions') }} />; return <Overview data={data} /> }, [data, linkedSession, refresh, tab])
+  const content = useMemo(() => { if (tab === 'sessions') return <Sessions store={sessionStore} views={controller.views} refreshToken={data} />; if (!data) return null; if (tab === 'tasks') return <Tasks snapshot={data} refresh={refresh} openSession={controller.openSession} />; return <Overview data={data} /> }, [data, refresh, tab, sessionStore, controller])
   if (!open) return null
   return <div className={css.workspace} role="dialog" aria-modal="true" aria-label="Agent Control workspace">
-    <header className={css.topbar}><div className={css.title}><span className={css.logo}>AC</span><div><strong>Agent Control</strong><small>Bridge sessions · Hermes tasks</small></div></div><nav>{(['overview', 'sessions', 'tasks'] as const).map(item => <button className={tab === item ? css.activeTab : ''} key={item} type="button" onClick={() => setTab(item)}>{item}</button>)}</nav><div className={css.topActions}><button type="button" onClick={() => void refresh()} disabled={loading}>↻</button><button type="button" onClick={controller.close}>Close</button></div></header>
-    {error ? <ErrorBanner error={error} retry={() => void refresh()} /> : loading && !data ? <div className={css.loading}>Loading Agent Control…</div> : content}
+    <header className={css.topbar}><div className={css.title}><span className={css.logo}>AC</span><div><strong>Agent Control</strong><small>Session UI · Round 20</small></div></div><nav>{(['overview', 'sessions', 'tasks'] as const).map(item => <Button size="sm" className={tab === item ? css.activeTab : ''} key={item} type="button" onClick={() => item === 'sessions' ? controller.openSession('') : setTab(item)}>{item === 'tasks' ? 'Kanban' : item}</Button>)}</nav><div className={css.topActions}><Button size="sm" type="button" aria-label="Refresh Agent Control" onClick={() => void (tab === 'sessions' ? sessionStore.refresh() : refresh())} disabled={tab !== 'sessions' && loading}>↻</Button><Button size="sm" type="button" onClick={controller.close}>Close</Button></div></header>
+    {tab !== 'sessions' && error ? <ErrorBanner error={error} retry={() => void refresh()} /> : tab !== 'sessions' && loading && !data ? <div className={css.loading}>Loading Agent Control…</div> : content}
   </div>
 }
 
-export const inject = ['slots', 'connection']
+export const inject = ['slots', 'connection', 'layout', 'remote', 'remote.session', 'sessions', 'workspaces']
 export function apply(ctx: ClientContext): void {
   connection = (ctx as unknown as { connection: RpcConnection }).connection
-  const controller = new WorkspaceController()
+  const remote = (ctx as unknown as { remote: { session: { modelCatalog(): Promise<{ ok: true; value: JsonValue } | { ok: false; error: { code: string; message: string } }> }; $on(event: string, listener: () => void): () => void } }).remote
+  const controller = new WorkspaceController(undefined, async () => {
+    const response = await remote.session.modelCatalog()
+    if (!response.ok) throw new Error(`${response.error.code}: ${response.error.message}`)
+    return response.value
+  })
+  ctx.effect(() => {
+    const refresh = () => controller.sessions.invalidateModels()
+    const disposers = [remote.$on('llm/adapters-updated', refresh), remote.$on('settings/document-updated', refresh), remote.$on('credentials/reference-updated', refresh)]
+    return () => { for (const dispose of disposers) dispose(); controller.sessions.dispose() }
+  })
+  installBridgeSurfaces(ctx, controller)
   ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({ name: 'sidebar.footer.action', id: 'agent-control', order: 20, inject: (): Injected => ({ controller }) }, FooterAction))
   ctx.slots.inject('shell.overlay', () => ctx.slots.register({ name: 'shell.overlay', id: 'agent-control', order: 10, inject: (): Injected => ({ controller }) }, WorkspaceOverlay))
 }

@@ -20,14 +20,15 @@ export interface Worker {
 
 export type SessionStatus = 'creating' | 'active' | 'waiting_for_approval' | 'waiting_for_input' | 'idle' | 'offline' | 'error' | 'unknown' | (string & {})
 export interface SessionSummary {
-  id: string
+  sessionId: string
   workerId: string
   agentType?: string
   title?: string
   status: SessionStatus
   workspace: string
   activeTurnId?: string | null
-  lastActivityAt: number
+  updatedAt: number
+  createdAt?: number
   taskId?: string | null
   runId?: string | null
   [key: string]: JsonValue | undefined
@@ -80,7 +81,7 @@ export interface ActionReceipt {
 }
 
 export interface BridgeCall {
-  operation: 'workers' | 'snapshot' | 'sessions' | 'session' | 'session_events' | 'create_session' |
+  operation: 'workers' | 'models' | 'snapshot' | 'sessions' | 'session' | 'delete_session' | 'session_events' | 'create_session' |
     'submit_turn' | 'interrupt_turn' | 'approvals' | 'approval' | 'resolve_approval' |
     'user_input' | 'user_input_request' | 'respond_user_input' | 'action'
   args?: JsonObject

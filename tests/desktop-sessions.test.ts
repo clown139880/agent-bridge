@@ -51,6 +51,7 @@ test("Desktop scanner baselines history, reports new completions, and tracks act
   assert.equal(scanner.isThreadActive("session-1"), false);
   assert.equal(emitted.length, 3);
   assert.equal(emitted[0]?.type, "session.discovered");
+  if(emitted[0]?.type === "session.discovered") assert.equal(emitted[0].updatedAt,emitted[0].createdAt);
   assert.equal(emitted[0] && "agentType" in emitted[0] ? emitted[0].agentType : undefined, "codex-desktop");
   assert.deepEqual(emitted[1], {
     type: "agent.completed",

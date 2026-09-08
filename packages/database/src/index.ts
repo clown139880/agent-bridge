@@ -103,11 +103,11 @@ export class Store {
   }
 
   setThread(sessionId: string, threadId: string): void {
-    this.db.prepare("UPDATE sessions SET matrix_thread_id=?, updated_at=? WHERE id=?").run(threadId, Date.now(), sessionId);
+    this.db.prepare("UPDATE sessions SET matrix_thread_id=? WHERE id=?").run(threadId, sessionId);
   }
 
   updateSessionStatus(sessionId: string, status: AgentStatus): void {
-    this.db.prepare("UPDATE sessions SET status=?, updated_at=? WHERE id=?").run(status, Date.now(), sessionId);
+    this.db.prepare("UPDATE sessions SET status=? WHERE id=?").run(status, sessionId);
   }
 
   getSession(id: string): SessionRecord | undefined {
@@ -130,8 +130,8 @@ export class Store {
   }
 
   setNativeSessionId(sessionId: string, nativeSessionId: string): void {
-    this.db.prepare("UPDATE sessions SET native_session_id=?, updated_at=? WHERE id=?")
-      .run(nativeSessionId, Date.now(), sessionId);
+    this.db.prepare("UPDATE sessions SET native_session_id=? WHERE id=?")
+      .run(nativeSessionId, sessionId);
   }
 
   listSessions(limit = 20): SessionRecord[] {

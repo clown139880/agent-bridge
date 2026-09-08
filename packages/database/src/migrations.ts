@@ -133,4 +133,37 @@ export function migrateDatabase(db: DatabaseSync): void {
       db.exec("COMMIT");
     } catch (error) { try { db.exec("ROLLBACK"); } catch {} throw error; }
   }
+  const applied3 = db.prepare("SELECT 1 FROM schema_migrations WHERE version=3").get();
+  if (!applied3) {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      db.exec(`
+        CREATE TABLE deleted_sessions (
+          session_id TEXT PRIMARY KEY, machine_id TEXT NOT NULL, deleted_at INTEGER NOT NULL
+        );
+        CREATE INDEX deleted_sessions_machine_idx ON deleted_sessions(machine_id, deleted_at);
+      `);
+      db.prepare("INSERT INTO schema_migrations(version,applied_at) VALUES (3,?)").run(Date.now());
+      db.exec("COMMIT");
+    } catch (error) { try { db.exec("ROLLBACK"); } catch {} throw error; }
+  }
+  const applied4 = db.prepare("SELECT 1 FROM schema_migrations WHERE version=4").get();
+  if (!applied4) {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      addColumn(db, "sessions", "last_response_at", "INTEGER");
+      db.exec(`
+        UPDATE sessions SET last_response_at = (
+          SELECT MAX(events.created_at) FROM events
+          WHERE events.session_id = sessions.id AND events.event_schema = 2 AND (
+            (events.type = 'message.completed' AND json_extract(CASE WHEN json_valid(events.payload) THEN events.payload ELSE '{}' END, '$.payload.role') = 'assistant')
+            OR (events.type = 'turn.completed' AND COALESCE(json_extract(CASE WHEN json_valid(events.payload) THEN events.payload ELSE '{}' END, '$.payload.summary'), '') <> '')
+          )
+        );
+        UPDATE sessions SET updated_at = COALESCE(last_response_at, created_at);
+      `);
+      db.prepare("INSERT INTO schema_migrations(version,applied_at) VALUES (4,?)").run(Date.now());
+      db.exec("COMMIT");
+    } catch (error) { try { db.exec("ROLLBACK"); } catch {} throw error; }
+  }
 }

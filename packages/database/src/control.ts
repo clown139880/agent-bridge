@@ -59,6 +59,8 @@ export interface SessionListQuery {
   conversationId?: string;
   active?: boolean;
   updatedAfter?: number;
+  dayStart?: number;
+  segment?: "recent" | "history" | "all";
   q?: string;
   sort: "updatedAt" | "createdAt";
   order: "asc" | "desc";
@@ -68,6 +70,13 @@ export interface SessionListQuery {
 
 function parseJson<T>(value: unknown, fallback: T): T {
   try { return value == null ? fallback : JSON.parse(String(value)) as T; } catch { return fallback; }
+}
+
+function promptExcerpt(value: string, limit = 80): string | null {
+  const text=value.replace(/\s+/g," ").trim();
+  if(!text)return null;
+  const points=Array.from(text);
+  return points.length<=limit?text:`${points.slice(0,limit).join("")}…`;
 }
 
 function encodeCursor(scope: string, values: unknown[]): string {
@@ -162,31 +171,31 @@ export class AgentControlStore {
       this.db.prepare("UPDATE machines SET status='offline' WHERE id=?").run(machineId);
       this.appendStream("worker.offline", "worker", `codex@${machineId}`, null, { machineId, status: "offline" });
       const sessions=this.db.prepare("SELECT id FROM sessions WHERE machine_id=?").all(machineId) as Array<{id:string}>;
-      this.db.prepare("UPDATE sessions SET activity_status='offline',updated_at=? WHERE machine_id=?")
-        .run(Date.now(),machineId);
+      this.db.prepare("UPDATE sessions SET activity_status='offline' WHERE machine_id=?").run(machineId);
       for(const session of sessions)this.appendStream("session.updated","session",session.id,session.id,this.session(session.id));
     });
   }
 
   upsertSession(machineId: string, state: SessionState): void {
+    if (this.isSessionDeleted(state.sessionId)) return;
     this.transaction(() => {
       const exists = this.db.prepare("SELECT id FROM sessions WHERE id=?").get(state.sessionId);
       if (exists) {
         this.db.prepare(`UPDATE sessions SET machine_id=?,agent_type=?,project_name=?,project_path=?,native_session_id=?,
           status=?,title=COALESCE(?,title),prompt_summary=COALESCE(?,prompt_summary),source=?,history_completeness=?,
           activity_status=?,active_turn_id=?,last_turn_status=COALESCE(?,last_turn_status),inventory_seen_at=?,
-          updated_at=MAX(updated_at,?) WHERE id=?`).run(
+          updated_at=COALESCE(last_response_at,created_at) WHERE id=?`).run(
           machineId, state.agentType, state.projectName, state.projectPath, state.nativeSessionId,
           legacyStatus(state.activityStatus, state.lastTurnStatus), state.title ?? null, state.promptSummary ?? null,
           state.source, state.historyCompleteness, state.activityStatus, state.activeTurnId ?? null,
-          state.lastTurnStatus ?? null, Date.now(), state.updatedAt, state.sessionId);
+          state.lastTurnStatus ?? null, Date.now(), state.sessionId);
       } else {
         this.db.prepare(`INSERT INTO sessions
           (id,machine_id,agent_type,project_name,project_path,matrix_room_id,matrix_thread_id,native_session_id,
            status,created_at,updated_at,title,prompt_summary,source,history_completeness,activity_status,active_turn_id,
            last_turn_status,inventory_seen_at) VALUES (?,?,?,?,?,'',NULL,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
           state.sessionId, machineId, state.agentType, state.projectName, state.projectPath, state.nativeSessionId,
-          legacyStatus(state.activityStatus, state.lastTurnStatus), state.createdAt, state.updatedAt,
+          legacyStatus(state.activityStatus, state.lastTurnStatus), state.createdAt, state.createdAt,
           state.title ?? null, state.promptSummary ?? null, state.source, state.historyCompleteness,
           state.activityStatus, state.activeTurnId ?? null, state.lastTurnStatus ?? null, Date.now());
       }
@@ -198,15 +207,15 @@ export class AgentControlStore {
   updateSessionActivity(sessionId: string, activity: SessionActivityStatus, activeTurnId?: string,
     lastTurnStatus?: TurnStatus, error?: string): void {
     this.transaction(() => {
-      const now = Date.now();
       this.db.prepare(`UPDATE sessions SET activity_status=?,active_turn_id=?,last_turn_status=COALESCE(?,last_turn_status),
-        last_error=?,status=?,updated_at=? WHERE id=?`).run(activity, activeTurnId ?? null,
-        lastTurnStatus ?? null, error ?? null, legacyStatus(activity, lastTurnStatus), now, sessionId);
+        last_error=?,status=? WHERE id=?`).run(activity, activeTurnId ?? null,
+        lastTurnStatus ?? null, error ?? null, legacyStatus(activity, lastTurnStatus), sessionId);
       this.appendStream("session.updated", "session", sessionId, sessionId, this.session(sessionId));
     });
   }
 
   appendSessionEvent(machineId: string, message: StructuredSessionEventMessage): boolean {
+    if (this.isSessionDeleted(message.sessionId)) return false;
     return this.transaction(() => {
       const run = this.db.prepare("SELECT id FROM worker_runs WHERE session_id=? ORDER BY created_at DESC LIMIT 1")
         .get(message.sessionId) as { id: string } | undefined;
@@ -223,6 +232,13 @@ export class AgentControlStore {
         sessionId: message.sessionId, runId: run?.id ?? null, turnId: message.turnId ?? null,
         itemId: message.itemId ?? null, timestamp: message.timestamp, payload: message.payload };
       this.db.prepare("UPDATE events SET payload=? WHERE id=?").run(JSON.stringify(event), sequence);
+      const payload = message.payload && typeof message.payload === "object" && !Array.isArray(message.payload)
+        ? message.payload as Record<string, unknown> : {};
+      const isReply = (message.eventType === "message.completed" && payload.role === "assistant")
+        || (message.eventType === "turn.completed" && typeof payload.summary === "string" && payload.summary.trim().length > 0);
+      if (isReply) this.db.prepare(`UPDATE sessions SET last_response_at=?,updated_at=?
+        WHERE id=? AND (last_response_at IS NULL OR last_response_at<?)`)
+        .run(message.timestamp, message.timestamp, message.sessionId, message.timestamp);
       this.appendStream("session.event.appended", "session", message.sessionId, message.sessionId, event);
       return true;
     });
@@ -252,8 +268,8 @@ export class AgentControlStore {
         turn_id=excluded.turn_id,request_json=excluded.request_json,requested_at=excluded.requested_at`)
         .run(id, kind, sessionId, run?.id ?? null, turnId ?? null, machineId, JSON.stringify(request), requestedAt, id);
       const activity = kind === "approval" ? "waiting_for_approval" : "waiting_for_input";
-      if(this.pending(id)?.status==="pending")this.db.prepare("UPDATE sessions SET activity_status=?,active_turn_id=COALESCE(?,active_turn_id),updated_at=? WHERE id=?")
-        .run(activity, turnId ?? null, Date.now(), sessionId);
+      if(this.pending(id)?.status==="pending")this.db.prepare("UPDATE sessions SET activity_status=?,active_turn_id=COALESCE(?,active_turn_id) WHERE id=?")
+        .run(activity, turnId ?? null, sessionId);
       this.appendStream(kind === "approval" ? "approval.upserted" : "user_input.upserted", kind, id,
         sessionId, this.pendingWire(this.pending(id)!));
     });
@@ -390,8 +406,8 @@ export class AgentControlStore {
       .all(sessionId) as Array<{kind:string}>;
     const activity=kinds.some(row=>row.kind==="user_input")?"waiting_for_input"
       :kinds.some(row=>row.kind==="approval")?"waiting_for_approval":"active";
-    this.db.prepare("UPDATE sessions SET activity_status=?,status=?,updated_at=? WHERE id=?")
-      .run(activity,activity==="active"?"working":activity==="waiting_for_input"?"waiting":"blocked",now,sessionId);
+    this.db.prepare("UPDATE sessions SET activity_status=?,status=? WHERE id=?")
+      .run(activity,activity==="active"?"working":activity==="waiting_for_input"?"waiting":"blocked",sessionId);
     this.appendStream("session.updated","session",sessionId,sessionId,this.session(sessionId));
   }
 
@@ -412,6 +428,15 @@ export class AgentControlStore {
     if (input.agents?.length) { where.push(`agent_type IN (${input.agents.map(() => "?").join(",")})`); params.push(...input.agents); }
     if (input.workspace) { where.push("project_path=?"); params.push(input.workspace); }
     if (input.updatedAfter != null) { where.push("updated_at>?"); params.push(input.updatedAfter); }
+    if (input.segment === "recent") {
+      if (input.dayStart == null) throw new Error("day_start_required");
+      where.push("(updated_at>=? OR activity_status IN ('creating','active','waiting_for_approval','waiting_for_input','error'))");
+      params.push(input.dayStart);
+    } else if (input.segment === "history") {
+      if (input.dayStart == null) throw new Error("day_start_required");
+      where.push("updated_at<? AND activity_status NOT IN ('creating','active','waiting_for_approval','waiting_for_input','error')");
+      params.push(input.dayStart);
+    }
     if (input.active != null) { where.push(input.active
       ? "activity_status IN ('active','waiting_for_approval','waiting_for_input')"
       : "activity_status NOT IN ('active','waiting_for_approval','waiting_for_input')"); }
@@ -440,6 +465,34 @@ export class AgentControlStore {
     const hasMore=rows.length>limit;if(hasMore)rows.pop();
     const data=rows.map(row=>parseJson(row.payload,{}));const last=rows.at(-1);
     return {data,hasMore,nextCursor:last?`e:${last.id}`:(after??null)};
+  }
+
+  isSessionDeleted(id: string): boolean {
+    return Boolean(this.db.prepare("SELECT 1 FROM deleted_sessions WHERE session_id=?").get(id));
+  }
+
+  deleteSession(id: string): boolean {
+    return this.transaction(() => {
+      const row = this.db.prepare("SELECT machine_id FROM sessions WHERE id=?").get(id) as { machine_id: string } | undefined;
+      if (!row) return false;
+      const now = Date.now();
+      this.db.prepare(`INSERT INTO deleted_sessions(session_id,machine_id,deleted_at) VALUES(?,?,?)
+        ON CONFLICT(session_id) DO UPDATE SET machine_id=excluded.machine_id,deleted_at=excluded.deleted_at`)
+        .run(id, row.machine_id, now);
+      this.db.prepare("DELETE FROM idempotency_keys WHERE action_id IN (SELECT id FROM actions WHERE session_id=?)").run(id);
+      this.db.prepare("DELETE FROM actions WHERE session_id=?").run(id);
+      this.db.prepare("DELETE FROM pending_requests WHERE session_id=?").run(id);
+      this.db.prepare("DELETE FROM events WHERE session_id=?").run(id);
+      this.db.prepare("DELETE FROM worker_runs WHERE session_id=?").run(id);
+      this.db.prepare("DELETE FROM stream_events WHERE session_id=?").run(id);
+      this.db.prepare("DELETE FROM sessions WHERE id=?").run(id);
+      this.appendStream("session.deleted", "session", id, id, { sessionId: id, deletedAt: now });
+      return true;
+    });
+  }
+
+  resetTransientSessionActivity(): void {
+    this.db.prepare("UPDATE sessions SET activity_status='offline' WHERE activity_status IN ('creating','active','waiting_for_approval','waiting_for_input')").run();
   }
 
   sessionEventsTail(sessionId: string, before: string | undefined, limit: number, types: string[]):
@@ -475,13 +528,28 @@ export class AgentControlStore {
     const run=latest?{runId:String(latest.id),taskId:latest.task_id?String(latest.task_id):null,
       conversationId:latest.conversation_id?String(latest.conversation_id):null,status:String(latest.status),
       createdAt:Number(latest.created_at),updatedAt:Number(latest.updated_at)}:null;
+    let promptSummary=row.prompt_summary?String(row.prompt_summary):null;
+    if(!promptSummary){
+      const messages=this.db.prepare("SELECT payload FROM events WHERE session_id=? AND event_schema=2 AND type='message.completed' ORDER BY id LIMIT 20")
+        .all(String(row.id)) as Array<{payload:string}>;
+      for(const message of messages){
+        const event=parseJson<Record<string,unknown>>(message.payload,{});
+        const payload=event.payload&&typeof event.payload==="object"&&!Array.isArray(event.payload)
+          ?event.payload as Record<string,unknown>:undefined;
+        if(payload?.role==="user"&&typeof payload.text==="string"){
+          promptSummary=promptExcerpt(payload.text);
+          if(promptSummary)break;
+        }
+      }
+    }
     const result:Record<string,unknown>={sessionId:String(row.id),nativeSessionId:row.native_session_id?String(row.native_session_id):String(row.id),
       workerId:`codex@${row.machine_id}`,machineId:String(row.machine_id),agent:String(row.agent_type),
-      title:row.title?String(row.title):null,promptSummary:row.prompt_summary?String(row.prompt_summary):null,
+      title:row.title?String(row.title):null,promptSummary,
       projectName:String(row.project_name),workspace:String(row.project_path),status:String(row.activity_status??"unknown"),
       activeTurnId:row.active_turn_id?String(row.active_turn_id):null,lastTurnStatus:row.last_turn_status?String(row.last_turn_status):null,
       pendingApprovalCount:count("approval"),pendingUserInputCount:count("user_input"),latestRun:run,
-      createdAt:Number(row.created_at),updatedAt:Number(row.updated_at),source:String(row.source??"app-server"),
+      createdAt:Number(row.created_at),updatedAt:Number(row.last_response_at??row.created_at),
+      lastResponseAt:row.last_response_at==null?null:Number(row.last_response_at),source:String(row.source??"app-server"),
       historyCompleteness:String(row.history_completeness??"loaded-only")};
     if(detail){const runs=this.db.prepare("SELECT * FROM worker_runs WHERE session_id=? ORDER BY created_at DESC,id DESC LIMIT 20")
       .all(String(row.id)) as Record<string,unknown>[];

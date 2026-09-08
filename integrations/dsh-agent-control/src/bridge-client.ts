@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { ControlError } from './errors.js'
-import { mockSnapshot } from './mock.js'
+import { mockSessionEvents, mockSnapshot } from './mock.js'
 import type { BridgeCall, JsonObject, JsonValue, Snapshot } from './types.js'
 
 export interface BridgeConfig {
@@ -31,6 +31,10 @@ function query(args: JsonObject, keys: readonly string[]): URLSearchParams {
 
 export class BridgeClient {
   private readonly token: string | undefined
+  private readonly resolvedMockApprovals = new Set<string>()
+  private readonly mockCreatedSessions: Snapshot['sessions'] = []
+  private readonly mockSubmittedEvents: JsonObject[] = []
+  private readonly mockDeletedSessions = new Set<string>()
 
   constructor(private readonly config: BridgeConfig) {
     this.token = config.token ?? process.env[config.tokenEnv]
@@ -44,12 +48,14 @@ export class BridgeClient {
     const args = call.args ?? {}
     switch (call.operation) {
       case 'workers': return this.request('GET', '/workers', undefined, undefined, signal)
+      case 'models': return this.request('GET', `/workers/${this.segment(textArg(args, 'workerId')!)}/models`, undefined, undefined, signal)
       case 'snapshot': return this.request('GET', `/snapshot?${query(args, ['sessionLimit'])}`, undefined, undefined, signal)
-      case 'sessions': return this.request('GET', `/sessions?${query(args, ['workerId', 'status', 'workspace', 'taskId', 'runId', 'limit', 'cursor'])}`, undefined, undefined, signal)
+      case 'sessions': return this.request('GET', `/sessions?${query(args, ['workerId', 'status', 'workspace', 'taskId', 'runId', 'segment', 'dayStart', 'sort', 'order', 'limit', 'cursor'])}`, undefined, undefined, signal)
       case 'session': return this.request('GET', `/sessions/${this.segment(textArg(args, 'sessionId')!)}`, undefined, undefined, signal)
+      case 'delete_session': return this.request('DELETE', `/sessions/${this.segment(textArg(args, 'sessionId')!)}`, undefined, undefined, signal)
       case 'session_events': {
         const id = this.segment(textArg(args, 'sessionId')!)
-        return this.request('GET', `/sessions/${id}/events?${query(args, ['after', 'limit', 'type'])}`, undefined, undefined, signal)
+        return this.request('GET', `/sessions/${id}/events?${query(args, ['after', 'before', 'tail', 'limit', 'type'])}`, undefined, undefined, signal)
       }
       case 'create_session': return this.write('/sessions', this.pick(args, ['workerId', 'workspace', 'input', 'model']), signal)
       case 'submit_turn': {
@@ -84,7 +90,7 @@ export class BridgeClient {
     return this.request('POST', path, body, randomUUID(), signal)
   }
 
-  private async request(method: 'GET' | 'POST', path: string, body?: JsonObject, idempotencyKey?: string, outerSignal?: AbortSignal): Promise<JsonValue> {
+  private async request(method: 'GET' | 'POST' | 'DELETE', path: string, body?: JsonObject, idempotencyKey?: string, outerSignal?: AbortSignal): Promise<JsonValue> {
     const timeout = AbortSignal.timeout(this.config.timeoutMs)
     const signal = outerSignal ? AbortSignal.any([outerSignal, timeout]) : timeout
     const headers: Record<string, string> = {
@@ -124,21 +130,76 @@ export class BridgeClient {
 
   private mock(call: BridgeCall): JsonValue {
     const args = call.args ?? {}
+    const sessions = [...this.mockCreatedSessions, ...mockSnapshot.sessions].filter(item => !this.mockDeletedSessions.has(item.sessionId))
+    const pending = mockSnapshot.approvals.filter(item => !this.resolvedMockApprovals.has(item.id))
+    const page = (rows: JsonValue[], eventPage = false): JsonValue => {
+      const value = args[eventPage ? 'after' : 'cursor']
+      const limit = typeof args['limit'] === 'number' ? Math.max(1, Math.min(500, args['limit'])) : 100
+      if (eventPage && args['tail'] === true) {
+        const before = args['before']
+        const end = typeof before === 'string' && /^mock:\d+$/.test(before) ? Number(before.slice(5)) : rows.length
+        const start = Math.max(0, end - limit)
+        return { data: rows.slice(start, end), nextCursor: start > 0 ? `mock:${start}` : null, hasMore: start > 0, streamCursor: 'mock:1' }
+      }
+      const offset = typeof value === 'string' && /^mock:\d+$/.test(value) ? Number(value.slice(5)) : 0
+      const data = rows.slice(offset, offset + limit)
+      const next = offset + data.length
+      return { data, nextCursor: next < rows.length || eventPage ? `mock:${next}` : null, hasMore: next < rows.length, streamCursor: 'mock:1' }
+    }
     switch (call.operation) {
       case 'workers': return { workers: mockSnapshot.workers, streamCursor: mockSnapshot.streamCursor ?? 'mock:1' } as unknown as JsonValue
-      case 'snapshot': return mockSnapshot as unknown as JsonValue
-      case 'sessions': return { data: mockSnapshot.sessions, nextCursor: null, hasMore: false, streamCursor: 'mock:1' } as unknown as JsonValue
-      case 'session': return mockSnapshot.sessions.find(item => item.id === args['sessionId']) as unknown as JsonValue ?? null
-      case 'session_events': return { data: [], nextCursor: null, hasMore: false, streamCursor: 'mock:1' }
-      case 'approvals': return { data: mockSnapshot.approvals, nextCursor: null, hasMore: false, streamCursor: 'mock:1' } as unknown as JsonValue
+      case 'models': return { models: [
+        { id: 'gpt-5.6-sol', model: 'gpt-5.6-sol', displayName: 'GPT-5.6-Sol', isDefault: true, defaultReasoningEffort: 'low', supportedReasoningEfforts: [{ reasoningEffort: 'low', description: 'Fast responses with lighter reasoning' }, { reasoningEffort: 'high', description: 'More reasoning' }] },
+        { id: 'gpt-5.6-terra', model: 'gpt-5.6-terra', displayName: 'GPT-5.6-Terra' },
+      ] } as unknown as JsonValue
+      case 'snapshot': return { ...mockSnapshot, approvals: pending } as unknown as JsonValue
+      case 'sessions': {
+        const dayStart = typeof args['dayStart'] === 'number' ? args['dayStart'] : 0
+        const attention = new Set(['creating', 'active', 'waiting_for_approval', 'waiting_for_input', 'error'])
+        const filtered = sessions.filter(item => (!args['workerId'] || item.workerId === args['workerId'])
+          && (!args['workspace'] || item.workspace === args['workspace']) && (!args['status'] || item.status === args['status'])
+          && (args['segment'] !== 'recent' || item.updatedAt >= dayStart || attention.has(item.status))
+          && (args['segment'] !== 'history' || (item.updatedAt < dayStart && !attention.has(item.status))))
+        return page(filtered as unknown as JsonValue[])
+      }
+      case 'create_session': {
+        const workerId = textArg(args, 'workerId')!
+        const workspace = textArg(args, 'workspace')!
+        if (mockSnapshot.workers.find(worker => worker.id === workerId)?.status !== 'online') throw new ControlError('worker_offline', 'Worker offline', 409)
+        const sessionId = `mock-session-${randomUUID()}`
+        this.mockCreatedSessions.unshift({ sessionId, workerId, workspace, title: 'New conversation', status: 'idle', createdAt: Date.now(), updatedAt: Date.now() })
+        return { actionId: `mock-${randomUUID()}`, kind: 'create_session', status: 'succeeded', sessionId }
+      }
+      case 'session': {
+        const session = sessions.find(item => item.sessionId === args['sessionId'])
+        return session ? { ...session, historyCompleteness: 'loaded-only', capabilities: mockSnapshot.workers.find(worker => worker.id === session.workerId)?.capabilities ?? [] } as unknown as JsonValue : null
+      }
+      case 'delete_session': {
+        const sessionId = textArg(args, 'sessionId')!
+        this.mockDeletedSessions.add(sessionId)
+        return { sessionId, deleted: true }
+      }
+      case 'session_events': return page([...mockSessionEvents, ...this.mockSubmittedEvents].filter(item => item['sessionId'] === args['sessionId']), true)
+      case 'submit_turn': {
+        const sessionId = textArg(args, 'sessionId')!
+        const input = textArg(args, 'input')!
+        const turnId = `mock-turn-${randomUUID()}`
+        this.mockSubmittedEvents.push({ eventId: `mock-event-${randomUUID()}`, sessionId, turnId, timestamp: Date.now(), type: 'message.completed', payload: { role: 'user', text: input } })
+        return { actionId: `mock-${randomUUID()}`, kind: 'submit_turn', status: 'succeeded', sessionId, turnId, resolvedAction: 'start_turn' }
+      }
+      case 'approvals': return page(pending.filter(item => !args['sessionId'] || item.sessionId === args['sessionId']) as unknown as JsonValue[])
       case 'approval': return mockSnapshot.approvals.find(item => item.id === args['approvalId']) as unknown as JsonValue ?? null
       case 'user_input': return { data: mockSnapshot.userInput, nextCursor: null, hasMore: false, streamCursor: 'mock:1' } as unknown as JsonValue
       case 'user_input_request': return mockSnapshot.userInput.find(item => item.id === args['requestId']) as unknown as JsonValue ?? null
       case 'respond_user_input': throw new ControlError('secret_input_unsupported', 'Mock transport does not persist or relay secret input.', 409)
+      case 'resolve_approval': {
+        this.resolvedMockApprovals.add(textArg(args, 'approvalId')!)
+        return { actionId: `mock-${randomUUID()}`, status: 'succeeded', kind: call.operation }
+      }
       default: return {
         actionId: `mock-${randomUUID()}`, kind: call.operation, status: 'succeeded',
         sessionId: typeof args['sessionId'] === 'string' ? args['sessionId'] : null,
-        turnId: null, ...(call.operation === 'submit_turn' ? { resolvedAction: 'start_turn' } : {}),
+        turnId: null,
       }
     }
   }

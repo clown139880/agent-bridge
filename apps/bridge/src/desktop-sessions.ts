@@ -217,6 +217,7 @@ export class CodexDesktopSessionScanner {
       title: state.title,
       status,
       createdAt: Math.floor(state.modifiedAt),
+      updatedAt: Math.floor(state.modifiedAt),
     });
   }
 }
