@@ -132,6 +132,72 @@ test("a restored active thread is included in the authoritative heartbeat snapsh
   assert.deepEqual(adapter.sessionActivity().activeSessionIds, ["active-thread"]);
 });
 
+test("reconnect synchronizes active turns after completion notifications were lost", async () => {
+  const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
+  const adapter = new CodexAppServerAdapter({
+    command: "codex", url: "ws://127.0.0.1:4500", allowedRoots: [process.cwd()],
+    manageServer: false, reconnectMs: 3_000,
+  }, () => {});
+  const internals = adapter as unknown as {
+    readyPromise: Promise<void>;
+    socket: { readyState: number; close(): void };
+    activeTurns: Map<string, string>;
+    activeThreads: Set<string>;
+    subscribedThreads: Set<string>;
+    threadsById: Map<string, { id: string; cwd: string }>;
+    restoreLoadedThreads(): Promise<void>;
+    request(method: string, params: Record<string, unknown>): Promise<unknown>;
+  };
+  internals.readyPromise = Promise.resolve();
+  internals.socket = { readyState: 1, close() {} };
+  for (const threadId of ["idle-thread", "changed-thread", "deleted-thread"]) {
+    internals.activeTurns.set(threadId, `stale-${threadId}`);
+    internals.activeThreads.add(threadId);
+    internals.subscribedThreads.add(threadId);
+    internals.threadsById.set(threadId, { id: threadId, cwd: process.cwd() });
+  }
+  internals.request = async (method, params) => {
+    calls.push({ method, params });
+    if (method === "thread/list") return { data: [], nextCursor: null };
+    if (method === "thread/loaded/list") return { data: [] };
+    if (method === "thread/read") {
+      if (params.threadId === "idle-thread") {
+        return { thread: { id: "idle-thread", cwd: process.cwd(), status: { type: "idle" }, turns: [
+          { id: "stale-idle-thread", status: "interrupted" },
+        ] } };
+      }
+      if (params.threadId === "changed-thread") {
+        return { thread: { id: "changed-thread", cwd: process.cwd(), status: { type: "active" }, turns: [
+          { id: "stale-changed-thread", status: "interrupted" },
+          { id: "current-turn", status: "inProgress" },
+        ] } };
+      }
+      throw new Error("thread not found");
+    }
+    return {};
+  };
+
+  await internals.restoreLoadedThreads();
+
+  assert.equal(internals.activeTurns.has("idle-thread"), false);
+  assert.equal(internals.activeThreads.has("idle-thread"), false);
+  assert.equal(internals.activeTurns.get("changed-thread"), "current-turn");
+  assert.equal(internals.activeThreads.has("changed-thread"), true);
+  assert.equal(internals.activeTurns.has("deleted-thread"), false);
+  assert.equal(internals.activeThreads.has("deleted-thread"), false);
+  assert.deepEqual(calls.filter((call) => call.method === "thread/read").map((call) => call.params), [
+    { threadId: "idle-thread", includeTurns: true },
+    { threadId: "changed-thread", includeTurns: true },
+    { threadId: "deleted-thread", includeTurns: true },
+  ]);
+
+  await adapter.submitTurnAction("new-turn", "idle-thread", "continue", "auto");
+  await adapter.submitTurnAction("steer", "changed-thread", "more", "auto", "current-turn");
+  assert.ok(calls.some((call) => call.method === "turn/start" && call.params.threadId === "idle-thread"));
+  assert.ok(calls.some((call) => call.method === "turn/steer"
+    && call.params.threadId === "changed-thread" && call.params.expectedTurnId === "current-turn"));
+});
+
 test("subsequent input does not resume an already subscribed thread again", async () => {
   const methods: string[] = [];
   const adapter = new CodexAppServerAdapter({

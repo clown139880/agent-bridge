@@ -493,7 +493,51 @@ export class CodexAppServerAdapter {
         log.warn({ error, threadId }, "Unable to restore loaded Codex thread");
       }
     }
+    await this.syncActiveTurns(new Set([
+      ...this.threadsById.keys(),
+      ...this.activeTurns.keys(),
+      ...result.data,
+    ]));
     if (!listed) log.warn("Session inventory is limited to thread/loaded/list");
+  }
+
+  private async syncActiveTurns(threadIds: Iterable<string>): Promise<void> {
+    for (const threadId of threadIds) {
+      const previousTurnId = this.activeTurns.get(threadId);
+      try {
+        const result = await this.request<{ thread: CodexThread & { turns?: CodexTurn[] } }>("thread/read", {
+          threadId,
+          includeTurns: true,
+        });
+        const thread = result.thread;
+
+        let activeTurnId: string | undefined;
+        if (thread.status?.type === "active") {
+          const turns = thread.turns ?? [];
+          for (let index = turns.length - 1; index >= 0; index -= 1) {
+            if (turns[index]?.status === "inProgress") {
+              activeTurnId = turns[index]?.id;
+              break;
+            }
+          }
+        }
+
+        // Notifications are already live while restoration runs. Only apply
+        // the read if no newer turn notification changed the cached value.
+        if (this.activeTurns.get(threadId) !== previousTurnId) continue;
+        if (activeTurnId) this.activeTurns.set(threadId, activeTurnId);
+        else this.activeTurns.delete(threadId);
+        if (thread.status?.type === "active") this.activeThreads.add(threadId);
+        else this.activeThreads.delete(threadId);
+      } catch (error) {
+        if (previousTurnId && isThreadNotFoundError(error)
+          && this.activeTurns.get(threadId) === previousTurnId) {
+          this.activeTurns.delete(threadId);
+          this.activeThreads.delete(threadId);
+        }
+        log.warn({ error, threadId }, "Unable to synchronize Codex thread state");
+      }
+    }
   }
 
   private async hydrateThreadHistory(threadId: string): Promise<void> {
@@ -1074,4 +1118,9 @@ function truncateEventText(text: string): string {
 
 function domainError(code: string, message: string): Error & { code: string; retryable: boolean } {
   return Object.assign(new Error(message), { code, retryable: false });
+}
+
+function isThreadNotFoundError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /(?:thread.*(?:not found|does not exist)|(?:not found|unknown).*thread)/i.test(message);
 }
