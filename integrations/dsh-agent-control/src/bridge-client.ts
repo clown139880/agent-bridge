@@ -51,10 +51,10 @@ export class BridgeClient {
         const id = this.segment(textArg(args, 'sessionId')!)
         return this.request('GET', `/sessions/${id}/events?${query(args, ['after', 'limit', 'type'])}`, undefined, undefined, signal)
       }
-      case 'create_session': return this.write('/sessions', this.pick(args, ['workerId', 'workspace', 'input']), signal)
+      case 'create_session': return this.write('/sessions', this.pick(args, ['workerId', 'workspace', 'input', 'model']), signal)
       case 'submit_turn': {
         const id = this.segment(textArg(args, 'sessionId')!)
-        return this.write(`/sessions/${id}/turns`, this.pick(args, ['input', 'delivery', 'expectedTurnId']), signal)
+        return this.write(`/sessions/${id}/turns`, this.pick(args, ['input', 'delivery', 'expectedTurnId', 'model']), signal)
       }
       case 'interrupt_turn': {
         const id = this.segment(textArg(args, 'sessionId')!)

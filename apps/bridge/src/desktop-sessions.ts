@@ -157,6 +157,13 @@ export class CodexDesktopSessionScanner {
         continue;
       }
       const payload = entry.payload ?? {};
+      if (entry.type === "session_meta" && payload.id === state.threadId && typeof payload.title === "string") {
+        if (payload.title !== state.title) {
+          state.title = payload.title;
+          if (!baselineOnly) this.emitDiscovery(state, state.activeTurnId ? "working" : "waiting");
+        }
+        continue;
+      }
       if (entry.type === "event_msg" && payload.type === "task_started" && typeof payload.turn_id === "string") {
         state.activeTurnId = payload.turn_id;
         state.lastAssistantText = undefined;
@@ -175,17 +182,7 @@ export class CodexDesktopSessionScanner {
       if (this.reportedEvents.has(eventId)) continue;
       this.reportedEvents.add(eventId);
       if (baselineOnly) continue;
-      this.options.emit({
-        type: "session.discovered",
-        sessionId: state.threadId,
-        nativeSessionId: state.threadId,
-        agentType: "codex-desktop",
-        projectPath: state.cwd,
-        projectName: basename(state.cwd.replace(/[\\/]$/, "")) || state.cwd,
-        title: state.title,
-        status: terminalType === "agent.completed" ? "completed" : "stopped",
-        createdAt: Math.floor(state.modifiedAt),
-      });
+      this.emitDiscovery(state, terminalType === "agent.completed" ? "completed" : "stopped");
       this.options.emit({
         type: terminalType,
         eventId,
@@ -207,6 +204,20 @@ export class CodexDesktopSessionScanner {
         },
       });
     }
+  }
+
+  private emitDiscovery(state: FileState, status: "working" | "waiting" | "completed" | "stopped"): void {
+    this.options.emit({
+      type: "session.discovered",
+      sessionId: state.threadId,
+      nativeSessionId: state.threadId,
+      agentType: "codex-desktop",
+      projectPath: state.cwd,
+      projectName: basename(state.cwd.replace(/[\\/]$/, "")) || state.cwd,
+      title: state.title,
+      status,
+      createdAt: Math.floor(state.modifiedAt),
+    });
   }
 }
 

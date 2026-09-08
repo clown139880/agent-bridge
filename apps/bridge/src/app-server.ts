@@ -37,6 +37,7 @@ interface CodexThread {
   updatedAt?: number;
   parentThreadId?: string | null;
   status?: { type?: string; activeFlags?: string[] };
+  model?: string;
 }
 
 interface CodexTurn {
@@ -45,6 +46,7 @@ interface CodexTurn {
   durationMs?: number | null;
   error?: { message?: string } | null;
   items?: ThreadItem[];
+  model?: string;
 }
 
 interface ThreadItem {
@@ -100,6 +102,8 @@ export class CodexAppServerAdapter {
   private readonly pendingUserInput = new Map<string, PendingUserInput>();
   private readonly pendingApprovals = new Map<string, PendingApproval>();
   private readonly activeTurns = new Map<string, string>();
+  private readonly turnModels = new Map<string, string>();
+  private readonly pendingTurnModels = new Map<string, string>();
   private readonly subscribedThreads = new Set<string>();
   private readonly threadsById = new Map<string, CodexThread>();
   private readonly activeThreads = new Set<string>();
@@ -186,7 +190,7 @@ export class CodexAppServerAdapter {
     this.desktopScannerStarted = false;
   }
 
-  async startSession(requestId: string, projectPath: string, prompt?: string, resumeSessionId?: string): Promise<string> {
+  async startSession(requestId: string, projectPath: string, prompt?: string, resumeSessionId?: string, model?: string): Promise<string> {
     await this.ensureReady();
     const cwd = await resolveProjectPath(projectPath, this.options.allowedRoots);
     if (prompt) this.pendingStartPrompts.set(cwd, prompt);
@@ -196,20 +200,20 @@ export class CodexAppServerAdapter {
         const threadCwd = await resolveProjectPath(thread.cwd, this.options.allowedRoots);
         if (threadCwd !== cwd) throw new Error(`Codex thread ${resumeSessionId} belongs to ${threadCwd}, not ${cwd}`);
         await this.discoverThread(thread, prompt, requestId);
-        if (prompt) await this.startTurn(thread.id, prompt);
+        if (prompt) await this.startTurn(thread.id, prompt, model);
         return thread.id;
       }
-      const result = await this.request<{ thread: CodexThread }>("thread/start", { cwd });
+      const result = await this.request<{ thread: CodexThread }>("thread/start", { cwd, ...(model ? { model } : {}) });
       this.subscribedThreads.add(result.thread.id);
       await this.discoverThread(result.thread, prompt, requestId);
-      if (prompt) await this.startTurn(result.thread.id, prompt);
+      if (prompt) await this.startTurn(result.thread.id, prompt, model);
       return result.thread.id;
     } finally {
       if (prompt && this.pendingStartPrompts.get(cwd) === prompt) this.pendingStartPrompts.delete(cwd);
     }
   }
 
-  async input(sessionId: string, text: string): Promise<void> {
+  async input(sessionId: string, text: string, model?: string): Promise<void> {
     await this.ensureReady();
     const userInput = this.pendingUserInput.get(sessionId);
     if (userInput) {
@@ -229,25 +233,27 @@ export class CodexAppServerAdapter {
     }
     await this.ensureThreadSubscribed(sessionId);
     const activeTurnId = this.activeTurns.get(sessionId);
+    if (activeTurnId && model) throw domainError("model_not_applicable", "model cannot be changed while steering an active turn");
     const input = [{ type: "text", text, text_elements: [] }];
     if (activeTurnId) {
       await this.request("turn/steer", { threadId: sessionId, expectedTurnId: activeTurnId, input });
     } else {
-      await this.request("turn/start", {
-        threadId: sessionId,
-        input,
-        ...(desktopCwd ? { cwd: desktopCwd } : {}),
-      });
+      if(model)this.pendingTurnModels.set(sessionId,model);
+      let result:{turn?:CodexTurn};
+      try{result=await this.request<{turn?:CodexTurn}>("turn/start", {threadId:sessionId,input,
+        ...(model?{model}:{}),...(desktopCwd?{cwd:desktopCwd}:{})});}
+      finally{this.pendingTurnModels.delete(sessionId);}
+      if(result.turn?.id){const actual=result.turn.model??model;if(actual)this.turnModels.set(result.turn.id,actual);}
     }
   }
 
-  async createSessionAction(actionId: string, projectPath: string, input?: string): Promise<{ sessionId: string; turnId?: string }> {
-    const sessionId = await this.startSession(actionId, projectPath, input);
+  async createSessionAction(actionId: string, projectPath: string, input?: string, model?: string): Promise<{ sessionId: string; turnId?: string }> {
+    const sessionId = await this.startSession(actionId, projectPath, input, undefined, model);
     return { sessionId, turnId: this.activeTurns.get(sessionId) };
   }
 
   submitTurnAction(actionId: string, sessionId: string, text: string,
-    delivery: "auto" | "steer" | "start_turn", expectedTurnId?: string): Promise<{
+    delivery: "auto" | "steer" | "start_turn", expectedTurnId?: string, model?: string): Promise<{
       sessionId: string; turnId?: string; resolvedAction: "steer" | "start_turn" }> {
     return this.serial(sessionId, async () => {
       await this.ensureReady();
@@ -256,6 +262,7 @@ export class CodexAppServerAdapter {
         throw domainError("approval_pending", "approval is pending");
       await this.ensureThreadSubscribed(sessionId);
       const activeTurnId = this.activeTurns.get(sessionId);
+      if (activeTurnId && model) throw domainError("model_not_applicable", "model cannot be changed while steering an active turn");
       if (expectedTurnId && expectedTurnId !== activeTurnId) throw domainError("turn_changed", "active turn changed");
       if (delivery === "steer" && !activeTurnId) throw domainError("no_active_turn", "session has no active turn");
       if (delivery === "start_turn" && activeTurnId) throw domainError("turn_already_active", "session already has an active turn");
@@ -263,8 +270,14 @@ export class CodexAppServerAdapter {
       const input = [{ type: "text", text, text_elements: [] }];
       if (activeTurnId) await this.request("turn/steer", { threadId: sessionId, expectedTurnId: activeTurnId, input });
       else {
-        const result = await this.request<{ turn?: CodexTurn }>("turn/start", { threadId: sessionId, input });
-        if (result.turn?.id) this.activeTurns.set(sessionId, result.turn.id);
+        if(model)this.pendingTurnModels.set(sessionId,model);
+        let result:{turn?:CodexTurn};
+        try{result=await this.request<{turn?:CodexTurn}>("turn/start",{threadId:sessionId,input,...(model?{model}:{})});}
+        finally{this.pendingTurnModels.delete(sessionId);}
+        if (result.turn?.id) {
+          this.activeTurns.set(sessionId, result.turn.id);
+          const actualModel=result.turn.model??model;if(actualModel)this.turnModels.set(result.turn.id,actualModel);
+        }
       }
       this.emitSessionEvent("message.completed", sessionId, `action:${actionId}:user`,
         { role: "user", text }, this.activeTurns.get(sessionId));
@@ -436,7 +449,7 @@ export class CodexAppServerAdapter {
     socket.on("close", (code, reason) => this.handleClose(code, reason.toString()));
     socket.on("error", (error) => log.warn({ error }, "App Server WebSocket error"));
     await this.request("initialize", {
-      clientInfo: { name: "agent_bridge", title: "Agent Bridge", version: "0.5.2" },
+      clientInfo: { name: "agent_bridge", title: "Agent Bridge", version: "0.6.0" },
     });
     this.notify("initialized", {});
     log.info({ url: this.options.url }, "Connected to Codex App Server");
@@ -484,7 +497,8 @@ export class CodexAppServerAdapter {
           const type=turn.status==="failed"?"turn.failed":turn.status==="interrupted"?"turn.interrupted":"turn.completed";
           this.emitSessionEvent(type,threadId,`app-server:${threadId}:${turn.id}:history-terminal`,{
             status:turn.status==="interrupted"?"interrupted":turn.status,summary:finalAgentText(turn.items??[]),
-            error:turn.error?.message,durationMs:turn.durationMs??undefined},turn.id);
+            error:turn.error?.message,durationMs:turn.durationMs??undefined,
+            ...(turn.model?{model:turn.model}:{})},turn.id);
           this.reportedTurns.add(turn.id);
         }
       }
@@ -601,6 +615,16 @@ export class CodexAppServerAdapter {
       if (thread) {
         this.subscribedThreads.add(thread.id);
         await this.discoverThread(thread, this.pendingStartPrompts.get(thread.cwd));
+        this.emitSessionEvent("session.discovered",thread.id,`app-server:${thread.id}:started`,
+          {...(thread.model?{model:thread.model}:{})});
+      }
+      return;
+    }
+    if (method === "thread/updated") {
+      const update = params.thread as CodexThread | undefined;
+      if (update?.id) {
+        const thread = { ...this.threadsById.get(update.id), ...update } as CodexThread;
+        await this.discoverThread(thread);
       }
       return;
     }
@@ -646,14 +670,27 @@ export class CodexAppServerAdapter {
     }
     if (method === "turn/started") {
       const turn = params.turn as CodexTurn;
+      const model=turn?.model??this.turnModels.get(turn?.id)??this.pendingTurnModels.get(threadId)
+        ??this.threadsById.get(threadId)?.model;
       if (turn?.id) this.activeTurns.set(threadId, turn.id);
+      if (turn?.id&&model)this.turnModels.set(turn.id,model);
       if (turn?.id) this.emitSessionEvent("turn.started", threadId, `app-server:${threadId}:${turn.id}:started`,
-        { status: "in_progress" }, turn.id);
+        { status: "in_progress", ...(model?{model}:{}) }, turn.id);
       if (!this.activeThreads.has(threadId)) {
         this.activeThreads.add(threadId);
         this.appendLog(threadId, "Turn started");
         this.emit({ type: "agent.started", sessionId: threadId, timestamp: Date.now(), summary: "New turn started" });
       }
+      return;
+    }
+    if(method==="model/rerouted"){
+      const turnId=typeof params.turnId==="string"?params.turnId:undefined;
+      const fromModel=typeof params.fromModel==="string"?params.fromModel:undefined;
+      const toModel=typeof params.toModel==="string"?params.toModel:undefined;
+      if(turnId&&toModel)this.turnModels.set(turnId,toModel);
+      this.emitSessionEvent("model.rerouted",threadId,
+        `app-server:${threadId}:${turnId??"unknown"}:model-rerouted:${toModel??"unknown"}`,
+        {model:toModel,fromModel,toModel,reason:params.reason},turnId);
       return;
     }
     if (method === "item/completed") {
@@ -694,13 +731,15 @@ export class CodexAppServerAdapter {
   private emitTerminalTurn(threadId: string, turn: CodexTurn): void {
     const eventId = `app-server:${threadId}:${turn.id}:terminal`;
     const summary = finalAgentText(turn.items ?? []);
+    const model=turn.model??this.turnModels.get(turn.id);
+    this.turnModels.delete(turn.id);
     if (turn.status === "failed") {
       this.emit({
         type: "agent.failed", eventId, sessionId: threadId, timestamp: Date.now(),
         durationMs: turn.durationMs ?? undefined, summary: turn.error?.message ?? summary,
       });
       this.emitSessionEvent("turn.failed", threadId, `${eventId}:structured`, {
-        status: "failed", error: turn.error?.message, summary, durationMs: turn.durationMs ?? undefined,
+        status: "failed", error: turn.error?.message, summary, durationMs: turn.durationMs ?? undefined, ...(model?{model}:{}),
       }, turn.id);
     } else if (turn.status === "interrupted") {
       this.emit({
@@ -708,7 +747,7 @@ export class CodexAppServerAdapter {
         durationMs: turn.durationMs ?? undefined,
       });
       this.emitSessionEvent("turn.interrupted", threadId, `${eventId}:structured`, {
-        status: "interrupted", durationMs: turn.durationMs ?? undefined,
+        status: "interrupted", durationMs: turn.durationMs ?? undefined, ...(model?{model}:{}),
       }, turn.id);
     } else {
       this.emit({
@@ -716,7 +755,7 @@ export class CodexAppServerAdapter {
         durationMs: turn.durationMs ?? undefined, summary,
       });
       this.emitSessionEvent("turn.completed", threadId, `${eventId}:structured`, {
-        status: "completed", summary, durationMs: turn.durationMs ?? undefined,
+        status: "completed", summary, durationMs: turn.durationMs ?? undefined, ...(model?{model}:{}),
       }, turn.id);
     }
   }
@@ -742,6 +781,7 @@ export class CodexAppServerAdapter {
       promptSummary: summarizePrompt(initialPrompt || thread.preview),
       status: thread.status?.type === "active" ? "working" : "waiting",
       createdAt: (thread.createdAt ?? Math.floor(Date.now() / 1000)) * 1000,
+      model: thread.model,
     };
     this.emit(message);
   }
@@ -774,11 +814,14 @@ export class CodexAppServerAdapter {
     }
   }
 
-  private async startTurn(threadId: string, text: string): Promise<void> {
-    await this.request("turn/start", {
-      threadId,
-      input: [{ type: "text", text, text_elements: [] }],
-    });
+  private async startTurn(threadId: string, text: string, model?: string): Promise<void> {
+    if(model)this.pendingTurnModels.set(threadId,model);
+    let result:{turn?:CodexTurn};
+    try{result=await this.request<{turn?:CodexTurn}>("turn/start", {threadId,
+      input:[{type:"text",text,text_elements:[]}],...(model?{model}:{})});}
+    finally{this.pendingTurnModels.delete(threadId);}
+    if(result.turn?.id){this.activeTurns.set(threadId,result.turn.id);
+      const actual=result.turn.model??model;if(actual)this.turnModels.set(result.turn.id,actual);}
   }
 
   private request<T = unknown>(method: string, params: Record<string, unknown>, timeoutMs = 15_000): Promise<T> {

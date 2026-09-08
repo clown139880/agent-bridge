@@ -66,16 +66,16 @@ test("Hermes worker API starts and observes a headless Codex run", async () => {
 
     const startResponse = await fetch(`${base}/runs`, {
       method: "POST", headers,
-      body: JSON.stringify({ runId: "run-1", taskId: "task-1", conversationId: "matrix-session-1", workerId: "codex@dev", projectPath: "/work/repo", prompt: "Fix tests" }),
+      body: JSON.stringify({ runId: "run-1", taskId: "task-1", conversationId: "matrix-session-1", workerId: "codex@dev", projectPath: "/work/repo", prompt: "Fix tests", model: "deepseek-chat" }),
     });
     assert.equal(startResponse.status, 202);
     assert.deepEqual(sent.at(-1), {
-      type: "start_agent", sessionId: "run-1", agentType: "codex-cli", projectPath: "/work/repo", prompt: "Fix tests",
+      type: "start_agent", sessionId: "run-1", agentType: "codex-cli", projectPath: "/work/repo", prompt: "Fix tests", model: "deepseek-chat",
     });
 
     const repeated = await fetch(`${base}/runs`, {
       method: "POST", headers,
-      body: JSON.stringify({ runId: "run-1", taskId: "task-1", conversationId: "matrix-session-1", workerId: "codex@dev", projectPath: "/work/repo", prompt: "Fix tests" }),
+      body: JSON.stringify({ runId: "run-1", taskId: "task-1", conversationId: "matrix-session-1", workerId: "codex@dev", projectPath: "/work/repo", prompt: "Fix tests", model: "deepseek-chat" }),
     });
     assert.equal(repeated.status, 200);
     assert.equal(sent.length, 1, "an idempotent retry must not start a second Codex thread");
@@ -84,6 +84,10 @@ test("Hermes worker API starts and observes a headless Codex run", async () => {
       type: "session.discovered", requestId: "run-1", sessionId: "thread-1", nativeSessionId: "thread-1",
       agentType: "codex-cli", projectPath: "/work/repo", status: "working", createdAt: Date.now(),
     });
+    const inputResponse=await fetch(`${base}/runs/run-1/input`,{method:"POST",headers,
+      body:JSON.stringify({text:"continue",model:"deepseek-v3"})});
+    assert.equal(inputResponse.status,202);
+    assert.deepEqual(sent.at(-1),{type:"agent_input",sessionId:"thread-1",text:"continue",model:"deepseek-v3"});
 
     store.db.prepare("UPDATE sessions SET updated_at=1 WHERE id='thread-1'").run();
     store.db.prepare("UPDATE worker_runs SET updated_at=1 WHERE id='run-1'").run();
@@ -210,13 +214,13 @@ test("Hermes worker API starts and observes a headless Codex run", async () => {
       method: "POST", headers,
       body: JSON.stringify({
         runId: "run-2", taskId: "task-2", conversationId: "matrix-session-1",
-        workerId: "codex@dev", projectPath: "/work/repo", prompt: "What did I ask you to remember?",
+        workerId: "codex@dev", projectPath: "/work/repo", prompt: "What did I ask you to remember?", model: "deepseek-v3",
       }),
     });
     assert.equal(resumeResponse.status, 202);
     assert.deepEqual(sent.at(-1), {
       type: "start_agent", sessionId: "run-2", resumeSessionId: "thread-1",
-      agentType: "codex-cli", projectPath: "/work/repo", prompt: "What did I ask you to remember?",
+      agentType: "codex-cli", projectPath: "/work/repo", prompt: "What did I ask you to remember?", model: "deepseek-v3",
     });
     const concurrentResume = await fetch(`${base}/runs`, {
       method: "POST", headers,

@@ -102,6 +102,7 @@ function Sessions({ snapshot, refresh, initialSessionId }: { snapshot: RecordVal
   const [selected, setSelected] = useState<RecordValue | undefined>(sessions.find(item => item['sessionId'] === initialSessionId) ?? sessions[0])
   const [events, setEvents] = useState<JsonValue[]>([])
   const [message, setMessage] = useState('')
+  const [model, setModel] = useState('')
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState('')
   const load = useCallback(async (session: RecordValue) => {
@@ -119,6 +120,7 @@ function Sessions({ snapshot, refresh, initialSessionId }: { snapshot: RecordVal
     try {
       const args: RecordValue = { sessionId: str(selected['sessionId']), input: message.trim(), delivery: 'auto' }
       if (typeof selected['activeTurnId'] === 'string') args['expectedTurnId'] = selected['activeTurnId']
+      else if (model.trim()) args['model'] = model.trim()
       const result = asRecord(await call('bridge', 'submit_turn', args))
       setNotice(`Accepted: ${str(result['resolvedAction'], str(result['status']))}`); setMessage(''); await refresh()
     } catch (error) { setNotice(error instanceof Error ? error.message : 'Send failed') } finally { setBusy(false) }
@@ -138,7 +140,7 @@ function Sessions({ snapshot, refresh, initialSessionId }: { snapshot: RecordVal
       {inputs.filter(item => item['sessionId'] === selected['sessionId']).map(item => <UserInputCard key={str(item['id'])} item={item} refresh={refresh} />)}
       <div className={css.timeline}>{events.length === 0 ? <Empty>No retained events, or the session has not been opened.</Empty> : events.map((event, index) => { const item = asRecord(event); return <article className={css.event} key={str(item['id'], String(index))}><div><span>{str(item['type'], 'event')}</span><time>{str(item['createdAt'], '')}</time></div><pre>{JSON.stringify(item['payload'] ?? item, null, 2)}</pre></article> })}</div>
       {notice && <div className={css.notice}>{notice}</div>}
-      <form className={css.composer} onSubmit={event => void send(event)}><textarea value={message} onChange={event => setMessage(event.target.value)} placeholder={selected['status'] === 'active' ? 'Steer the active turn…' : 'Start a new turn…'} /><button disabled={busy || !message.trim()}>{busy ? 'Sending…' : 'Send'}</button></form>
+      <form className={css.composer} onSubmit={event => void send(event)}><input aria-label="Model" value={model} disabled={typeof selected['activeTurnId'] === 'string'} onChange={event => setModel(event.target.value)} placeholder="Model (empty = default)" /><textarea value={message} onChange={event => setMessage(event.target.value)} placeholder={selected['status'] === 'active' ? 'Steer the active turn…' : 'Start a new turn…'} /><button disabled={busy || !message.trim()}>{busy ? 'Sending…' : 'Send'}</button></form>
     </>}</main>
   </div>
 }

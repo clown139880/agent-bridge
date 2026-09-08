@@ -98,3 +98,30 @@ test("Desktop scanner ignores non-Desktop and out-of-scope rollouts", async () =
   assert.deepEqual(emitted, []);
   rmSync(root, { recursive: true, force: true });
 });
+
+test("Desktop scanner rediscovers a session when its title is updated", async () => {
+  const root = join(tmpdir(), `agent-bridge-desktop-title-${randomUUID()}`);
+  const project = join(root, "project");
+  const sessions = join(root, ".codex", "sessions");
+  const rollout = join(sessions, "rollout-title.jsonl");
+  mkdirSync(project, { recursive: true });
+  mkdirSync(sessions, { recursive: true });
+  writeFileSync(rollout, line({ type: "session_meta", payload: {
+    id: "desktop-title", cwd: project, originator: "Codex Desktop", title: "Initial",
+  } }));
+  const emitted: BridgeToControlMessage[] = [];
+  const scanner = new CodexDesktopSessionScanner({ codexHome: join(root, ".codex"), allowedRoots: [root],
+    intervalMs: 60_000, replayExisting: false, emit: (message) => emitted.push(message) });
+  await scanner.start();
+
+  appendFileSync(rollout, line({ type: "session_meta", payload: {
+    id: "desktop-title", title: "Generated title",
+  } }));
+  await scanner.refresh();
+
+  assert.equal(emitted.length, 1);
+  assert.equal(emitted[0]?.type, "session.discovered");
+  assert.equal(emitted[0]?.type === "session.discovered" ? emitted[0].title : undefined, "Generated title");
+  scanner.stop();
+  rmSync(root, { recursive: true, force: true });
+});

@@ -141,10 +141,11 @@ export class AgentControlApi {
     const key=this.requireKey(request),body=await jsonBody(request),workerId=string(body.workerId,"workerId",true)!;
     const prior=this.existingAction(principal,key,"/api/v1/sessions",body);if(prior){this.ok(response,actionJson(prior),202);return;}
     if(!workerId.startsWith("codex@")||workerId.length===6)throw new ApiProblem(400,"invalid_worker_id","workerId must be codex@machine");
-    const machineId=workerId.slice(6),workspace=string(body.workspace,"workspace",true)!,input=string(body.input,"input");
+    const machineId=workerId.slice(6),workspace=string(body.workspace,"workspace",true)!,input=string(body.input,"input"),
+      model=string(body.model,"model");
     this.requireActionBridge(machineId);
     const created=this.createAction(principal,key,"/api/v1/sessions",body,"create_session",machineId);
-    if(!created.existing)this.dispatch(created.action,{type:"action.create_session",actionId:created.action.actionId,projectPath:workspace,input});
+    if(!created.existing)this.dispatch(created.action,{type:"action.create_session",actionId:created.action.actionId,projectPath:workspace,input,model});
     this.ok(response,actionJson(this.store.action(created.action.actionId)!),202);
   }
 
@@ -169,16 +170,18 @@ export class AgentControlApi {
     const path=`/api/v1/sessions/${session.sessionId}/turns`,prior=this.existingAction(principal,key,path,body);
     if(prior){this.ok(response,actionJson(prior),202);return;}
     const delivery=body.delivery??"auto";if(!["auto","steer","start_turn"].includes(String(delivery)))throw new ApiProblem(400,"invalid_parameter","invalid delivery");
-    const expected=string(body.expectedTurnId,"expectedTurnId"),active=typeof session.activeTurnId==="string"?session.activeTurnId:undefined;
+    const expected=string(body.expectedTurnId,"expectedTurnId"),model=string(body.model,"model"),
+      active=typeof session.activeTurnId==="string"?session.activeTurnId:undefined;
     if(Number(session.pendingApprovalCount)>0)throw new ApiProblem(409,"approval_pending","resolve pending approval first");
     if(Number(session.pendingUserInputCount)>0)throw new ApiProblem(409,"user_input_pending","resolve pending user input first");
     if(expected&&expected!==active)throw new ApiProblem(409,"turn_changed","active turn changed",false,{activeTurnId:active??null});
     if(delivery==="steer"&&!active)throw new ApiProblem(409,"no_active_turn","session has no active turn");
     if(delivery==="start_turn"&&active)throw new ApiProblem(409,"turn_already_active","session already has an active turn",false,{activeTurnId:active});
+    if(model&&active)throw new ApiProblem(409,"model_not_applicable","model cannot be changed while steering an active turn");
     const machineId=String(session.machineId);this.requireActionBridge(machineId);
     const created=this.createAction(principal,key,path,body,"submit_turn",machineId,String(session.sessionId));
     if(!created.existing)this.dispatch(created.action,{type:"action.submit_turn",actionId:created.action.actionId,
-      sessionId:String(session.sessionId),input,delivery:delivery as "auto"|"steer"|"start_turn",expectedTurnId:expected});
+      sessionId:String(session.sessionId),input,delivery:delivery as "auto"|"steer"|"start_turn",expectedTurnId:expected,model});
     this.ok(response,actionJson(this.store.action(created.action.actionId)!),202);
   }
 

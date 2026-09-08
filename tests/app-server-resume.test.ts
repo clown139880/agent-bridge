@@ -99,12 +99,13 @@ test("a new run can resume a persisted thread and start its prompt as the next t
     return {};
   };
 
-  await adapter.startSession("run-2", process.cwd(), "What did I ask you to remember?", "persisted-thread");
+  await adapter.startSession("run-2", process.cwd(), "What did I ask you to remember?", "persisted-thread", "deepseek-chat");
 
   assert.deepEqual(calls.map((call) => call.method), ["thread/resume", "turn/start"]);
   assert.deepEqual(calls[1]?.params, {
     threadId: "persisted-thread",
     input: [{ type: "text", text: "What did I ask you to remember?", text_elements: [] }],
+    model: "deepseek-chat",
   });
   assert.ok(emitted.some((message) => message.type === "session.discovered"
     && message.requestId === "run-2" && message.sessionId === "persisted-thread"));
@@ -177,6 +178,46 @@ test("session action serializes steer and enforces expectedTurnId", async () => 
   const result=await adapter.submitTurnAction("a2","thread","continue","auto","turn-current");
   assert.equal(result.resolvedAction,"steer");assert.equal(calls[0]?.method,"turn/steer");
   assert.ok(emitted.some(message=>message.type==="session.event"&&message.eventType==="message.completed"));
+  await assert.rejects(adapter.submitTurnAction("a3","thread","switch","auto","turn-current","deepseek-chat"),
+    (error:any)=>error.code==="model_not_applicable");
+});
+
+test("turn events retain the rerouted model through completion", async () => {
+  const emitted:BridgeToControlMessage[]=[];
+  const adapter=new CodexAppServerAdapter({command:"codex",url:"ws://127.0.0.1:4500",allowedRoots:[process.cwd()],
+    manageServer:false,reconnectMs:3000},message=>emitted.push(message));
+  const internals=adapter as unknown as {handleNotification(method:string,params:Record<string,unknown>):Promise<void>;
+    pendingTurnModels:Map<string,string>};
+  internals.pendingTurnModels.set("thread","deepseek-chat");
+  await internals.handleNotification("turn/started",{threadId:"thread",turn:{id:"turn-1",status:"inProgress"}});
+  await internals.handleNotification("model/rerouted",{threadId:"thread",turnId:"turn-1",fromModel:"deepseek-chat",
+    toModel:"deepseek-v3",reason:"fallback"});
+  await internals.handleNotification("turn/completed",{threadId:"thread",turn:{id:"turn-1",status:"completed",items:[]}});
+  const events=emitted.filter((message):message is Extract<BridgeToControlMessage,{type:"session.event"}>=>message.type==="session.event");
+  assert.equal(events.find(event=>event.eventType==="turn.started")?.payload.model,"deepseek-chat");
+  assert.deepEqual(events.find(event=>event.eventType==="model.rerouted")?.payload,
+    {model:"deepseek-v3",fromModel:"deepseek-chat",toModel:"deepseek-v3",reason:"fallback"});
+  assert.equal(events.find(event=>event.eventType==="turn.completed")?.payload.model,"deepseek-v3");
+  assert.equal(events.find(event=>event.eventType==="model.rerouted")?.turnId,"turn-1");
+});
+
+test("thread updates merge cached metadata and rediscover the session", async () => {
+  const emitted: BridgeToControlMessage[] = [];
+  const adapter = new CodexAppServerAdapter({ command: "codex", url: "ws://127.0.0.1:4500",
+    allowedRoots: [process.cwd()], manageServer: false, reconnectMs: 3_000 }, (message) => emitted.push(message));
+  const internals = adapter as unknown as {
+    handleNotification(method: string, params: Record<string, unknown>): Promise<void>;
+    threadsById: Map<string, { id: string; cwd: string; name?: string; updatedAt?: number }>;
+  };
+  internals.threadsById.set("thread-title", { id: "thread-title", cwd: process.cwd(), name: "Old", updatedAt: 1 });
+
+  await internals.handleNotification("thread/updated", {
+    thread: { id: "thread-title", name: "Generated title", updatedAt: 2 },
+  });
+
+  assert.equal(internals.threadsById.get("thread-title")?.updatedAt, 2);
+  assert.ok(emitted.some((message) => message.type === "session.discovered"
+    && message.sessionId === "thread-title" && message.title === "Generated title"));
 });
 
 test("Matrix input resumes a completed Desktop thread in its mapped project directory", async () => {

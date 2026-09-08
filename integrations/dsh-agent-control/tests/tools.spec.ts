@@ -16,6 +16,8 @@ describe('model-facing tools', () => {
   it('uses DSH runtime argument validation for required and enum fields', () => {
     const submit = TOOL_SPECS.find(item => item.name === 'agent_bridge_submit_turn')!
     expect(validateArgs(submit.parameters, { sessionId: 's', input: 'x', delivery: 'auto' })).toEqual([])
+    expect(validateArgs(submit.parameters, { sessionId: 's', input: 'x', delivery: 'auto', model: 'deepseek-chat' })).toEqual([])
+    expect(TOOL_SPECS.find(item => item.name === 'agent_bridge_create_session')!.parameters).toHaveProperty('model')
     expect(validateArgs(submit.parameters, { sessionId: 's', delivery: 'invalid' })).not.toEqual([])
   })
 })

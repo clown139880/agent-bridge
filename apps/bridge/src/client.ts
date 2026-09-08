@@ -172,11 +172,11 @@ export class BridgeClient {
               message: `bridge update admission state is ${this.updater.admissionState()}` });
             break;
           }
-          void this.codex.startSession(message.sessionId, message.projectPath, message.prompt, message.resumeSessionId)
+          void this.codex.startSession(message.sessionId, message.projectPath, message.prompt, message.resumeSessionId, message.model)
             .catch((error) => this.send({ type: "error", sessionId: message.sessionId, message: error instanceof Error ? error.message : String(error) }));
           break;
         case "agent_input":
-          void this.codex.input(message.sessionId, message.text)
+          void this.codex.input(message.sessionId, message.text, message.model)
             .catch((error) => this.send({ type: "error", sessionId: message.sessionId, message: error instanceof Error ? error.message : String(error) }));
           break;
         case "approval_response":
@@ -247,10 +247,10 @@ export class BridgeClient {
     let result:ActionResultMessage;
     try {
       if(message.type==="action.create_session"){
-        const value=await this.codex.createSessionAction(message.actionId,message.projectPath,message.input);
+        const value=await this.codex.createSessionAction(message.actionId,message.projectPath,message.input,message.model);
         result={type:"action.result",actionId:message.actionId,kind,status:"succeeded",...value,timestamp:Date.now()};
       }else if(message.type==="action.submit_turn"){
-        const value=await this.codex.submitTurnAction(message.actionId,message.sessionId,message.input,message.delivery,message.expectedTurnId);
+        const value=await this.codex.submitTurnAction(message.actionId,message.sessionId,message.input,message.delivery,message.expectedTurnId,message.model);
         result={type:"action.result",actionId:message.actionId,kind,status:"succeeded",...value,timestamp:Date.now()};
       }else if(message.type==="action.interrupt_turn"){
         const value=await this.codex.interruptAction(message.sessionId,message.expectedTurnId);

@@ -12,9 +12,10 @@ describe('BridgeClient', () => {
     })
     vi.stubGlobal('fetch', fetchMock)
     const client = new BridgeClient({ mode: 'live', origin: 'http://bridge.invalid', tokenEnv: 'TEST_BRIDGE_TOKEN', timeoutMs: 1000 })
-    await client.call({ operation: 'submit_turn', args: { sessionId: 's1', input: 'continue', delivery: 'auto' } })
+    await client.call({ operation: 'submit_turn', args: { sessionId: 's1', input: 'continue', delivery: 'auto', model: 'deepseek-chat' } })
     const serialized = JSON.stringify(fetchMock.mock.calls)
     expect(serialized).toContain('/api/v1/sessions/s1/turns')
+    expect(serialized).toContain('deepseek-chat')
   })
 
   it('maps structured Bridge errors without exposing request headers', async () => {

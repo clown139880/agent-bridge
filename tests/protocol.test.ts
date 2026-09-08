@@ -22,3 +22,9 @@ test("parseMessage accepts approval responses", () => {
     choice: "allow-session",
   });
 });
+
+test("parseMessage preserves optional model fields", () => {
+  assert.deepEqual(parseMessage('{"type":"start_agent","sessionId":"r1","model":"deepseek-chat"}'), {
+    type: "start_agent", sessionId: "r1", model: "deepseek-chat",
+  });
+});

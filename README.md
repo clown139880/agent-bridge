@@ -2,12 +2,12 @@
 
 把多台机器上的 Codex 暴露成可由 Hermes 调度的远程 worker。Codex 仍运行在开发机上；每台 Bridge 只连接本机 Codex App Server，Control Plane 提供经过认证的 worker API、运行路由和 SQLite 持久化。原有 Matrix gateway 暂时保留为可选兼容层。
 
-当前版本：`0.5.2`
+当前版本：`0.6.0`
 
 ## 任务完成定义
 
 涉及 Agent Bridge 代码或发布的任务，只有在改动已推送到远程，且 Control Plane 的版本登记已更新、
-bridge 自更新流程已被触发后，才算真正完成。发布时必须按语义化版本规范 bump 版本（本次为 `0.5.1`），
+bridge 自更新流程已被触发后，才算真正完成。发布时必须按语义化版本规范 bump 版本（当前为 `0.6.0`），
 并在 Control Plane 中将 `BRIDGE_LATEST_VERSION` 登记为该版本；各主机的 bridge 再自行发现、拉取、校验和重启。
 “本地已提交但未推送”或“远程已推送但 Control Plane 尚未登记/通告新版本”都只是中间态，
 不能作为任务的完成结论。若自更新因 active turn、待审批或待输入而延后，任务报告必须记录原因和后续触发路径。
@@ -226,6 +226,7 @@ Content-Type: application/json
   "workerId": "codex@bridge-01",
   "projectPath": "/workspace/project",
   "prompt": "完成卡片中的任务，并报告验证结果",
+  "model": "deepseek-chat",
   "resumeSessionId": "可选：上一 run 返回的 sessionId"
 }
 ```
@@ -235,6 +236,13 @@ Content-Type: application/json
 执行 `thread/resume` 和 `turn/start`，因此可以跨 `runId`、跨 `taskId` 延续上下文。目标 session 正在执行，或机器/目录不匹配时请求会被拒绝。
 也可以为连续派发传入稳定的 `conversationId`；Control Plane 会自动续接该逻辑会话在同一机器和 workspace 的最近 thread。
 两者都省略时创建新 Codex thread。
+
+### 指定模型
+
+`POST /api/v1/runs` 和 `/api/v1/runs/:runId/input` 均可在 body 中传可选 `model`。新建 thread 时该值同时传给
+`thread/start` 与首个 `turn/start`；通过 `resumeSessionId` 或 `conversationId` 续接时，它只覆盖新 turn，
+不改变历史 turn。活动 turn 的 steer 不支持切换模型，带 `model` 会返回 `model_not_applicable`。
+模型 provider 仍只由各机器的 `config.toml` 静态配置；省略该字段即使用 Codex 默认模型。
 
 一个最小的两次派发流程是：第一次正常创建 run，等待其完成并保存响应中的 `sessionId`；第二次使用新的 `runId` 和
 `taskId`，同时把保存值作为 `resumeSessionId`。`runId` 仍表示一次独立、幂等的执行，`sessionId` 表示可被多个顺序 run
@@ -246,7 +254,7 @@ Content-Type: application/json
 | --- | --- |
 | `GET /api/v1/runs/:runId` | 当前状态、Codex session 以及待处理 approvals |
 | `GET /api/v1/runs/:runId/events?after=N` | 增量读取事件；使用返回的 `next` 作为下一页游标 |
-| `POST /api/v1/runs/:runId/input` | 发送 `{ "text": "..." }`，继续同一 Codex thread |
+| `POST /api/v1/runs/:runId/input` | 发送 `{ "text": "...", "model": "可选" }`，继续同一 Codex thread |
 | `POST /api/v1/runs/:runId/interrupt` | 中断当前 turn |
 | `POST /api/v1/runs/:runId/reclaim` | 定向收尾已停滞至少 5 分钟、无原因且无待审批项的 blocked run |
 | `POST /api/v1/runs/:runId/approvals/:approvalId` | 提交 `{ "choice": "allow" }` 等授权决定 |
@@ -355,7 +363,7 @@ BRIDGE_ALLOWED_ROOTS=C:\Users\<windows-user>\Workspace
 启用监控时，Bridge 会把 `CODEX_DESKTOP_HOME` 同时作为其托管 App Server 的 `CODEX_HOME`，
 并在接力前确认 Desktop 没有仍在执行该 thread。不要同时从 Desktop 和其他控制端向同一个活跃 turn 输入。
 
-## Matrix 使用
+## Matrix 使用（已弃用，仅作兼容保留）
 
 直接在房间发送第一条任务，例如：
 

@@ -58,6 +58,7 @@ export interface SessionDiscoveredMessage {
   promptSummary?: string;
   status: AgentStatus;
   createdAt: number;
+  model?: string;
 }
 
 export interface RegisterMessage {
@@ -134,12 +135,14 @@ export interface StartAgentMessage {
   agentType: "codex-cli";
   projectPath: string;
   prompt?: string;
+  model?: string;
 }
 
 export interface AgentInputMessage {
   type: "agent_input";
   sessionId: string;
   text: string;
+  model?: string;
 }
 
 export interface StopAgentMessage {
@@ -237,7 +240,7 @@ export type StructuredSessionEventType =
   | "session.discovered" | "session.updated" | "turn.started" | "turn.completed"
   | "turn.failed" | "turn.interrupted" | "message.completed" | "command.completed"
   | "file_change.completed" | "progress" | "approval.requested" | "approval.resolved"
-  | "user_input.requested" | "user_input.resolved" | "error";
+  | "user_input.requested" | "user_input.resolved" | "model.rerouted" | "error";
 
 export interface StructuredSessionEventMessage {
   type: "session.event";
@@ -255,6 +258,7 @@ export interface CreateSessionActionMessage {
   actionId: string;
   projectPath: string;
   input?: string;
+  model?: string;
 }
 export interface SubmitTurnActionMessage {
   type: "action.submit_turn";
@@ -263,6 +267,7 @@ export interface SubmitTurnActionMessage {
   input: string;
   delivery: "auto" | "steer" | "start_turn";
   expectedTurnId?: string;
+  model?: string;
 }
 export interface InterruptTurnActionMessage {
   type: "action.interrupt_turn";

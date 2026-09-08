@@ -8,6 +8,7 @@ import test from "node:test";
 import { WebSocket } from "ws";
 import { AgentControlStore, Store } from "../packages/database/src/index.js";
 import { ControlPlane } from "../apps/control-plane/src/server.js";
+import { CodexAppServerAdapter } from "../apps/bridge/src/app-server.js";
 import type { BridgeToControlMessage, ControlToBridgeMessage } from "../packages/protocol/src/index.js";
 
 class HeadlessGateway {
@@ -52,10 +53,16 @@ test("Agent Control REST exposes snapshot, pagination, actions, idempotency and 
     const forbidden=await fetch(`${f.base}/sessions/thread-1/turns`,{method:"POST",headers:{authorization:"Bearer read","content-type":"application/json","idempotency-key":"read-cannot-write"},body:'{"input":"x"}'});
     assert.equal(forbidden.status,403);
 
-    const turn=await fetch(`${f.base}/sessions/thread-1/turns`,{method:"POST",headers:{...f.headers,"idempotency-key":"turn-one"},body:JSON.stringify({input:"continue",delivery:"auto"})});
+    const create=await fetch(`${f.base}/sessions`,{method:"POST",headers:{...f.headers,"idempotency-key":"create-model"},
+      body:JSON.stringify({workerId:"codex@dev",workspace:"/work/repo",input:"hello",model:"deepseek-chat"})});
+    assert.equal(create.status,202);assert.equal((f.sent.at(-1) as any).type,"action.create_session");
+    assert.equal((f.sent.at(-1) as any).model,"deepseek-chat");
+
+    const turn=await fetch(`${f.base}/sessions/thread-1/turns`,{method:"POST",headers:{...f.headers,"idempotency-key":"turn-one"},body:JSON.stringify({input:"continue",delivery:"auto",model:"deepseek-v3"})});
     assert.equal(turn.status,202);const receipt=await turn.json() as any;assert.equal(receipt.status,"accepted");
     assert.equal((f.sent.at(-1) as any).type,"action.submit_turn");
-    const repeat=await fetch(`${f.base}/sessions/thread-1/turns`,{method:"POST",headers:{...f.headers,"idempotency-key":"turn-one"},body:JSON.stringify({input:"continue",delivery:"auto"})}).then(r=>r.json()) as any;
+    assert.equal((f.sent.at(-1) as any).model,"deepseek-v3");
+    const repeat=await fetch(`${f.base}/sessions/thread-1/turns`,{method:"POST",headers:{...f.headers,"idempotency-key":"turn-one"},body:JSON.stringify({input:"continue",delivery:"auto",model:"deepseek-v3"})}).then(r=>r.json()) as any;
     assert.equal(repeat.actionId,receipt.actionId);assert.equal(f.sent.filter(item=>item.type==="action.submit_turn").length,1);
     await f.internals.handleBridgeMessage("dev",{type:"action.result",actionId:receipt.actionId,kind:"submit_turn",status:"succeeded",
       sessionId:"thread-1",turnId:"turn-1",resolvedAction:"start_turn",timestamp:Date.now()});
@@ -64,7 +71,7 @@ test("Agent Control REST exposes snapshot, pagination, actions, idempotency and 
     await f.internals.handleBridgeMessage("dev",{type:"session.event",eventId:"turn-start",eventType:"turn.started",
       sessionId:"thread-1",turnId:"turn-1",timestamp:Date.now(),payload:{status:"in_progress"}});
     const repeatAfterStateChange=await fetch(`${f.base}/sessions/thread-1/turns`,{method:"POST",
-      headers:{...f.headers,"idempotency-key":"turn-one"},body:JSON.stringify({input:"continue",delivery:"auto"})});
+      headers:{...f.headers,"idempotency-key":"turn-one"},body:JSON.stringify({input:"continue",delivery:"auto",model:"deepseek-v3"})});
     assert.equal(repeatAfterStateChange.status,202);
     assert.equal((await repeatAfterStateChange.json() as any).actionId,receipt.actionId);
     const stale=await fetch(`${f.base}/sessions/thread-1/turns`,{method:"POST",headers:{...f.headers,"idempotency-key":"stale"},
@@ -105,6 +112,31 @@ test("Agent Control REST exposes snapshot, pagination, actions, idempotency and 
     assert.equal(noContentType.status,415);
     assert.equal((await noContentType.json() as any).error.code,"unsupported_media_type");
   }finally{await f.close();}
+});
+
+test("thread/updated asynchronously refreshes the persisted session title", async () => {
+  const f = await fixture();
+  try {
+    const pending: Promise<void>[] = [];
+    const adapter = new CodexAppServerAdapter({ command: "codex", url: "ws://127.0.0.1:4500",
+      allowedRoots: [process.cwd()], manageServer: false, reconnectMs: 3_000 }, (message) => {
+      pending.push(f.internals.handleBridgeMessage("dev", message));
+    });
+    const internals = adapter as unknown as {
+      handleNotification(method: string, params: Record<string, unknown>): Promise<void>;
+      threadsById: Map<string, { id: string; cwd: string; name?: string; updatedAt?: number }>;
+    };
+    internals.threadsById.set("thread-1", { id: "thread-1", cwd: process.cwd(), name: "Control me" });
+
+    await internals.handleNotification("thread/updated", {
+      thread: { id: "thread-1", name: "Asynchronous title", updatedAt: 3 },
+    });
+    await Promise.all(pending);
+
+    assert.equal(f.internals.controlStore.session("thread-1")?.title, "Asynchronous title");
+  } finally {
+    await f.close();
+  }
 });
 
 test("snapshot cursor followed by SSE does not miss a committed session event",async()=>{

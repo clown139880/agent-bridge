@@ -30,6 +30,7 @@ interface PendingRunLaunch {
   projectPath: string;
   prompt: string;
   resumeSessionId?: string;
+  model?: string;
   targetVersion: string;
   epoch: string;
   timeout: NodeJS.Timeout;
@@ -327,6 +328,7 @@ export class ControlPlane {
       const taskId = optionalStringField(body, "taskId");
       const conversationId = optionalStringField(body, "conversationId");
       const resumeSessionId = optionalStringField(body, "resumeSessionId");
+      const model = optionalStringField(body, "model");
       const allowStaleVersion = body && typeof body === "object"
         ? (body as Record<string, unknown>).allow_stale_version === true : false;
       if (workerId && (!workerId.startsWith("codex@") || !machineId || (explicitMachineId && explicitMachineId !== machineId))) {
@@ -392,14 +394,14 @@ export class ControlPlane {
       });
       if (this.bridgeNeedsUpdate(bridge) && !allowStaleVersion) {
         this.queueRunForUpdate({ runId, machineId, projectPath, prompt,
-          resumeSessionId: effectiveResumeSessionId });
+          resumeSessionId: effectiveResumeSessionId, model });
         this.sendUpdateAnnouncement(bridge.socket);
       } else {
         if (allowStaleVersion && this.bridgeNeedsUpdate(bridge)) {
           log.warn({ machineId, runId, currentVersion: bridge.bridgeVersion,
             targetVersion: this.options.bridgeUpdate?.latestVersion }, "Audited stale bridge version override");
         }
-        this.sendStartAgent(bridge, runId, projectPath, prompt, effectiveResumeSessionId);
+        this.sendStartAgent(bridge, runId, projectPath, prompt, effectiveResumeSessionId, model);
       }
       this.json(response, 202, workerRunJson(this.store.getWorkerRun(runId)!));
       return;
@@ -440,11 +442,12 @@ export class ControlPlane {
         if (action === "input") {
           const body = await readJson(request);
           const input = stringField(body, "text");
+          const model = optionalStringField(body, "model");
           if (!input) {
             this.json(response, 400, { error: "text is required" });
             return;
           }
-          this.send(bridge.socket, { type: "agent_input", sessionId: run.sessionId, text: input });
+          this.send(bridge.socket, { type: "agent_input", sessionId: run.sessionId, text: input, model });
         } else {
           this.send(bridge.socket, { type: "stop_agent", sessionId: run.sessionId });
         }
@@ -734,25 +737,27 @@ export class ControlPlane {
       clearTimeout(pending.timeout);
       this.pendingRunLaunches.delete(runId);
       this.store.updateWorkerRun(runId, "starting");
-      this.sendStartAgent(bridge, runId, pending.projectPath, pending.prompt, pending.resumeSessionId);
+      this.sendStartAgent(bridge, runId, pending.projectPath, pending.prompt, pending.resumeSessionId, pending.model);
     }
   }
 
   private sendStartAgent(bridge: BridgeConnection, runId: string, projectPath: string,
-    prompt: string, resumeSessionId?: string): void {
+    prompt: string, resumeSessionId?: string, model?: string): void {
     this.send(bridge.socket, { type: "start_agent", sessionId: runId, resumeSessionId,
-      agentType: "codex-cli", projectPath, prompt });
+      agentType: "codex-cli", projectPath, prompt, model });
   }
 
   private replayControlActions(machineId: string): void {
     for (const { action, request, path } of this.controlStore.pendingActions(machineId)) {
       if (action.kind === "create_session") this.registry.send(machineId, { type: "action.create_session",
         actionId: action.actionId, projectPath: String(request.workspace),
-        input: typeof request.input === "string" ? request.input : undefined });
+        input: typeof request.input === "string" ? request.input : undefined,
+        model: typeof request.model === "string" ? request.model : undefined });
       else if (action.kind === "submit_turn" && action.sessionId) this.registry.send(machineId, {
         type: "action.submit_turn", actionId: action.actionId, sessionId: action.sessionId,
         input: String(request.input), delivery: (request.delivery ?? "auto") as "auto"|"steer"|"start_turn",
-        expectedTurnId: typeof request.expectedTurnId === "string" ? request.expectedTurnId : undefined });
+        expectedTurnId: typeof request.expectedTurnId === "string" ? request.expectedTurnId : undefined,
+        model: typeof request.model === "string" ? request.model : undefined });
       else if (action.kind === "interrupt_turn" && action.sessionId) this.registry.send(machineId, {
         type: "action.interrupt_turn", actionId: action.actionId, sessionId: action.sessionId,
         expectedTurnId: typeof request.expectedTurnId === "string" ? request.expectedTurnId : undefined });

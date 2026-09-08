@@ -25,6 +25,7 @@ describe('client components', () => {
   it('contains no Host token, Bridge origin, or Hermes path in the browser source', () => {
     const source = readFileSync(new URL('../src/client/index.tsx', import.meta.url), 'utf8')
     expect(source).not.toMatch(/Authorization|Bearer|AGENT_BRIDGE|WORKER_API_TOKEN|127\.0\.0\.1:8787|hermesRoot|hermesHome/)
+    expect(source).toContain('Model (empty = default)')
   })
 
   it('uses the Agent Bridge sessionId contract for session operations', () => {
