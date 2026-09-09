@@ -169,8 +169,11 @@ sudo /root/agent-bridge/deploy/hal/deploy-bridge.sh
 ```
 
 脚本默认保留当前 artifact 和一个旧 artifact 用于回滚；可通过
-`AGENT_BRIDGE_RELEASE_RETENTION` 调整保留数量。若部署时仍有活动 turn、审批或输入，脚本会先完成构建和
-staging，但不会重启正在工作的 Bridge，而是以非零状态退出，待下一次调用时再激活。
+`AGENT_BRIDGE_RELEASE_RETENTION` 调整保留数量。部署时如果仍有活动 turn、审批或输入，脚本会等待：默认
+两分钟后通过 `AGENT_BRIDGE_DEPLOY_NOTIFY_COMMAND` 通知 Hermes，四分钟后通过 Control Plane interrupt API
+中断活动 turn 并强制激活新版本。通知命令接收 `AGENT_BRIDGE_DEPLOY_EVENT`、`AGENT_BRIDGE_DEPLOY_ACTIVE`、
+`AGENT_BRIDGE_DEPLOY_VERSION`、`AGENT_BRIDGE_DEPLOY_COMMIT` 和 `AGENT_BRIDGE_DEPLOY_MACHINE` 环境变量。
+等待和强制时间可分别用 `AGENT_BRIDGE_DEPLOY_NOTIFY_AFTER` 与 `AGENT_BRIDGE_DEPLOY_FORCE_AFTER` 调整。
 
 发现新版本后的本机流程为：先关闭本地 start admission 并进入 `draining_for_update`，再检查 active Codex
 turn/待审批/待输入；繁忙则报告 `deferred`，直到最后一项活动结束时主动发送 `bridge.idle`；

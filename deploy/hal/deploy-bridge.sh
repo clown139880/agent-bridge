@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+env_file=${AGENT_BRIDGE_ENV_FILE:-/etc/agent-bridge/bridge.env}
+if test -r "$env_file"; then
+  set -a
+  # shellcheck source=/dev/null
+  . "$env_file"
+  set +a
+fi
+
 repo=${AGENT_BRIDGE_REPO:-/root/agent-bridge}
 install_root=${AGENT_BRIDGE_INSTALL_ROOT:-/opt/agent-bridge}
 service=${AGENT_BRIDGE_SERVICE:-agent-bridge-hal.service}
@@ -10,7 +18,16 @@ drain_file=${AGENT_BRIDGE_DRAIN_FILE:-/run/agent-bridge-${machine_id}.drain}
 lock_file=${AGENT_BRIDGE_DEPLOY_LOCK:-/run/lock/agent-bridge-hal-deploy.lock}
 store_dir=${AGENT_BRIDGE_STORE_DIR:-$install_root/pnpm-store}
 retention=${AGENT_BRIDGE_RELEASE_RETENTION:-2}
+notify_after=${AGENT_BRIDGE_DEPLOY_NOTIFY_AFTER:-120}
+force_after=${AGENT_BRIDGE_DEPLOY_FORCE_AFTER:-240}
+poll_interval=${AGENT_BRIDGE_DEPLOY_POLL_INTERVAL:-5}
+notify_command=${AGENT_BRIDGE_DEPLOY_NOTIFY_COMMAND:-}
+control_api_url=${AGENT_BRIDGE_CONTROL_API_URL:-http://127.0.0.1:8787}
+control_api_token=${AGENT_BRIDGE_CONTROL_API_TOKEN:-${CONTROL_API_WRITE_TOKEN:-}}
 [[ "$retention" =~ ^[1-9][0-9]*$ ]] || { echo "AGENT_BRIDGE_RELEASE_RETENTION must be a positive integer." >&2; exit 1; }
+[[ "$notify_after" =~ ^[1-9][0-9]*$ && "$force_after" =~ ^[1-9][0-9]*$ && "$force_after" -gt "$notify_after" ]] || {
+  echo "AGENT_BRIDGE_DEPLOY_NOTIFY_AFTER and AGENT_BRIDGE_DEPLOY_FORCE_AFTER are invalid." >&2; exit 1;
+}
 
 exec 9>"$lock_file"
 flock -n 9 || { echo "Another HAL Bridge deployment is running." >&2; exit 1; }
@@ -84,24 +101,68 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT TERM
 
+notify_deploy() {
+  local event=$1 active=${2:-0}
+  echo "HAL Bridge deployment: $event (active=$active)"
+  if test -n "$notify_command"; then
+    AGENT_BRIDGE_DEPLOY_EVENT="$event" AGENT_BRIDGE_DEPLOY_ACTIVE="$active" \
+      AGENT_BRIDGE_DEPLOY_VERSION="$version" AGENT_BRIDGE_DEPLOY_COMMIT="$target_commit" \
+      AGENT_BRIDGE_DEPLOY_MACHINE="$machine_id" "$notify_command" ||
+      echo "Deployment notification command failed." >&2
+  fi
+}
+
+active_count() {
+  if ! test -f "$database"; then echo 0; return; fi
+  sqlite3 "$database" "
+    SELECT
+      (SELECT COUNT(*) FROM sessions
+        WHERE machine_id='$machine_id'
+          AND activity_status IN ('creating','active','waiting_for_approval','waiting_for_input'))
+      +
+      (SELECT COUNT(*) FROM pending_requests
+        WHERE machine_id='$machine_id' AND status='pending');"
+}
+
+interrupt_active_sessions() {
+  test -n "$control_api_token" || return 0
+  command -v curl >/dev/null 2>&1 || return 0
+  local body session_id
+  body=$(curl -fsS --max-time 10 -H "Authorization: Bearer $control_api_token" \
+    "$control_api_url/api/v1/sessions?machineId=$machine_id&active=true&limit=200") || return 0
+  while IFS= read -r session_id; do
+    test -n "$session_id" || continue
+    curl -fsS --max-time 10 -o /dev/null -X POST \
+      -H "Authorization: Bearer $control_api_token" \
+      -H 'Content-Type: application/json' \
+      -H "Idempotency-Key: hal-deploy-${target_commit}-${session_id}" \
+      --data '{}' "$control_api_url/api/v1/sessions/$session_id/interrupt" || true
+  done < <(node -e 'const x=JSON.parse(process.argv[1]); for (const s of (x.data ?? [])) if (s.sessionId) console.log(s.sessionId)' "$body" 2>/dev/null || true)
+}
+
 install -m 0644 /dev/null "$drain_file"
-for observation in 1 2; do
-  active=1
-  if test -f "$database"; then
-    active=$(sqlite3 "$database" "
-      SELECT
-        (SELECT COUNT(*) FROM sessions
-          WHERE machine_id='$machine_id'
-            AND activity_status IN ('creating','active','waiting_for_approval','waiting_for_input'))
-        +
-        (SELECT COUNT(*) FROM pending_requests
-          WHERE machine_id='$machine_id' AND status='pending');")
+started_wait=$(date +%s)
+notified=false
+idle_observation=0
+while true; do
+  active=$(active_count)
+  elapsed=$(( $(date +%s) - started_wait ))
+  if test "$active" -eq 0; then
+    idle_observation=$((idle_observation + 1))
+    test "$idle_observation" -ge 2 && break
+  else
+    idle_observation=0
   fi
-  if test "$active" -ne 0; then
-    echo "HAL Bridge is busy; release is staged but activation was not started." >&2
-    exit 75
+  if test "$elapsed" -ge "$notify_after" && ! "$notified"; then
+    notify_deploy waiting "$active"
+    notified=true
   fi
-  test "$observation" -eq 2 || sleep 3
+  if test "$elapsed" -ge "$force_after"; then
+    notify_deploy interrupting "$active"
+    interrupt_active_sessions
+    break
+  fi
+  sleep "$poll_interval"
 done
 
 next_link="$install_root/.current.next.$$"
