@@ -1,0 +1,18 @@
+[Unit]
+Description=HAL Agent Bridge (immutable releases)
+After=network-online.target agent-control-plane.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/agent-bridge/current
+EnvironmentFile=/etc/agent-bridge/bridge.env
+ExecStart=/usr/bin/node apps/bridge/dist/index.js
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+NoNewPrivileges=true
+SyslogIdentifier=agent-bridge-hal
+
+[Install]
+WantedBy=multi-user.target

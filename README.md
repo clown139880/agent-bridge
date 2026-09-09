@@ -110,6 +110,7 @@ Bridge 主要变量：
 | `BRIDGE_AUTO_UPDATE` | 本机自动更新开关，默认 `false` |
 | `BRIDGE_UPDATE_SOURCE` | 本机信任并实际拉取的 git 源；不会被 Control Plane 通告覆盖 |
 | `BRIDGE_UPDATE_REF` | 本机拉取的 branch/tag，默认 `main` |
+| `BRIDGE_UPDATE_SOURCE_CHECKOUT` | 可选的本机干净 checkout；使用它构建后仅发布编译产物 |
 | `BRIDGE_UPDATE_INSTALL_ROOT` | 本机 release 根目录，默认 `/opt/agent-bridge` |
 | `BRIDGE_UPDATE_CURRENT_LINK` | systemd 启动所使用的 `current` 软链接 |
 | `BRIDGE_UPDATE_STATE_PATH` | 跨重启完成确认状态文件 |
@@ -136,7 +137,8 @@ Control Plane 也没有拉取、写文件、执行命令或重启远端
 每台机器在自己的 `.env.bridge` 中独立决定是否更新以及信任哪个源。通告中的 `source` 仅供审计；实际传给
 `git clone` 的始终是本机 `BRIDGE_UPDATE_SOURCE`，因此 Control Plane 不能改变拉取目标。启用前需把当前稳定
 release 放在 `BRIDGE_UPDATE_INSTALL_ROOT/releases/`，让 `BRIDGE_UPDATE_CURRENT_LINK` 指向它，并让 systemd
-从该软链接启动（可参考 `deploy/systemd/agent-bridge-self-update.service`）。典型本机配置：
+从该软链接启动（HAL 可直接安装 `deploy/systemd/agent-bridge-hal.service`；通用示例见
+`deploy/systemd/agent-bridge-self-update.service`）。典型本机配置：
 
 ```dotenv
 BRIDGE_AUTO_UPDATE=true
@@ -145,6 +147,18 @@ BRIDGE_UPDATE_REF=main
 BRIDGE_UPDATE_INSTALL_ROOT=/opt/agent-bridge
 BRIDGE_UPDATE_RESTART_EXECUTABLE=systemctl
 BRIDGE_UPDATE_RESTART_ARGS=["--no-block","restart","agent-bridge-hal.service"]
+```
+
+HAL 的完整环境模板见 [`deploy/hal.env.example`](deploy/hal.env.example)。设置
+`BRIDGE_UPDATE_SOURCE_CHECKOUT=/root/agent-bridge` 后，Bridge 会在该干净 checkout 中
+fetch/ff-only、安装依赖并执行检查和构建，再把 `dist` 与运行所需文件放入新的 release；运行中的
+`current` 目录不会被修改。首次启用前需准备一个已验证的 release 并建立 `current` 软链接，
+然后安装并启用 HAL unit：
+
+```bash
+sudo install -Dm644 deploy/systemd/agent-bridge-hal.service /etc/systemd/system/agent-bridge-hal.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now agent-bridge-hal.service
 ```
 
 发现新版本后的本机流程为：先关闭本地 start admission 并进入 `draining_for_update`，再检查 active Codex

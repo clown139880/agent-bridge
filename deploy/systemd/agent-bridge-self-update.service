@@ -7,7 +7,10 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=/opt/agent-bridge/current
 EnvironmentFile=/etc/agent-bridge/bridge.env
-ExecStart=/usr/bin/env pnpm start:bridge
+# Run the immutable compiled artifact selected by the current symlink.  Do not
+# invoke pnpm from the source checkout: updates stage a complete release and
+# atomically switch /opt/agent-bridge/current before restarting this unit.
+ExecStart=/usr/bin/node apps/bridge/dist/index.js
 Restart=always
 RestartSec=5
 TimeoutStopSec=20
