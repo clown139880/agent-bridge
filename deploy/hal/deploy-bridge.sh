@@ -69,6 +69,7 @@ cleanup() {
   exit "$status"
 }
 trap cleanup EXIT
+trap 'exit 130' INT TERM
 
 install -m 0644 /dev/null "$drain_file"
 deadline=$((SECONDS + drain_timeout))
