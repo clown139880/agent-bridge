@@ -1,5 +1,6 @@
 param(
     [string]$EnvFile = "$env:LOCALAPPDATA\agent-bridge\bridge.env",
+    [string]$PnpmPath,
     [string]$BunPath,
     [string]$LogDirectory = "$env:LOCALAPPDATA\agent-bridge"
 )
@@ -10,21 +11,13 @@ Set-Location $root
 New-Item -ItemType Directory -Path $logDirectory -Force | Out-Null
 $logPath = Join-Path $logDirectory 'bridge.log'
 try {
-    $bunCommand = Get-Command bun.exe -ErrorAction SilentlyContinue
-    $bundledBun = Join-Path $logDirectory 'runtime\bun-windows-x64\bun.exe'
-    if ($BunPath) {
-        $runtime = $BunPath
-        $runtimeArgs = 'apps/bridge/src/index.ts'
-    } elseif ($bunCommand) {
-        $runtime = $bunCommand.Source
-        $runtimeArgs = 'apps/bridge/src/index.ts'
-    } elseif (Test-Path -LiteralPath $bundledBun) {
-        $runtime = $bundledBun
-        $runtimeArgs = 'apps/bridge/src/index.ts'
-    } else {
-        $runtime = (Get-Command node.exe -ErrorAction Stop).Source
-        $runtimeArgs = '--import tsx apps/bridge/src/index.ts'
-    }
+    $pnpmCommand = Get-Command pnpm.cmd -ErrorAction SilentlyContinue
+    $fallbackPnpm = Join-Path $env:LOCALAPPDATA 'pnpm\pnpm.cmd'
+    if ($PnpmPath) { $runtime = $PnpmPath }
+    elseif ($pnpmCommand) { $runtime = $pnpmCommand.Source }
+    elseif (Test-Path -LiteralPath $fallbackPnpm) { $runtime = $fallbackPnpm }
+    else { throw 'pnpm.cmd was not found; pass -PnpmPath with an absolute path' }
+    $runtimeArgs = 'start:bridge'
     # Task Scheduler can terminate this PowerShell wrapper without terminating a
     # process created by Start-Process. Clean up only an older Bridge launched
     # with this exact runtime before starting its replacement.

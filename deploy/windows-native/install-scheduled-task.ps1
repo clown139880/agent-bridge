@@ -1,7 +1,7 @@
 param(
     [string]$TaskName = 'Agent Bridge (dev-windows)',
     [string]$InstallRoot = "$env:LOCALAPPDATA\agent-bridge",
-    [string]$BunPath,
+    [string]$PnpmPath,
     [string]$EnvFile,
     [string]$LogDirectory
 )
@@ -11,7 +11,7 @@ $start = Join-Path $currentRoot 'deploy\windows-native\start-bridge.ps1'
 $restart = Join-Path $currentRoot 'deploy\windows-native\restart-bridge.ps1'
 $restartTaskName = "$TaskName Restart"
 $arguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$start`""
-foreach ($name in @('BunPath', 'EnvFile', 'LogDirectory')) {
+foreach ($name in @('PnpmPath', 'EnvFile', 'LogDirectory')) {
     $value = Get-Variable -Name $name -ValueOnly
     if ($value) {
         if ($value.Contains('"')) { throw "$name must not contain a double quote" }
