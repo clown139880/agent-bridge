@@ -124,6 +124,42 @@ test("bridge stages, validates, activates, restarts itself, then reports complet
   }
 });
 
+test("source checkout updates stage a compiled artifact without cloning a second checkout", async () => {
+  const root = mkdtempSync(join(tmpdir(), "agent-bridge-source-checkout-update-"));
+  const source = join(root, "source");
+  const oldRelease = join(root, "releases", "0.3.0");
+  const currentLink = join(root, "current");
+  const statePath = join(root, "state.json");
+  mkdirSync(join(source, "apps", "bridge", "dist"), { recursive: true });
+  mkdirSync(join(source, "apps", "bridge", "node_modules", "@agent-bridge", "protocol"), { recursive: true });
+  mkdirSync(join(source, "deploy", "windows-native"), { recursive: true });
+  mkdirSync(oldRelease, { recursive: true });
+  writeFileSync(join(source, "package.json"), JSON.stringify({ version: "0.4.0" }));
+  writeFileSync(join(source, "apps", "bridge", "dist", "index.js"), "console.log('compiled');");
+  writeFileSync(join(source, "apps", "bridge", "node_modules", "@agent-bridge", "protocol", "package.json"), JSON.stringify({ name: "@agent-bridge/protocol" }));
+  writeFileSync(join(source, "deploy", "windows-native", "start-bridge.ps1"), "start");
+  writeFileSync(join(oldRelease, "package.json"), JSON.stringify({ version: "0.3.0" }));
+  symlinkSync(oldRelease, currentLink, linkType);
+  const commands: string[][] = [];
+  try {
+    const updater = new BridgeSelfUpdater({
+      enabled: true, currentVersion: "0.3.0", source: "/trusted/repo", sourceRef: "main",
+      installRoot: root, sourceCheckout: source, currentLink, statePath, packageManager: "pnpm",
+      restartExecutable: "schtasks.exe", restartArgs: [], isBusy: () => false,
+      report: () => {}, restart: async () => {},
+      runCommand: async (executable, args, cwd) => { commands.push([executable, ...args]); assert.equal(cwd === source || executable === "git", true); },
+    });
+    await updater.consider({ type: "bridge_update.available", latestVersion: "0.4.0", source: "/registry/repo" });
+    assert.equal(commands.some((command) => command.includes("clone")), false);
+    assert.ok(commands.some((command) => command.join(" ").includes("fetch origin main")));
+    const artifact = resolve(dirname(currentLink), readlinkSync(currentLink));
+    assert.equal(existsSync(join(artifact, "apps", "bridge", "dist", "index.js")), true);
+    assert.equal(existsSync(join(artifact, "apps", "bridge", "node_modules", "@agent-bridge", "protocol", "package.json")), true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("an announcement cannot override the source trusted by this machine", async () => {
   const root = mkdtempSync(join(tmpdir(), "agent-bridge-source-boundary-"));
   const statuses: BridgeUpdateStatusMessage[] = [];
