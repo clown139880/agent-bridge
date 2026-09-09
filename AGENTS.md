@@ -25,6 +25,6 @@
 
 - HAL updates are agent-triggered, never Bridge auto-updates. Fetch and fast-forward the clean HAL checkout from the pushed remote commit, validate in a staged immutable release, and atomically switch the release link.
 - Never continue from a dirty HAL checkout. Do not create source-copy `.deploy-backup-*` directories and do not stash local edits. Stop and investigate unexpected changes.
-- Stage and validate while sessions are active, but never activate or restart the HAL Bridge until admission is drained and active turns, approvals, and user input are all empty. A timeout leaves the release staged and the running service untouched.
+- Stage and validate while sessions are active, but never activate or restart the HAL Bridge until admission is drained and active turns, approvals, and user input are all empty. Activation uses two short idle observations and exits immediately if either is busy; it must never wait in the background for a later idle window.
 - Keep SQLite data and secrets outside the Git checkout. Database backups must use SQLite's online backup mechanism and live outside the repository; Git and the prior immutable release provide source rollback.
 - Restarting the Control Plane and restarting the HAL Bridge are separate operations. The HAL Bridge owns its Codex App Server, so restarting it without a successful drain can interrupt active turns.

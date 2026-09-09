@@ -7,7 +7,6 @@ service=${AGENT_BRIDGE_SERVICE:-agent-bridge-hal.service}
 machine_id=${AGENT_BRIDGE_MACHINE_ID:-hal}
 database=${AGENT_BRIDGE_DATABASE:-/root/agent-bridge/data/control-plane.sqlite}
 drain_file=${AGENT_BRIDGE_DRAIN_FILE:-/run/agent-bridge-${machine_id}.drain}
-drain_timeout=${AGENT_BRIDGE_DRAIN_TIMEOUT_SECONDS:-900}
 lock_file=${AGENT_BRIDGE_DEPLOY_LOCK:-/run/lock/agent-bridge-hal-deploy.lock}
 
 exec 9>"$lock_file"
@@ -72,9 +71,7 @@ trap cleanup EXIT
 trap 'exit 130' INT TERM
 
 install -m 0644 /dev/null "$drain_file"
-deadline=$((SECONDS + drain_timeout))
-idle_observations=0
-while test "$SECONDS" -lt "$deadline"; do
+for observation in 1 2; do
   active=1
   if test -f "$database"; then
     active=$(sqlite3 "$database" "
@@ -86,18 +83,12 @@ while test "$SECONDS" -lt "$deadline"; do
         (SELECT COUNT(*) FROM pending_requests
           WHERE machine_id='$machine_id' AND status='pending');")
   fi
-  if test "$active" -eq 0; then
-    idle_observations=$((idle_observations + 1))
-    test "$idle_observations" -ge 2 && break
-  else
-    idle_observations=0
+  if test "$active" -ne 0; then
+    echo "HAL Bridge is busy; release is staged but activation was not started." >&2
+    exit 75
   fi
-  sleep 3
+  test "$observation" -eq 2 || sleep 3
 done
-if test "$idle_observations" -lt 2; then
-  echo "HAL Bridge did not drain within ${drain_timeout}s; release is staged but not activated." >&2
-  exit 1
-fi
 
 next_link="$install_root/.current.next.$$"
 ln -s "$release" "$next_link"
