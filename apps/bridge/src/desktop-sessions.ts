@@ -15,6 +15,8 @@ interface DesktopSessionMetadata {
   threadId: string;
   cwd: string;
   title?: string;
+  createdAt: number;
+  updatedAt: number;
 }
 
 interface FileState extends DesktopSessionMetadata {
@@ -27,6 +29,7 @@ interface FileState extends DesktopSessionMetadata {
 }
 
 interface RolloutEntry {
+  timestamp?: string;
   type?: string;
   payload?: Record<string, unknown>;
 }
@@ -165,6 +168,8 @@ export class CodexDesktopSessionScanner {
         continue;
       }
       const payload = entry.payload ?? {};
+      const timestamp = rolloutTimestamp(entry);
+      if (timestamp !== undefined) state.updatedAt = Math.max(state.updatedAt, timestamp);
       if (entry.type === "session_meta" && payload.id === state.threadId && typeof payload.title === "string") {
         if (payload.title !== state.title) {
           state.title = payload.title;
@@ -195,7 +200,7 @@ export class CodexDesktopSessionScanner {
         type: terminalType,
         eventId,
         sessionId: state.threadId,
-        timestamp: Date.now(),
+        timestamp: timestamp ?? Date.now(),
         summary: terminalType === "agent.completed" ? state.lastAssistantText : undefined,
       });
       this.options.emit({
@@ -204,7 +209,7 @@ export class CodexDesktopSessionScanner {
         eventType: terminalType === "agent.completed" ? "turn.completed" : "turn.interrupted",
         sessionId: state.threadId,
         turnId,
-        timestamp: Date.now(),
+        timestamp: timestamp ?? Date.now(),
         payload: {
           status: terminalType === "agent.completed" ? "completed" : "interrupted",
           summary: terminalType === "agent.completed" ? state.lastAssistantText : undefined,
@@ -224,8 +229,8 @@ export class CodexDesktopSessionScanner {
       projectName: basename(state.cwd.replace(/[\\/]$/, "")) || state.cwd,
       title: state.title,
       status,
-      createdAt: Math.floor(state.modifiedAt),
-      updatedAt: Math.floor(state.modifiedAt),
+      createdAt: state.createdAt,
+      updatedAt: state.updatedAt,
     });
   }
 }
@@ -302,7 +307,15 @@ function readDesktopSessionMetadata(path: string, allowedRoots: string[]): Deskt
     threadId: payload.id,
     cwd,
     title: typeof payload.title === "string" ? payload.title : undefined,
+    createdAt: rolloutTimestamp(entry) ?? Math.floor(statSync(path).birthtimeMs || statSync(path).mtimeMs),
+    updatedAt: rolloutTimestamp(entry) ?? Math.floor(statSync(path).mtimeMs),
   };
+}
+
+function rolloutTimestamp(entry: RolloutEntry): number | undefined {
+  if (typeof entry.timestamp !== "string") return undefined;
+  const timestamp = Date.parse(entry.timestamp);
+  return Number.isFinite(timestamp) ? timestamp : undefined;
 }
 
 function normalizeDesktopPath(value: string): string {

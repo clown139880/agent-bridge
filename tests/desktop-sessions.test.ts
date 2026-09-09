@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { appendFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -152,6 +152,49 @@ test("Desktop scanner reads generated titles from the Desktop session index", as
   await scanner.refresh();
   assert.equal(emitted.length, 2);
   assert.equal(emitted[1]?.type === "session.discovered" ? emitted[1].title : undefined, "Renamed in Desktop");
+  scanner.stop();
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("Desktop scanner uses rollout event times instead of synchronized file mtimes", async () => {
+  const root = join(tmpdir(), `agent-bridge-desktop-time-${randomUUID()}`);
+  const project = join(root, "project");
+  const codexHome = join(root, ".codex");
+  const sessions = join(codexHome, "sessions");
+  const rollout = join(sessions, "rollout-time.jsonl");
+  const createdAt = "2026-09-09T01:00:00.000Z";
+  const completedAt = "2026-09-09T01:15:00.000Z";
+  mkdirSync(project, { recursive: true });
+  mkdirSync(sessions, { recursive: true });
+  writeFileSync(rollout, [
+    line({ timestamp: createdAt, type: "session_meta", payload: {
+      id: "desktop-time", cwd: project, originator: "Codex Desktop", title: "Timed session",
+    } }),
+    line({ timestamp: "2026-09-09T01:14:00.000Z", type: "event_msg", payload: {
+      type: "task_started", turn_id: "turn-time",
+    } }),
+    line({ timestamp: completedAt, type: "event_msg", payload: {
+      type: "task_complete", turn_id: "turn-time",
+    } }),
+  ].join(""));
+  const synchronizedAt = new Date("2026-09-09T09:00:00.000Z");
+  utimesSync(rollout, synchronizedAt, synchronizedAt);
+  const emitted: BridgeToControlMessage[] = [];
+  const scanner = new CodexDesktopSessionScanner({ codexHome, allowedRoots: [root],
+    intervalMs: 60_000, replayExisting: true, emit: (message) => emitted.push(message) });
+
+  await scanner.start();
+
+  const discovery = emitted.find((message) => message.type === "session.discovered");
+  assert.ok(discovery?.type === "session.discovered");
+  assert.equal(discovery.createdAt, Date.parse(createdAt));
+  assert.equal(discovery.updatedAt, Date.parse(completedAt));
+  const completed = emitted.find((message) => message.type === "agent.completed");
+  assert.ok(completed?.type === "agent.completed");
+  assert.equal(completed.timestamp, Date.parse(completedAt));
+  const terminal = emitted.find((message) => message.type === "session.event");
+  assert.ok(terminal?.type === "session.event");
+  assert.equal(terminal.timestamp, Date.parse(completedAt));
   scanner.stop();
   rmSync(root, { recursive: true, force: true });
 });
