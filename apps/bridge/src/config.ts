@@ -32,6 +32,7 @@ function resolveCodexCommand(value: string): string {
 }
 
 const updateInstallRoot = process.env.BRIDGE_UPDATE_INSTALL_ROOT ?? (isWindows ? `${process.env.LOCALAPPDATA ?? process.cwd()}\\agent-bridge` : "/opt/agent-bridge");
+const updateStoreDir = process.env.BRIDGE_UPDATE_STORE_DIR ?? join(updateInstallRoot, "pnpm-store");
 const machineId = process.env.MACHINE_ID ?? hostname();
 function positiveNumber(name: string, fallback: number): number {
   const value=Number(process.env[name]??fallback);if(!Number.isFinite(value)||value<=0)throw new Error(`${name} must be positive`);return value;
@@ -68,6 +69,8 @@ export const config = {
   updateSource: process.env.BRIDGE_UPDATE_SOURCE,
   updateSourceRef: process.env.BRIDGE_UPDATE_REF ?? "main",
   updateInstallRoot,
+  updateStoreDir,
+  updateReleaseRetention: positiveNumber("BRIDGE_UPDATE_RELEASE_RETENTION", 2),
   updateCurrentLink: process.env.BRIDGE_UPDATE_CURRENT_LINK ?? `${updateInstallRoot}/current`,
   updateStatePath: process.env.BRIDGE_UPDATE_STATE_PATH ?? `${updateInstallRoot}/update-state.json`,
   actionCachePath: process.env.BRIDGE_ACTION_CACHE_PATH ?? `${updateInstallRoot}/action-cache.json`,

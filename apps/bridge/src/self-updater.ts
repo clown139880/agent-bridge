@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { lstat, mkdir, readFile, readlink, rename, symlink, unlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, readlink, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import type { BridgeUpdateAnnouncementMessage, BridgeUpdateStatusMessage } from "@agent-bridge/protocol";
@@ -28,6 +28,8 @@ export interface SelfUpdaterOptions {
   currentLink: string;
   statePath: string;
   packageManager: string;
+  storeDir?: string;
+  releaseRetention?: number;
   restartExecutable: string;
   restartArgs: string[];
   isBusy: () => boolean | Promise<boolean>;
@@ -68,6 +70,7 @@ export class BridgeSelfUpdater {
     if (this.options.currentVersion === pending.targetVersion) {
       this.report("completed", pending.targetVersion, true);
       await unlinkIfPresent(this.options.statePath);
+      await cleanupReleases(this.options.installRoot, pending.releasePath, pending.previousTarget, this.options.releaseRetention ?? 2);
       return;
     }
     await restoreSymlink(this.options.currentLink, pending.previousTarget);
@@ -144,7 +147,9 @@ export class BridgeSelfUpdater {
       if (compareVersions(packageVersion, announcement.latestVersion) !== 0) {
         throw new Error(`fetched package version ${packageVersion} does not match ${announcement.latestVersion}`);
       }
-      await this.command(this.options.packageManager, ["install", "--frozen-lockfile"], releasePath);
+      const installArgs = ["install", "--frozen-lockfile"];
+      if (this.options.storeDir) installArgs.push("--store-dir", this.options.storeDir);
+      await this.command(this.options.packageManager, installArgs, releasePath);
       await assertWorkspaceDependencyInstalled(releasePath, "apps/bridge", "@agent-bridge/protocol");
       await this.command(this.options.packageManager, ["check"], releasePath);
       previousTarget = await currentSymlinkTarget(this.options.currentLink);
@@ -179,6 +184,7 @@ export class BridgeSelfUpdater {
           updatable: true, fetched, reason,
         });
       } else {
+        await rm(releasePath, { recursive: true, force: true }).catch(() => undefined);
         this.options.report({
           type: "bridge_update.status", phase: "failed",
           currentVersion: this.options.currentVersion, latestVersion: announcement.latestVersion,
@@ -318,5 +324,17 @@ async function unlinkIfPresent(path: string): Promise<void> {
     await unlink(path);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+}
+
+async function cleanupReleases(installRoot: string, currentTarget: string, previousTarget: string | undefined, retention: number): Promise<void> {
+  const releasesRoot = join(installRoot, "releases");
+  let entries;
+  try { entries = await readdir(releasesRoot, { withFileTypes: true }); } catch { return; }
+  const keep = new Set([resolve(currentTarget), ...(previousTarget ? [resolve(previousTarget)] : [])]);
+  const candidates = entries.filter((entry) => entry.isDirectory()).map((entry) => join(releasesRoot, entry.name));
+  candidates.sort((left, right) => right.localeCompare(left));
+  for (const candidate of candidates.slice(Math.max(0, retention))) {
+    if (!keep.has(resolve(candidate))) await rm(candidate, { recursive: true, force: true }).catch(() => undefined);
   }
 }

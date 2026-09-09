@@ -11,6 +11,7 @@ import {
   type RegisterMessage,
 } from "@agent-bridge/protocol";
 import { CodexAppServerAdapter } from "./app-server.js";
+import { config } from "./config.js";
 import { BridgeSelfUpdater } from "./self-updater.js";
 
 const log = pino({ name: "bridge-client" });
@@ -85,6 +86,8 @@ export class BridgeClient {
       currentLink: options.updateCurrentLink,
       statePath: options.updateStatePath,
       packageManager: options.updatePackageManager,
+      storeDir: config.updateStoreDir,
+      releaseRetention: config.updateReleaseRetention,
       restartExecutable: options.updateRestartExecutable,
       restartArgs: options.updateRestartArgs,
       isBusy: () => !this.codex.isReady() || this.codex.hasActiveSessions(),
