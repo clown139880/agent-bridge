@@ -19,7 +19,7 @@ export class BridgeClient {
   private socket?: WebSocket;
   private reconnectTimer?: NodeJS.Timeout;
   private heartbeatTimer?: NodeJS.Timeout;
-  private heartbeatInFlight = false;
+  private reconcileInFlight = false;
   private stopped = false;
   private readonly codex: CodexAppServerAdapter;
   private readonly updater: BridgeSelfUpdater;
@@ -286,23 +286,22 @@ export class BridgeClient {
   }
 
   private async sendHeartbeat(): Promise<void> {
-    if (this.heartbeatInFlight) return;
-    this.heartbeatInFlight = true;
+    // Liveness must not depend on the (potentially slow) App Server reads used
+    // to reconcile active turns.  Send the heartbeat first so Control Plane
+    // never mistakes a busy App Server for an offline Bridge.
+    const activity = this.codex.isReady() ? this.codex.sessionActivity() : {};
+    this.send({
+      type: "heartbeat", machineId: this.options.machineId, timestamp: Date.now(), ...activity,
+    });
+    if (!this.codex.isReady() || this.reconcileInFlight) return;
+    this.reconcileInFlight = true;
     try {
-      if (this.codex.isReady()) {
-        try {
-          await this.codex.reconcileActivity();
-        } catch (error) {
-          log.warn({ error }, "Unable to reconcile Codex activity before heartbeat");
-        }
+      try {
+        await this.codex.reconcileActivity();
+      } catch (error) {
+        log.warn({ error }, "Unable to reconcile Codex activity after heartbeat");
       }
-      const activity = this.codex.isReady() ? this.codex.sessionActivity() : {};
-      this.send({
-        type: "heartbeat", machineId: this.options.machineId, timestamp: Date.now(), ...activity,
-      });
-    } finally {
-      this.heartbeatInFlight = false;
-    }
+    } finally { this.reconcileInFlight = false; }
   }
 
   private admitNewWork(): boolean {

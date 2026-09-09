@@ -50,7 +50,7 @@ function useNativeSnapshot<T>(source: { getSnapshot(): T; subscribe(listener: ()
   return useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
 }
 
-type UnifiedRow = ExternalSessionBrowserGroup['sessions'][number] & { source: 'DSH' | 'Bridge'; rawId: string }
+type UnifiedRow = ExternalSessionBrowserGroup['sessions'][number] & { source: 'DSH' | 'Bridge'; rawId: string; unread?: boolean }
 type UnifiedGroup = Omit<ExternalSessionBrowserGroup, 'sessions'> & { sessions: UnifiedRow[]; baseLabel?: string; environments?: string[]; nativeWorkspaceId?: string; bridgeWorker?: string; latestAt?: number }
 
 /** One native Workspace browser projection containing both DSH and Bridge sessions. */
@@ -75,14 +75,14 @@ export function UnifiedSessions({ store, views, nativeSessions, nativeWorkspaces
       nativeWorkspaceId: workspace.workspaceId, sessions: workspace.sessionIds.flatMap(id => {
         const session = native.byId[id]
         if (!session || archived.has(id) || (session.blank && native.current !== id)) return []
-        return [{ id: `dsh:${id}`, rawId: id, source: 'DSH' as const, title: session.displayTitle, status: session.running ? 'active' : session.completed ? 'completed' : 'idle', updatedAt: session.updatedAt }]
+        return [{ id: `dsh:${id}`, rawId: id, source: 'DSH' as const, title: session.displayTitle, status: session.running ? 'active' : session.completed ? 'completed' : 'idle', unread: session.completed === true, updatedAt: session.updatedAt }]
       }),
     }))
     const accounted = new Set(workspaces.items.flatMap(workspace => [...workspace.sessionIds]))
     const ungrouped = native.ids.flatMap(id => {
       const session = native.byId[id]
       if (accounted.has(id) || !session || archived.has(id) || (session.blank && native.current !== id)) return []
-      return [{ id: `dsh:${id}`, rawId: id, source: 'DSH' as const, title: session.displayTitle, status: session.running ? 'active' : session.completed ? 'completed' : 'idle', updatedAt: session.updatedAt }]
+      return [{ id: `dsh:${id}`, rawId: id, source: 'DSH' as const, title: session.displayTitle, status: session.running ? 'active' : session.completed ? 'completed' : 'idle', unread: session.completed === true, updatedAt: session.updatedAt }]
     })
     if (ungrouped.length) result.push({ key: 'native:ungrouped', label: 'Other conversations', baseLabel: 'Other conversations', environments: ['local DSH'], expanded: views.groupMode('native:ungrouped') !== 'collapsed', sessions: ungrouped })
     for (const bridgeGroup of groupSessions(bridge.sessions, query, true, false, view.sort)) {
@@ -103,16 +103,16 @@ export function UnifiedSessions({ store, views, nativeSessions, nativeWorkspaces
       if (view.sort === 'updatedAt') group.sessions.sort((a, b) => b.updatedAt - a.updatedAt || a.id.localeCompare(b.id))
       group.latestAt = Math.max(0, ...group.sessions.map(row => row.updatedAt))
       const recentSince = Date.now() - RECENT_WINDOW_MS
-      const essential = group.sessions.filter(row => row.updatedAt >= recentSince || activeStatus(row.status) || row.status === 'error' || row.id === `dsh:${native.current ?? ''}` || row.id === `bridge:${bridge.selected ?? ''}`)
+      const essential = group.sessions.filter(row => row.updatedAt >= recentSince || activeStatus(row.status) || row.unread === true || row.status === 'error' || row.id === `dsh:${native.current ?? ''}` || row.id === `bridge:${bridge.selected ?? ''}`)
       const all = !view.grouped || query.trim() || expanded.includes(group.key)
       group.totalCount = group.sessions.length; group.hiddenCount = all ? 0 : group.sessions.length - essential.length; group.showingMore = expanded.includes(group.key)
       if (!all) group.sessions = essential
       const mode = views.groupMode(group.key)
       group.mode = mode; group.expanded = mode !== 'collapsed'; group.pinned = view.pinnedGroups.includes(group.key)
-      if (mode === 'active') { group.sessions = group.sessions.filter(row => activeStatus(row.status)); group.hiddenCount = 0; group.showingMore = false }
+      if (mode === 'active') { group.sessions = group.sessions.filter(row => activeStatus(row.status) || row.unread === true); group.hiddenCount = 0; group.showingMore = false }
     }
     const visible = result.filter(group => group.totalCount || !needle).sort((a, b) => {
-      const active = (group: UnifiedGroup) => group.sessions.some(row => ['active', 'waiting_for_approval', 'waiting_for_input', 'error'].includes(row.status)) ? 1 : 0
+      const active = (group: UnifiedGroup) => group.sessions.some(row => activeStatus(row.status) || row.unread === true) ? 1 : 0
       const aPin = view.pinnedGroups.indexOf(a.key); const bPin = view.pinnedGroups.indexOf(b.key)
       if (aPin >= 0 || bPin >= 0) return aPin < 0 ? 1 : bPin < 0 ? -1 : aPin - bPin
       return active(b) - active(a) || (b.latestAt ?? 0) - (a.latestAt ?? 0)
