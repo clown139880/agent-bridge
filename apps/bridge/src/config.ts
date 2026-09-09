@@ -1,6 +1,7 @@
 import "dotenv/config";
-import { readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { hostname, platform } from "node:os";
+import { basename, dirname, join } from "node:path";
 import { config as loadEnv } from "dotenv";
 import { splitAllowedRoots } from "./path-utils.js";
 
@@ -8,6 +9,28 @@ loadEnv({ path: process.env.BRIDGE_ENV_FILE ?? ".env.bridge", override: true, qu
 
 const packageVersion = (JSON.parse(readFileSync(new URL("../../../package.json", import.meta.url), "utf8")) as { version: string }).version;
 const isWindows = platform() === "win32";
+
+function resolveCodexCommand(value: string): string {
+  if (!isWindows || basename(value).toLowerCase() !== "codex.exe") return value;
+  if (existsSync(join(dirname(value), "codex-code-mode-host.exe"))) return value;
+
+  // A self-updated Bridge may carry a pinned codex.exe in its runtime directory
+  // without the companion code-mode host. Fall back to the complete native
+  // Codex installation so App Server tools can spawn their host process.
+  const installRoot = process.env.LOCALAPPDATA
+    ? join(process.env.LOCALAPPDATA, "OpenAI", "Codex", "bin")
+    : undefined;
+  if (!installRoot || !existsSync(installRoot)) return value;
+  const candidates = readdirSync(installRoot, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => join(installRoot, entry.name))
+    .filter((directory) => existsSync(join(directory, "codex.exe")) && existsSync(join(directory, "codex-code-mode-host.exe")))
+    .sort((left, right) => {
+      try { return statSync(right).mtimeMs - statSync(left).mtimeMs; } catch { return 0; }
+    });
+  return candidates.length ? join(candidates[0]!, "codex.exe") : value;
+}
+
 const updateInstallRoot = process.env.BRIDGE_UPDATE_INSTALL_ROOT ?? (isWindows ? `${process.env.LOCALAPPDATA ?? process.cwd()}\\agent-bridge` : "/opt/agent-bridge");
 const machineId = process.env.MACHINE_ID ?? hostname();
 function positiveNumber(name: string, fallback: number): number {
@@ -31,7 +54,7 @@ export const config = {
   machineName: process.env.MACHINE_NAME ?? hostname(),
   hostname: hostname(),
   platform: platform(),
-  codexCommand: process.env.CODEX_COMMAND ?? "codex",
+  codexCommand: resolveCodexCommand(process.env.CODEX_COMMAND ?? "codex"),
   appServerUrl: process.env.CODEX_APP_SERVER_URL ?? "ws://127.0.0.1:4500",
   manageAppServer: process.env.CODEX_APP_SERVER_MANAGED !== "false",
   desktopHome: process.env.CODEX_DESKTOP_HOME,
