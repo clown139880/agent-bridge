@@ -114,6 +114,7 @@ Bridge 主要变量：
 | `BRIDGE_UPDATE_CURRENT_LINK` | systemd 启动所使用的 `current` 软链接 |
 | `BRIDGE_UPDATE_STATE_PATH` | 跨重启完成确认状态文件 |
 | `BRIDGE_ACTION_CACHE_PATH` | action 去重结果缓存，默认位于 update install root，原子写入且权限为 0600 |
+| `BRIDGE_DRAIN_FILE` | 可选的本机部署 drain 标记；存在时拒绝创建 session 或提交新 turn，Linux 默认 `/run/agent-bridge-<machineId>.drain` |
 | `BRIDGE_ACTION_CACHE_RETENTION_MS` | Bridge action 去重缓存保留期，默认 24 小时 |
 | `BRIDGE_UPDATE_PACKAGE_MANAGER` | 本机包管理器可执行文件，默认 `pnpm` |
 | `BRIDGE_UPDATE_RESTART_EXECUTABLE` / `BRIDGE_UPDATE_RESTART_ARGS` | 本机重启程序及 JSON 参数数组；不经过 shell |

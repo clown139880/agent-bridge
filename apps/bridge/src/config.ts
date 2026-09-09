@@ -9,6 +9,7 @@ loadEnv({ path: process.env.BRIDGE_ENV_FILE ?? ".env.bridge", override: true, qu
 const packageVersion = (JSON.parse(readFileSync(new URL("../../../package.json", import.meta.url), "utf8")) as { version: string }).version;
 const isWindows = platform() === "win32";
 const updateInstallRoot = process.env.BRIDGE_UPDATE_INSTALL_ROOT ?? (isWindows ? `${process.env.LOCALAPPDATA ?? process.cwd()}\\agent-bridge` : "/opt/agent-bridge");
+const machineId = process.env.MACHINE_ID ?? hostname();
 function positiveNumber(name: string, fallback: number): number {
   const value=Number(process.env[name]??fallback);if(!Number.isFinite(value)||value<=0)throw new Error(`${name} must be positive`);return value;
 }
@@ -26,7 +27,7 @@ function jsonStringArray(name: string, fallback: string[]): string[] {
 export const config = {
   controlUrl: process.env.CONTROL_WS_URL ?? "ws://127.0.0.1:8787/bridge",
   bridgeToken: process.env.BRIDGE_TOKEN,
-  machineId: process.env.MACHINE_ID ?? hostname(),
+  machineId,
   machineName: process.env.MACHINE_NAME ?? hostname(),
   hostname: hostname(),
   platform: platform(),
@@ -48,6 +49,7 @@ export const config = {
   updateStatePath: process.env.BRIDGE_UPDATE_STATE_PATH ?? `${updateInstallRoot}/update-state.json`,
   actionCachePath: process.env.BRIDGE_ACTION_CACHE_PATH ?? `${updateInstallRoot}/action-cache.json`,
   actionCacheTtlMs: positiveNumber("BRIDGE_ACTION_CACHE_RETENTION_MS", 86_400_000),
+  drainFile: process.env.BRIDGE_DRAIN_FILE ?? (isWindows ? undefined : `/run/agent-bridge-${machineId}.drain`),
   updatePackageManager: process.env.BRIDGE_UPDATE_PACKAGE_MANAGER ?? "pnpm",
   updateRestartExecutable: process.env.BRIDGE_UPDATE_RESTART_EXECUTABLE ?? (isWindows ? "powershell.exe" : "systemctl"),
   updateRestartArgs: jsonStringArray("BRIDGE_UPDATE_RESTART_ARGS", isWindows ? ["-NoProfile", "-File", "restart-bridge.ps1"] : ["--no-block", "restart", "agent-bridge.service"]),

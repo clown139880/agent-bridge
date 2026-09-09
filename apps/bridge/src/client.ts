@@ -1,6 +1,6 @@
 import pino from "pino";
 import WebSocket from "ws";
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import {
   BRIDGE_PROTOCOL_VERSION,
@@ -51,6 +51,7 @@ export class BridgeClient {
     updateStatePath: string;
     actionCachePath: string;
     actionCacheTtlMs: number;
+    drainFile?: string;
     updatePackageManager: string;
     updateRestartExecutable: string;
     updateRestartArgs: string[];
@@ -167,15 +168,20 @@ export class BridgeClient {
           });
           break;
         case "start_agent":
-          if (!this.updater.admitStart()) {
+          if (!this.admitNewWork()) {
             this.send({ type: "error", sessionId: message.sessionId, code: "update_required",
-              message: `bridge update admission state is ${this.updater.admissionState()}` });
+              message: this.admissionMessage() });
             break;
           }
           void this.codex.startSession(message.sessionId, message.projectPath, message.prompt, message.resumeSessionId, message.model)
             .catch((error) => this.send({ type: "error", sessionId: message.sessionId, message: error instanceof Error ? error.message : String(error) }));
           break;
         case "agent_input":
+          if (!this.admitNewWork()) {
+            this.send({ type: "error", sessionId: message.sessionId, code: "update_required",
+              message: this.admissionMessage() });
+            break;
+          }
           void this.codex.input(message.sessionId, message.text, message.model)
             .catch((error) => this.send({ type: "error", sessionId: message.sessionId, message: error instanceof Error ? error.message : String(error) }));
           break;
@@ -251,6 +257,10 @@ export class BridgeClient {
     this.saveActionResults();
     let result:ActionResultMessage;
     try {
+      if ((message.type === "action.create_session" || message.type === "action.submit_turn")
+        && !this.admitNewWork()) {
+        throw Object.assign(new Error(this.admissionMessage()), { code: "update_required", retryable: true });
+      }
       if(message.type==="action.create_session"){
         const value=await this.codex.createSessionAction(message.actionId,message.projectPath,message.input,message.model);
         result={type:"action.result",actionId:message.actionId,kind,status:"succeeded",...value,timestamp:Date.now()};
@@ -277,6 +287,15 @@ export class BridgeClient {
     if(this.actionResults.size>2_000)this.actionResults.delete(this.actionResults.keys().next().value!);
     this.saveActionResults();
     this.send(result);queueMicrotask(()=>void this.updater.activityChanged());
+  }
+
+  private admitNewWork(): boolean {
+    return this.updater.admitStart() && !(this.options.drainFile && existsSync(this.options.drainFile));
+  }
+
+  private admissionMessage(): string {
+    if (this.options.drainFile && existsSync(this.options.drainFile)) return "bridge is draining for a manual deployment";
+    return `bridge update admission state is ${this.updater.admissionState()}`;
   }
 
   private loadActionResults():void {
