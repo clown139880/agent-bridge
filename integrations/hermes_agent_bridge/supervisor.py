@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import ntpath
 import os
 from pathlib import Path
 import re
@@ -53,7 +54,13 @@ def _remote_workspace(task) -> str:
             "set the absolute path as it appears on the selected bridge machine"
         )
     value = (task.workspace_path or "").strip()
-    if not value or not Path(value).is_absolute():
+    # The supervisor validates the path on HAL, but the path belongs to the
+    # selected Bridge host.  POSIX Path.is_absolute() rejects Windows drive
+    # paths (for example C:\\Users\\clown\\Workspace\\agent-bridge), which
+    # caused Windows claims to be blocked locally before WorkerApi.start().
+    # Accept native POSIX paths, Windows drive paths, and UNC paths without
+    # resolving or touching the supervisor's filesystem.
+    if not value or not (Path(value).is_absolute() or ntpath.isabs(value)):
         raise ValueError("external worker requires an absolute workspace_path on the bridge machine")
     return value
 

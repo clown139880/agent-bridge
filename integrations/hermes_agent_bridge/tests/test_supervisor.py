@@ -33,6 +33,15 @@ def test_remote_workspace_uses_the_bridge_path_without_touching_local_disk(tmp_p
     assert not remote_path.exists()
 
 
+@pytest.mark.parametrize("workspace", [
+    r"C:\Users\clown\Workspace\agent-bridge",
+    r"C:/Users/clown/Workspace/agent-bridge",
+    r"\\dev-windows\agent-bridge",
+])
+def test_remote_workspace_accepts_windows_paths_for_windows_bridges(workspace):
+    assert _remote_workspace(_Task("dir", workspace)) == workspace
+
+
 @pytest.mark.parametrize("kind", ["scratch", "worktree"])
 def test_remote_workspace_rejects_host_owned_workspace_kinds(kind):
     with pytest.raises(ValueError, match="workspace_kind=dir"):
