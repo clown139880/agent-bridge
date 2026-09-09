@@ -350,9 +350,18 @@ async function cleanupReleases(installRoot: string, currentTarget: string, previ
 
 async function stageCompiledArtifact(sourceRoot: string, releasePath: string): Promise<void> {
   await mkdir(join(releasePath, "apps", "bridge"), { recursive: true });
-  await mkdir(join(releasePath, "deploy", "windows-native"), { recursive: true });
+  if (process.platform === "win32") {
+    await mkdir(join(releasePath, "deploy", "windows-native"), { recursive: true });
+    await cp(join(sourceRoot, "deploy", "windows-native"), join(releasePath, "deploy", "windows-native"), { recursive: true });
+  }
   await cp(join(sourceRoot, "apps", "bridge", "dist"), join(releasePath, "apps", "bridge", "dist"), { recursive: true });
   await cp(join(sourceRoot, "package.json"), join(releasePath, "package.json"));
-  await cp(join(sourceRoot, "deploy", "windows-native"), join(releasePath, "deploy", "windows-native"), { recursive: true });
   await symlink(join(sourceRoot, "node_modules"), join(releasePath, "node_modules"), process.platform === "win32" ? "junction" : "dir");
+  const appNodeModules = join(sourceRoot, "apps", "bridge", "node_modules");
+  try {
+    await lstat(appNodeModules);
+    await symlink(appNodeModules, join(releasePath, "apps", "bridge", "node_modules"), process.platform === "win32" ? "junction" : "dir");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
 }

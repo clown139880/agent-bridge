@@ -149,11 +149,12 @@ BRIDGE_UPDATE_RESTART_EXECUTABLE=systemctl
 BRIDGE_UPDATE_RESTART_ARGS=["--no-block","restart","agent-bridge-hal.service"]
 ```
 
-HAL 的完整环境模板见 [`deploy/hal.env.example`](deploy/hal.env.example)。设置
-`BRIDGE_UPDATE_SOURCE_CHECKOUT=/root/agent-bridge` 后，Bridge 会在该干净 checkout 中
-fetch/ff-only、安装依赖并执行检查和构建，再把 `dist` 与运行所需文件放入新的 release；运行中的
-`current` 目录不会被修改。首次启用前需准备一个已验证的 release 并建立 `current` 软链接，
-然后安装并启用 HAL unit：
+HAL 的完整环境模板见 [`deploy/hal.env.example`](deploy/hal.env.example)。生产部署统一使用
+[`deploy/hal/deploy-bridge.sh`](deploy/hal/deploy-bridge.sh)：它在固定 checkout 中
+fetch/ff-only，使用共享 pnpm store/node_modules 执行检查和构建，把 `dist` 与运行时链接放入轻量
+artifact，然后完成 drain、空闲检查、`current` 原子切换、启动验证和旧 artifact 清理。调用方无需判断
+是否有活动 session、审批请求或仅有 DSH 插件变更：脚本会安全处理这些情况。运行中的 `current` 目录不会被
+直接构建或覆盖。先安装并启用 HAL unit：
 
 ```bash
 sudo install -Dm644 deploy/systemd/agent-bridge-hal.service /etc/systemd/system/agent-bridge-hal.service
@@ -161,10 +162,21 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now agent-bridge-hal.service
 ```
 
+之后每次部署只需在 HAL 上执行：
+
+```bash
+sudo /root/agent-bridge/deploy/hal/deploy-bridge.sh
+```
+
+脚本默认保留当前 artifact 和一个旧 artifact 用于回滚；可通过
+`AGENT_BRIDGE_RELEASE_RETENTION` 调整保留数量。若部署时仍有活动 turn、审批或输入，脚本会先完成构建和
+staging，但不会重启正在工作的 Bridge，而是以非零状态退出，待下一次调用时再激活。
+
 发现新版本后的本机流程为：先关闭本地 start admission 并进入 `draining_for_update`，再检查 active Codex
 turn/待审批/待输入；繁忙则报告 `deferred`，直到最后一项活动结束时主动发送 `bridge.idle`；
-克隆到全新的 `releases/<version>-<timestamp>`；校验根 `package.json` 版本严格等于通告版本；执行
-`pnpm install --frozen-lockfile` 和 `pnpm check`；原子切换 `current` 软链接；写入 0600 pending 状态；最后由
+在固定 source checkout 中 fetch/ff-only；校验根 `package.json` 版本严格等于通告版本；执行
+`pnpm install --frozen-lockfile`、`pnpm check` 和 `pnpm build`；把编译 artifact 放入新的 release；原子切换
+`current` 软链接；写入 0600 pending 状态；最后由
 bridge 自己调用本机重启命令。新进程读取 pending 状态且版本吻合后才报告 `completed`，Control Plane 随后向
 Matrix/clown 发送“完成自更新”通知。首次 `discovered` 会发送“发现更新”通知，两类通知按机器和目标版本去重。
 

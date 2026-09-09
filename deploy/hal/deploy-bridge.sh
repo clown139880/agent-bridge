@@ -8,6 +8,9 @@ machine_id=${AGENT_BRIDGE_MACHINE_ID:-hal}
 database=${AGENT_BRIDGE_DATABASE:-/root/agent-bridge/data/control-plane.sqlite}
 drain_file=${AGENT_BRIDGE_DRAIN_FILE:-/run/agent-bridge-${machine_id}.drain}
 lock_file=${AGENT_BRIDGE_DEPLOY_LOCK:-/run/lock/agent-bridge-hal-deploy.lock}
+store_dir=${AGENT_BRIDGE_STORE_DIR:-$install_root/pnpm-store}
+retention=${AGENT_BRIDGE_RELEASE_RETENTION:-2}
+[[ "$retention" =~ ^[1-9][0-9]*$ ]] || { echo "AGENT_BRIDGE_RELEASE_RETENTION must be a positive integer." >&2; exit 1; }
 
 exec 9>"$lock_file"
 flock -n 9 || { echo "Another HAL Bridge deployment is running." >&2; exit 1; }
@@ -20,7 +23,10 @@ if test -n "$(git status --porcelain)"; then
   exit 1
 fi
 
-deployed_commit=$(git -C "$install_root/current" rev-parse HEAD 2>/dev/null || true)
+deployed_commit=$(cat "$install_root/current/.release-commit" 2>/dev/null || true)
+if test -z "$deployed_commit"; then
+  deployed_commit=$(git -C "$install_root/current" rev-parse HEAD 2>/dev/null || true)
+fi
 git fetch origin
 git pull --ff-only origin "$(git branch --show-current)"
 target_commit=$(git rev-parse HEAD)
@@ -48,10 +54,18 @@ short_commit=$(git rev-parse --short=12 HEAD)
 release="$install_root/releases/${version}-${short_commit}"
 if ! test -d "$release"; then
   mkdir -p "$install_root/releases"
-  git worktree add --detach "$release" "$target_commit"
-  pnpm --dir "$release" install --frozen-lockfile
-  pnpm --dir "$release" check
-  pnpm --dir "$release" build
+  pnpm --dir "$repo" install --frozen-lockfile --store-dir "$store_dir"
+  pnpm --dir "$repo" check
+  pnpm --dir "$repo" build
+  mkdir -p "$release/apps/bridge"
+  cp -a "$repo/apps/bridge/dist" "$release/apps/bridge/dist"
+  cp -a "$repo/package.json" "$release/package.json"
+  ln -s "$repo/node_modules" "$release/node_modules"
+  if test -d "$repo/apps/bridge/node_modules"; then
+    ln -s "$repo/apps/bridge/node_modules" "$release/apps/bridge/node_modules"
+  fi
+  printf '%s\n' "$target_commit" > "$release/.release-commit"
+  printf '%s\n' "$version" > "$release/.release-version"
 fi
 
 previous_release=$(readlink -f "$install_root/current")
@@ -111,3 +125,19 @@ test "${running_dir:-}" = "$release" || {
 
 activated=false
 echo "HAL Bridge deployed: $version ($target_commit)"
+
+# Keep the active artifact and the newest previous artifacts for rollback.
+mapfile -t releases < <(find "$install_root/releases" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' | sort -nr | cut -d' ' -f2-)
+kept=0
+for candidate in "${releases[@]}"; do
+  test "$candidate" = "$(readlink -f "$install_root/current")" && continue
+  kept=$((kept + 1))
+  if test "$kept" -ge "$retention"; then
+    # Older deployments may still be Git worktrees from the pre-artifact
+    # layout. Unregister them before removing their directory.
+    if test -f "$candidate/.git"; then
+      git -C "$repo" worktree remove --force "$candidate" 2>/dev/null || true
+    fi
+    rm -rf -- "$candidate"
+  fi
+done
