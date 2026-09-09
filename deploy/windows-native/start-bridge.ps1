@@ -48,6 +48,10 @@ try {
         }
     }
     # Redirect at process level so PowerShell 5.1 does not treat native stderr as an error.
+    $protocolPackage = Join-Path $root 'apps\bridge\node_modules\@agent-bridge\protocol\package.json'
+    if (-not (Test-Path -LiteralPath $protocolPackage -PathType Leaf)) {
+        throw "Bridge release is incomplete: missing $protocolPackage"
+    }
     Add-Content -LiteralPath (Join-Path $logDirectory 'launcher.log') -Value "$(Get-Date -Format o) Starting $runtime $runtimeArgs in $root"
     $process = Start-Process -FilePath $runtime -ArgumentList $runtimeArgs -WorkingDirectory $root -WindowStyle Hidden -RedirectStandardOutput $logPath -RedirectStandardError (Join-Path $logDirectory 'bridge.err.log') -Wait -PassThru
     Add-Content -LiteralPath (Join-Path $logDirectory 'launcher.log') -Value "$(Get-Date -Format o) Bridge exited: $($process.ExitCode)"

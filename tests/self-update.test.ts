@@ -8,6 +8,12 @@ const linkType = process.platform === "win32" ? "junction" : "dir";
 import type { BridgeUpdateStatusMessage } from "../packages/protocol/src/index.js";
 import { BridgeSelfUpdater, compareVersions, type UpdateCommandRunner } from "../apps/bridge/src/self-updater.js";
 
+function writeStagedPackage(releasePath: string, version: string): void {
+  mkdirSync(join(releasePath, "apps", "bridge", "node_modules", "@agent-bridge", "protocol"), { recursive: true });
+  writeFileSync(join(releasePath, "package.json"), JSON.stringify({ version }));
+  writeFileSync(join(releasePath, "apps", "bridge", "node_modules", "@agent-bridge", "protocol", "package.json"), JSON.stringify({ name: "@agent-bridge/protocol", version: "0.6.0" }));
+}
+
 test("semantic bridge versions are ordered", () => {
   assert.equal(compareVersions("0.3.0", "0.4.0"), -1);
   assert.equal(compareVersions("v1.0.0", "1.0.0"), 0);
@@ -33,7 +39,7 @@ test("a v-prefixed registry version accepts the equivalent package version", asy
         if (executable !== "git") return;
         const releasePath = args.at(-1)!;
         mkdirSync(releasePath, { recursive: true });
-        writeFileSync(join(releasePath, "package.json"), JSON.stringify({ version: "0.4.0" }));
+        writeStagedPackage(releasePath, "0.4.0");
       },
     });
     await updater.consider({ type: "bridge_update.available", latestVersion: "v0.4.0", source: "/registry/repo" });
@@ -60,7 +66,7 @@ test("bridge stages, validates, activates, restarts itself, then reports complet
     if (executable === "git") {
       const releasePath = args.at(-1)!;
       mkdirSync(releasePath, { recursive: true });
-      writeFileSync(join(releasePath, "package.json"), JSON.stringify({ version: "0.4.0" }));
+      writeStagedPackage(releasePath, "0.4.0");
     } else {
       assert.ok(cwd?.includes(join(root, "releases")));
     }
@@ -160,7 +166,7 @@ test("a restart command failure atomically restores the previous release", async
         if (executable !== "git") return;
         const releasePath = args.at(-1)!;
         mkdirSync(releasePath, { recursive: true });
-        writeFileSync(join(releasePath, "package.json"), JSON.stringify({ version: "0.4.0" }));
+        writeStagedPackage(releasePath, "0.4.0");
       },
       restart: async () => { throw new Error("local systemd restart failed"); },
     });

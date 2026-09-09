@@ -145,6 +145,7 @@ export class BridgeSelfUpdater {
         throw new Error(`fetched package version ${packageVersion} does not match ${announcement.latestVersion}`);
       }
       await this.command(this.options.packageManager, ["install", "--frozen-lockfile"], releasePath);
+      await assertWorkspaceDependencyInstalled(releasePath, "apps/bridge", "@agent-bridge/protocol");
       await this.command(this.options.packageManager, ["check"], releasePath);
       previousTarget = await currentSymlinkTarget(this.options.currentLink);
       if (!previousTarget) throw new Error(`${this.options.currentLink} must point to the current stable release`);
@@ -272,6 +273,17 @@ async function replaceSymlink(path: string, target: string): Promise<void> {
   } catch (error) {
     await unlinkIfPresent(temporary);
     throw error;
+  }
+}
+
+async function assertWorkspaceDependencyInstalled(releasePath: string, consumer: string, dependency: string): Promise<void> {
+  const packagePath = join(releasePath, consumer, "node_modules", ...dependency.split("/"));
+  try {
+    const stat = await lstat(packagePath);
+    if (!stat.isDirectory() && !stat.isSymbolicLink()) throw new Error("not a directory or link");
+    await lstat(join(packagePath, "package.json"));
+  } catch {
+    throw new Error(`package manager did not install workspace dependency ${dependency}`);
   }
 }
 
