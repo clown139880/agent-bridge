@@ -43,6 +43,8 @@ interface CodexThread {
 interface CodexTurn {
   id: string;
   status: "completed" | "interrupted" | "failed" | "inProgress";
+  startedAt?: number | null;
+  completedAt?: number | null;
   durationMs?: number | null;
   error?: { message?: string } | null;
   items?: ThreadItem[];
@@ -401,6 +403,14 @@ export class CodexAppServerAdapter {
     };
   }
 
+  async reconcileActivity(): Promise<void> {
+    await this.ensureReady();
+    await this.syncActiveTurns(new Set([
+      ...this.activeThreads,
+      ...this.activeTurns.keys(),
+    ]));
+  }
+
   isReady(): boolean {
     return this.readyForUpdate;
   }
@@ -540,6 +550,13 @@ export class CodexAppServerAdapter {
         // Notifications are already live while restoration runs. Only apply
         // the read if no newer turn notification changed the cached value.
         if (this.activeTurns.get(threadId) !== previousTurnId) continue;
+        if (!activeTurnId && previousTurnId) {
+          // A terminal notification can be lost while the App Server socket
+          // itself remains connected. Recover the terminal event before
+          // clearing the cached turn so Control Plane also converges to idle.
+          await this.syncLatestCompletedTurn(threadId, thread);
+          if (this.activeTurns.get(threadId) !== previousTurnId) continue;
+        }
         if (activeTurnId) this.activeTurns.set(threadId, activeTurnId);
         else this.activeTurns.delete(threadId);
         if (thread.status?.type === "active") this.activeThreads.add(threadId);
@@ -562,13 +579,14 @@ export class CodexAppServerAdapter {
       const result=await this.request<{thread:CodexThread&{turns?:CodexTurn[]}}>("thread/read",{threadId,includeTurns:true});
       const turns=(result.thread.turns??[]).slice(-50);
       for(const turn of turns){
-        for(const item of turn.items??[])this.emitHistoricalItem(threadId,turn.id,item,historyTimestamp);
+        const timestamp=codexTimestamp(turn.completedAt??turn.startedAt)??historyTimestamp;
+        for(const item of turn.items??[])this.emitHistoricalItem(threadId,turn.id,item,timestamp);
         if(turn.status!=="inProgress"){
           const type=turn.status==="failed"?"turn.failed":turn.status==="interrupted"?"turn.interrupted":"turn.completed";
           this.emitSessionEvent(type,threadId,`app-server:${threadId}:${turn.id}:history-terminal`,{
             status:turn.status==="interrupted"?"interrupted":turn.status,summary:finalAgentText(turn.items??[]),
             error:turn.error?.message,durationMs:turn.durationMs??undefined,
-            ...(turn.model?{model:turn.model}:{})},turn.id,undefined,historyTimestamp);
+            ...(turn.model?{model:turn.model}:{})},turn.id,undefined,timestamp);
           this.reportedTurns.add(turn.id);
         }
       }
@@ -799,16 +817,18 @@ export class CodexAppServerAdapter {
     }
   }
 
-  private async syncLatestCompletedTurn(threadId: string): Promise<void> {
+  private async syncLatestCompletedTurn(
+    threadId: string,
+    snapshot?: CodexThread & { turns?: CodexTurn[] },
+  ): Promise<void> {
     try {
-      const result = await this.request<{ thread: CodexThread & { turns?: CodexTurn[] } }>("thread/read", {
-        threadId,
-        includeTurns: true,
-      });
+      const thread = snapshot ?? (await this.request<{ thread: CodexThread & { turns?: CodexTurn[] } }>(
+        "thread/read", { threadId, includeTurns: true },
+      )).thread;
       // Only inspect the newest turn. Walking backwards into any older
       // unreported turn can replay stale output when this read races with the
       // real-time turn/completed notification for the current turn.
-      const turns = result.thread.turns ?? [];
+      const turns = thread.turns ?? [];
       const turn = turns.at(-1);
       if (!turn || turn.status === "inProgress" || this.reportedTurns.has(turn.id)) return;
       this.reportedTurns.add(turn.id);
@@ -999,6 +1019,11 @@ export class CodexAppServerAdapter {
 
 function threadTimestamp(thread: CodexThread): number {
   return (thread.updatedAt ?? thread.createdAt ?? Math.floor(Date.now() / 1000)) * 1000;
+}
+
+function codexTimestamp(value: number | null | undefined): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
+  return value < 1_000_000_000_000 ? value * 1000 : value;
 }
 
 export function summarizePrompt(prompt: string | undefined, limit = 240): string | undefined {

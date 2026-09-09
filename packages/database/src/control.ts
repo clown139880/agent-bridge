@@ -184,11 +184,11 @@ export class AgentControlStore {
         this.db.prepare(`UPDATE sessions SET machine_id=?,agent_type=?,project_name=?,project_path=?,native_session_id=?,
           status=?,title=COALESCE(?,title),prompt_summary=COALESCE(?,prompt_summary),source=?,history_completeness=?,
           activity_status=?,active_turn_id=?,last_turn_status=COALESCE(?,last_turn_status),inventory_seen_at=?,
-          updated_at=? WHERE id=?`).run(
+          updated_at=?,last_response_at=CASE WHEN last_response_at>? THEN ? ELSE last_response_at END WHERE id=?`).run(
           machineId, state.agentType, state.projectName, state.projectPath, state.nativeSessionId,
           legacyStatus(state.activityStatus, state.lastTurnStatus), state.title ?? null, state.promptSummary ?? null,
           state.source, state.historyCompleteness, state.activityStatus, state.activeTurnId ?? null,
-          state.lastTurnStatus ?? null, Date.now(), state.updatedAt, state.sessionId);
+          state.lastTurnStatus ?? null, Date.now(), state.updatedAt, state.updatedAt, state.updatedAt, state.sessionId);
       } else {
         this.db.prepare(`INSERT INTO sessions
           (id,machine_id,agent_type,project_name,project_path,matrix_room_id,matrix_thread_id,native_session_id,

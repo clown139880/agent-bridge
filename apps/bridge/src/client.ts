@@ -19,6 +19,7 @@ export class BridgeClient {
   private socket?: WebSocket;
   private reconnectTimer?: NodeJS.Timeout;
   private heartbeatTimer?: NodeJS.Timeout;
+  private heartbeatInFlight = false;
   private stopped = false;
   private readonly codex: CodexAppServerAdapter;
   private readonly updater: BridgeSelfUpdater;
@@ -131,12 +132,7 @@ export class BridgeClient {
       };
       this.send(registration);
       clearInterval(this.heartbeatTimer);
-      this.heartbeatTimer = setInterval(() => {
-        const activity = this.codex.isReady() ? this.codex.sessionActivity() : {};
-        this.send({
-          type: "heartbeat", machineId: this.options.machineId, timestamp: Date.now(), ...activity,
-        });
-      }, 15_000);
+      this.heartbeatTimer = setInterval(() => void this.sendHeartbeat(), 15_000);
     });
     socket.on("message", (data) => {
       const message = parseMessage(data.toString());
@@ -287,6 +283,26 @@ export class BridgeClient {
     if(this.actionResults.size>2_000)this.actionResults.delete(this.actionResults.keys().next().value!);
     this.saveActionResults();
     this.send(result);queueMicrotask(()=>void this.updater.activityChanged());
+  }
+
+  private async sendHeartbeat(): Promise<void> {
+    if (this.heartbeatInFlight) return;
+    this.heartbeatInFlight = true;
+    try {
+      if (this.codex.isReady()) {
+        try {
+          await this.codex.reconcileActivity();
+        } catch (error) {
+          log.warn({ error }, "Unable to reconcile Codex activity before heartbeat");
+        }
+      }
+      const activity = this.codex.isReady() ? this.codex.sessionActivity() : {};
+      this.send({
+        type: "heartbeat", machineId: this.options.machineId, timestamp: Date.now(), ...activity,
+      });
+    } finally {
+      this.heartbeatInFlight = false;
+    }
   }
 
   private admitNewWork(): boolean {

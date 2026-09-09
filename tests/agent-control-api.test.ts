@@ -133,6 +133,26 @@ test("Agent Control REST exposes snapshot, pagination, actions, idempotency and 
   }finally{await f.close();}
 });
 
+test("a session snapshot repairs a replay timestamp newer than the real thread activity", async () => {
+  const f = await fixture();
+  try {
+    await f.internals.handleBridgeMessage("dev", { type: "session.event", eventId: "bad-replay-time",
+      eventType: "message.completed", sessionId: "thread-1", turnId: "old-turn", itemId: "old-answer",
+      timestamp: 9_000, payload: { role: "assistant", text: "Old replayed answer" } });
+    await f.internals.handleBridgeMessage("dev", { type: "state.snapshot", generation: "repair", complete: true,
+      approvals: [], userInputs: [], sessions: [{ sessionId: "thread-1", nativeSessionId: "thread-1",
+        agentType: "codex-cli", projectPath: "/work/repo", projectName: "repo", title: "Control me",
+        activityStatus: "idle", lastTurnStatus: "completed", createdAt: 1_000, updatedAt: 2_000,
+        source: "app-server", historyCompleteness: "full" }] });
+
+    const repaired = f.internals.controlStore.session("thread-1") as { updatedAt: number; lastResponseAt: number };
+    assert.equal(repaired.updatedAt, 2_000);
+    assert.equal(repaired.lastResponseAt, 2_000);
+  } finally {
+    await f.close();
+  }
+});
+
 test("thread/updated asynchronously refreshes the persisted session title", async () => {
   const f = await fixture();
   try {

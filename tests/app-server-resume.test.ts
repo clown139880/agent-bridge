@@ -132,7 +132,7 @@ test("a restored active thread is included in the authoritative heartbeat snapsh
   assert.deepEqual(adapter.sessionActivity().activeSessionIds, ["active-thread"]);
 });
 
-test("history hydration preserves the Codex thread activity time", async () => {
+test("history hydration preserves each Codex turn time", async () => {
   const emitted: BridgeToControlMessage[] = [];
   const adapter = new CodexAppServerAdapter({
     command: "codex", url: "ws://127.0.0.1:4500", allowedRoots: [process.cwd()],
@@ -143,13 +143,14 @@ test("history hydration preserves the Codex thread activity time", async () => {
     request(method: string, params: Record<string, unknown>): Promise<unknown>;
   };
   internals.request = async () => ({ thread: { turns: [{ id: "old-turn", status: "completed",
+    startedAt: 120, completedAt: 150,
     items: [{ id: "old-message", type: "agentMessage", text: "Old answer" }] }] } });
 
   await internals.hydrateThreadHistory({ id: "history-thread", cwd: process.cwd(), createdAt: 100, updatedAt: 200 });
 
   const history = emitted.filter((message) => message.type === "session.event");
   assert.equal(history.length, 2);
-  assert.deepEqual(history.map((message) => message.timestamp), [200_000, 200_000]);
+  assert.deepEqual(history.map((message) => message.timestamp), [150_000, 150_000]);
 });
 
 test("restoration only hydrates unique threads inside the allowed roots", async () => {
@@ -257,6 +258,39 @@ test("reconnect synchronizes active turns after completion notifications were lo
   assert.ok(calls.some((call) => call.method === "turn/start" && call.params.threadId === "idle-thread"));
   assert.ok(calls.some((call) => call.method === "turn/steer"
     && call.params.threadId === "changed-thread" && call.params.expectedTurnId === "current-turn"));
+});
+
+test("periodic activity reconciliation recovers a lost terminal notification", async () => {
+  const emitted: BridgeToControlMessage[] = [];
+  const adapter = new CodexAppServerAdapter({
+    command: "codex", url: "ws://127.0.0.1:4500", allowedRoots: [process.cwd()],
+    manageServer: false, reconnectMs: 3_000,
+  }, (message) => emitted.push(message));
+  const internals = adapter as unknown as {
+    readyPromise: Promise<void>;
+    socket: { readyState: number; close(): void };
+    activeTurns: Map<string, string>;
+    activeThreads: Set<string>;
+    request(method: string, params: Record<string, unknown>): Promise<unknown>;
+  };
+  internals.readyPromise = Promise.resolve();
+  internals.socket = { readyState: 1, close() {} };
+  internals.activeTurns.set("thread", "turn");
+  internals.activeThreads.add("thread");
+  internals.request = async (method) => {
+    assert.equal(method, "thread/read");
+    return { thread: { id: "thread", cwd: process.cwd(), status: { type: "idle" }, turns: [
+      { id: "turn", status: "completed", durationMs: 123, items: [] },
+    ] } };
+  };
+
+  await adapter.reconcileActivity();
+
+  assert.equal(internals.activeTurns.has("thread"), false);
+  assert.equal(internals.activeThreads.has("thread"), false);
+  assert.ok(emitted.some((message) => message.type === "agent.completed"));
+  assert.ok(emitted.some((message) => message.type === "session.event"
+    && message.eventType === "turn.completed"));
 });
 
 test("subsequent input does not resume an already subscribed thread again", async () => {
