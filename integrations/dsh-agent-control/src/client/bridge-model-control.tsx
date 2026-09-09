@@ -38,7 +38,7 @@ const copy: Record<string, string> = {
 function translate(key: string, params: Record<string, unknown> = {}): string {
   return (copy[key] ?? key).replace(/\{(\w+)\}/g, (_, name: string) => String(params[name] ?? ''))
 }
-function catalogState(loading: boolean, error: string, selected: string, selectedEffort: string, native?: JsonObject): DirectoryState {
+export function catalogState(loading: boolean, error: string, selected: string, selectedEffort: string, native?: JsonObject): DirectoryState {
   if (native) {
     const fallback = asRecord(native['default'])
     const groups = Array.isArray(native['groups']) ? native['groups'].map(asRecord).map(group => ({
@@ -55,7 +55,18 @@ function catalogState(loading: boolean, error: string, selected: string, selecte
         } } : {}),
       })).filter(model => model.id) : [],
     })).filter(group => group.id) : []
-    const chosenModel = selected || str(fallback['model'], '')
+    // Bridge sessions created by older workers may report a provider-qualified
+    // placeholder (for example `modlens-tokensapi/—`) that is not a model id in
+    // DSH's current catalog. Do not surface that value as the active selection:
+    // it makes the native selector look configured while the next turn would
+    // silently fall back to the worker default. A suffix match keeps compatible
+    // provider-qualified ids useful when the provider uses `provider/model`.
+    const allModels = groups.flatMap(group => group.models)
+    const selectedMatch = allModels.find(model => model.id === selected)
+      ?? (selected.includes('/') ? allModels.find(model => model.id === selected.slice(selected.lastIndexOf('/') + 1)) : undefined)
+    const fallbackModel = str(fallback['model'], '')
+    const fallbackMatch = allModels.find(model => model.id === fallbackModel)
+    const chosenModel = selectedMatch?.id ?? fallbackMatch?.id ?? ''
     const chosenGroup = groups.find(group => group.models.some(model => model.id === chosenModel))
     const provider = chosenGroup?.id || str(fallback['provider'], '')
     const failures = Array.isArray(native['failures']) ? native['failures'].map(asRecord).map(failure => ({
