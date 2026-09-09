@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { JsonObject, JsonValue } from '../src/types.js'
 import { SessionStore, type BridgeRpc } from '../src/client/session-store.js'
-import { groupSessions, projectEvents, sessionTitle } from '../src/client/session-model.js'
+import { groupSessions, latestSessionModel, projectEvents, sessionTitle } from '../src/client/session-model.js'
 import { BridgeClient } from '../src/bridge-client.js'
 
 const page = (data: JsonObject[] = [], cursor: string | null = null, hasMore = false): JsonValue => ({ data, nextCursor: cursor, hasMore })
@@ -203,6 +203,13 @@ describe('SessionStore', () => {
 })
 
 describe('session presentation projection', () => {
+  it('derives the selected model from the latest retained turn', () => {
+    expect(latestSessionModel([
+      { eventId: 'a', payload: { model: 'gpt-5.6-sol' } },
+      { eventId: 'b', payload: { model: 'gpt-5.6-terra' } },
+    ])).toBe('gpt-5.6-terra')
+    expect(latestSessionModel([{ eventId: 'c', type: 'model.rerouted', payload: { toModel: 'kimi-k3' } }])).toBe('kimi-k3')
+  })
   it('uses the first prompt summary before falling back to a project and id', () => {
     expect(sessionTitle({ sessionId: 'abcdefghi', projectName: 'repo', promptSummary: '  Fix   the flaky test  ' })).toBe('Fix the flaky test')
     expect(sessionTitle({ sessionId: 'abcdefghi', projectName: 'repo' })).toBe('repo · abcdefgh')

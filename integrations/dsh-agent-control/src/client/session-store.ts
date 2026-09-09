@@ -1,6 +1,6 @@
 import type { BridgeCall, BridgeStreamEvent, JsonObject, JsonValue } from '../types.js'
 import { BridgeStreamError } from './bridge-stream.js'
-import { asRecord, mergeRecords, readPage, requiredId, str } from './session-model.js'
+import { asRecord, latestSessionModel, mergeRecords, readPage, requiredId, str } from './session-model.js'
 
 export type BridgeRpc = (operation: BridgeCall['operation'], args?: JsonObject) => Promise<JsonValue>
 export type BridgeStream = (cursor: string | undefined, signal: AbortSignal, onOpen?: () => void) => AsyncIterable<BridgeStreamEvent>
@@ -333,7 +333,7 @@ export class SessionStore {
       if (!this.valid(generation)) return
       const session = asRecord(raw)
       if (requiredId(session, 'sessionId') !== id) throw new Error('Bridge returned a different session.')
-      this.patchDetail(id, { session, approvals, inputs })
+      this.patchDetail(id, { session, approvals, inputs, ...(this.detail(id).model ? {} : typeof session['model'] === 'string' && session['model'].trim() ? { model: session['model'].trim() } : {}) })
       this.patch({ sessions: this.state.sessions.map(row => row['sessionId'] === id ? session : row) })
     } catch (error) { if (this.valid(generation)) this.patchDetail(id, { error: errorText(error) }) }
     finally { if (this.valid(generation)) this.patchDetail(id, { loading: false }) }
@@ -349,7 +349,9 @@ export class SessionStore {
       if (!this.valid(generation)) return
       if (page.data.some(event => event['sessionId'] !== id)) throw new Error('Bridge returned events for a different session.')
       if (page.hasMore && page.cursor === before) throw new Error('Event pagination did not advance. Reload available history.')
-      this.patchDetail(id, { events: reset ? page.data : mergeRecords(page.data, detail.events, 'eventId'), cursor: page.cursor, hasMore: page.hasMore, loaded: true })
+      const events = reset ? page.data : mergeRecords(page.data, detail.events, 'eventId')
+      const model = detail.model || latestSessionModel(events)
+      this.patchDetail(id, { events, cursor: page.cursor, hasMore: page.hasMore, loaded: true, ...(model ? { model } : {}) })
     } catch (error) { if (this.valid(generation)) this.patchDetail(id, { eventsError: errorText(error) }) }
     finally { if (this.valid(generation)) this.patchDetail(id, { eventsLoading: false }) }
   }
@@ -362,7 +364,9 @@ export class SessionStore {
       const page = readPage(await this.rpc('session_events', { sessionId: id, limit: 200, tail: true }), 'eventId')
       if (!this.valid(generation)) return
       if (page.data.some(event => event['sessionId'] !== id)) throw new Error('Bridge returned events for a different session.')
-      this.patchDetail(id, { events: mergeRecords(detail.events, page.data, 'eventId'), loaded: true })
+      const events = mergeRecords(detail.events, page.data, 'eventId')
+      const model = detail.model || latestSessionModel(events)
+      this.patchDetail(id, { events, loaded: true, ...(model ? { model } : {}) })
     } catch (error) { if (this.valid(generation)) this.patchDetail(id, { eventsError: errorText(error) }) }
     finally { if (this.valid(generation)) this.patchDetail(id, { eventsLoading: false }) }
   }

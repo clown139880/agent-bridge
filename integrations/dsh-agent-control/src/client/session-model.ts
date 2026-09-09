@@ -33,6 +33,18 @@ export function mergeRecords(current: JsonObject[], incoming: JsonObject[], idKe
   return [...rows.values()]
 }
 
+/** Resolve the model used by the most recent retained turn. */
+export function latestSessionModel(events: JsonObject[]): string {
+  for (let index = events.length - 1; index >= 0; index--) {
+    const payload = asRecord(events[index]?.['payload'])
+    const model = payload['model']
+    if (typeof model === 'string' && model.trim()) return model.trim()
+    const rerouted = payload['toModel']
+    if (typeof rerouted === 'string' && rerouted.trim()) return rerouted.trim()
+  }
+  return ''
+}
+
 /** Transport event identity and item identity are separate: history hydration can repeat a settled item. */
 export function projectEvents(events: JsonObject[]): JsonObject[] {
   const result = new Map<string, JsonObject>()

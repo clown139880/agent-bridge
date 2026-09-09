@@ -64,9 +64,9 @@ export function catalogState(loading: boolean, error: string, selected: string, 
     const allModels = groups.flatMap(group => group.models)
     const selectedMatch = allModels.find(model => model.id === selected)
       ?? (selected.includes('/') ? allModels.find(model => model.id === selected.slice(selected.lastIndexOf('/') + 1)) : undefined)
-    const fallbackModel = str(fallback['model'], '')
-    const fallbackMatch = allModels.find(model => model.id === fallbackModel)
-    const chosenModel = selectedMatch?.id ?? fallbackMatch?.id ?? ''
+    // Keep model selection scoped to the conversation. Unknown legacy values
+    // remain visibly unselected instead of being replaced by a global default.
+    const chosenModel = selectedMatch?.id ?? ''
     const chosenGroup = groups.find(group => group.models.some(model => model.id === chosenModel))
     const provider = chosenGroup?.id || str(fallback['provider'], '')
     const failures = Array.isArray(native['failures']) ? native['failures'].map(asRecord).map(failure => ({
