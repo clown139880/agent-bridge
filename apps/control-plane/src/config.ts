@@ -63,4 +63,9 @@ export const config = {
     source: bridgeUpdateSource,
     publishedAt: bridgeUpdatePublishedAt,
   } : undefined,
+  // Dorothy bridge-events webhook. Both must be set to enable delivery.
+  webhook: process.env.DOROTHY_WEBHOOK_URL && process.env.DOROTHY_WEBHOOK_SECRET ? {
+    url: process.env.DOROTHY_WEBHOOK_URL,
+    secret: process.env.DOROTHY_WEBHOOK_SECRET,
+  } : undefined,
 };

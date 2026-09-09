@@ -24,6 +24,7 @@ import {
 import type { ControlGateway } from "./matrix.js";
 import { AgentControlApi } from "./api/router.js";
 import { BridgeRegistry, type BridgeConnection } from "./bridge-registry.js";
+import { WebhookNotifier, type WebhookOptions } from "./webhook.js";
 
 const log = pino({ name: "control-plane" });
 
@@ -94,6 +95,7 @@ export class ControlPlane {
   private readonly bridges = this.registry.connections;
   private readonly controlStore: AgentControlStore;
   private readonly controlApi: AgentControlApi;
+  private readonly webhook: WebhookNotifier;
   private readonly approvalsByEvent = new Map<string, PendingApproval>();
   private readonly approvalsById = new Map<string, PendingApproval>();
   private readonly resolvedApprovalIds = new Set<string>();
@@ -126,8 +128,10 @@ export class ControlPlane {
         publishedAt?: number;
         admissionTimeoutMs?: number;
       };
+      webhook?: WebhookOptions;
     },
   ) {
+    this.webhook = new WebhookNotifier(options.webhook);
     this.controlStore = new AgentControlStore(store.db, options.retention ?? {
       sessionEventsMs: 30 * 86_400_000, streamEventsMs: 7 * 86_400_000, actionsMs: 86_400_000,
     });
@@ -600,6 +604,7 @@ export class ControlPlane {
       if (machineId && this.registry.remove(machineId, socket)) {
         try { this.controlStore.markMachineOffline(machineId); }
         catch (error) { log.debug({ error, machineId }, "Unable to persist bridge disconnect during shutdown"); }
+        this.webhook.notify({ type: "bridge.offline", machine_id: machineId });
       }
     });
     socket.on("error", (error) => log.warn({ error, machineId }, "Bridge socket error"));
@@ -848,6 +853,14 @@ export class ControlPlane {
     machineId: string,
     message: Extract<BridgeToControlMessage, { type: "bridge_update.status" }>,
   ): Promise<void> {
+    // Relay operator-relevant update phases to Dorothy's bridge-events webhook.
+    if (["discovered", "completed", "failed", "rolled_back"].includes(message.phase)) {
+      this.webhook.notify({
+        type: "bridge_update.status", machine_id: machineId, phase: message.phase,
+        current_version: message.currentVersion, latest_version: message.latestVersion,
+        updatable: message.updatable, reason: message.reason,
+      });
+    }
     if (message.phase === "completed") {
       const bridge = this.bridges.get(machineId);
       if (bridge) bridge.bridgeVersion = message.currentVersion;

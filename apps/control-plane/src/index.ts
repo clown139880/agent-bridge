@@ -31,6 +31,7 @@ control = new ControlPlane(store, matrix, {
   retention: config.retention,
   sse: config.sse,
   bridgeUpdate: config.bridgeUpdate,
+  webhook: config.webhook,
 });
 
 await control.start();
