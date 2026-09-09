@@ -165,13 +165,19 @@ test("deleting an idle session clears retained data and prevents inventory resur
       sessionId:"thread-older", turnId:"old-turn", itemId:"old-message", timestamp:1600,
       payload:{role:"user",text:"remove me"} });
     f.internals.controlStore.updateSessionActivity("thread-1", "active", "turn-live");
-    const active = await fetch(`${f.base}/sessions/thread-1`, { method:"DELETE", headers:f.headers });
+    const active = await fetch(`${f.base}/sessions/thread-1`, { method:"DELETE",
+      headers:{...f.headers,"idempotency-key":"delete-active"}, body:"{}" });
     assert.equal(active.status, 409);
     assert.equal((await active.json() as any).error.code, "session_active");
 
-    const response = await fetch(`${f.base}/sessions/thread-older`, { method:"DELETE", headers:f.headers });
-    assert.equal(response.status, 200);
-    assert.deepEqual(await response.json(), { sessionId:"thread-older", deleted:true });
+    const response = await fetch(`${f.base}/sessions/thread-older`, { method:"DELETE",
+      headers:{...f.headers,"idempotency-key":"delete-idle"}, body:"{}" });
+    assert.equal(response.status, 202);
+    const receipt = await response.json() as any;
+    assert.equal(receipt.kind, "delete_session");
+    assert.equal(receipt.status, "accepted");
+    await f.internals.handleBridgeMessage("dev", { type:"action.result", actionId:receipt.actionId,
+      kind:"delete_session", status:"succeeded", sessionId:"thread-older", timestamp:Date.now() });
     assert.equal(f.internals.controlStore.session("thread-older"), undefined);
     assert.equal((f.store.db.prepare("SELECT COUNT(*) AS n FROM events WHERE session_id=?").get("thread-older") as {n:number}).n, 0);
     assert.equal(f.internals.controlStore.isSessionDeleted("thread-older"), true);
