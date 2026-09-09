@@ -221,6 +221,10 @@ export class BridgeSelfUpdater {
       maxBuffer: 10 * 1024 * 1024,
       // Windows package managers are commonly exposed as .cmd shims.
       shell: process.platform === "win32" && executable.toLowerCase().endsWith(".cmd"),
+      // Self-update runs headless (no TTY). CI=true makes pnpm proceed
+      // non-interactively instead of aborting on the modules-purge prompt
+      // (ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY).
+      env: { ...process.env, CI: "true" },
     });
   }
 }
