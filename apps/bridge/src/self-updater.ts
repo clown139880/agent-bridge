@@ -152,6 +152,7 @@ export class BridgeSelfUpdater {
       await this.command(this.options.packageManager, installArgs, releasePath);
       await assertWorkspaceDependencyInstalled(releasePath, "apps/bridge", "@agent-bridge/protocol");
       await this.command(this.options.packageManager, ["check"], releasePath);
+      await this.command(this.options.packageManager, ["build"], releasePath);
       previousTarget = await currentSymlinkTarget(this.options.currentLink);
       if (!previousTarget) throw new Error(`${this.options.currentLink} must point to the current stable release`);
       await replaceSymlink(this.options.currentLink, releasePath);
