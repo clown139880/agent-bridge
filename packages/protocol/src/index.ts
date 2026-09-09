@@ -16,6 +16,33 @@ export type AgentStatus = (typeof AGENT_STATUSES)[number];
 export type AgentType = "codex-cli" | "codex-desktop" | "claude-code" | "opencode";
 export const BRIDGE_PROTOCOL_VERSION = 2;
 
+/**
+ * Short worker-id prefix per agent family. Worker ids are `${prefix}@${machineId}`.
+ * Codex CLI/Desktop share the historical `codex` prefix for backward compatibility.
+ */
+export function workerPrefix(agentType: AgentType): string {
+  switch (agentType) {
+    case "claude-code":
+      return "claude";
+    case "opencode":
+      return "opencode";
+    default:
+      return "codex";
+  }
+}
+
+/** Build a worker id, e.g. workerId("claude-code","hal") => "claude@hal". */
+export function workerId(agentType: AgentType, machineId: string): string {
+  return `${workerPrefix(agentType)}@${machineId}`;
+}
+
+/** Parse a worker id into its agent prefix and machine id, or undefined if malformed. */
+export function parseWorkerId(id: string): { prefix: string; machineId: string } | undefined {
+  const at = id.indexOf("@");
+  if (at <= 0 || at === id.length - 1) return undefined;
+  return { prefix: id.slice(0, at), machineId: id.slice(at + 1) };
+}
+
 export type SessionActivityStatus =
   | "creating" | "active" | "waiting_for_approval" | "waiting_for_input"
   | "idle" | "offline" | "error" | "unknown";
@@ -51,7 +78,7 @@ export interface SessionDiscoveredMessage {
   requestId?: string;
   sessionId: string;
   nativeSessionId: string;
-  agentType: "codex-cli" | "codex-desktop";
+  agentType: AgentType;
   projectPath: string;
   projectName?: string;
   title?: string;
@@ -61,6 +88,8 @@ export interface SessionDiscoveredMessage {
   /** Last real thread activity. Inventory and reconnect time must not replace it. */
   updatedAt?: number;
   model?: string;
+  /** Memory seam: stable cross-machine project key (e.g. derived from git remote). */
+  projectIdentity?: string;
 }
 
 export interface RegisterMessage {
@@ -134,7 +163,7 @@ export interface StartAgentMessage {
   type: "start_agent";
   sessionId: string;
   resumeSessionId?: string;
-  agentType: "codex-cli";
+  agentType: AgentType;
   projectPath: string;
   prompt?: string;
   model?: string;
@@ -228,10 +257,12 @@ export interface UserInputResolvedMessage {
   resolvedAt: number;
 }
 
+export type SessionSource = "app-server" | "desktop-rollout" | "claude-cli";
+
 export interface SessionState {
   sessionId: string;
   nativeSessionId: string;
-  agentType: "codex-cli" | "codex-desktop";
+  agentType: AgentType;
   projectPath: string;
   projectName: string;
   title?: string;
@@ -241,8 +272,10 @@ export interface SessionState {
   lastTurnStatus?: TurnStatus;
   createdAt: number;
   updatedAt: number;
-  source: "app-server" | "desktop-rollout";
+  source: SessionSource;
   historyCompleteness: "full" | "loaded-only" | "terminal-only";
+  /** Memory seam: stable cross-machine project key (e.g. derived from git remote). */
+  projectIdentity?: string;
 }
 
 export interface StateSnapshotMessage {
@@ -274,6 +307,7 @@ export interface StructuredSessionEventMessage {
 export interface CreateSessionActionMessage {
   type: "action.create_session";
   actionId: string;
+  agentType?: AgentType;
   projectPath: string;
   input?: string;
   model?: string;

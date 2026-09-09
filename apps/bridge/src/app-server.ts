@@ -16,6 +16,7 @@ import type {
 } from "@agent-bridge/protocol";
 import { CodexDesktopSessionScanner } from "./desktop-sessions.js";
 import { isPathWithinRoots } from "./path-utils.js";
+import type { AgentAdapter } from "./agent-adapter.js";
 
 const log = pino({ name: "codex-app-server" });
 const execFileAsync = promisify(execFile);
@@ -96,7 +97,7 @@ interface PendingApproval {
   choices: ApprovalChoice[];
 }
 
-export class CodexAppServerAdapter {
+export class CodexAppServerAdapter implements AgentAdapter {
   private socket?: WebSocket;
   private child?: ChildProcess;
   private nextRequestId = 1;

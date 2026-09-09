@@ -55,12 +55,17 @@ export const config = {
   machineName: process.env.MACHINE_NAME ?? hostname(),
   hostname: hostname(),
   platform: platform(),
+  // Which agent backends this bridge runs, e.g. "codex" or "codex,claude".
+  providers: (process.env.BRIDGE_PROVIDERS ?? "codex").split(",").map((p) => p.trim()).filter(Boolean),
   codexCommand: resolveCodexCommand(process.env.CODEX_COMMAND ?? "codex"),
   appServerUrl: process.env.CODEX_APP_SERVER_URL ?? "ws://127.0.0.1:4500",
   manageAppServer: process.env.CODEX_APP_SERVER_MANAGED !== "false",
   desktopHome: process.env.CODEX_DESKTOP_HOME,
   desktopScanIntervalMs: Number(process.env.CODEX_DESKTOP_SCAN_INTERVAL_MS ?? "3000"),
   desktopReplayExisting: process.env.CODEX_DESKTOP_REPLAY_EXISTING === "true",
+  claudeCommand: process.env.CLAUDE_COMMAND ?? "claude",
+  claudeHome: process.env.CLAUDE_HOME ?? `${process.env.HOME ?? ""}/.claude`,
+  claudeScanExisting: process.env.CLAUDE_SCAN_EXISTING === "true",
   allowedRoots: splitAllowedRoots(process.env.BRIDGE_ALLOWED_ROOTS, platform()).length
     ? splitAllowedRoots(process.env.BRIDGE_ALLOWED_ROOTS, platform()) : [process.cwd()],
   reconnectMs: Number(process.env.BRIDGE_RECONNECT_MS ?? "3000"),

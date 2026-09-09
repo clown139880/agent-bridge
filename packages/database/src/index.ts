@@ -2,7 +2,7 @@ import { mkdirSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { AgentEvent, AgentStatus, AgentType } from "@agent-bridge/protocol";
+import { workerId, type AgentEvent, type AgentStatus, type AgentType } from "@agent-bridge/protocol";
 import { migrateDatabase } from "./migrations.js";
 export * from "./control.js";
 
@@ -35,7 +35,7 @@ export interface WorkerRunRecord {
   taskId: string | null;
   conversationId: string | null;
   machineId: string;
-  agentType: "codex-cli";
+  agentType: AgentType;
   projectPath: string;
   sessionId: string | null;
   status: AgentStatus;
@@ -229,7 +229,7 @@ export class Store {
 
   private addRunStream(id: string): void {
     const run=this.getWorkerRun(id);if(!run)return;
-    const payload={runId:run.id,taskId:run.taskId,conversationId:run.conversationId,workerId:`codex@${run.machineId}`,
+    const payload={runId:run.id,taskId:run.taskId,conversationId:run.conversationId,workerId:workerId(run.agentType,run.machineId),
       machineId:run.machineId,agent:run.agentType,workspace:run.projectPath,sessionId:run.sessionId,status:run.status,
       error:run.error,createdAt:run.createdAt,updatedAt:run.updatedAt};
     this.db.prepare(`INSERT INTO stream_events(event_id,type,resource_kind,resource_id,session_id,payload,created_at)
@@ -251,7 +251,7 @@ function mapWorkerRun(row: Record<string, unknown>): WorkerRunRecord {
   return {
     id: String(row.id), taskId: row.task_id ? String(row.task_id) : null,
     conversationId: row.conversation_id ? String(row.conversation_id) : null,
-    machineId: String(row.machine_id), agentType: row.agent_type as "codex-cli",
+    machineId: String(row.machine_id), agentType: row.agent_type as AgentType,
     projectPath: String(row.project_path), sessionId: row.session_id ? String(row.session_id) : null,
     status: row.status as AgentStatus, error: row.error ? String(row.error) : null,
     createdAt: Number(row.created_at), updatedAt: Number(row.updated_at),

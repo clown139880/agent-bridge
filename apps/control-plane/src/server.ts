@@ -7,8 +7,11 @@ import { WebSocket, WebSocketServer } from "ws";
 import { AgentControlStore, Store, type SessionRecord, type WorkerRunRecord } from "@agent-bridge/database";
 import {
   parseMessage,
+  parseWorkerId,
   statusForEvent,
+  workerId as buildWorkerId,
   type AgentEvent,
+  type AgentType,
   type ApprovalChoice,
   type ApprovalRequestMessage,
   type BridgeToControlMessage,
@@ -24,9 +27,20 @@ import { BridgeRegistry, type BridgeConnection } from "./bridge-registry.js";
 
 const log = pino({ name: "control-plane" });
 
+/** Map a worker-id prefix (from `${prefix}@machine`) to an agent type. */
+function agentTypeForWorkerPrefix(prefix: string): AgentType {
+  return prefix === "claude" ? "claude-code" : "codex-cli";
+}
+
+/** Registration capability a bridge must advertise to run the given agent type. */
+function capabilityForAgent(agentType: AgentType): string {
+  return agentType === "claude-code" ? "claude-code" : "codex-cli";
+}
+
 interface PendingRunLaunch {
   runId: string;
   machineId: string;
+  agentType: AgentType;
   projectPath: string;
   prompt: string;
   resumeSessionId?: string;
@@ -41,7 +55,7 @@ interface PendingLaunch {
   prompt: string;
   sourceEventId: string;
   machineId?: string;
-  agentType: "codex-cli";
+  agentType: AgentType;
 }
 
 interface PendingLaunchSelection {
@@ -306,17 +320,27 @@ export class ControlPlane {
     }
     const url = new URL(request.url ?? "/", "http://localhost");
     if (request.method === "GET" && url.pathname === "/api/v1/workers") {
-      const workers = this.store.listMachines().map((machine) => ({
-        id: `codex@${machine.id}`,
-        machineId: machine.id,
-        name: `Codex @ ${machine.name}`,
-        status: this.bridges.has(machine.id) ? "online" : "offline",
-        platform: machine.platform,
-        hostname: machine.hostname,
-        capabilities: machine.capabilities,
-        workspaces: this.store.listProjectPaths(machine.id),
-        lastSeenAt: machine.lastSeenAt,
-      }));
+      const workers = this.store.listMachines().flatMap((machine) => {
+        // One worker per agent family the bridge advertises. Codex is always
+        // present for backward compatibility; Claude appears when the bridge
+        // registered the claude-code capability.
+        const agents: Array<{ agentType: AgentType; label: string }> = [{ agentType: "codex-cli", label: "Codex" }];
+        if (machine.capabilities.includes("claude-code")) agents.push({ agentType: "claude-code", label: "Claude" });
+        return agents
+          .filter(({ agentType }) => agentType === "codex-cli" || machine.capabilities.includes(capabilityForAgent(agentType)))
+          .map(({ agentType, label }) => ({
+            id: buildWorkerId(agentType, machine.id),
+            machineId: machine.id,
+            agentType,
+            name: `${label} @ ${machine.name}`,
+            status: this.bridges.has(machine.id) ? "online" : "offline",
+            platform: machine.platform,
+            hostname: machine.hostname,
+            capabilities: machine.capabilities,
+            workspaces: this.store.listProjectPaths(machine.id),
+            lastSeenAt: machine.lastSeenAt,
+          }));
+      });
       this.json(response, 200, { workers });
       return;
     }
@@ -324,7 +348,9 @@ export class ControlPlane {
       const body = await readJson(request);
       const workerId = optionalStringField(body, "workerId");
       const explicitMachineId = optionalStringField(body, "machineId");
-      const machineId = workerId?.startsWith("codex@") ? workerId.slice("codex@".length) : explicitMachineId;
+      const parsedWorker = workerId ? parseWorkerId(workerId) : undefined;
+      const machineId = parsedWorker?.machineId ?? explicitMachineId;
+      const agentType = parsedWorker ? agentTypeForWorkerPrefix(parsedWorker.prefix) : "codex-cli";
       const projectPath = stringField(body, "projectPath");
       const prompt = stringField(body, "prompt");
       const requestedRunId = optionalStringField(body, "runId");
@@ -334,7 +360,7 @@ export class ControlPlane {
       const model = optionalStringField(body, "model");
       const allowStaleVersion = body && typeof body === "object"
         ? (body as Record<string, unknown>).allow_stale_version === true : false;
-      if (workerId && (!workerId.startsWith("codex@") || !machineId || (explicitMachineId && explicitMachineId !== machineId))) {
+      if (workerId && (!parsedWorker || !machineId || (explicitMachineId && explicitMachineId !== machineId))) {
         this.json(response, 400, { error: "invalid_worker_id", workerId });
         return;
       }
@@ -343,7 +369,7 @@ export class ControlPlane {
         return;
       }
       const bridge = this.bridges.get(machineId);
-      if (!bridge || !bridge.capabilities.includes("codex-cli")) {
+      if (!bridge || !bridge.capabilities.includes(capabilityForAgent(agentType))) {
         this.json(response, 409, { error: "worker_offline", machineId });
         return;
       }
@@ -390,13 +416,13 @@ export class ControlPlane {
       const now = Date.now();
       this.store.createWorkerRun({
         id: runId, taskId: taskId ?? null, conversationId: conversationId ?? null,
-        machineId, agentType: "codex-cli", projectPath,
+        machineId, agentType, projectPath,
         sessionId: resumeSession?.id ?? null,
         status: this.bridgeNeedsUpdate(bridge) && !allowStaleVersion ? "update_waiting" : "starting",
         error: null, createdAt: now, updatedAt: now,
       });
       if (this.bridgeNeedsUpdate(bridge) && !allowStaleVersion) {
-        this.queueRunForUpdate({ runId, machineId, projectPath, prompt,
+        this.queueRunForUpdate({ runId, machineId, agentType, projectPath, prompt,
           resumeSessionId: effectiveResumeSessionId, model });
         this.sendUpdateAnnouncement(bridge.socket);
       } else {
@@ -404,7 +430,7 @@ export class ControlPlane {
           log.warn({ machineId, runId, currentVersion: bridge.bridgeVersion,
             targetVersion: this.options.bridgeUpdate?.latestVersion }, "Audited stale bridge version override");
         }
-        this.sendStartAgent(bridge, runId, projectPath, prompt, effectiveResumeSessionId, model);
+        this.sendStartAgent(bridge, runId, projectPath, prompt, effectiveResumeSessionId, model, agentType);
       }
       this.json(response, 202, workerRunJson(this.store.getWorkerRun(runId)!));
       return;
@@ -750,14 +776,14 @@ export class ControlPlane {
       clearTimeout(pending.timeout);
       this.pendingRunLaunches.delete(runId);
       this.store.updateWorkerRun(runId, "starting");
-      this.sendStartAgent(bridge, runId, pending.projectPath, pending.prompt, pending.resumeSessionId, pending.model);
+      this.sendStartAgent(bridge, runId, pending.projectPath, pending.prompt, pending.resumeSessionId, pending.model, pending.agentType);
     }
   }
 
   private sendStartAgent(bridge: BridgeConnection, runId: string, projectPath: string,
-    prompt: string, resumeSessionId?: string, model?: string): void {
+    prompt: string, resumeSessionId?: string, model?: string, agentType: AgentType = "codex-cli"): void {
     this.send(bridge.socket, { type: "start_agent", sessionId: runId, resumeSessionId,
-      agentType: "codex-cli", projectPath, prompt, model });
+      agentType, projectPath, prompt, model });
   }
 
   private replayControlActions(machineId: string): void {
@@ -1150,7 +1176,7 @@ function workerRunJson(run: WorkerRunRecord): Record<string, unknown> {
     runId: run.id,
     taskId: run.taskId,
     conversationId: run.conversationId,
-    workerId: `codex@${run.machineId}`,
+    workerId: buildWorkerId(run.agentType, run.machineId),
     machineId: run.machineId,
     agent: run.agentType,
     workspace: run.projectPath,

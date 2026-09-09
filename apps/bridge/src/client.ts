@@ -6,15 +6,32 @@ import {
   BRIDGE_PROTOCOL_VERSION,
   parseMessage,
   type ActionResultMessage,
+  type AgentType,
   type BridgeToControlMessage,
   type ControlToBridgeMessage,
   type RegisterMessage,
+  type SessionState,
 } from "@agent-bridge/protocol";
 import { CodexAppServerAdapter } from "./app-server.js";
 import { config } from "./config.js";
+import { ClaudeCodeAdapter } from "./claude/claude-adapter.js";
+import type { AgentAdapter } from "./agent-adapter.js";
 import { BridgeSelfUpdater } from "./self-updater.js";
 
 const log = pino({ name: "bridge-client" });
+
+/** Map a provider name from config to its canonical AgentType. */
+function providerToAgentType(provider: string): AgentType | undefined {
+  if (provider === "codex") return "codex-cli";
+  if (provider === "claude") return "claude-code";
+  return undefined;
+}
+
+/** Registration capabilities contributed by each agent type. */
+function capabilitiesFor(agentType: AgentType): string[] {
+  if (agentType === "claude-code") return ["claude-code", "claude-cli"];
+  return ["codex-cli", "codex-app-server"];
+}
 
 export class BridgeClient {
   private socket?: WebSocket;
@@ -22,7 +39,9 @@ export class BridgeClient {
   private heartbeatTimer?: NodeJS.Timeout;
   private reconcileInFlight = false;
   private stopped = false;
-  private readonly codex: CodexAppServerAdapter;
+  private readonly adapters = new Map<AgentType, AgentAdapter>();
+  /** sessionId -> owning agent type, so session-addressed messages route correctly. */
+  private readonly sessionOwner = new Map<string, AgentType>();
   private readonly updater: BridgeSelfUpdater;
   private readonly actionResults = new Map<string, ActionResultMessage>();
   private readonly inFlightActions = new Set<string>();
@@ -36,12 +55,16 @@ export class BridgeClient {
     machineName: string;
     hostname: string;
     platform: NodeJS.Platform;
+    providers?: string[];
     command: string;
     appServerUrl: string;
     manageAppServer: boolean;
     desktopHome?: string;
     desktopScanIntervalMs: number;
     desktopReplayExisting: boolean;
+    claudeCommand?: string;
+    claudeHome?: string;
+    claudeScanExisting?: boolean;
     allowedRoots: string[];
     reconnectMs: number;
     version: string;
@@ -59,24 +82,30 @@ export class BridgeClient {
     updateRestartArgs: string[];
   }) {
     this.loadActionResults();
-    this.codex = new CodexAppServerAdapter({
-      command: options.command,
-      url: options.appServerUrl,
-      allowedRoots: options.allowedRoots,
-      manageServer: options.manageAppServer,
-      desktopHome: options.desktopHome,
-      desktopScanIntervalMs: options.desktopScanIntervalMs,
-      desktopReplayExisting: options.desktopReplayExisting,
-      reconnectMs: options.reconnectMs,
-    }, (message) => {
-      if (["session.discovered", "session.event", "approval_request", "approval_resolved",
-        "user_input_request", "user_input_resolved"].includes(message.type)) this.sendDurable(message);
-      else this.send(message);
-      if (message.type === "agent.completed" || message.type === "agent.failed"
-        || message.type === "agent.stopped" || message.type === "approval_resolved") {
-        queueMicrotask(() => void this.updater.activityChanged());
-      }
-    });
+
+    const providers = options.providers?.length ? options.providers : ["codex"];
+    if (providers.includes("codex")) {
+      this.adapters.set("codex-cli", new CodexAppServerAdapter({
+        command: options.command,
+        url: options.appServerUrl,
+        allowedRoots: options.allowedRoots,
+        manageServer: options.manageAppServer,
+        desktopHome: options.desktopHome,
+        desktopScanIntervalMs: options.desktopScanIntervalMs,
+        desktopReplayExisting: options.desktopReplayExisting,
+        reconnectMs: options.reconnectMs,
+      }, this.adapterEmit("codex-cli")));
+    }
+    if (providers.includes("claude")) {
+      this.adapters.set("claude-code", new ClaudeCodeAdapter({
+        command: options.claudeCommand ?? "claude",
+        claudeHome: options.claudeHome ?? `${process.env.HOME ?? ""}/.claude`,
+        allowedRoots: options.allowedRoots,
+        scanExisting: options.claudeScanExisting ?? false,
+      }, this.adapterEmit("claude-code")));
+    }
+    if (!this.adapters.size) throw new Error(`No known agent providers enabled: ${providers.join(",")}`);
+
     this.updater = new BridgeSelfUpdater({
       enabled: options.updateEnabled,
       currentVersion: options.version,
@@ -91,19 +120,57 @@ export class BridgeClient {
       releaseRetention: config.updateReleaseRetention,
       restartExecutable: options.updateRestartExecutable,
       restartArgs: options.updateRestartArgs,
-      isBusy: () => !this.codex.isReady() || this.codex.hasActiveSessions(),
+      isBusy: () => [...this.adapters.values()].some((a) => !a.isReady() || a.hasActiveSessions()),
       report: (message) => this.send(message),
       reportIdle: () => this.send({ type: "bridge.idle", machineId: this.options.machineId, timestamp: Date.now() }),
     });
   }
 
+  /** Build the per-adapter emit callback: tag session ownership, forward, and poke the updater. */
+  private adapterEmit(agentType: AgentType): (message: BridgeToControlMessage) => void {
+    return (message) => {
+      if (message.type === "session.discovered" && "sessionId" in message) {
+        this.sessionOwner.set(message.sessionId, agentType);
+      }
+      if (["session.discovered", "session.event", "approval_request", "approval_resolved",
+        "user_input_request", "user_input_resolved"].includes(message.type)) this.sendDurable(message);
+      else this.send(message);
+      if (message.type === "agent.completed" || message.type === "agent.failed"
+        || message.type === "agent.stopped" || message.type === "approval_resolved") {
+        queueMicrotask(() => void this.updater.activityChanged());
+      }
+    };
+  }
+
+  /** Resolve the adapter that owns a session id (falls back to snapshot scan, then sole adapter). */
+  private adapterForSession(sessionId: string): AgentAdapter {
+    const owner = this.sessionOwner.get(sessionId);
+    if (owner && this.adapters.has(owner)) return this.adapters.get(owner)!;
+    for (const [type, adapter] of this.adapters) {
+      if (adapter.isReady() && adapter.stateSnapshot().sessions.some((s) => s.sessionId === sessionId)) {
+        this.sessionOwner.set(sessionId, type);
+        return adapter;
+      }
+    }
+    if (this.adapters.size === 1) return this.adapters.values().next().value!;
+    throw new Error(`No adapter owns session ${sessionId}`);
+  }
+
+  /** Resolve the adapter for a target agent type (defaults to the first enabled adapter). */
+  private adapterForType(agentType?: AgentType): AgentAdapter {
+    if (agentType && this.adapters.has(agentType)) return this.adapters.get(agentType)!;
+    return this.adapters.values().next().value!;
+  }
+
   start(): void {
     this.stopped = false;
-    void this.codex.start()
-      .then(() => this.updater.activityChanged())
-      .catch((error) => {
-        log.error({ error }, "Unable to initialize Codex App Server adapter");
-      });
+    for (const [type, adapter] of this.adapters) {
+      void adapter.start()
+        .then(() => this.updater.activityChanged())
+        .catch((error) => {
+          log.error({ error, agentType: type }, "Unable to initialize agent adapter");
+        });
+    }
     this.connect();
   }
 
@@ -111,8 +178,23 @@ export class BridgeClient {
     this.stopped = true;
     clearTimeout(this.reconnectTimer);
     clearInterval(this.heartbeatTimer);
-    this.codex.stop();
+    for (const adapter of this.adapters.values()) adapter.stop();
     this.socket?.close(1000, "bridge shutdown");
+  }
+
+  /** Merge session-activity buckets across all ready adapters. */
+  private aggregateActivity(): { activeSessionIds: string[]; waitingSessionIds: string[]; blockedSessionIds: string[] } {
+    const active = new Set<string>();
+    const waiting = new Set<string>();
+    const blocked = new Set<string>();
+    for (const adapter of this.adapters.values()) {
+      if (!adapter.isReady()) continue;
+      const a = adapter.sessionActivity();
+      a.activeSessionIds.forEach((s) => active.add(s));
+      a.waitingSessionIds.forEach((s) => waiting.add(s));
+      a.blockedSessionIds.forEach((s) => blocked.add(s));
+    }
+    return { activeSessionIds: [...active], waitingSessionIds: [...waiting], blockedSessionIds: [...blocked] };
   }
 
   private connect(): void {
@@ -127,7 +209,10 @@ export class BridgeClient {
         name: this.options.machineName,
         hostname: this.options.hostname,
         platform: this.options.platform,
-        capabilities: ["codex-cli", "codex-app-server", "local-first", "git"],
+        capabilities: [
+          ...new Set([...this.adapters.keys()].flatMap((type) => capabilitiesFor(type))),
+          "local-first", "git",
+        ],
         protocolVersion: BRIDGE_PROTOCOL_VERSION,
         features: ["session-inventory", "session-events", "session-actions", "turn-steer",
           "turn-interrupt", "approvals", "user-input", "desktop-terminal-history"],
@@ -173,7 +258,7 @@ export class BridgeClient {
               message: this.admissionMessage() });
             break;
           }
-          void this.codex.startSession(message.sessionId, message.projectPath, message.prompt, message.resumeSessionId, message.model)
+          void this.adapterForType(message.agentType).startSession(message.sessionId, message.projectPath, message.prompt, message.resumeSessionId, message.model)
             .catch((error) => this.send({ type: "error", sessionId: message.sessionId, message: error instanceof Error ? error.message : String(error) }));
           break;
         case "agent_input":
@@ -182,22 +267,22 @@ export class BridgeClient {
               message: this.admissionMessage() });
             break;
           }
-          void this.codex.input(message.sessionId, message.text, message.model)
+          void this.adapterForSession(message.sessionId).input(message.sessionId, message.text, message.model)
             .catch((error) => this.send({ type: "error", sessionId: message.sessionId, message: error instanceof Error ? error.message : String(error) }));
           break;
         case "approval_response":
-          void this.codex.approve(message.sessionId, message.approvalId, message.choice)
+          void this.adapterForSession(message.sessionId).approve(message.sessionId, message.approvalId, message.choice)
             .catch((error) => this.send({ type: "error", sessionId: message.sessionId, message: error instanceof Error ? error.message : String(error) }));
           break;
         case "stop_agent":
-          void this.codex.stopSession(message.sessionId)
+          void this.adapterForSession(message.sessionId).stopSession(message.sessionId)
             .catch((error) => this.send({ type: "error", sessionId: message.sessionId, message: error instanceof Error ? error.message : String(error) }));
           break;
         case "log_request":
-          this.send({ type: "log_response", sessionId: message.sessionId, text: this.codex.logs(message.sessionId, message.lines) });
+          this.send({ type: "log_response", sessionId: message.sessionId, text: this.adapterForSession(message.sessionId).logs(message.sessionId, message.lines) });
           break;
         case "model_catalog_request":
-          void this.codex.models().then(models => this.send({ type: "model_catalog_response", requestId: message.requestId, models }))
+          void this.adapterForType().models().then(models => this.send({ type: "model_catalog_response", requestId: message.requestId, models }))
             .catch(error => this.send({ type: "model_catalog_response", requestId: message.requestId, error: error instanceof Error ? error.message : String(error) }));
           break;
         case "action.create_session":
@@ -224,9 +309,14 @@ export class BridgeClient {
 
   private sendStateSnapshot(): void {
     if(this.stopped)return;
-    if(!this.codex.isReady()){setTimeout(()=>this.sendStateSnapshot(),250).unref();return;}
-    const snapshot=this.codex.stateSnapshot();
-    this.send({type:"state.snapshot",generation:`${Date.now()}`,...snapshot,complete:true} as BridgeToControlMessage);
+    if([...this.adapters.values()].some((a)=>!a.isReady())){setTimeout(()=>this.sendStateSnapshot(),250).unref();return;}
+    const sessions:SessionState[]=[];const approvals:Array<Record<string,unknown>>=[];const userInputs:Array<Record<string,unknown>>=[];
+    for(const[type,adapter]of this.adapters){
+      const snap=adapter.stateSnapshot();
+      for(const session of snap.sessions)this.sessionOwner.set(session.sessionId,type);
+      sessions.push(...snap.sessions);approvals.push(...snap.approvals);userInputs.push(...snap.userInputs);
+    }
+    this.send({type:"state.snapshot",generation:`${Date.now()}`,sessions,approvals,userInputs,complete:true} as BridgeToControlMessage);
     while(this.queuedStateMessages.length)this.send(this.queuedStateMessages.shift()!);
   }
 
@@ -262,22 +352,22 @@ export class BridgeClient {
         throw Object.assign(new Error(this.admissionMessage()), { code: "update_required", retryable: true });
       }
       if(message.type==="action.create_session"){
-        const value=await this.codex.createSessionAction(message.actionId,message.projectPath,message.input,message.model);
+        const value=await this.adapterForType(message.agentType).createSessionAction(message.actionId,message.projectPath,message.input,message.model);
         result={type:"action.result",actionId:message.actionId,kind,status:"succeeded",...value,timestamp:Date.now()};
       }else if(message.type==="action.submit_turn"){
-        const value=await this.codex.submitTurnAction(message.actionId,message.sessionId,message.input,message.delivery,message.expectedTurnId,message.model,message.reasoningEffort);
+        const value=await this.adapterForSession(message.sessionId).submitTurnAction(message.actionId,message.sessionId,message.input,message.delivery,message.expectedTurnId,message.model,message.reasoningEffort);
         result={type:"action.result",actionId:message.actionId,kind,status:"succeeded",...value,timestamp:Date.now()};
       }else if(message.type==="action.interrupt_turn"){
-        const value=await this.codex.interruptAction(message.sessionId,message.expectedTurnId);
+        const value=await this.adapterForSession(message.sessionId).interruptAction(message.sessionId,message.expectedTurnId);
         result={type:"action.result",actionId:message.actionId,kind,status:"succeeded",...value,timestamp:Date.now()};
       }else if(message.type==="action.resolve_approval"){
-        await this.codex.approve(message.sessionId,message.approvalId,message.choice);
+        await this.adapterForSession(message.sessionId).approve(message.sessionId,message.approvalId,message.choice);
         result={type:"action.result",actionId:message.actionId,kind,status:"succeeded",sessionId:message.sessionId,timestamp:Date.now()};
       }else if(message.type==="action.resolve_user_input"){
-        await this.codex.respondUserInput(message.sessionId,message.requestId,message.answers);
+        await this.adapterForSession(message.sessionId).respondUserInput(message.sessionId,message.requestId,message.answers);
         result={type:"action.result",actionId:message.actionId,kind,status:"succeeded",sessionId:message.sessionId,timestamp:Date.now()};
       }else{
-        const value=await this.codex.deleteSessionAction(message.sessionId);
+        const value=await this.adapterForSession(message.sessionId).deleteSessionAction(message.sessionId);
         result={type:"action.result",actionId:message.actionId,kind,status:"succeeded",...value,timestamp:Date.now()};
       }
     }catch(error){const value=error as Error&{code?:string;retryable?:boolean};result={type:"action.result",actionId:message.actionId,
@@ -293,17 +383,19 @@ export class BridgeClient {
     // Liveness must not depend on the (potentially slow) App Server reads used
     // to reconcile active turns.  Send the heartbeat first so Control Plane
     // never mistakes a busy App Server for an offline Bridge.
-    const activity = this.codex.isReady() ? this.codex.sessionActivity() : {};
     this.send({
-      type: "heartbeat", machineId: this.options.machineId, timestamp: Date.now(), ...activity,
+      type: "heartbeat", machineId: this.options.machineId, timestamp: Date.now(), ...this.aggregateActivity(),
     });
-    if (!this.codex.isReady() || this.reconcileInFlight) return;
+    if (this.reconcileInFlight) return;
     this.reconcileInFlight = true;
     try {
-      try {
-        await this.codex.reconcileActivity();
-      } catch (error) {
-        log.warn({ error }, "Unable to reconcile Codex activity after heartbeat");
+      for (const adapter of this.adapters.values()) {
+        if (!adapter.isReady()) continue;
+        try {
+          await adapter.reconcileActivity();
+        } catch (error) {
+          log.warn({ error }, "Unable to reconcile adapter activity after heartbeat");
+        }
       }
     } finally { this.reconcileInFlight = false; }
   }

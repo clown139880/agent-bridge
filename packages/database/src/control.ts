@@ -1,8 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
-import type {
-  ActionKind, ActionResultMessage, ApprovalChoice, SessionActivityStatus, SessionState,
-  StructuredSessionEventMessage, TurnStatus, UserInputQuestion,
+import {
+  workerId as buildWorkerId,
+  type AgentType, type ActionKind, type ActionResultMessage, type ApprovalChoice, type SessionActivityStatus,
+  type SessionState, type StructuredSessionEventMessage, type TurnStatus, type UserInputQuestion,
 } from "@agent-bridge/protocol";
 
 export interface RetentionOptions {
@@ -423,7 +424,7 @@ export class AgentControlStore {
     const comparator = input.order === "asc" ? ">" : "<";
     const where: string[] = [], params: any[] = [];
     if (input.statuses?.length) { where.push(`activity_status IN (${input.statuses.map(() => "?").join(",")})`); params.push(...input.statuses); }
-    const machine = input.machineId ?? (input.workerId?.startsWith("codex@") ? input.workerId.slice(6) : undefined);
+    const machine = input.machineId ?? (input.workerId?.includes("@") ? input.workerId.slice(input.workerId.indexOf("@") + 1) : undefined);
     if (machine) { where.push("machine_id=?"); params.push(machine); }
     if (input.agents?.length) { where.push(`agent_type IN (${input.agents.map(() => "?").join(",")})`); params.push(...input.agents); }
     if (input.workspace) { where.push("project_path=?"); params.push(input.workspace); }
@@ -543,7 +544,7 @@ export class AgentControlStore {
       }
     }
     const result:Record<string,unknown>={sessionId:String(row.id),nativeSessionId:row.native_session_id?String(row.native_session_id):String(row.id),
-      workerId:`codex@${row.machine_id}`,machineId:String(row.machine_id),agent:String(row.agent_type),
+      workerId:buildWorkerId(String(row.agent_type) as AgentType,String(row.machine_id)),machineId:String(row.machine_id),agent:String(row.agent_type),
       title:row.title?String(row.title):null,promptSummary,
       projectName:String(row.project_name),workspace:String(row.project_path),status:String(row.activity_status??"unknown"),
       activeTurnId:row.active_turn_id?String(row.active_turn_id):null,lastTurnStatus:row.last_turn_status?String(row.last_turn_status):null,

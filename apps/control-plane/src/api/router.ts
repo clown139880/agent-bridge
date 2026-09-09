@@ -1,11 +1,21 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Store, AgentControlStore, PendingRow, ActionRow } from "@agent-bridge/database";
-import type { ActionKind, ControlToBridgeMessage } from "@agent-bridge/protocol";
+import { parseWorkerId, workerId as buildWorkerId, type AgentType, type ActionKind, type ControlToBridgeMessage } from "@agent-bridge/protocol";
 import { BridgeRegistry } from "../bridge-registry.js";
 import { AgentControlSse, SseCursorError } from "./sse.js";
 import { ActionServiceError, SessionActionService } from "./session-actions.js";
 import { ApiProblem, integerParam as integer, jsonBody, stringField as string } from "./validation.js";
+
+/** Map a worker-id prefix to an agent type, or undefined for an unknown prefix. */
+function agentTypeForWorkerPrefix(prefix: string): AgentType | undefined {
+  if (prefix === "codex") return "codex-cli";
+  if (prefix === "claude") return "claude-code";
+  return undefined;
+}
+function capabilityForAgent(agentType: AgentType): string {
+  return agentType === "claude-code" ? "claude-code" : "codex-cli";
+}
 
 interface Principal { id: string; read: boolean; write: boolean; }
 interface ApiOptions { workerToken?: string; readToken?: string; writeToken?: string;
@@ -82,27 +92,34 @@ export class AgentControlApi {
     throw new ApiProblem(401,"unauthorized","valid bearer token required");
   }
 
-  private workerJson(machine:ReturnType<Store["listMachines"]>[number]):Record<string,unknown>{
+  private workerJson(machine:ReturnType<Store["listMachines"]>[number],agentType:AgentType,label:string):Record<string,unknown>{
     const bridge=this.bridges.get(machine.id);const workspaces=this.legacy.listProjectPaths(machine.id);
     const recent=workspaces.map(path=>{const row=this.store.db.prepare("SELECT MAX(updated_at) AS t,COUNT(*) AS n FROM sessions WHERE machine_id=? AND project_path=?").get(machine.id,path) as {t:number;n:number};return{path,name:path.replace(/[\\/]$/,"").split(/[\\/]/).at(-1)||path,lastUsedAt:Number(row.t),sessionCount:Number(row.n)};});
     const active=Number((this.store.db.prepare("SELECT COUNT(*) AS n FROM sessions WHERE machine_id=? AND activity_status IN ('active','waiting_for_approval','waiting_for_input')").get(machine.id) as {n:number}).n);
-    return{id:`codex@${machine.id}`,machineId:machine.id,name:`Codex @ ${machine.name}`,status:bridge?"online":"offline",
+    return{id:buildWorkerId(agentType,machine.id),machineId:machine.id,agentType,name:`${label} @ ${machine.name}`,status:bridge?"online":"offline",
       platform:machine.platform,hostname:machine.hostname,capabilities:[...new Set([...machine.capabilities,...(bridge?.features??[])])],
       workspaces,recentWorkspaces:recent,lastSeenAt:machine.lastSeenAt,bridgeVersion:bridge?.bridgeVersion??null,activeSessionCount:active};
   }
-  private workers(response:ServerResponse):void{this.ok(response,{workers:this.legacy.listMachines().map(m=>this.workerJson(m)),streamCursor:this.store.streamCursor()});}
+  private machineWorkers(machine:ReturnType<Store["listMachines"]>[number]):Record<string,unknown>[]{
+    // Codex is always listed for backward compatibility; Claude appears when the bridge advertises it.
+    const rows=[this.workerJson(machine,"codex-cli","Codex")];
+    if(machine.capabilities.includes(capabilityForAgent("claude-code")))rows.push(this.workerJson(machine,"claude-code","Claude"));
+    return rows;
+  }
+  private workers(response:ServerResponse):void{this.ok(response,{workers:this.legacy.listMachines().flatMap(m=>this.machineWorkers(m)),streamCursor:this.store.streamCursor()});}
   private snapshot(url:URL,response:ServerResponse):void{
     const limit=integer(url.searchParams.get("sessionLimit"),"sessionLimit",100,1,200);
     this.store.db.exec("BEGIN");try{const sessions=this.store.listSessions({sort:"updatedAt",order:"desc",limit});
       const approvals=this.store.listPending("approval",{statuses:["pending"],limit:200});
       const inputs=this.store.listPending("user_input",{statuses:["pending"],limit:200});
-      const body={workers:this.legacy.listMachines().map(m=>this.workerJson(m)),sessions:sessions.data,
+      const body={workers:this.legacy.listMachines().flatMap(m=>this.machineWorkers(m)),sessions:sessions.data,
         approvals:approvals.data.map(pendingJson),userInput:inputs.data.map(pendingJson),streamCursor:this.store.streamCursor(),
         truncated:{sessions:sessions.hasMore}};this.store.db.exec("COMMIT");this.ok(response,body);
     }catch(error){this.store.db.exec("ROLLBACK");throw error;}}
   private sessions(url:URL,response:ServerResponse):void{
     const workerId=url.searchParams.get("workerId")??undefined,machineId=url.searchParams.get("machineId")??undefined;
-    if(workerId&&(!workerId.startsWith("codex@")||Boolean(machineId&&workerId.slice(6)!==machineId)))throw new ApiProblem(400,"invalid_worker_id","workerId and machineId must agree");
+    const parsedWorker=workerId?parseWorkerId(workerId):undefined;
+    if(workerId&&(!parsedWorker||!agentTypeForWorkerPrefix(parsedWorker.prefix)||Boolean(machineId&&parsedWorker.machineId!==machineId)))throw new ApiProblem(400,"invalid_worker_id","workerId and machineId must agree");
     const sort=url.searchParams.get("sort")??"updatedAt";if(!["updatedAt","createdAt"].includes(sort))throw new ApiProblem(400,"invalid_parameter","invalid sort");
     const order=url.searchParams.get("order")??"desc";if(!["asc","desc"].includes(order))throw new ApiProblem(400,"invalid_parameter","invalid order");
     const active=url.searchParams.get("active");if(active!==null&&!['true','false'].includes(active))throw new ApiProblem(400,"invalid_parameter","active must be boolean");
@@ -147,12 +164,13 @@ export class AgentControlApi {
   private async createSession(request:IncomingMessage,response:ServerResponse,principal:Principal):Promise<void>{
     const key=this.requireKey(request),body=await jsonBody(request),workerId=string(body.workerId,"workerId",true)!;
     const prior=this.existingAction(principal,key,"/api/v1/sessions",body);if(prior){this.ok(response,actionJson(prior),202);return;}
-    if(!workerId.startsWith("codex@")||workerId.length===6)throw new ApiProblem(400,"invalid_worker_id","workerId must be codex@machine");
-    const machineId=workerId.slice(6),workspace=string(body.workspace,"workspace",true)!,input=string(body.input,"input"),
+    const parsed=parseWorkerId(workerId);const agentType=parsed?agentTypeForWorkerPrefix(parsed.prefix):undefined;
+    if(!parsed||!agentType)throw new ApiProblem(400,"invalid_worker_id","workerId must be <codex|claude>@machine");
+    const machineId=parsed.machineId,workspace=string(body.workspace,"workspace",true)!,input=string(body.input,"input"),
       model=string(body.model,"model");
     this.requireActionBridge(machineId);
     const created=this.createAction(principal,key,"/api/v1/sessions",body,"create_session",machineId);
-    if(!created.existing)this.dispatch(created.action,{type:"action.create_session",actionId:created.action.actionId,projectPath:workspace,input,model});
+    if(!created.existing)this.dispatch(created.action,{type:"action.create_session",actionId:created.action.actionId,agentType,projectPath:workspace,input,model});
     this.ok(response,actionJson(this.store.action(created.action.actionId)!),202);
   }
 

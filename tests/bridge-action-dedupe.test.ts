@@ -17,17 +17,19 @@ testActionDedupe("duplicate action replay waits for the in-flight RPC and then r
     reconnectMs:1000,version:"0.4.2",updateEnabled:false,updateSourceRef:"main",updateInstallRoot:"/tmp/unused",
     updateCurrentLink:"/tmp/unused/current",updateStatePath:"/tmp/unused/state.json",actionCachePath:cachePath,
     actionCacheTtlMs:86_400_000,updatePackageManager:"pnpm",updateRestartExecutable:"true",updateRestartArgs:[]});
+  type StubAdapter={createSessionAction(actionId:string,path:string,input?:string):Promise<{sessionId:string}>;
+    isReady():boolean;hasActiveSessions():boolean};
   const internals=client as unknown as {
-    codex:{createSessionAction(actionId:string,path:string,input?:string):Promise<{sessionId:string}>;
-      isReady():boolean;hasActiveSessions():boolean};
-    updater:{activityChanged():Promise<void>};
+    adapters:Map<string,StubAdapter>;
+    updater:{admitStart():boolean;admissionState():string;activityChanged():Promise<void>};
     send(message:ActionResultMessage):void;
     handleAction(message:CreateSessionActionMessage):Promise<void>;
   };
   const sent:ActionResultMessage[]=[];let finish!:(value:{sessionId:string})=>void;
-  internals.codex={createSessionAction:()=>new Promise(resolve=>{finish=resolve;}),
+  const stub:StubAdapter={createSessionAction:()=>new Promise(resolve=>{finish=resolve;}),
     isReady:()=>true,hasActiveSessions:()=>false};
-  internals.updater={activityChanged:async()=>{}};
+  internals.adapters=new Map([["codex-cli",stub]]);
+  internals.updater={admitStart:()=>true,admissionState:()=>"ready",activityChanged:async()=>{}};
   internals.send=(message)=>sent.push(message);
   const message:CreateSessionActionMessage={type:"action.create_session",actionId:"action-1",projectPath:"/work/repo"};
   try{

@@ -21,13 +21,13 @@ test("a manual deployment drain rejects new work without touching the App Server
     updateRestartExecutable: "true", updateRestartArgs: [],
   });
   const internals = client as unknown as {
-    codex: { createSessionAction(): Promise<{ sessionId: string }> };
+    adapters: Map<string, { createSessionAction(): Promise<{ sessionId: string }> }>;
     updater: { admitStart(): boolean; admissionState(): "ready"; activityChanged(): Promise<void> };
     send(message: ActionResultMessage): void;
     handleAction(message: CreateSessionActionMessage): Promise<void>;
   };
   let calls = 0;
-  internals.codex = { createSessionAction: async () => { calls += 1; return { sessionId: "thread" }; } };
+  internals.adapters = new Map([["codex-cli", { createSessionAction: async () => { calls += 1; return { sessionId: "thread" }; } }]]);
   internals.updater = { admitStart: () => true, admissionState: () => "ready", activityChanged: async () => {} };
   const sent: ActionResultMessage[] = [];
   internals.send = (message) => sent.push(message);
