@@ -478,6 +478,7 @@ export class CodexAppServerAdapter {
 
   private async restoreLoadedThreads(): Promise<void> {
     let listed = false;
+    const listedThreadIds = new Set<string>();
     try {
       let cursor: string | undefined;
       for (let page = 0; page < 5; page += 1) {
@@ -488,8 +489,10 @@ export class CodexAppServerAdapter {
         listed = true;
         this.inventoryComplete = true;
         for (const thread of result.data) {
-          await this.discoverThread(thread);
-          if (page === 0) await this.hydrateThreadHistory(thread);
+          if (!thread.id || listedThreadIds.has(thread.id)) continue;
+          listedThreadIds.add(thread.id);
+          const discovered = await this.discoverThread(thread);
+          if (discovered && page === 0) await this.hydrateThreadHistory(thread);
         }
         cursor = result.nextCursor ?? undefined;
         if (!cursor) break;
@@ -848,13 +851,13 @@ export class CodexAppServerAdapter {
     }
   }
 
-  private async discoverThread(thread: CodexThread, initialPrompt?: string, requestId?: string): Promise<void> {
-    if (!thread.id || !thread.cwd || thread.parentThreadId) return;
+  private async discoverThread(thread: CodexThread, initialPrompt?: string, requestId?: string): Promise<boolean> {
+    if (!thread.id || !thread.cwd || thread.parentThreadId) return false;
     let projectPath: string;
     try {
       projectPath = await resolveProjectPath(thread.cwd, this.options.allowedRoots);
     } catch {
-      return;
+      return false;
     }
     this.threadsById.set(thread.id, thread);
     const message: SessionDiscoveredMessage = {
@@ -873,6 +876,7 @@ export class CodexAppServerAdapter {
       model: thread.model,
     };
     this.emit(message);
+    return true;
   }
 
   private handleCompletedItem(threadId: string, item: ThreadItem): void {

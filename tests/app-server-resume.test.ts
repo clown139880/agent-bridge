@@ -152,6 +152,47 @@ test("history hydration preserves the Codex thread activity time", async () => {
   assert.deepEqual(history.map((message) => message.timestamp), [200_000, 200_000]);
 });
 
+test("restoration only hydrates unique threads inside the allowed roots", async () => {
+  const root = join(tmpdir(), `agent-bridge-inventory-${randomUUID()}`);
+  const allowed = join(root, "allowed");
+  const outside = join(root, "outside");
+  mkdirSync(allowed, { recursive: true });
+  mkdirSync(outside, { recursive: true });
+  const emitted: BridgeToControlMessage[] = [];
+  const reads: string[] = [];
+  const adapter = new CodexAppServerAdapter({
+    command: "codex", url: "ws://127.0.0.1:4500", allowedRoots: [allowed],
+    manageServer: false, reconnectMs: 3_000,
+  }, (message) => emitted.push(message));
+  const internals = adapter as unknown as {
+    restoreLoadedThreads(): Promise<void>;
+    request(method: string, params: Record<string, unknown>): Promise<unknown>;
+  };
+  internals.request = async (method, params) => {
+    if (method === "thread/list") return { data: [
+      { id: "allowed-thread", cwd: allowed, status: { type: "idle" } },
+      { id: "allowed-thread", cwd: allowed, status: { type: "idle" } },
+      { id: "outside-thread", cwd: outside, status: { type: "idle" } },
+    ], nextCursor: null };
+    if (method === "thread/loaded/list") return { data: [] };
+    if (method === "thread/read") {
+      reads.push(String(params.threadId));
+      return { thread: { id: params.threadId, status: { type: "idle" }, turns: [] } };
+    }
+    return {};
+  };
+
+  try {
+    await internals.restoreLoadedThreads();
+    assert.deepEqual(reads, ["allowed-thread", "allowed-thread"]);
+    assert.equal(emitted.filter((message) => message.type === "session.discovered").length, 1);
+    assert.equal(emitted.some((message) => "sessionId" in message
+      && message.sessionId === "outside-thread"), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("reconnect synchronizes active turns after completion notifications were lost", async () => {
   const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
   const adapter = new CodexAppServerAdapter({
