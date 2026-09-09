@@ -242,7 +242,7 @@ export class SessionStore {
       if (this.state.creation?.action?.['actionId'] === actionId) void this.settleCreation(data)
       const sessionId = typeof data['sessionId'] === 'string' ? data['sessionId'] : undefined
       if (sessionId && this.detail(sessionId).action?.['actionId'] === actionId) {
-        this.patchDetail(sessionId, { action: data, notice: `Action ${str(data['status'])} · ${actionId}` })
+        this.patchDetail(sessionId, { action: data, notice: data['kind'] === 'submit_turn' ? '' : `Action ${str(data['status'])} · ${actionId}` })
         this.settle(sessionId, data)
       }
     }
@@ -407,7 +407,7 @@ export class SessionStore {
     try {
       const action = asRecord(await this.rpc(operation, payload))
       requiredId(action, 'actionId')
-      this.patchDetail(id, { action, notice: `Action ${str(action['status'])} · ${str(action['actionId'])}` })
+      this.patchDetail(id, { action, notice: operation === 'submit_turn' ? '' : `Action ${str(action['status'])} · ${str(action['actionId'])}` })
       // Keep the submitted text until the action is confirmed. A failed asynchronous receipt remains retryable.
       if (operation === 'submit_turn') this.submitted.set(id, { actionId: requiredId(action, 'actionId'), draft: detail.draft })
       this.settle(id, action)
@@ -451,7 +451,7 @@ export class SessionStore {
       const action = asRecord(await this.rpc('action', { actionId: requiredId(previous, 'actionId') }))
       if (!this.valid(generation)) return
       if (requiredId(action, 'actionId') !== previous['actionId']) throw new Error('Unexpected action receipt.')
-      this.patchDetail(id, { action, notice: `Action ${str(action['status'])} · ${str(action['actionId'])}` })
+      this.patchDetail(id, { action, notice: action['kind'] === 'submit_turn' ? '' : `Action ${str(action['status'])} · ${str(action['actionId'])}` })
       this.settle(id, action)
       if (action['status'] !== 'accepted' && this.state.sessions.some(row => row['sessionId'] === id)) { await this.refreshDetail(id); await this.refreshLatestEvents(id) }
     } catch (error) { if (this.valid(generation)) this.patchDetail(id, { notice: `Action outcome unconfirmed: ${errorText(error)}. Refresh to check again.` }) }

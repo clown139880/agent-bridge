@@ -60,8 +60,8 @@ function CompatibleSessionComposer({ value, busy, canSend, active, modelControl,
           event.preventDefault()
           if (enabled) event.currentTarget.form?.requestSubmit()
         }} />
-      <div className={css.composerBottom}><span id="bridge-composer-hint">{!canSend ? 'Read-only' : busy ? 'Sending…' : 'Shift+Enter for newline'}</span>{modelControl}
-        <Button type={primaryStops ? 'button' : 'submit'} variant="primary" className={css.sendButton} disabled={primaryStops ? busy || !canSend : !enabled} aria-label={busy ? 'Sending message' : primaryStops ? 'Stop' : 'Send'} title={primaryStops ? 'Interrupt active turn' : active ? 'Send to active turn' : 'Send message'} onClick={primaryStops ? onStop : undefined}><svg aria-hidden="true" viewBox="0 0 16 16">{primaryStops ? <rect x="3" y="3" width="10" height="10" rx="3" fill="currentColor" stroke="none" /> : <path d="M8 12.5v-9m0 0L4.5 7M8 3.5 11.5 7" />}</svg></Button>
+      <div className={css.composerBottom}><span id="bridge-composer-hint">{!canSend ? 'Read-only' : busy ? <><span className={css.sendSpinner} aria-hidden="true" /> Sending…</> : 'Shift+Enter for newline'}</span>{modelControl}
+        <Button type={primaryStops ? 'button' : 'submit'} variant="primary" className={css.sendButton} disabled={primaryStops ? busy || !canSend : !enabled} aria-label={busy ? 'Sending message' : primaryStops ? 'Stop' : 'Send'} title={primaryStops ? 'Interrupt active turn' : active ? 'Send to active turn' : 'Send message'} onClick={primaryStops ? onStop : undefined}>{busy ? <span className={css.sendSpinner} aria-hidden="true" /> : <svg aria-hidden="true" viewBox="0 0 16 16">{primaryStops ? <rect x="3" y="3" width="10" height="10" rx="3" fill="currentColor" stroke="none" /> : <path d="M8 12.5v-9m0 0L4.5 7M8 3.5 11.5 7" />}</svg>}</Button>
       </div>
     </form>
   </ComposerSurface></div>
