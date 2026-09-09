@@ -18,6 +18,7 @@ export interface SessionDetail {
   eventsError: string
   draft: string
   model: string
+  reasoningEffort: string
   busy: boolean
   notice: string
   action?: JsonObject
@@ -38,7 +39,7 @@ export interface SessionState {
   realtime: 'connecting' | 'live' | 'fallback'
   realtimeError: string
 }
-const emptyDetail = (): SessionDetail => ({ events: [], approvals: [], inputs: [], cursor: null, hasMore: false, loaded: false, loading: false, eventsLoading: false, error: '', eventsError: '', draft: '', model: '', busy: false, notice: '' })
+const emptyDetail = (): SessionDetail => ({ events: [], approvals: [], inputs: [], cursor: null, hasMore: false, loaded: false, loading: false, eventsLoading: false, error: '', eventsError: '', draft: '', model: '', reasoningEffort: '', busy: false, notice: '' })
 const errorText = (error: unknown): string => error instanceof Error ? error.message : 'Bridge request failed.'
 
 /** One configured Bridge connection. Immutable UI snapshots; async writes always target their captured session. */
@@ -253,7 +254,7 @@ export class SessionStore {
     if (!this.detail(id).loaded) void this.loadEvents(id)
   }
   setDraft(id: string, draft: string): void { this.patchDetail(id, { draft }) }
-  setModel(id: string, model: string): void { this.patchDetail(id, { model }) }
+  setModel(id: string, model: string, reasoningEffort?: string): void { this.patchDetail(id, { model, reasoningEffort: reasoningEffort ?? '' }) }
   invalidateModels(): void { this.patch({ modelCatalogs: {} }) }
   async loadModels(workerId: string): Promise<void> {
     if (this.state.modelCatalogs[workerId]?.loading) return
@@ -399,7 +400,8 @@ export class SessionStore {
     const turn = detail.session['activeTurnId']
     if (operation === 'interrupt_turn' && typeof turn !== 'string') return false
     const model = detail.model.trim()
-    const payload = operation === 'submit_turn' ? { sessionId: id, input, delivery: 'auto', ...(typeof turn === 'string' ? { expectedTurnId: turn } : model ? { model } : {}) }
+    const reasoningEffort = detail.reasoningEffort.trim()
+    const payload = operation === 'submit_turn' ? { sessionId: id, input, delivery: 'auto', ...(typeof turn === 'string' ? { expectedTurnId: turn } : { ...(model ? { model } : {}), ...(reasoningEffort ? { reasoningEffort } : {}) }) }
       : operation === 'interrupt_turn' ? { sessionId: id, ...(typeof turn === 'string' ? { expectedTurnId: turn } : {}) } : args
     this.patchDetail(id, { busy: true, notice: '' })
     try {

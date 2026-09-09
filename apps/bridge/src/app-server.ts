@@ -262,7 +262,7 @@ export class CodexAppServerAdapter {
   }
 
   submitTurnAction(actionId: string, sessionId: string, text: string,
-    delivery: "auto" | "steer" | "start_turn", expectedTurnId?: string, model?: string): Promise<{
+    delivery: "auto" | "steer" | "start_turn", expectedTurnId?: string, model?: string, reasoningEffort?: string): Promise<{
       sessionId: string; turnId?: string; resolvedAction: "steer" | "start_turn" }> {
     return this.serial(sessionId, async () => {
       await this.ensureReady();
@@ -271,7 +271,7 @@ export class CodexAppServerAdapter {
         throw domainError("approval_pending", "approval is pending");
       await this.ensureThreadSubscribed(sessionId);
       const activeTurnId = this.activeTurns.get(sessionId);
-      if (activeTurnId && model) throw domainError("model_not_applicable", "model cannot be changed while steering an active turn");
+      if (activeTurnId && (model || reasoningEffort)) throw domainError("model_not_applicable", "model and reasoning effort cannot be changed while steering an active turn");
       if (expectedTurnId && expectedTurnId !== activeTurnId) throw domainError("turn_changed", "active turn changed");
       if (delivery === "steer" && !activeTurnId) throw domainError("no_active_turn", "session has no active turn");
       if (delivery === "start_turn" && activeTurnId) throw domainError("turn_already_active", "session already has an active turn");
@@ -281,7 +281,7 @@ export class CodexAppServerAdapter {
       else {
         if(model)this.pendingTurnModels.set(sessionId,model);
         let result:{turn?:CodexTurn};
-        try{result=await this.request<{turn?:CodexTurn}>("turn/start",{threadId:sessionId,input,...(model?{model}:{})});}
+        try{result=await this.request<{turn?:CodexTurn}>("turn/start",{threadId:sessionId,input,...(model?{model}:{}),...(reasoningEffort?{effort:reasoningEffort}:{})});}
         finally{this.pendingTurnModels.delete(sessionId);}
         if (result.turn?.id) {
           this.activeTurns.set(sessionId, result.turn.id);

@@ -770,7 +770,8 @@ export class ControlPlane {
         type: "action.submit_turn", actionId: action.actionId, sessionId: action.sessionId,
         input: String(request.input), delivery: (request.delivery ?? "auto") as "auto"|"steer"|"start_turn",
         expectedTurnId: typeof request.expectedTurnId === "string" ? request.expectedTurnId : undefined,
-        model: typeof request.model === "string" ? request.model : undefined });
+        model: typeof request.model === "string" ? request.model : undefined,
+        reasoningEffort: typeof request.reasoningEffort === "string" ? request.reasoningEffort : undefined });
       else if (action.kind === "interrupt_turn" && action.sessionId) this.registry.send(machineId, {
         type: "action.interrupt_turn", actionId: action.actionId, sessionId: action.sessionId,
         expectedTurnId: typeof request.expectedTurnId === "string" ? request.expectedTurnId : undefined });

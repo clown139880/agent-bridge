@@ -286,6 +286,7 @@ export interface SubmitTurnActionMessage {
   delivery: "auto" | "steer" | "start_turn";
   expectedTurnId?: string;
   model?: string;
+  reasoningEffort?: string;
 }
 export interface InterruptTurnActionMessage {
   type: "action.interrupt_turn";

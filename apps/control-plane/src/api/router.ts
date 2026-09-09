@@ -191,18 +191,18 @@ export class AgentControlApi {
     const path=`/api/v1/sessions/${session.sessionId}/turns`,prior=this.existingAction(principal,key,path,body);
     if(prior){this.ok(response,actionJson(prior),202);return;}
     const delivery=body.delivery??"auto";if(!["auto","steer","start_turn"].includes(String(delivery)))throw new ApiProblem(400,"invalid_parameter","invalid delivery");
-    const expected=string(body.expectedTurnId,"expectedTurnId"),model=string(body.model,"model"),
+    const expected=string(body.expectedTurnId,"expectedTurnId"),model=string(body.model,"model"),reasoningEffort=string(body.reasoningEffort,"reasoningEffort"),
       active=typeof session.activeTurnId==="string"?session.activeTurnId:undefined;
     if(Number(session.pendingApprovalCount)>0)throw new ApiProblem(409,"approval_pending","resolve pending approval first");
     if(Number(session.pendingUserInputCount)>0)throw new ApiProblem(409,"user_input_pending","resolve pending user input first");
     if(expected&&expected!==active)throw new ApiProblem(409,"turn_changed","active turn changed",false,{activeTurnId:active??null});
     if(delivery==="steer"&&!active)throw new ApiProblem(409,"no_active_turn","session has no active turn");
     if(delivery==="start_turn"&&active)throw new ApiProblem(409,"turn_already_active","session already has an active turn",false,{activeTurnId:active});
-    if(model&&active)throw new ApiProblem(409,"model_not_applicable","model cannot be changed while steering an active turn");
+    if((model||reasoningEffort)&&active)throw new ApiProblem(409,"model_not_applicable","model and reasoning effort cannot be changed while steering an active turn");
     const machineId=String(session.machineId);this.requireActionBridge(machineId);
     const created=this.createAction(principal,key,path,body,"submit_turn",machineId,String(session.sessionId));
     if(!created.existing)this.dispatch(created.action,{type:"action.submit_turn",actionId:created.action.actionId,
-      sessionId:String(session.sessionId),input,delivery:delivery as "auto"|"steer"|"start_turn",expectedTurnId:expected,model});
+      sessionId:String(session.sessionId),input,delivery:delivery as "auto"|"steer"|"start_turn",expectedTurnId:expected,model,reasoningEffort});
     this.ok(response,actionJson(this.store.action(created.action.actionId)!),202);
   }
 

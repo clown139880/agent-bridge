@@ -38,7 +38,7 @@ const copy: Record<string, string> = {
 function translate(key: string, params: Record<string, unknown> = {}): string {
   return (copy[key] ?? key).replace(/\{(\w+)\}/g, (_, name: string) => String(params[name] ?? ''))
 }
-function catalogState(loading: boolean, error: string, selected: string, native?: JsonObject): DirectoryState {
+function catalogState(loading: boolean, error: string, selected: string, selectedEffort: string, native?: JsonObject): DirectoryState {
   if (native) {
     const fallback = asRecord(native['default'])
     const groups = Array.isArray(native['groups']) ? native['groups'].map(asRecord).map(group => ({
@@ -62,18 +62,18 @@ function catalogState(loading: boolean, error: string, selected: string, native?
       id: str(failure['id'], ''), name: str(failure['name'], str(failure['id'], 'Provider')), message: str(failure['message'], 'Model catalog failed to load.'),
     })) : []
     const routableProviders = Array.isArray(native['routableProviders']) ? native['routableProviders'] : []
-    return { current: chosenModel && provider ? { provider, model: chosenModel } : null, routable: provider ? routableProviders.includes(provider) : null,
+    return { current: chosenModel && provider ? { provider, model: chosenModel, ...(selectedEffort ? { reasoningEffort: selectedEffort } : {}) } : null, routable: provider ? routableProviders.includes(provider) : null,
       groups, failures, status: loading ? 'loading' : error ? 'error' : groups.length ? 'ready' : 'idle', error: error || null }
   }
   return { current: null, routable: null, groups: [], failures: [], status: loading ? 'loading' : error ? 'error' : 'idle', error: error || null }
 }
 
 /** Target-neutral data adapter for DSH's exact native ModelSelect component. */
-export function BridgeModelControl({ store, sessionId, workerId, selected, locked }: {
-  store: SessionStore; sessionId: string; workerId: string; selected: string; locked: boolean
+export function BridgeModelControl({ store, sessionId, workerId, selected, selectedEffort, locked }: {
+  store: SessionStore; sessionId: string; workerId: string; selected: string; selectedEffort: string; locked: boolean
 }) {
   const catalog = store.snapshot().modelCatalogs[workerId]
-  const snapshot = useMemo(() => catalogState(catalog?.loading ?? false, catalog?.error ?? '', selected, catalog?.catalog), [catalog, selected])
+  const snapshot = useMemo(() => catalogState(catalog?.loading ?? false, catalog?.error ?? '', selected, selectedEffort, catalog?.catalog), [catalog, selected, selectedEffort])
   const snapshotRef = useRef(snapshot)
   snapshotRef.current = snapshot
   const directory = useMemo(() => ({ subscribe: (listener: () => void) => store.subscribe(listener), getSnapshot: () => snapshotRef.current }), [store])
@@ -81,7 +81,7 @@ export function BridgeModelControl({ store, sessionId, workerId, selected, locke
   const props: NativeModelSelectProps = {
     locked, available: Boolean(workerId), directory,
     load: () => { void store.loadModels(workerId) },
-    select: async selection => { store.setModel(sessionId, selection.model); return true },
+    select: async selection => { store.setModel(sessionId, selection.model, selection.reasoningEffort); return true },
     t: translate,
   }
   if (NativeModelSelect) return <NativeModelSelect {...props} />

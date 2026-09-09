@@ -246,7 +246,7 @@ export function Sessions({ store, views: providedViews, refreshToken, initialSes
     {detail.notice && <div className={css.notice} role="status">{detail.notice}{detail.action?.['status'] === 'accepted' && <Button size="sm" onClick={() => void store.checkAction(selectedId)}>Check outcome</Button>}</div>}
     {selected && !canAct && !detail.loading && !detail.error && <small className={css.readOnly}>This session is read-only: its worker is offline or session actions are unavailable.</small>}
     <SessionComposer value={detail.draft} busy={Boolean(busy)} canSend={Boolean(canAct)} active={selected?.['status'] === 'active'}
-      modelControl={selected ? <BridgeModelControl store={store} sessionId={selectedId} workerId={str(selected['workerId'])} selected={detail.model || str(selected['model'])} locked={Boolean(busy || !canAct || selected['activeTurnId'])} /> : undefined}
+      modelControl={selected ? <BridgeModelControl store={store} sessionId={selectedId} workerId={str(selected['workerId'])} selected={detail.model || str(selected['model'])} selectedEffort={detail.reasoningEffort} locked={Boolean(busy || !canAct || selected['activeTurnId'])} /> : undefined}
       {...(context ? { context } : {})}
       onChange={value => store.setDraft(selectedId, value)} onSend={() => void store.act(selectedId, 'submit_turn')} onStop={() => void store.act(selectedId, 'interrupt_turn')} />
   </> : null

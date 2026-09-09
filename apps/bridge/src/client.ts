@@ -255,7 +255,7 @@ export class BridgeClient {
         const value=await this.codex.createSessionAction(message.actionId,message.projectPath,message.input,message.model);
         result={type:"action.result",actionId:message.actionId,kind,status:"succeeded",...value,timestamp:Date.now()};
       }else if(message.type==="action.submit_turn"){
-        const value=await this.codex.submitTurnAction(message.actionId,message.sessionId,message.input,message.delivery,message.expectedTurnId,message.model);
+        const value=await this.codex.submitTurnAction(message.actionId,message.sessionId,message.input,message.delivery,message.expectedTurnId,message.model,message.reasoningEffort);
         result={type:"action.result",actionId:message.actionId,kind,status:"succeeded",...value,timestamp:Date.now()};
       }else if(message.type==="action.interrupt_turn"){
         const value=await this.codex.interruptAction(message.sessionId,message.expectedTurnId);

@@ -54,6 +54,12 @@ worker、session、session event、approval、user input 和 action 的类型化
 断线从最后完整应用的 cursor 续传；cursor 失效时丢弃旧 checkpoint 并重建 snapshot。连续连接失败后才启用
 原有 5 秒详情／action 轮询，SSE 恢复后自动退出轮询降级。当前仍按约定只执行 build/typecheck，不运行测试。
 
+步骤 4 的 reasoning effort 已贯通：Bridge `ModelSelect` 同时保存 model 与显式 effort，只有新 turn 才把
+`reasoningEffort` 随可靠 action 送入 Control Plane；action 重放保持该字段，Windows Bridge 最终映射到当前
+Codex App Server `turn/start.effort`。steer 期间选择器继续锁定，Control Plane 与 Bridge 也拒绝在 active turn
+上修改 model／effort。未显式选择 effort 时不发送覆盖值，继续使用 provider／Codex 默认值。附件契约仍是
+下一项，不能在上传、worker 文件归属和发送回执尚未贯通时只做一个看似可用的附件按钮。
+
 ## 第十二轮：运行中主操作与模型控件 seat（2026-09-08，已部署）
 
 `ExternalComposer` 增加 `running/onStop`。运行中的普通 Bridge 会话在空草稿时，原生蓝色主按钮显示 Stop 并调用带 `expectedTurnId` 的 `interrupt_turn`；输入文字后同一按钮恢复 Send，通过现有 auto/steer 提交。兼容 textarea 路径也保持同样行为，详情菜单中的 Interrupt 继续作为次级入口。
