@@ -180,6 +180,7 @@ export function Sessions({ store, views: providedViews, refreshToken, initialSes
     if (surface === 'list') return
     const timer = window.setInterval(() => {
       if (document.visibilityState !== 'visible') return
+      if (!store.needsPolling()) return
       void store.checkCreation()
       for (const [id, detail] of Object.entries(store.snapshot().details)) if (detail.action?.['status'] === 'accepted') void store.checkAction(id)
       const id = store.snapshot().selected

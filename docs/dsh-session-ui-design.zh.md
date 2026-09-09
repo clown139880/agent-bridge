@@ -48,6 +48,12 @@ Session 浏览器随后调整为滚动 24 小时窗口：最近 24 小时的会�
 会话的项目才经过 active-only，且该状态持续只展示 active／待审批／待输入会话。会话级收藏已移除，pin
 迁移到项目级并用于项目排序。视图存储升级到 v3，旧版遗留的全折叠状态不会继续污染新默认值。
 
+步骤 3 已进入实现：DSH Host 在受认证的 Connection Fetch 路由中代理 Control Plane SSE，token 不下发到
+浏览器。Client 先加载最近会话，再用原子 `/snapshot` 返回的 `streamCursor` 建立基线，随后按 cursor 接收
+worker、session、session event、approval、user input 和 action 的类型化增量。SessionStore 以 eventId 去重，
+断线从最后完整应用的 cursor 续传；cursor 失效时丢弃旧 checkpoint 并重建 snapshot。连续连接失败后才启用
+原有 5 秒详情／action 轮询，SSE 恢复后自动退出轮询降级。当前仍按约定只执行 build/typecheck，不运行测试。
+
 ## 第十二轮：运行中主操作与模型控件 seat（2026-09-08，已部署）
 
 `ExternalComposer` 增加 `running/onStop`。运行中的普通 Bridge 会话在空草稿时，原生蓝色主按钮显示 Stop 并调用带 `expectedTurnId` 的 `interrupt_turn`；输入文字后同一按钮恢复 Send，通过现有 auto/steer 提交。兼容 textarea 路径也保持同样行为，详情菜单中的 Interrupt 继续作为次级入口。

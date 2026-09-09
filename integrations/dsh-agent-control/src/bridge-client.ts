@@ -86,6 +86,19 @@ export class BridgeClient {
     return await this.call({ operation: 'snapshot', args: { sessionLimit: 100 } }, signal) as unknown as Snapshot
   }
 
+  async stream(cursor: string | undefined, signal: AbortSignal): Promise<Response> {
+    if (this.config.mode === 'mock') return new Response(JSON.stringify({ error: { code: 'stream_unavailable', message: 'Mock Bridge streaming is unavailable.' } }), { status: 501, headers: { 'content-type': 'application/json' } })
+    const url = new URL('/api/v1/stream', this.config.origin)
+    if (cursor) url.searchParams.set('cursor', cursor)
+    try {
+      const response = await fetch(url, { headers: { authorization: `Bearer ${this.token!}`, accept: 'text/event-stream' }, signal, cache: 'no-store' })
+      return new Response(response.body, { status: response.status, statusText: response.statusText, headers: response.headers })
+    } catch (error) {
+      if (signal.aborted) throw error
+      return Response.json({ error: { code: 'bridge_unavailable', message: error instanceof Error ? error.message : 'Agent Bridge unavailable.', retryable: true } }, { status: 503 })
+    }
+  }
+
   private async write(path: string, body: JsonObject, signal?: AbortSignal): Promise<JsonValue> {
     return this.request('POST', path, body, randomUUID(), signal)
   }

@@ -7,6 +7,7 @@ import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import type { FormEvent, ReactNode } from 'react'
 import css from './workspace.module.css'
+import { openBridgeStream } from './bridge-stream.js'
 import { Sessions, UnifiedSessions, type NativeSessionSource, type NativeWorkspaceSource } from './sessions.js'
 import { SessionStore, type BridgeRpc } from './session-store.js'
 import { SessionViewStore } from './session-view-state.js'
@@ -18,7 +19,7 @@ type RecordValue = Record<string, JsonValue>
 export class WorkspaceController {
   readonly sessions: SessionStore
   readonly views = new SessionViewStore()
-  constructor(rpc: BridgeRpc = (operation, args) => call('bridge', operation, args), loadNativeModelCatalog?: () => Promise<JsonValue>) { this.sessions = new SessionStore(rpc, loadNativeModelCatalog) }
+  constructor(rpc: BridgeRpc = (operation, args) => call('bridge', operation, args), loadNativeModelCatalog?: () => Promise<JsonValue>) { this.sessions = new SessionStore(rpc, loadNativeModelCatalog, openBridgeStream) }
   private requestedSession: { id: string } | undefined
   private openValue = false
   private bridgeValue = false

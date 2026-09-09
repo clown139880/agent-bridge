@@ -80,6 +80,19 @@ export interface ActionReceipt {
   updatedAt?: number
 }
 
+export type BridgeStreamEventType = 'worker.upserted' | 'worker.offline' | 'session.upserted' | 'session.updated' |
+  'session.deleted' | 'session.event.appended' | 'approval.upserted' | 'user_input.upserted' | 'action.updated'
+
+export interface BridgeStreamEvent {
+  cursor: string
+  eventId: string
+  type: BridgeStreamEventType
+  timestamp: number
+  resource: { kind: string; id: string }
+  sessionId: string | null
+  data: JsonValue
+}
+
 export interface BridgeCall {
   operation: 'workers' | 'models' | 'snapshot' | 'sessions' | 'session' | 'delete_session' | 'session_events' | 'create_session' |
     'submit_turn' | 'interrupt_turn' | 'approvals' | 'approval' | 'resolve_approval' |

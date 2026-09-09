@@ -14,6 +14,7 @@ export { MUTATING_TOOL_NAMES, TOOL_SPECS } from './tools.js'
 export const name = 'agent-control'
 export const inject = ['tools', 'systemPrompt', 'connection']
 export const AGENT_CONTROL_PATH = '/api/agent-control'
+export const AGENT_CONTROL_STREAM_PATH = '/api/agent-control.stream'
 const AGENT_CONTROL_RPC_CHANNEL = '/agent-control'
 export interface Config extends AgentControlConfig {}
 
@@ -23,7 +24,10 @@ export const Config: Schema<Config> = Schema.object({
 }) as Schema<Config>
 
 declare module '@deepseek-ai/cordis' { interface Context { agentControl: AgentControlService } }
-interface ConnectionFace { rpc: { handle(channel: string, handler: (endpoint: string, payload: unknown, signal: AbortSignal) => Promise<unknown>, options: { authority: 'trusted-host' | 'loopback' }): () => Promise<void> } }
+interface ConnectionFace {
+  rpc: { handle(channel: string, handler: (endpoint: string, payload: unknown, signal: AbortSignal) => Promise<unknown>, options: { authority: 'trusted-host' | 'loopback' }): () => Promise<void> }
+  fetch: { register(route: { path: string; methods: readonly ('GET' | 'HEAD' | 'POST')[]; requestBody: 'buffered' | 'streaming'; fetch(request: Request): Promise<Response> }): () => Promise<void> }
+}
 
 type RpcResult<T = unknown> =
   | { ok: true; value: T }
@@ -83,6 +87,15 @@ export function apply(ctx: Context, config: Config): void {
     scoped.effect(
       () => connection.rpc.handle(AGENT_CONTROL_RPC_CHANNEL, createAgentControlRpcHandler(service), { authority: 'trusted-host' }),
       'agent-control: rpc channel',
+    )
+    scoped.effect(
+      () => connection.fetch.register({
+        path: AGENT_CONTROL_STREAM_PATH,
+        methods: ['GET'],
+        requestBody: 'buffered',
+        fetch: request => service.bridge.stream(new URL(request.url).searchParams.get('cursor') ?? undefined, request.signal),
+      }),
+      'agent-control: Bridge SSE proxy',
     )
   })
 }

@@ -1,7 +1,9 @@
-import type { BridgeCall, JsonObject, JsonValue } from '../types.js'
+import type { BridgeCall, BridgeStreamEvent, JsonObject, JsonValue } from '../types.js'
+import { BridgeStreamError } from './bridge-stream.js'
 import { asRecord, mergeRecords, readPage, requiredId, str } from './session-model.js'
 
 export type BridgeRpc = (operation: BridgeCall['operation'], args?: JsonObject) => Promise<JsonValue>
+export type BridgeStream = (cursor: string | undefined, signal: AbortSignal, onOpen?: () => void) => AsyncIterable<BridgeStreamEvent>
 export interface SessionDetail {
   session?: JsonObject
   events: JsonObject[]
@@ -33,18 +35,27 @@ export interface SessionState {
   error: string
   details: Record<string, SessionDetail>
   modelCatalogs: Record<string, { catalog?: JsonObject; models: JsonObject[]; loading: boolean; error: string }>
+  realtime: 'connecting' | 'live' | 'fallback'
+  realtimeError: string
 }
 const emptyDetail = (): SessionDetail => ({ events: [], approvals: [], inputs: [], cursor: null, hasMore: false, loaded: false, loading: false, eventsLoading: false, error: '', eventsError: '', draft: '', model: '', busy: false, notice: '' })
 const errorText = (error: unknown): string => error instanceof Error ? error.message : 'Bridge request failed.'
 
 /** One configured Bridge connection. Immutable UI snapshots; async writes always target their captured session. */
 export class SessionStore {
-  private state: SessionState = { sessions: [], selected: undefined, cursor: null, hasMore: false, loading: false, loaded: false, error: '', details: {}, modelCatalogs: {} }
+  private state: SessionState = { sessions: [], selected: undefined, cursor: null, hasMore: false, loading: false, loaded: false, error: '', details: {}, modelCatalogs: {}, realtime: 'fallback', realtimeError: '' }
   private listeners = new Set<() => void>()
   private generation = 0
   private active = true
   private historyLoaded = false
-  constructor(private readonly rpc: BridgeRpc, private readonly loadNativeModelCatalog?: () => Promise<JsonValue>) {}
+  private streamAbort: AbortController | undefined
+  private streamTask: Promise<void> | undefined
+  private streamCursor: string | undefined
+  private readonly streamEvents = new Set<string>()
+  private fallbackTimer: ReturnType<typeof setInterval> | undefined
+  constructor(private readonly rpc: BridgeRpc, private readonly loadNativeModelCatalog?: () => Promise<JsonValue>, private readonly stream?: BridgeStream) {
+    if (stream) this.state = { ...this.state, realtime: 'connecting' }
+  }
   private workersLoading = false
   async loadWorkers(): Promise<void> {
     if (this.workersLoading) return
@@ -99,15 +110,142 @@ export class SessionStore {
   }
   snapshot = (): SessionState => this.state
   subscribe = (listener: () => void): (() => void) => { this.listeners.add(listener); return () => this.listeners.delete(listener) }
-  activate(): void { this.active = true }
+  activate(): void {
+    this.active = true
+    if (this.stream && !this.streamTask) {
+      const abort = new AbortController(); this.streamAbort = abort
+      this.streamTask = this.followStream(abort.signal).finally(() => { if (this.streamAbort === abort) { this.streamAbort = undefined; this.streamTask = undefined } })
+    }
+    if (this.stream && !this.fallbackTimer) this.fallbackTimer = setInterval(() => {
+      if (!this.active || !this.needsPolling() || (typeof document !== 'undefined' && document.visibilityState !== 'visible')) return
+      void this.loadWorkers(); void this.loadSessions(); void this.checkCreation()
+    }, 5_000)
+  }
+  needsPolling(): boolean { return !this.stream || this.state.realtime === 'fallback' }
   dispose(): void {
-    this.active = false; this.generation++
+    this.active = false; this.generation++; this.streamAbort?.abort(); this.streamAbort = undefined; this.streamTask = undefined
+    if (this.fallbackTimer) clearInterval(this.fallbackTimer); this.fallbackTimer = undefined
     this.state = { ...this.state, loading: false, details: Object.fromEntries(Object.entries(this.state.details).map(([id, detail]) => [id, { ...detail, loading: false, eventsLoading: false }])) }
   }
   private valid(generation: number): boolean { return this.active && generation === this.generation }
   private patch(patch: Partial<SessionState>): void { this.state = { ...this.state, ...patch }; for (const listener of this.listeners) listener() }
   private detail(id: string): SessionDetail { return this.state.details[id] ?? emptyDetail() }
   private patchDetail(id: string, patch: Partial<SessionDetail>): void { this.patch({ details: { ...this.state.details, [id]: { ...this.detail(id), ...patch } } }) }
+
+  private async followStream(signal: AbortSignal): Promise<void> {
+    const generation = this.generation
+    let failures = 0
+    while (this.valid(generation) && !signal.aborted) {
+      try {
+        if (!this.streamCursor) {
+          await this.loadSessions()
+          if (!this.valid(generation) || signal.aborted) return
+          await this.applySnapshot(await this.rpc('snapshot', { sessionLimit: 200 }))
+        }
+        if (!this.stream) return
+        if (failures < 3) this.patch({ realtime: 'connecting', realtimeError: '' })
+        for await (const message of this.stream(this.streamCursor, signal, () => {
+          failures = 0
+          if (this.valid(generation) && !signal.aborted) this.patch({ realtime: 'live', realtimeError: '' })
+        })) {
+          if (!this.valid(generation) || signal.aborted) return
+          this.applyStreamEvent(message)
+          this.streamCursor = message.cursor
+          failures = 0
+          if (this.state.realtime !== 'live') this.patch({ realtime: 'live', realtimeError: '' })
+        }
+        if (!signal.aborted) throw new BridgeStreamError('stream_closed', 'Agent Bridge stream closed unexpectedly.')
+      } catch (error) {
+        if (signal.aborted || !this.valid(generation)) return
+        failures += 1
+        if (error instanceof BridgeStreamError && ['invalid_cursor', 'cursor_expired'].includes(error.code)) this.streamCursor = undefined
+        this.patch({ realtime: failures >= 3 ? 'fallback' : 'connecting', realtimeError: errorText(error) })
+        await this.streamDelay(Math.min(10_000, 750 * 2 ** Math.min(failures - 1, 4)), signal)
+      }
+    }
+  }
+
+  private streamDelay(milliseconds: number, signal: AbortSignal): Promise<void> {
+    return new Promise(resolve => {
+      const timer = setTimeout(done, milliseconds)
+      function done(): void { clearTimeout(timer); signal.removeEventListener('abort', done); resolve() }
+      signal.addEventListener('abort', done, { once: true })
+    })
+  }
+
+  private async applySnapshot(value: JsonValue): Promise<void> {
+    const snapshot = asRecord(value)
+    if (!Array.isArray(snapshot['workers']) || !Array.isArray(snapshot['sessions']) || !Array.isArray(snapshot['approvals']) || !Array.isArray(snapshot['userInput']) || typeof snapshot['streamCursor'] !== 'string') {
+      throw new BridgeStreamError('bridge_protocol_error', 'Agent Bridge returned an invalid realtime snapshot.')
+    }
+    const workers = snapshot['workers'].map(asRecord)
+    const sessions = snapshot['sessions'].map(row => { const session = asRecord(row); requiredId(session, 'sessionId'); return session })
+    const approvals = snapshot['approvals'].map(asRecord)
+    const inputs = snapshot['userInput'].map(asRecord)
+    this.streamCursor = snapshot['streamCursor']
+    this.patch({ workers, sessions: mergeRecords(this.state.sessions, sessions, 'sessionId'), workersError: '' })
+    for (const id of Object.keys(this.state.details)) {
+      const session = sessions.find(row => row['sessionId'] === id)
+      this.patchDetail(id, {
+        ...(session ? { session: { ...(this.detail(id).session ?? {}), ...session } } : {}),
+        approvals: approvals.filter(row => row['sessionId'] === id && row['status'] === 'pending'),
+        inputs: inputs.filter(row => row['sessionId'] === id && row['status'] === 'pending'),
+      })
+    }
+  }
+
+  private applyStreamEvent(message: BridgeStreamEvent): void {
+    if (this.streamEvents.has(message.eventId)) return
+    const data = asRecord(message.data)
+    if (message.type === 'worker.upserted') requiredId(data, 'id')
+    else if (message.type === 'session.upserted' || message.type === 'session.updated' || message.type === 'session.event.appended') requiredId(data, 'sessionId')
+    else if (message.type === 'approval.upserted' || message.type === 'user_input.upserted') { requiredId(data, 'id'); requiredId(data, 'sessionId') }
+    else if (message.type === 'action.updated') requiredId(data, 'actionId')
+    this.streamEvents.add(message.eventId)
+    if (this.streamEvents.size > 2_000) this.streamEvents.delete(this.streamEvents.values().next().value!)
+    if (message.type === 'worker.upserted') {
+      const id = requiredId(data, 'id')
+      this.patch({ workers: mergeRecords(this.state.workers ?? [], [data], 'id').map(row => row['id'] === id ? data : row) })
+      return
+    }
+    if (message.type === 'worker.offline') {
+      this.patch({ workers: (this.state.workers ?? []).map(row => row['id'] === message.resource.id ? { ...row, status: 'offline' } : row) })
+      return
+    }
+    if (message.type === 'session.deleted') { this.removeSession(message.resource.id); return }
+    if (message.type === 'session.upserted' || message.type === 'session.updated') {
+      const id = requiredId(data, 'sessionId')
+      const current = this.state.sessions.find(row => row['sessionId'] === id)
+      const session = { ...(current ?? {}), ...data }
+      this.patch({ sessions: mergeRecords(this.state.sessions, [session], 'sessionId') })
+      if (this.state.details[id]) this.patchDetail(id, { session: { ...(this.detail(id).session ?? {}), ...data } })
+      return
+    }
+    if (message.type === 'session.event.appended') {
+      const id = requiredId(data, 'sessionId')
+      const detail = this.state.details[id]
+      if (detail?.loaded) this.patchDetail(id, { events: mergeRecords(detail.events, [data], 'eventId').sort((a, b) => Number(a['timestamp'] ?? 0) - Number(b['timestamp'] ?? 0)), eventsError: '' })
+      return
+    }
+    if (message.type === 'approval.upserted' || message.type === 'user_input.upserted') {
+      const id = requiredId(data, 'id'); const sessionId = requiredId(data, 'sessionId')
+      if (!this.state.details[sessionId]) return
+      const key = message.type === 'approval.upserted' ? 'approvals' : 'inputs'
+      const current = this.detail(sessionId)[key]
+      const rows = data['status'] === 'pending' ? mergeRecords(current, [data], 'id') : current.filter(row => row['id'] !== id)
+      this.patchDetail(sessionId, { [key]: rows })
+      return
+    }
+    if (message.type === 'action.updated') {
+      const actionId = requiredId(data, 'actionId')
+      if (this.state.creation?.action?.['actionId'] === actionId) void this.settleCreation(data)
+      const sessionId = typeof data['sessionId'] === 'string' ? data['sessionId'] : undefined
+      if (sessionId && this.detail(sessionId).action?.['actionId'] === actionId) {
+        this.patchDetail(sessionId, { action: data, notice: `Action ${str(data['status'])} · ${actionId}` })
+        this.settle(sessionId, data)
+      }
+    }
+  }
   select(id: string): void {
     this.patch({ selected: id })
     if (!this.state.details[id]) this.patchDetail(id, {})
