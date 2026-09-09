@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 
-const testSelfUpdate = process.platform === "win32" ? test.skip : test;
+const linkType = process.platform === "win32" ? "junction" : "dir";
 import type { BridgeUpdateStatusMessage } from "../packages/protocol/src/index.js";
 import { BridgeSelfUpdater, compareVersions, type UpdateCommandRunner } from "../apps/bridge/src/self-updater.js";
 
@@ -15,13 +15,13 @@ test("semantic bridge versions are ordered", () => {
   assert.throws(() => compareVersions("latest", "1.0.0"), /Invalid bridge version/);
 });
 
-testSelfUpdate("a v-prefixed registry version accepts the equivalent package version", async () => {
+test("a v-prefixed registry version accepts the equivalent package version", async () => {
   const root = mkdtempSync(join(tmpdir(), "agent-bridge-v-prefixed-update-"));
   const oldRelease = join(root, "releases", "0.3.0");
   const currentLink = join(root, "current");
   mkdirSync(oldRelease, { recursive: true });
   writeFileSync(join(oldRelease, "package.json"), JSON.stringify({ version: "0.3.0" }));
-  symlinkSync(oldRelease, currentLink, "dir");
+  symlinkSync(oldRelease, currentLink, linkType);
   const statuses: BridgeUpdateStatusMessage[] = [];
   try {
     const updater = new BridgeSelfUpdater({
@@ -43,14 +43,14 @@ testSelfUpdate("a v-prefixed registry version accepts the equivalent package ver
   }
 });
 
-testSelfUpdate("bridge stages, validates, activates, restarts itself, then reports completion after boot", async () => {
+test("bridge stages, validates, activates, restarts itself, then reports completion after boot", async () => {
   const root = mkdtempSync(join(tmpdir(), "agent-bridge-update-"));
   const oldRelease = join(root, "releases", "0.3.0");
   const currentLink = join(root, "current");
   const statePath = join(root, "update-state.json");
   mkdirSync(oldRelease, { recursive: true });
   writeFileSync(join(oldRelease, "package.json"), JSON.stringify({ version: "0.3.0" }));
-  symlinkSync(oldRelease, currentLink, "dir");
+  symlinkSync(oldRelease, currentLink, linkType);
   const statuses: BridgeUpdateStatusMessage[] = [];
   const commands: string[] = [];
   let busy = true;
@@ -141,14 +141,14 @@ test("an announcement cannot override the source trusted by this machine", async
   }
 });
 
-testSelfUpdate("a restart command failure atomically restores the previous release", async () => {
+test("a restart command failure atomically restores the previous release", async () => {
   const root = mkdtempSync(join(tmpdir(), "agent-bridge-update-rollback-"));
   const oldRelease = join(root, "releases", "0.3.0");
   const currentLink = join(root, "current");
   const statePath = join(root, "state.json");
   mkdirSync(oldRelease, { recursive: true });
   writeFileSync(join(oldRelease, "package.json"), JSON.stringify({ version: "0.3.0" }));
-  symlinkSync(oldRelease, currentLink, "dir");
+  symlinkSync(oldRelease, currentLink, linkType);
   const statuses: BridgeUpdateStatusMessage[] = [];
   try {
     const updater = new BridgeSelfUpdater({

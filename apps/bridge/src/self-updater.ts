@@ -244,7 +244,29 @@ async function currentSymlinkTarget(path: string): Promise<string | undefined> {
 async function replaceSymlink(path: string, target: string): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   const temporary = `${path}.new-${randomUUID()}`;
-  await symlink(target, temporary, "dir");
+  await symlink(target, temporary, process.platform === "win32" ? "junction" : "dir");
+  if (process.platform === "win32") {
+    const previous = `${path}.old-${randomUUID()}`;
+    let movedPrevious = false;
+    try {
+      await rename(path, previous);
+      movedPrevious = true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        await unlinkIfPresent(temporary);
+        throw error;
+      }
+    }
+    try {
+      await rename(temporary, path);
+      if (movedPrevious) await unlinkIfPresent(previous);
+    } catch (error) {
+      await unlinkIfPresent(temporary);
+      if (movedPrevious) await rename(previous, path);
+      throw error;
+    }
+    return;
+  }
   try {
     await rename(temporary, path);
   } catch (error) {
