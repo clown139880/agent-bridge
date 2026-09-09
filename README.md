@@ -486,8 +486,23 @@ CODEX_APP_SERVER_MANAGED=true
 
 可复制 [`deploy/wsl-only.env.example`](deploy/wsl-only.env.example) 作为无凭据模板。
 
-仓库中的系统级 unit 使用专用的 `agent-bridge` 用户、`/opt/agent-bridge` 代码目录和
-`/etc/agent-bridge/bridge.env` 配置文件。请按本机环境创建用户和目录，或复制 unit 后调整这些值。
+仓库中的系统级 unit 使用专用的 `agent-bridge` 用户、`/etc/agent-bridge/bridge.env` 配置文件，
+并从 `/opt/agent-bridge/current`（不可变 release 的 `current` 软链）运行编译产物
+`node apps/bridge/dist/index.js`，而不再从源码目录跑 `pnpm start:bridge`。这与 HAL 一致：
+自更新会 `git fetch + merge --ff-only` 共享源码检出、把编译产物写入
+`BRIDGE_UPDATE_INSTALL_ROOT/releases/`（共享 pnpm store、保留最近 `BRIDGE_UPDATE_RELEASE_RETENTION` 个），
+原子切换 `current` 后重启本 unit——不再为每个 release 克隆整份源码树。
+
+首次启用前必须先把 `current` 播种出来（否则 unit 因软链不存在而启动失败）。用 env 参数化
+[`deploy/hal/deploy-bridge.sh`](deploy/hal/deploy-bridge.sh) 完成初次构建即可：
+
+```bash
+sudo AGENT_BRIDGE_ENV_FILE=/etc/agent-bridge/bridge.env \
+  AGENT_BRIDGE_REPO=/opt/agent-bridge AGENT_BRIDGE_INSTALL_ROOT=/opt/agent-bridge \
+  AGENT_BRIDGE_SERVICE=agent-bridge-wsl.service AGENT_BRIDGE_MACHINE_ID=dev-wsl \
+  deploy/hal/deploy-bridge.sh
+```
+
 服务由 WSL 的 systemd 在启动时拉起，不依赖交互式登录或用户 manager：
 
 ```bash

@@ -5,9 +5,13 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=%h/agent-bridge
+# Run the immutable compiled artifact selected by the current symlink. Self-update
+# fast-forwards %h/agent-bridge, builds a release under
+# %h/.local/share/agent-bridge/releases, and atomically switches `current` before
+# restarting this unit. Do not run pnpm from the source checkout.
+WorkingDirectory=%h/.local/share/agent-bridge/current
 EnvironmentFile=%h/agent-bridge/.env.bridge
-ExecStart=/usr/bin/pnpm start:bridge
+ExecStart=/usr/bin/node apps/bridge/dist/index.js
 Restart=always
 RestartSec=5
 TimeoutStopSec=20

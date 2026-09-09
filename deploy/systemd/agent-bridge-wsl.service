@@ -6,10 +6,13 @@ StartLimitIntervalSec=0
 Type=simple
 User=agent-bridge
 Group=agent-bridge
-WorkingDirectory=/opt/agent-bridge
+# Run the immutable compiled artifact selected by the current symlink. Self-update
+# stages a release under /opt/agent-bridge/releases and atomically switches
+# /opt/agent-bridge/current before restarting this unit.
+WorkingDirectory=/opt/agent-bridge/current
 Environment=HOME=/var/lib/agent-bridge
 EnvironmentFile=/etc/agent-bridge/bridge.env
-ExecStart=/usr/bin/pnpm --dir /opt/agent-bridge start:bridge
+ExecStart=/usr/bin/node apps/bridge/dist/index.js
 Restart=always
 RestartSec=5
 TimeoutStopSec=20
