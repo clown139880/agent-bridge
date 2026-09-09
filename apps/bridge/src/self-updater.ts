@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { lstat, mkdir, readFile, readdir, readlink, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { cp, lstat, mkdir, readFile, readdir, readlink, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import type { BridgeUpdateAnnouncementMessage, BridgeUpdateStatusMessage } from "@agent-bridge/protocol";
@@ -25,6 +25,7 @@ export interface SelfUpdaterOptions {
   source?: string;
   sourceRef: string;
   installRoot: string;
+  sourceCheckout?: string;
   currentLink: string;
   statePath: string;
   packageManager: string;
@@ -137,22 +138,29 @@ export class BridgeSelfUpdater {
     try {
       await mkdir(dirname(releasePath), { recursive: true });
       this.report("fetching", announcement.latestVersion, false);
-      await this.command("git", [
-        "clone", "--depth", "1", "--branch", this.options.sourceRef, "--", this.options.source!, releasePath,
-      ]);
+      if (this.options.sourceCheckout) {
+        await this.command("git", ["-C", this.options.sourceCheckout, "fetch", "origin", this.options.sourceRef]);
+        await this.command("git", ["-C", this.options.sourceCheckout, "merge", "--ff-only", `origin/${this.options.sourceRef}`]);
+      } else {
+        await this.command("git", [
+          "clone", "--depth", "1", "--branch", this.options.sourceRef, "--", this.options.source!, releasePath,
+        ]);
+      }
       fetched = true;
       this.report("fetched", announcement.latestVersion, true);
       this.report("validating", announcement.latestVersion, true);
-      const packageVersion = await readPackageVersion(join(releasePath, "package.json"));
+      const sourceRoot = this.options.sourceCheckout ?? releasePath;
+      const packageVersion = await readPackageVersion(join(sourceRoot, "package.json"));
       if (compareVersions(packageVersion, announcement.latestVersion) !== 0) {
         throw new Error(`fetched package version ${packageVersion} does not match ${announcement.latestVersion}`);
       }
       const installArgs = ["install", "--frozen-lockfile"];
       if (this.options.storeDir) installArgs.push("--store-dir", this.options.storeDir);
-      await this.command(this.options.packageManager, installArgs, releasePath);
-      await assertWorkspaceDependencyInstalled(releasePath, "apps/bridge", "@agent-bridge/protocol");
-      await this.command(this.options.packageManager, ["check"], releasePath);
-      await this.command(this.options.packageManager, ["build"], releasePath);
+      await this.command(this.options.packageManager, installArgs, sourceRoot);
+      await assertWorkspaceDependencyInstalled(sourceRoot, "apps/bridge", "@agent-bridge/protocol");
+      await this.command(this.options.packageManager, ["check"], sourceRoot);
+      await this.command(this.options.packageManager, ["build"], sourceRoot);
+      if (this.options.sourceCheckout) await stageCompiledArtifact(sourceRoot, releasePath);
       previousTarget = await currentSymlinkTarget(this.options.currentLink);
       if (!previousTarget) throw new Error(`${this.options.currentLink} must point to the current stable release`);
       await replaceSymlink(this.options.currentLink, releasePath);
@@ -338,4 +346,13 @@ async function cleanupReleases(installRoot: string, currentTarget: string, previ
   for (const candidate of candidates.slice(Math.max(0, retention))) {
     if (!keep.has(resolve(candidate))) await rm(candidate, { recursive: true, force: true }).catch(() => undefined);
   }
+}
+
+async function stageCompiledArtifact(sourceRoot: string, releasePath: string): Promise<void> {
+  await mkdir(join(releasePath, "apps", "bridge"), { recursive: true });
+  await mkdir(join(releasePath, "deploy", "windows-native"), { recursive: true });
+  await cp(join(sourceRoot, "apps", "bridge", "dist"), join(releasePath, "apps", "bridge", "dist"), { recursive: true });
+  await cp(join(sourceRoot, "package.json"), join(releasePath, "package.json"));
+  await cp(join(sourceRoot, "deploy", "windows-native"), join(releasePath, "deploy", "windows-native"), { recursive: true });
+  await symlink(join(sourceRoot, "node_modules"), join(releasePath, "node_modules"), process.platform === "win32" ? "junction" : "dir");
 }

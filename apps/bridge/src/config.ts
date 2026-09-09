@@ -69,6 +69,7 @@ export const config = {
   updateSource: process.env.BRIDGE_UPDATE_SOURCE,
   updateSourceRef: process.env.BRIDGE_UPDATE_REF ?? "main",
   updateInstallRoot,
+  updateSourceCheckout: process.env.BRIDGE_UPDATE_SOURCE_CHECKOUT,
   updateStoreDir,
   updateReleaseRetention: positiveNumber("BRIDGE_UPDATE_RELEASE_RETENTION", 2),
   updateCurrentLink: process.env.BRIDGE_UPDATE_CURRENT_LINK ?? `${updateInstallRoot}/current`,

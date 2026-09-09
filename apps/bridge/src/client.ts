@@ -83,6 +83,7 @@ export class BridgeClient {
       source: options.updateSource,
       sourceRef: options.updateSourceRef,
       installRoot: options.updateInstallRoot,
+      sourceCheckout: config.updateSourceCheckout,
       currentLink: options.updateCurrentLink,
       statePath: options.updateStatePath,
       packageManager: options.updatePackageManager,
