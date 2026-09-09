@@ -7,6 +7,7 @@ import type { BridgeToControlMessage } from "@agent-bridge/protocol";
 const log = pino({ name: "codex-desktop-sessions" });
 const MAX_SCAN_FILES = 500;
 const MAX_READ_BYTES = 8 * 1024 * 1024;
+const MAX_SESSION_INDEX_BYTES = 8 * 1024 * 1024;
 const FIRST_LINE_BYTES = 64 * 1024;
 const MAX_PARTIAL_LINE_CHARS = 1024 * 1024;
 
@@ -101,10 +102,17 @@ export class CodexDesktopSessionScanner {
 
   private async scanInternal(initial: boolean): Promise<void> {
     const sessionsRoot = join(this.options.codexHome, "sessions");
+    const indexedTitles = readDesktopSessionTitles(this.options.codexHome);
     const paths = listRecentRollouts(sessionsRoot);
     for (const path of paths) {
       try {
         this.scanFile(path, initial);
+        const state = this.files.get(path);
+        const indexedTitle = state && indexedTitles.get(state.threadId);
+        if (state && indexedTitle && indexedTitle !== state.title) {
+          state.title = indexedTitle;
+          this.emitDiscovery(state, state.activeTurnId ? "working" : "waiting");
+        }
       } catch (error) {
         log.warn({ error, path }, "Unable to inspect Codex Desktop rollout");
       }
@@ -220,6 +228,32 @@ export class CodexDesktopSessionScanner {
       updatedAt: Math.floor(state.modifiedAt),
     });
   }
+}
+
+function readDesktopSessionTitles(codexHome: string): Map<string, string> {
+  const titles = new Map<string, string>();
+  const path = join(codexHome, "session_index.jsonl");
+  let size: number;
+  try {
+    size = statSync(path).size;
+  } catch {
+    return titles;
+  }
+  const start = Math.max(0, size - MAX_SESSION_INDEX_BYTES);
+  const chunk = readRange(path, start, size);
+  const text = start > 0 ? chunk.slice(Math.max(0, chunk.indexOf("\n") + 1)) : chunk;
+  for (const line of text.split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      const entry = JSON.parse(line) as Record<string, unknown>;
+      const id = typeof entry.id === "string" ? entry.id : undefined;
+      const title = typeof entry.thread_name === "string" ? entry.thread_name.trim() : "";
+      if (id && title) titles.set(id, title);
+    } catch {
+      // Ignore a concurrently written or malformed index entry.
+    }
+  }
+  return titles;
 }
 
 function listRecentRollouts(root: string): string[] {

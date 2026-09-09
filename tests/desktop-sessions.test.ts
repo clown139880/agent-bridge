@@ -126,3 +126,32 @@ test("Desktop scanner rediscovers a session when its title is updated", async ()
   scanner.stop();
   rmSync(root, { recursive: true, force: true });
 });
+
+test("Desktop scanner reads generated titles from the Desktop session index", async () => {
+  const root = join(tmpdir(), `agent-bridge-desktop-index-title-${randomUUID()}`);
+  const project = join(root, "project");
+  const codexHome = join(root, ".codex");
+  const sessions = join(codexHome, "sessions");
+  const rollout = join(sessions, "rollout-index-title.jsonl");
+  const index = join(codexHome, "session_index.jsonl");
+  mkdirSync(project, { recursive: true });
+  mkdirSync(sessions, { recursive: true });
+  writeFileSync(rollout, line({ type: "session_meta", payload: {
+    id: "desktop-index-title", cwd: project, originator: "Codex Desktop",
+  } }));
+  writeFileSync(index, line({ id: "desktop-index-title", thread_name: "Generated in Desktop" }));
+  const emitted: BridgeToControlMessage[] = [];
+  const scanner = new CodexDesktopSessionScanner({ codexHome, allowedRoots: [root],
+    intervalMs: 60_000, replayExisting: false, emit: (message) => emitted.push(message) });
+
+  await scanner.start();
+  assert.equal(emitted.length, 1);
+  assert.equal(emitted[0]?.type === "session.discovered" ? emitted[0].title : undefined, "Generated in Desktop");
+
+  appendFileSync(index, line({ id: "desktop-index-title", thread_name: "Renamed in Desktop" }));
+  await scanner.refresh();
+  assert.equal(emitted.length, 2);
+  assert.equal(emitted[1]?.type === "session.discovered" ? emitted[1].title : undefined, "Renamed in Desktop");
+  scanner.stop();
+  rmSync(root, { recursive: true, force: true });
+});
