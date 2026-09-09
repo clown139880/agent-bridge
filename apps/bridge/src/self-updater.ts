@@ -201,7 +201,12 @@ export class BridgeSelfUpdater {
 
   private async command(executable: string, args: string[], cwd?: string): Promise<void> {
     if (this.options.runCommand) return this.options.runCommand(executable, args, cwd);
-    await execFileAsync(executable, args, { cwd, maxBuffer: 10 * 1024 * 1024 });
+    await execFileAsync(executable, args, {
+      cwd,
+      maxBuffer: 10 * 1024 * 1024,
+      // Windows package managers are commonly exposed as .cmd shims.
+      shell: process.platform === "win32" && executable.toLowerCase().endsWith(".cmd"),
+    });
   }
 }
 
