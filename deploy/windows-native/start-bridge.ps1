@@ -25,6 +25,28 @@ try {
         $runtime = (Get-Command node.exe -ErrorAction Stop).Source
         $runtimeArgs = '--import tsx apps/bridge/src/index.ts'
     }
+    # Task Scheduler can terminate this PowerShell wrapper without terminating a
+    # process created by Start-Process. Clean up only an older Bridge launched
+    # with this exact runtime before starting its replacement.
+    $staleBridges = @(Get-CimInstance Win32_Process | Where-Object {
+        $_.ProcessId -ne $PID -and
+        $_.ExecutablePath -and
+        $_.ExecutablePath -ieq $runtime -and
+        $_.CommandLine -match 'apps[/\\]bridge[/\\]src[/\\]index\.ts'
+    })
+    if ($staleBridges.Count -gt 0) {
+        $processes = @(Get-CimInstance Win32_Process)
+        function Stop-AgentBridgeProcessTree([int]$ProcessId) {
+            foreach ($child in @($processes | Where-Object { $_.ParentProcessId -eq $ProcessId })) {
+                Stop-AgentBridgeProcessTree $child.ProcessId
+            }
+            Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue
+        }
+        foreach ($stale in $staleBridges) {
+            Add-Content -LiteralPath (Join-Path $logDirectory 'launcher.log') -Value "$(Get-Date -Format o) Stopping stale Bridge process tree: $($stale.ProcessId)"
+            Stop-AgentBridgeProcessTree $stale.ProcessId
+        }
+    }
     # Redirect at process level so PowerShell 5.1 does not treat native stderr as an error.
     Add-Content -LiteralPath (Join-Path $logDirectory 'launcher.log') -Value "$(Get-Date -Format o) Starting $runtime $runtimeArgs in $root"
     $process = Start-Process -FilePath $runtime -ArgumentList $runtimeArgs -WorkingDirectory $root -WindowStyle Hidden -RedirectStandardOutput $logPath -RedirectStandardError (Join-Path $logDirectory 'bridge.err.log') -Wait -PassThru
