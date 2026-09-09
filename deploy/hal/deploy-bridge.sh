@@ -21,17 +21,17 @@ if test -n "$(git status --porcelain)"; then
   exit 1
 fi
 
-previous_commit=$(git rev-parse HEAD)
+deployed_commit=$(git -C "$install_root/current" rev-parse HEAD 2>/dev/null || true)
 git fetch origin
 git pull --ff-only origin "$(git branch --show-current)"
 target_commit=$(git rev-parse HEAD)
 
-if test "$previous_commit" = "$target_commit"; then
-  echo "HAL checkout is already at $target_commit."
+if test "$deployed_commit" = "$target_commit"; then
+  echo "HAL Bridge is already running $target_commit."
   exit 0
 fi
 
-mapfile -t changed_files < <(git diff --name-only "$previous_commit" "$target_commit")
+mapfile -t changed_files < <(git diff --name-only "${deployed_commit:-$target_commit^}" "$target_commit")
 plugin_only=true
 for path in "${changed_files[@]}"; do
   case "$path" in

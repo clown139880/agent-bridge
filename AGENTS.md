@@ -4,6 +4,7 @@
 
 - After completing and committing requested repository changes, push the current branch to its configured remote. Do not report delivery complete while commits exist only locally.
 - Resolve non-fast-forward updates by fetching and integrating the remote branch without force-pushing unless the user explicitly requests a force push.
+- Do not claim that a machine or desktop client is updated based only on a clean Git worktree or successful commit.
 - Never deploy source by copying files between Windows and HAL, and never use an automatic stash to make a deployment checkout appear clean. Deployments must start from pushed commits and a clean `git pull --ff-only` on HAL.
 - Maintain release versions. Changes to the Bridge, Control Plane, protocol, database, or runtime deployment code must bump the root package version. Changes confined to `integrations/dsh-agent-control` bump only that package version and must not trigger a Bridge or Control Plane deployment.
 
@@ -27,4 +28,3 @@
 - Stage and validate while sessions are active, but never activate or restart the HAL Bridge until admission is drained and active turns, approvals, and user input are all empty. A timeout leaves the release staged and the running service untouched.
 - Keep SQLite data and secrets outside the Git checkout. Database backups must use SQLite's online backup mechanism and live outside the repository; Git and the prior immutable release provide source rollback.
 - Restarting the Control Plane and restarting the HAL Bridge are separate operations. The HAL Bridge owns its Codex App Server, so restarting it without a successful drain can interrupt active turns.
-- Do not claim that Windows or the desktop client is updated based only on a clean Git worktree or successful commit.
