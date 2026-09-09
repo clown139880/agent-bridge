@@ -2,6 +2,7 @@ param(
     [string]$EnvFile = "$env:LOCALAPPDATA\agent-bridge\bridge.env",
     [string]$PnpmPath,
     [string]$BunPath,
+    [string]$NodePath,
     [string]$LogDirectory = "$env:LOCALAPPDATA\agent-bridge"
 )
 $ErrorActionPreference = 'Stop'
@@ -11,13 +12,9 @@ Set-Location $root
 New-Item -ItemType Directory -Path $logDirectory -Force | Out-Null
 $logPath = Join-Path $logDirectory 'bridge.log'
 try {
-    $pnpmCommand = Get-Command pnpm.cmd -ErrorAction SilentlyContinue
-    $fallbackPnpm = Join-Path $env:LOCALAPPDATA 'pnpm\pnpm.cmd'
-    if ($PnpmPath) { $runtime = $PnpmPath }
-    elseif ($pnpmCommand) { $runtime = $pnpmCommand.Source }
-    elseif (Test-Path -LiteralPath $fallbackPnpm) { $runtime = $fallbackPnpm }
-    else { throw 'pnpm.cmd was not found; pass -PnpmPath with an absolute path' }
-    $runtimeArgs = 'start:bridge'
+    if ($NodePath) { $runtime = $NodePath }
+    else { $runtime = (Get-Command node.exe -ErrorAction Stop).Source }
+    $runtimeArgs = 'apps/bridge/dist/index.js'
     # Task Scheduler can terminate this PowerShell wrapper without terminating a
     # process created by Start-Process. Clean up only an older Bridge launched
     # with this exact runtime before starting its replacement.
