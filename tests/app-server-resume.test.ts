@@ -132,6 +132,26 @@ test("a restored active thread is included in the authoritative heartbeat snapsh
   assert.deepEqual(adapter.sessionActivity().activeSessionIds, ["active-thread"]);
 });
 
+test("history hydration preserves the Codex thread activity time", async () => {
+  const emitted: BridgeToControlMessage[] = [];
+  const adapter = new CodexAppServerAdapter({
+    command: "codex", url: "ws://127.0.0.1:4500", allowedRoots: [process.cwd()],
+    manageServer: false, reconnectMs: 3_000,
+  }, (message) => emitted.push(message));
+  const internals = adapter as unknown as {
+    hydrateThreadHistory(thread: { id: string; cwd: string; createdAt: number; updatedAt: number }): Promise<void>;
+    request(method: string, params: Record<string, unknown>): Promise<unknown>;
+  };
+  internals.request = async () => ({ thread: { turns: [{ id: "old-turn", status: "completed",
+    items: [{ id: "old-message", type: "agentMessage", text: "Old answer" }] }] } });
+
+  await internals.hydrateThreadHistory({ id: "history-thread", cwd: process.cwd(), createdAt: 100, updatedAt: 200 });
+
+  const history = emitted.filter((message) => message.type === "session.event");
+  assert.equal(history.length, 2);
+  assert.deepEqual(history.map((message) => message.timestamp), [200_000, 200_000]);
+});
+
 test("reconnect synchronizes active turns after completion notifications were lost", async () => {
   const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
   const adapter = new CodexAppServerAdapter({

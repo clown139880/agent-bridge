@@ -184,18 +184,18 @@ export class AgentControlStore {
         this.db.prepare(`UPDATE sessions SET machine_id=?,agent_type=?,project_name=?,project_path=?,native_session_id=?,
           status=?,title=COALESCE(?,title),prompt_summary=COALESCE(?,prompt_summary),source=?,history_completeness=?,
           activity_status=?,active_turn_id=?,last_turn_status=COALESCE(?,last_turn_status),inventory_seen_at=?,
-          updated_at=COALESCE(last_response_at,created_at) WHERE id=?`).run(
+          updated_at=? WHERE id=?`).run(
           machineId, state.agentType, state.projectName, state.projectPath, state.nativeSessionId,
           legacyStatus(state.activityStatus, state.lastTurnStatus), state.title ?? null, state.promptSummary ?? null,
           state.source, state.historyCompleteness, state.activityStatus, state.activeTurnId ?? null,
-          state.lastTurnStatus ?? null, Date.now(), state.sessionId);
+          state.lastTurnStatus ?? null, Date.now(), state.updatedAt, state.sessionId);
       } else {
         this.db.prepare(`INSERT INTO sessions
           (id,machine_id,agent_type,project_name,project_path,matrix_room_id,matrix_thread_id,native_session_id,
            status,created_at,updated_at,title,prompt_summary,source,history_completeness,activity_status,active_turn_id,
            last_turn_status,inventory_seen_at) VALUES (?,?,?,?,?,'',NULL,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
           state.sessionId, machineId, state.agentType, state.projectName, state.projectPath, state.nativeSessionId,
-          legacyStatus(state.activityStatus, state.lastTurnStatus), state.createdAt, state.createdAt,
+          legacyStatus(state.activityStatus, state.lastTurnStatus), state.createdAt, state.updatedAt,
           state.title ?? null, state.promptSummary ?? null, state.source, state.historyCompleteness,
           state.activityStatus, state.activeTurnId ?? null, state.lastTurnStatus ?? null, Date.now());
       }
@@ -548,7 +548,7 @@ export class AgentControlStore {
       projectName:String(row.project_name),workspace:String(row.project_path),status:String(row.activity_status??"unknown"),
       activeTurnId:row.active_turn_id?String(row.active_turn_id):null,lastTurnStatus:row.last_turn_status?String(row.last_turn_status):null,
       pendingApprovalCount:count("approval"),pendingUserInputCount:count("user_input"),latestRun:run,
-      createdAt:Number(row.created_at),updatedAt:Number(row.last_response_at??row.created_at),
+      createdAt:Number(row.created_at),updatedAt:Number(row.updated_at??row.created_at),
       lastResponseAt:row.last_response_at==null?null:Number(row.last_response_at),source:String(row.source??"app-server"),
       historyCompleteness:String(row.history_completeness??"loaded-only")};
     if(detail){const runs=this.db.prepare("SELECT * FROM worker_runs WHERE session_id=? ORDER BY created_at DESC,id DESC LIMIT 20")

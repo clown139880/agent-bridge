@@ -153,6 +153,7 @@ test("thread/updated asynchronously refreshes the persisted session title", asyn
     await Promise.all(pending);
 
     assert.equal(f.internals.controlStore.session("thread-1")?.title, "Asynchronous title");
+    assert.equal(f.internals.controlStore.session("thread-1")?.updatedAt, 3_000);
   } finally {
     await f.close();
   }

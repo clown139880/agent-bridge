@@ -489,7 +489,7 @@ export class CodexAppServerAdapter {
         this.inventoryComplete = true;
         for (const thread of result.data) {
           await this.discoverThread(thread);
-          if (page === 0) await this.hydrateThreadHistory(thread.id);
+          if (page === 0) await this.hydrateThreadHistory(thread);
         }
         cursor = result.nextCursor ?? undefined;
         if (!cursor) break;
@@ -552,35 +552,37 @@ export class CodexAppServerAdapter {
     }
   }
 
-  private async hydrateThreadHistory(threadId: string): Promise<void> {
+  private async hydrateThreadHistory(thread: CodexThread): Promise<void> {
+    const threadId = thread.id;
+    const historyTimestamp = threadTimestamp(thread);
     try {
       const result=await this.request<{thread:CodexThread&{turns?:CodexTurn[]}}>("thread/read",{threadId,includeTurns:true});
       const turns=(result.thread.turns??[]).slice(-50);
       for(const turn of turns){
-        for(const item of turn.items??[])this.emitHistoricalItem(threadId,turn.id,item);
+        for(const item of turn.items??[])this.emitHistoricalItem(threadId,turn.id,item,historyTimestamp);
         if(turn.status!=="inProgress"){
           const type=turn.status==="failed"?"turn.failed":turn.status==="interrupted"?"turn.interrupted":"turn.completed";
           this.emitSessionEvent(type,threadId,`app-server:${threadId}:${turn.id}:history-terminal`,{
             status:turn.status==="interrupted"?"interrupted":turn.status,summary:finalAgentText(turn.items??[]),
             error:turn.error?.message,durationMs:turn.durationMs??undefined,
-            ...(turn.model?{model:turn.model}:{})},turn.id);
+            ...(turn.model?{model:turn.model}:{})},turn.id,undefined,historyTimestamp);
           this.reportedTurns.add(turn.id);
         }
       }
     }catch(error){log.debug({error,threadId},"Unable to hydrate thread history");}
   }
 
-  private emitHistoricalItem(threadId:string,turnId:string,item:ThreadItem):void{
+  private emitHistoricalItem(threadId:string,turnId:string,item:ThreadItem,timestamp:number):void{
     const itemId=item.id??createHash("sha256").update(JSON.stringify(item)).digest("hex").slice(0,24);
     const text=item.text??item.content?.map(part=>part.text??"").join("\n").trim();
     if((item.type==="agentMessage"||item.type==="userMessage")&&text)this.emitSessionEvent("message.completed",threadId,
-      `app-server:${threadId}:${turnId}:${itemId}:history-message`,{role:item.type==="userMessage"?"user":"assistant",text:truncateEventText(text)},turnId,itemId);
+      `app-server:${threadId}:${turnId}:${itemId}:history-message`,{role:item.type==="userMessage"?"user":"assistant",text:truncateEventText(text)},turnId,itemId,timestamp);
     else if(item.type==="commandExecution")this.emitSessionEvent("command.completed",threadId,
       `app-server:${threadId}:${turnId}:${itemId}:history-command`,{command:item.command??"command",cwd:item.cwd,
-        status:item.status??"unknown",exitCode:item.exitCode??null,output:truncateEventText(item.aggregatedOutput??"")},turnId,itemId);
+        status:item.status??"unknown",exitCode:item.exitCode??null,output:truncateEventText(item.aggregatedOutput??"")},turnId,itemId,timestamp);
     else if(item.type==="fileChange")this.emitSessionEvent("file_change.completed",threadId,
       `app-server:${threadId}:${turnId}:${itemId}:history-file-change`,{changes:(item.changes??[]).slice(0,200),
-        truncated:(item.changes?.length??0)>200},turnId,itemId);
+        truncated:(item.changes?.length??0)>200},turnId,itemId,timestamp);
   }
 
   private async ensureThreadSubscribed(threadId: string): Promise<CodexThread> {
@@ -983,11 +985,16 @@ export class CodexAppServerAdapter {
   }
 
   private emitSessionEvent(eventType: import("@agent-bridge/protocol").StructuredSessionEventType,
-    sessionId: string, eventId: string, payload: Record<string, unknown>, turnId?: string, itemId?: string): void {
-    this.emit({ type: "session.event", eventType, sessionId, eventId, timestamp: Date.now(),
+    sessionId: string, eventId: string, payload: Record<string, unknown>, turnId?: string, itemId?: string,
+    timestamp = Date.now()): void {
+    this.emit({ type: "session.event", eventType, sessionId, eventId, timestamp,
       turnId, itemId, payload });
   }
 
+}
+
+function threadTimestamp(thread: CodexThread): number {
+  return (thread.updatedAt ?? thread.createdAt ?? Math.floor(Date.now() / 1000)) * 1000;
 }
 
 export function summarizePrompt(prompt: string | undefined, limit = 240): string | undefined {
