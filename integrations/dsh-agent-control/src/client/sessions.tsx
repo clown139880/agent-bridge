@@ -153,7 +153,7 @@ export function UnifiedSessions({ store, views, nativeSessions, nativeWorkspaces
       onGroupByChange={value => views.setGrouped(value === 'workspace')} onOrderByChange={value => views.setSort(value === 'updated' ? 'updatedAt' : 'createdAt')}
       onToggle={key => { const group = groups.find(item => item.key === key); views.toggleGroup(key, Boolean(group?.sessions.some(row => activeStatus(row.status)))) }} onOpen={open} onCreate={key => void create(key)}
       onShowMore={(key, value) => setExpanded(keys => value ? [...new Set([...keys, key])] : keys.filter(item => item !== key))}
-      onPinGroup={key => views.toggleGroupPin(key)} /> : null}
+      onPinGroup={key => views.toggleGroupPin(key)} />
     {bridge.hasMore && <Button size="sm" className={css.loadMore} disabled={bridge.loading} onClick={() => void store.loadSessions(true)}>{bridge.loading ? 'Loading…' : 'Load more Bridge sessions'}</Button>}
   </div>
 }
