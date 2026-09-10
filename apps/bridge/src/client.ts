@@ -144,8 +144,8 @@ export class BridgeClient {
     };
   }
 
-  /** Resolve the adapter that owns a session id (falls back to snapshot scan, then sole adapter). */
-  private adapterForSession(sessionId: string): AgentAdapter {
+  /** Adapter that genuinely holds this session in memory (owner map or snapshot scan), else undefined. */
+  private ownedBy(sessionId: string): AgentAdapter | undefined {
     const owner = this.sessionOwner.get(sessionId);
     if (owner && this.adapters.has(owner)) return this.adapters.get(owner)!;
     for (const [type, adapter] of this.adapters) {
@@ -154,8 +154,36 @@ export class BridgeClient {
         return adapter;
       }
     }
+    return undefined;
+  }
+
+  /** Resolve the adapter that owns a session id (falls back to sole adapter, else throws). */
+  private adapterForSession(sessionId: string): AgentAdapter {
+    const owned = this.ownedBy(sessionId);
+    if (owned) return owned;
     if (this.adapters.size === 1) return this.adapters.values().next().value!;
     throw new Error(`No adapter owns session ${sessionId}`);
+  }
+
+  /**
+   * Resolve the adapter for a submit_turn, reviving the session first if this bridge
+   * no longer holds it (e.g. a Claude subprocess killed by a restart/self-update) and
+   * the control-plane supplied a resume hint. Without a hint, or an adapter that can't
+   * resume, this falls back to the normal resolution (which throws for unknown sessions).
+   */
+  private async ensureTurnOwner(message: Extract<ControlToBridgeMessage, { type: "action.submit_turn" }>): Promise<AgentAdapter> {
+    const owned = this.ownedBy(message.sessionId);
+    if (owned) return owned;
+    const resume = message.resume;
+    const adapter = resume ? this.adapters.get(resume.agentType) : undefined;
+    if (resume && adapter?.resumeSession) {
+      log.info({ sessionId: message.sessionId, agentType: resume.agentType, workspace: resume.workspace },
+        "Reviving session before turn — bridge no longer held it");
+      await adapter.resumeSession(message.sessionId, resume.workspace, resume.nativeSessionId, message.model);
+      this.sessionOwner.set(message.sessionId, resume.agentType);
+      return adapter;
+    }
+    return this.adapterForSession(message.sessionId);
   }
 
   /** Resolve the adapter for a target agent type (defaults to the first enabled adapter). */
@@ -357,7 +385,7 @@ export class BridgeClient {
         const value=await this.adapterForType(message.agentType).createSessionAction(message.actionId,message.projectPath,message.input,message.model,message.attachments);
         result={type:"action.result",actionId:message.actionId,kind,status:"succeeded",...value,timestamp:Date.now()};
       }else if(message.type==="action.submit_turn"){
-        const value=await this.adapterForSession(message.sessionId).submitTurnAction(message.actionId,message.sessionId,message.input,message.delivery,message.expectedTurnId,message.model,message.reasoningEffort,message.attachments);
+        const value=await (await this.ensureTurnOwner(message)).submitTurnAction(message.actionId,message.sessionId,message.input,message.delivery,message.expectedTurnId,message.model,message.reasoningEffort,message.attachments);
         result={type:"action.result",actionId:message.actionId,kind,status:"succeeded",...value,timestamp:Date.now()};
       }else if(message.type==="action.interrupt_turn"){
         const value=await this.adapterForSession(message.sessionId).interruptAction(message.sessionId,message.expectedTurnId);

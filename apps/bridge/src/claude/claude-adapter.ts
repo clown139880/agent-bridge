@@ -149,15 +149,34 @@ export class ClaudeCodeAdapter implements AgentAdapter {
   // ---- session lifecycle -------------------------------------------------
 
   async startSession(requestId: string, projectPath: string, prompt?: string, resumeSessionId?: string, model?: string, attachments?: AttachmentRef[]): Promise<string> {
+    // Existing worker-API semantics: a supplied resumeSessionId doubles as the public
+    // id and Claude's resume id. Callers that must keep a distinct bridge-assigned
+    // public id while resuming (session revival) use resumeSession() instead.
+    return this.launch({ publicSessionId: resumeSessionId ?? `claude-${randomUUID()}`,
+      requestId, projectPath, prompt, resumeNativeId: resumeSessionId, model, attachments });
+  }
+
+  /**
+   * Revive a session the bridge no longer holds in memory (Claude subprocess killed
+   * by a restart/self-update): relaunch Claude in projectPath resuming nativeSessionId
+   * while keeping the stable bridge-assigned public id, so the control-plane and UI
+   * keep tracking the same session. No first prompt — the caller submits the turn
+   * next, reusing the same path as a no-input session create.
+   */
+  async resumeSession(sessionId: string, projectPath: string, nativeSessionId?: string, model?: string): Promise<void> {
+    if (this.sessions.has(sessionId)) return;
+    await this.launch({ publicSessionId: sessionId, requestId: sessionId, projectPath, resumeNativeId: nativeSessionId, model });
+  }
+
+  private async launch(params: { publicSessionId: string; requestId: string; projectPath: string; prompt?: string; resumeNativeId?: string; model?: string; attachments?: AttachmentRef[] }): Promise<string> {
+    const { publicSessionId: sessionId, requestId, projectPath, prompt, resumeNativeId, model, attachments } = params;
     const cwd = await resolveProjectPath(projectPath, this.options.allowedRoots);
     // The public id is bridge-assigned and stable for the session's lifetime.
-    // Claude's own uuid is learned later from system/init (see handleSystem) and
-    // kept as nativeSessionId for resume; unlike Codex, Claude does not expose a
-    // session id until it has processed a first user message.
-    const sessionId = resumeSessionId ?? `claude-${randomUUID()}`;
+    // Claude's own uuid is learned from system/init (see handleSystem) and kept as
+    // nativeSessionId for resume; on revival it is seeded from resumeNativeId here.
     const session: ClaudeSession = {
       sessionId,
-      nativeSessionId: resumeSessionId,
+      nativeSessionId: resumeNativeId,
       requestId,
       cwd,
       projectPath: cwd,
@@ -186,7 +205,8 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       prompt: session.input,
       options: {
         cwd,
-        resume: resumeSessionId,
+        // Claude's own resumable id (native uuid), NOT the bridge public id.
+        resume: resumeNativeId,
         model,
         abort: session.abort.signal,
         canCallTool: (toolName, input, opts) => this.handleToolPermission(session, toolName, input, opts.signal),
@@ -217,10 +237,10 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       this.emitSessionEvent(session, "message.completed", `claude:${sessionId}:first:user`,
         { role: "user", text: truncate(prompt), attachments: attachments ?? [] });
     } else {
-      // With no first prompt, Claude stays silent — no init, no native id — until a
-      // turn is submitted. Announce the session now (keyed on the stable public id
-      // as its native id, so it is unique) so the control-plane persists it and can
-      // accept that first turn. Claude's own uuid is recorded from init later.
+      // With no first prompt (fresh no-input create OR a revival), Claude stays silent
+      // until a turn is submitted. Announce the session now so the control-plane keeps
+      // (or re-creates) its row and accepts that turn; Claude's uuid is (re)learned from
+      // init on the next turn.
       this.emitDiscovered(session);
     }
     return sessionId;

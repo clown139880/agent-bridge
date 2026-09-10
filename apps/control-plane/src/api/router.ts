@@ -37,6 +37,16 @@ function pendingJson(row: PendingRow): Record<string,unknown> {
     choices:row.request.choices,decision:row.decision?.choice??null};
   return {requestId:row.id,...common,questions:row.request.questions,answers:row.decision?.answers??null};
 }
+// Resume hint for a turn: lets the bridge revive a session it no longer holds
+// (Claude subprocess killed by a restart). workspace is the cwd to relaunch in;
+// nativeSessionId is the agent's own resumable id. Only emitted when both the
+// agent type and workspace are known.
+function resumeContext(session:Record<string,unknown>):{agentType:AgentType;workspace:string;nativeSessionId?:string}|undefined{
+  const agent=session.agent,workspace=session.workspace;
+  if((agent!=="codex-cli"&&agent!=="claude-code")||typeof workspace!=="string"||!workspace)return undefined;
+  const nativeSessionId=typeof session.nativeSessionId==="string"?session.nativeSessionId:undefined;
+  return {agentType:agent,workspace,nativeSessionId};
+}
 function queryScope(name:string,url:URL):string{const entries=[...url.searchParams.entries()].filter(([key])=>key!=="cursor"&&key!=="limit").sort();return `${name}:${createHash("sha256").update(JSON.stringify(entries)).digest("hex").slice(0,16)}`;}
 function pageCursor(scope:string,time:number,id:string):string{return Buffer.from(JSON.stringify({scope,time,id})).toString("base64url");}
 function readPageCursor(value:string,scope:string):[number,string]{try{const row=JSON.parse(Buffer.from(value,"base64url").toString()) as any;if(row.scope!==scope||!Number.isFinite(row.time)||typeof row.id!=="string")throw new Error();return[row.time,row.id];}catch{throw new ApiProblem(400,"invalid_cursor","invalid cursor");}}
@@ -246,7 +256,8 @@ export class AgentControlApi {
     const machineId=String(session.machineId);this.requireActionBridge(machineId);
     const created=this.createAction(principal,key,path,body,"submit_turn",machineId,String(session.sessionId));
     if(!created.existing)this.dispatch(created.action,{type:"action.submit_turn",actionId:created.action.actionId,
-      sessionId:String(session.sessionId),input,delivery:delivery as "auto"|"steer"|"start_turn",expectedTurnId:expected,model,reasoningEffort,attachments});
+      sessionId:String(session.sessionId),input,delivery:delivery as "auto"|"steer"|"start_turn",expectedTurnId:expected,model,reasoningEffort,attachments,
+      resume:resumeContext(session)});
     this.ok(response,actionJson(this.store.action(created.action.actionId)!),202);
   }
 

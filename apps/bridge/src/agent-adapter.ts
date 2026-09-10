@@ -14,6 +14,13 @@ export interface AgentAdapter {
 
   /** Start (or resume) a session for a project, optionally kicking off a first turn. Returns the native session id. */
   startSession(requestId: string, projectPath: string, prompt?: string, resumeSessionId?: string, model?: string, attachments?: AttachmentRef[]): Promise<string>;
+  /**
+   * Revive a session this bridge no longer holds in memory (e.g. after a restart/
+   * self-update killed its subprocess), keeping the same public sessionId, so a
+   * subsequent turn continues the conversation. Optional: adapters that cannot resume
+   * simply omit it and unknown sessions keep failing as before.
+   */
+  resumeSession?(sessionId: string, projectPath: string, nativeSessionId?: string, model?: string): Promise<void>;
   /** Deliver free-form text to a session (answers pending input, steers an active turn, or starts a new turn). */
   input(sessionId: string, text: string, model?: string, attachments?: AttachmentRef[]): Promise<void>;
 

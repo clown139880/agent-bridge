@@ -337,6 +337,14 @@ export interface SubmitTurnActionMessage {
   model?: string;
   reasoningEffort?: string;
   attachments?: AttachmentRef[];
+  /**
+   * Context to revive a session the bridge no longer holds in memory (e.g. a
+   * Claude subprocess that died on a bridge restart/self-update). When the bridge
+   * has no adapter for `sessionId`, it resumes the session on the named agent in
+   * `workspace` using `nativeSessionId` (the agent's own resumable id) before
+   * applying this turn — so conversations survive bridge restarts.
+   */
+  resume?: { agentType: AgentType; workspace: string; nativeSessionId?: string };
 }
 export interface InterruptTurnActionMessage {
   type: "action.interrupt_turn";

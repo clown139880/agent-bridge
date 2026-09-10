@@ -825,6 +825,16 @@ export class ControlPlane {
       agentType, projectPath, prompt, model, attachments });
   }
 
+  // Resume hint for submit_turn: lets the bridge revive a session it no longer
+  // holds in memory (e.g. a Claude subprocess killed by a bridge restart/self-update)
+  // by relaunching the agent in the session's workspace and resuming its native id.
+  private resumeContext(sessionId: string): { agentType: AgentType; workspace: string; nativeSessionId?: string } | undefined {
+    const session = this.store.getSession(sessionId);
+    if (!session || !session.projectPath) return undefined;
+    return { agentType: session.agentType, workspace: session.projectPath,
+      nativeSessionId: session.nativeSessionId ?? undefined };
+  }
+
   private replayControlActions(machineId: string): void {
     for (const { action, request, path } of this.controlStore.pendingActions(machineId)) {
       if (action.kind === "create_session") this.registry.send(machineId, { type: "action.create_session",
@@ -838,7 +848,7 @@ export class ControlPlane {
         expectedTurnId: typeof request.expectedTurnId === "string" ? request.expectedTurnId : undefined,
         model: typeof request.model === "string" ? request.model : undefined,
         reasoningEffort: typeof request.reasoningEffort === "string" ? request.reasoningEffort : undefined,
-        attachments: attachmentsFromBody(request) });
+        attachments: attachmentsFromBody(request), resume: this.resumeContext(action.sessionId) });
       else if (action.kind === "interrupt_turn" && action.sessionId) this.registry.send(machineId, {
         type: "action.interrupt_turn", actionId: action.actionId, sessionId: action.sessionId,
         expectedTurnId: typeof request.expectedTurnId === "string" ? request.expectedTurnId : undefined });
