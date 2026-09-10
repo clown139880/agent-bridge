@@ -203,6 +203,10 @@ export class AgentControlApi {
       const session=this.store.session(sessionId);if(!session)throw new ApiProblem(404,"session_not_found","session not found");
       if(["creating","active","waiting_for_approval","waiting_for_input"].includes(String(session.status)))
         throw new ApiProblem(409,"session_active","interrupt or resolve the active session before deleting it");
+      // Offline sessions (e.g. a Claude subprocess that died on a bridge restart) are
+      // no longer owned by any adapter, so a bridge-routed delete fails with
+      // "No adapter owns session". Remove the record directly instead.
+      if(String(session.status)==="offline"){this.store.deleteSession(sessionId);this.ok(response,{sessionId,deleted:true},200);return;}
       const machineId=String(session.machineId);this.requireActionBridge(machineId);
       const created=this.createAction(principal,key,path,body,"delete_session",machineId,sessionId,"DELETE");
       if(!created.existing)this.dispatch(created.action,{type:"action.delete_session",actionId:created.action.actionId,sessionId});
