@@ -97,7 +97,7 @@ export function UnifiedSessions({ store, views, nativeSessions, nativeWorkspaces
       // group so the heading identifies the environment for every row below it.
       const key = `bridge:${bridgeGroup.key}`
       const baseLabel = bridgeGroup.title.split(/[\\/]/).filter(Boolean).at(-1) || bridgeGroup.title
-      const target: UnifiedGroup = { key, label: baseLabel, baseLabel, environments: [`@${bridgeGroup.worker.replace(/^codex@/, '')}`], cwd: bridgeGroup.title, expanded: views.groupMode(key) !== 'collapsed', canCreate: store.canCreate(bridgeGroup.worker), bridgeWorker: bridgeGroup.worker, sessions: [] }
+      const target: UnifiedGroup = { key, label: baseLabel, baseLabel, environments: [`@${bridgeGroup.worker.replace(/^[^@]+@/, '')}`], cwd: bridgeGroup.title, expanded: views.groupMode(key) !== 'collapsed', canCreate: store.canCreate(bridgeGroup.worker), bridgeWorker: bridgeGroup.worker, sessions: [] }
       result.push(target)
       target.sessions.push(...bridgeGroup.sessions.map(session => ({
         id: `bridge:${str(session['sessionId'])}`, rawId: str(session['sessionId']), source: 'Bridge' as const,
@@ -267,7 +267,7 @@ export function Sessions({ store, views: providedViews, refreshToken, initialSes
     const rows = mode === 'active' ? group.sessions.filter(session => activeStatus(str(session['status']))) : showingMore || !supportsSummary ? group.sessions : summaryRows
     return {
       key: group.key,
-      label: `${surface === 'list' ? group.title.split(/[\\/]/).filter(Boolean).at(-1) || group.title : group.title}${group.worker ? ` · @${group.worker.replace(/^codex@/, '')}` : ''}`,
+      label: `${surface === 'list' ? group.title.split(/[\\/]/).filter(Boolean).at(-1) || group.title : group.title}${group.worker ? ` · @${group.worker.replace(/^[^@]+@/, '')}` : ''}`,
       ...(group.title === 'No workspace' ? {} : { cwd: group.title }),
       expanded: mode !== 'collapsed', mode, pinned: pinnedGroups.includes(group.key),
       canCreate: Boolean(group.worker && group.title !== 'No workspace' && store.canCreate(group.worker) && !state.creation?.busy && state.creation?.action?.['status'] !== 'accepted'),

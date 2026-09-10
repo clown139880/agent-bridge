@@ -43,6 +43,7 @@ export interface PendingRow {
   runId: string | null;
   turnId: string | null;
   machineId: string;
+  agentType?: string;
   status: string;
   request: Record<string, unknown>;
   decision: Record<string, unknown> | null;
@@ -292,7 +293,8 @@ export class AgentControlStore {
   }
 
   pending(id: string): PendingRow | undefined {
-    const row = this.db.prepare("SELECT * FROM pending_requests WHERE id=?").get(id) as Record<string, unknown> | undefined;
+    const row = this.db.prepare(`SELECT *, (SELECT agent_type FROM sessions WHERE sessions.id=pending_requests.session_id) AS agent_type
+      FROM pending_requests WHERE id=?`).get(id) as Record<string, unknown> | undefined;
     return row ? this.mapPending(row) : undefined;
   }
 
@@ -309,7 +311,8 @@ export class AgentControlStore {
       const [time, id] = decodeCursor(input.cursor, scope);
       where.push("(requested_at<? OR (requested_at=? AND id<?))"); params.push(time, time, id);
     }
-    const rows = this.db.prepare(`SELECT * FROM pending_requests WHERE ${where.join(" AND ")}
+    const rows = this.db.prepare(`SELECT *, (SELECT agent_type FROM sessions WHERE sessions.id=pending_requests.session_id) AS agent_type
+      FROM pending_requests WHERE ${where.join(" AND ")}
       ORDER BY requested_at DESC,id DESC LIMIT ?`).all(...params, input.limit + 1) as Record<string, unknown>[];
     const hasMore = rows.length > input.limit; if (hasMore) rows.pop();
     const data = rows.map((row) => this.mapPending(row)); const last = data.at(-1);
@@ -566,7 +569,8 @@ export class AgentControlStore {
   private mapPending(row: Record<string, unknown>): PendingRow {
     return { id:String(row.id),kind:row.kind as PendingRow["kind"],sessionId:String(row.session_id),
       runId:row.worker_run_id?String(row.worker_run_id):null,turnId:row.turn_id?String(row.turn_id):null,
-      machineId:String(row.machine_id),status:String(row.status),request:parseJson(row.request_json,{}),
+      machineId:String(row.machine_id),agentType:row.agent_type?String(row.agent_type):undefined,
+      status:String(row.status),request:parseJson(row.request_json,{}),
       decision:parseJson(row.decision_json,null),requestedAt:Number(row.requested_at),
       resolvedAt:row.resolved_at==null?null:Number(row.resolved_at) };
   }
@@ -579,7 +583,8 @@ export class AgentControlStore {
   }
 
   private pendingWire(row: PendingRow): Record<string,unknown> {
-    const common={sessionId:row.sessionId,runId:row.runId,turnId:row.turnId,workerId:`codex@${row.machineId}`,
+    const common={sessionId:row.sessionId,runId:row.runId,turnId:row.turnId,
+      workerId:buildWorkerId((row.agentType??"codex-cli") as AgentType,row.machineId),
       status:row.status,requestedAt:row.requestedAt,resolvedAt:row.resolvedAt};
     return row.kind==="approval"?{approvalId:row.id,...common,kind:row.request.kind,summary:row.request.summary,
       choices:row.request.choices,decision:row.decision?.choice??null}

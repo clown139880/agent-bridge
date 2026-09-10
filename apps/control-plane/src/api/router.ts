@@ -30,7 +30,8 @@ function actionJson(action: ActionRow): Record<string,unknown> {
     createdAt:action.createdAt,updatedAt:action.updatedAt};
 }
 function pendingJson(row: PendingRow): Record<string,unknown> {
-  const common={sessionId:row.sessionId,runId:row.runId,turnId:row.turnId,workerId:`codex@${row.machineId}`,
+  const common={sessionId:row.sessionId,runId:row.runId,turnId:row.turnId,
+    workerId:buildWorkerId((row.agentType??"codex-cli") as AgentType,row.machineId),
     status:row.status,requestedAt:row.requestedAt,resolvedAt:row.resolvedAt};
   if(row.kind==="approval")return {approvalId:row.id,...common,kind:row.request.kind,summary:row.request.summary,
     choices:row.request.choices,decision:row.decision?.choice??null};
@@ -60,7 +61,7 @@ export class AgentControlApi {
       if(request.method==="GET"&&!principal.read)throw new ApiProblem(403,"forbidden","read scope is required");
       if(request.method==="GET"&&url.pathname==="/api/v1/workers"){this.workers(response);return true;}
       const workerModels=url.pathname.match(/^\/api\/v1\/workers\/([^/]+)\/models$/);
-      if(request.method==="GET"&&workerModels){const workerId=decodeURIComponent(workerModels[1]!);const machineId=workerId.startsWith('codex@')?workerId.slice(6):workerId;
+      if(request.method==="GET"&&workerModels){const workerId=decodeURIComponent(workerModels[1]!);const machineId=parseWorkerId(workerId)?.machineId??workerId;
         try{this.ok(response,await this.bridges.requestModels(machineId));}catch(error){throw new ApiProblem(503,'model_catalog_unavailable',error instanceof Error?error.message:String(error));}return true;}
       if(request.method==="GET"&&url.pathname==="/api/v1/snapshot"){this.snapshot(url,response);return true;}
       if(request.method==="GET"&&url.pathname==="/api/v1/sessions"){this.sessions(url,response);return true;}
@@ -252,7 +253,7 @@ export class AgentControlApi {
     const limit=integer(url.searchParams.get("limit"),"limit",50,1,200),where:string[]=[],params:any[]=[];
     const fields:[[string,string],...Array<[string,string]>]=[["sessionId","session_id"],["taskId","task_id"],["conversationId","conversation_id"],["machineId","machine_id"]];
     for(const [query,column] of fields){const value=url.searchParams.get(query);if(value){where.push(`${column}=?`);params.push(value);}}
-    const workerId=url.searchParams.get("workerId");if(workerId){if(!workerId.startsWith("codex@"))throw new ApiProblem(400,"invalid_worker_id","invalid workerId");where.push("machine_id=?");params.push(workerId.slice(6));}
+    const workerId=url.searchParams.get("workerId");if(workerId){const parsed=parseWorkerId(workerId);if(!parsed)throw new ApiProblem(400,"invalid_worker_id","invalid workerId");where.push("machine_id=?");params.push(parsed.machineId);}
     const statuses=url.searchParams.getAll("status"),valid=new Set(["starting","update_waiting","update_required","update_failed","working","waiting","blocked","completed","failed","stopped","unknown"]);
     if(statuses.some(value=>!valid.has(value)))throw new ApiProblem(400,"invalid_parameter","invalid run status");
     if(statuses.length){where.push(`status IN (${statuses.map(()=>"?").join(",")})`);params.push(...statuses);}
@@ -266,7 +267,7 @@ export class AgentControlApi {
   }
 
   private runJson(row:Record<string,unknown>):Record<string,unknown>{return{runId:String(row.id),taskId:row.task_id?String(row.task_id):null,
-    conversationId:row.conversation_id?String(row.conversation_id):null,workerId:`codex@${row.machine_id}`,machineId:String(row.machine_id),
+    conversationId:row.conversation_id?String(row.conversation_id):null,workerId:buildWorkerId(String(row.agent_type) as AgentType,String(row.machine_id)),machineId:String(row.machine_id),
     agent:String(row.agent_type),workspace:String(row.project_path),sessionId:row.session_id?String(row.session_id):null,status:String(row.status),
     error:row.error?String(row.error):null,createdAt:Number(row.created_at),updatedAt:Number(row.updated_at)};}
 
@@ -274,11 +275,12 @@ export class AgentControlApi {
     const statuses=url.searchParams.getAll("status").length?url.searchParams.getAll("status"):["pending"],valid=new Set(["pending","accepted","denied","resolved_elsewhere","expired"]);
     if(statuses.some(value=>!valid.has(value)))throw new ApiProblem(400,"invalid_parameter","invalid pending status");
     const workerId=url.searchParams.get("workerId"),machineId=url.searchParams.get("machineId");
-    if(workerId&&(!workerId.startsWith("codex@")||workerId.length===6||Boolean(machineId&&workerId.slice(6)!==machineId)))
+    const parsedWorker=workerId?parseWorkerId(workerId):undefined;
+    if(workerId&&(!parsedWorker||Boolean(machineId&&parsedWorker.machineId!==machineId)))
       throw new ApiProblem(400,"invalid_worker_id","workerId and machineId must agree");
     try{const page=this.store.listPending(kind,{statuses,
       sessionId:url.searchParams.get("sessionId")??undefined,runId:url.searchParams.get("runId")??undefined,
-      machineId:machineId??workerId?.slice(6),
+      machineId:machineId??parsedWorker?.machineId,
       limit:integer(url.searchParams.get("limit"),"limit",50,1,200),cursor:url.searchParams.get("cursor")??undefined});
       this.ok(response,{data:page.data.map(pendingJson),nextCursor:page.nextCursor,hasMore:page.hasMore,streamCursor:this.store.streamCursor()});
     }catch(error){this.cursorError(error);}}
