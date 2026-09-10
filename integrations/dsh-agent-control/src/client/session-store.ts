@@ -149,7 +149,7 @@ export class SessionStore {
         if (failures < 3) this.patch({ realtime: 'connecting', realtimeError: '' })
         for await (const message of this.stream(this.streamCursor, signal, () => {
           failures = 0
-          if (this.valid(generation) && !signal.aborted) this.patch({ realtime: 'live', realtimeError: '' })
+          if (this.valid(generation) && !signal.aborted) { this.patch({ realtime: 'live', realtimeError: '' }); this.recoverSelected() }
         })) {
           if (!this.valid(generation) || signal.aborted) return
           this.applyStreamEvent(message)
@@ -228,6 +228,10 @@ export class SessionStore {
       const id = requiredId(data, 'sessionId')
       const detail = this.state.details[id]
       if (detail?.loaded) this.patchDetail(id, { events: mergeRecords(detail.events, [data], 'eventId').sort((a, b) => Number(a['timestamp'] ?? 0) - Number(b['timestamp'] ?? 0)), eventsError: '' })
+      // A selected session that never finished its initial load (e.g. a transient failed
+      // loadEvents during a reconnect) would otherwise stay stuck at "loading" forever,
+      // silently dropping every appended event. Catch it up the moment activity arrives.
+      else if (this.active && this.state.selected === id && !detail?.eventsLoading) void this.loadEvents(id, true)
       return
     }
     if (message.type === 'approval.upserted' || message.type === 'user_input.upserted') {
@@ -248,6 +252,18 @@ export class SessionStore {
         this.settle(sessionId, data)
       }
     }
+  }
+  /**
+   * Reload the selected session if it wedged at loaded=false — e.g. a transient failed its
+   * initial detail/events load (common while the fleet is restarting). Called on every stream
+   * (re)connect so a stuck "loading" view self-heals instead of needing a manual refresh.
+   */
+  private recoverSelected(): void {
+    const id = this.state.selected
+    if (!this.active || !id) return
+    const detail = this.state.details[id]
+    if (!detail?.loaded && !detail?.eventsLoading) void this.loadEvents(id, true)
+    if (!detail?.loading) void this.refreshDetail(id)
   }
   select(id: string): void {
     this.patch({ selected: id })
@@ -486,7 +502,11 @@ export class SessionStore {
     try {
       const action = asRecord(await this.rpc('action', { actionId: requiredId(previous, 'actionId') }))
       if (!this.valid(generation)) return
-      if (requiredId(action, 'actionId') !== previous['actionId']) throw new Error('Unexpected action receipt.')
+      // A transient (empty/degraded) poll response during a reconnect must not surface as a
+      // scary "missing actionId" error and must not wedge the turn — just leave it accepted
+      // and let the next stream event / poll settle it.
+      if (typeof action['actionId'] !== 'string') return
+      if (action['actionId'] !== previous['actionId']) throw new Error('Unexpected action receipt.')
       this.patchDetail(id, { action, notice: action['kind'] === 'submit_turn' ? '' : `Action ${str(action['status'])} · ${str(action['actionId'])}` })
       this.settle(id, action)
       if (action['status'] !== 'accepted' && this.state.sessions.some(row => row['sessionId'] === id)) { await this.refreshDetail(id); await this.refreshLatestEvents(id) }
