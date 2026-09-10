@@ -382,7 +382,11 @@ export class SessionStore {
       this.patchDetail(id, { session, approvals, inputs, ...(this.detail(id).model ? {} : typeof session['model'] === 'string' && session['model'].trim() ? { model: session['model'].trim() } : {}) })
       this.patch({ sessions: this.state.sessions.map(row => row['sessionId'] === id ? session : row) })
     } catch (error) { if (this.valid(generation)) this.patchDetail(id, { error: errorText(error) }) }
-    finally { if (this.valid(generation)) this.patchDetail(id, { loading: false }) }
+    // Always clear the flag, even if this load was superseded (generation changed): a
+    // guarded reset leaves `loading` stuck true after a deactivate/reactivate, and then
+    // the `if (loading) return` guard above blocks every future load — the session wedges
+    // at "loading" forever and its approvals never populate.
+    finally { if (this.state.details[id]) this.patchDetail(id, { loading: false }) }
   }
   async loadEvents(id: string, reset = false): Promise<void> {
     const detail = this.detail(id)
@@ -399,7 +403,7 @@ export class SessionStore {
       const model = detail.model || latestSessionModel(events)
       this.patchDetail(id, { events, cursor: page.cursor, hasMore: page.hasMore, loaded: true, ...(model ? { model } : {}) })
     } catch (error) { if (this.valid(generation)) this.patchDetail(id, { eventsError: errorText(error) }) }
-    finally { if (this.valid(generation)) this.patchDetail(id, { eventsLoading: false }) }
+    finally { if (this.state.details[id]) this.patchDetail(id, { eventsLoading: false }) }
   }
   async refreshLatestEvents(id: string): Promise<void> {
     const detail = this.detail(id)
@@ -414,7 +418,7 @@ export class SessionStore {
       const model = detail.model || latestSessionModel(events)
       this.patchDetail(id, { events, loaded: true, ...(model ? { model } : {}) })
     } catch (error) { if (this.valid(generation)) this.patchDetail(id, { eventsError: errorText(error) }) }
-    finally { if (this.valid(generation)) this.patchDetail(id, { eventsLoading: false }) }
+    finally { if (this.state.details[id]) this.patchDetail(id, { eventsLoading: false }) }
   }
   async refresh(): Promise<void> {
     const id = this.state.selected
