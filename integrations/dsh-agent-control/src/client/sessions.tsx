@@ -28,7 +28,14 @@ const ExternalQuestionPanel = (QuestionsUi as unknown as { ExternalQuestionPanel
 type GroupMode = 'expanded' | 'active' | 'collapsed'
 type ExternalSessionBrowserGroup = { key: string; label: string; cwd?: string; expanded: boolean; mode?: GroupMode; pinned?: boolean; canCreate?: boolean; totalCount?: number; hiddenCount?: number; showingMore?: boolean; sessions: Array<{ id: string; title: string; status: string; updatedAt: number; source?: string }> }
 interface ExternalSessionBrowserProps { groups: ExternalSessionBrowserGroup[]; currentId?: string; locale?: string; query?: string; groupBy?: 'workspace' | 'flat'; orderBy?: 'manual' | 'updated'; onQueryChange?(value: string): void; onGroupByChange?(value: 'workspace' | 'flat'): void; onOrderByChange?(value: 'manual' | 'updated'): void; onToggle(key: string): void; onCreate?(key: string): void; onOpen(id: string): void; onShowMore?(key: string, expanded: boolean): void; onPinGroup?(key: string): void }
-const ExternalSessionBrowser = (WorkspaceUi as unknown as { ExternalSessionBrowser?: ComponentType<ExternalSessionBrowserProps> }).ExternalSessionBrowser
+const WorkspaceExports = WorkspaceUi as unknown as { ExternalSessionBrowser?: ComponentType<ExternalSessionBrowserProps>; UnifiedSessionBrowser?: ComponentType<ExternalSessionBrowserProps>; SessionBrowser?: ComponentType<ExternalSessionBrowserProps> }
+// DSH 0.4.9 renamed this export; keep both names so the plugin works across clients.
+const ExternalSessionBrowser = WorkspaceExports.UnifiedSessionBrowser ?? WorkspaceExports.ExternalSessionBrowser ?? WorkspaceExports.SessionBrowser
+
+const CompatibleSessionBrowser: ComponentType<ExternalSessionBrowserProps> = ({ groups, currentId, query = '', onQueryChange, onToggle, onOpen, onCreate }) => <div className={css.sessionBrowserFallback} role="tree" aria-label="Sessions">
+  <input aria-label="Search all conversations" placeholder="Search conversations…" value={query} onChange={event => onQueryChange?.(event.target.value)} />
+  {groups.map(group => <section key={group.key}><button type="button" onClick={() => onToggle(group.key)}>{group.expanded ? '▾' : '▸'} {group.label} ({group.totalCount ?? group.sessions.length})</button>{group.canCreate && <button type="button" onClick={() => onCreate?.(group.key)} aria-label={`New conversation in ${group.label}`}>＋</button>}{group.expanded && group.sessions.map(session => <button className={currentId === session.id ? css.selected : ''} key={session.id} type="button" onClick={() => onOpen(session.id)}>{session.status === 'active' ? '● ' : ''}{session.title}</button>)}</section>)}
+</div>
 const RECENT_WINDOW_MS = 24 * 60 * 60 * 1000
 const activeStatus = (status: string): boolean => ['active', 'waiting_for_approval', 'waiting_for_input'].includes(status)
 
@@ -136,16 +143,17 @@ export function UnifiedSessions({ store, views, nativeSessions, nativeWorkspaces
       }
     } catch (error) { setNotice(error instanceof Error ? error.message : 'Could not create conversation.') }
   }
+  const Browser = ExternalSessionBrowser ?? CompatibleSessionBrowser
   return <div className={css.unifiedBrowser}>
     {notice && <div className={css.notice} role="alert">{notice}</div>}
     {bridge.error && <div className={css.notice} role="alert">Bridge · {bridge.error}<Button size="sm" onClick={() => void store.loadSessions()}>Retry</Button></div>}
     {bridge.creation && <div className={css.notice} role="status">{bridge.creation.notice}{bridge.creation.action?.['status'] === 'accepted' && <Button size="sm" onClick={async () => { await store.checkCreation(); const created = store.snapshot().creation?.action; if (created?.['status'] === 'succeeded' && typeof created['sessionId'] === 'string') openBridge(created['sessionId']) }}>Check creation</Button>}</div>}
-    {ExternalSessionBrowser ? <ExternalSessionBrowser groups={groups} {...(currentId ? { currentId } : {})} locale={typeof navigator === 'undefined' ? 'en' : navigator.language}
+    <Browser groups={groups} {...(currentId ? { currentId } : {})} locale={typeof navigator === 'undefined' ? 'en' : navigator.language}
       query={query} groupBy={view.grouped ? 'workspace' : 'flat'} orderBy={view.sort === 'updatedAt' ? 'updated' : 'manual'} onQueryChange={setQuery}
       onGroupByChange={value => views.setGrouped(value === 'workspace')} onOrderByChange={value => views.setSort(value === 'updated' ? 'updatedAt' : 'createdAt')}
       onToggle={key => { const group = groups.find(item => item.key === key); views.toggleGroup(key, Boolean(group?.sessions.some(row => activeStatus(row.status)))) }} onOpen={open} onCreate={key => void create(key)}
       onShowMore={(key, value) => setExpanded(keys => value ? [...new Set([...keys, key])] : keys.filter(item => item !== key))}
-      onPinGroup={key => views.toggleGroupPin(key)} /> : <p className={css.empty}>Unified browser requires TokensCowork 0.4.5.</p>}
+      onPinGroup={key => views.toggleGroupPin(key)} /> : null}
     {bridge.hasMore && <Button size="sm" className={css.loadMore} disabled={bridge.loading} onClick={() => void store.loadSessions(true)}>{bridge.loading ? 'Loading…' : 'Load more Bridge sessions'}</Button>}
   </div>
 }

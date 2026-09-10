@@ -2,6 +2,12 @@
 .footerButton:hover { background:color-mix(in srgb,currentColor 9%,transparent); }
 .unifiedBrowser { display:flex; min-height:0; flex:1; flex-direction:column; overflow:hidden; }
 .unifiedBrowser [data-external-session-row] { display:grid; grid-template-columns:minmax(0,1fr) 26px; align-items:center; }
+.sessionBrowserFallback { display:grid; gap:8px; padding:8px; overflow:auto; }
+.sessionBrowserFallback>input { padding:8px 10px; border:1px solid var(--dsw-alias-border-l,#444); border-radius:8px; background:transparent; color:inherit; }
+.sessionBrowserFallback section { display:flex; flex-wrap:wrap; gap:3px; }
+.sessionBrowserFallback section>button { border:0; background:transparent; color:inherit; padding:7px 9px; text-align:left; cursor:pointer; border-radius:6px; }
+.sessionBrowserFallback section>button:first-child { flex:1 1 80%; font-weight:600; }
+.sessionBrowserFallback section>button:hover,.sessionBrowserFallback .selected { background:color-mix(in srgb,currentColor 12%,transparent); }
 .unifiedBrowser [data-external-session-row]>span { width:auto; min-width:0; }
 .integratedSidebar,.integratedConversation { display:flex; flex-direction:column; min-width:0; min-height:0; height:100%; flex:1; overflow:hidden; color:inherit; font:13px/1.45 system-ui,sans-serif; }
 .surfaceHeading { display:flex; align-items:center; gap:8px; padding:10px 12px; border-bottom:1px solid color-mix(in srgb,currentColor 12%,transparent); flex-wrap:wrap; }
