@@ -16,7 +16,7 @@ if (-not $DesktopOrigin) {
   foreach ($port in $candidates) {
     $candidateOrigin = 'http://127.0.0.1:' + $port
     try {
-      $probe = Invoke-WebRequest -Uri ($candidateOrigin + '/plugins/dsh-agent-control-plugin/client.js') -TimeoutSec 3 -SkipHttpErrorCheck
+      $probe = Invoke-WebRequest -Uri ($candidateOrigin + '/plugins/dsh-agent-control-plugin/client.js') -TimeoutSec 3
       if (($probe.StatusCode -eq 200 -and $probe.Content -match 'dsh-agent-control-plugin') -or $probe.StatusCode -eq 403) { $origins += $candidateOrigin }
     } catch { }
   }
@@ -26,13 +26,13 @@ if (-not $DesktopOrigin) {
 $origin = [Uri]$DesktopOrigin
 if (-not $origin.IsLoopback -or $origin.Scheme -ne 'http') { throw 'DesktopOrigin must be a local HTTP Desktop server.' }
 # Check reachability and both browser/Host build outputs before creating a backup or changing installed files.
-$preflight = Invoke-WebRequest -Uri ($DesktopOrigin.TrimEnd('/') + '/plugins/dsh-agent-control-plugin/client.js') -TimeoutSec 5 -SkipHttpErrorCheck
+$preflight = Invoke-WebRequest -Uri ($DesktopOrigin.TrimEnd('/') + '/plugins/dsh-agent-control-plugin/client.js') -TimeoutSec 5
 $authenticatedServer = $preflight.StatusCode -in @(401, 403)
 # Recent Desktop builds serve browser plugins only through the combined
 # `/plugins/??...` bundle. In compatibility mode the legacy per-plugin URL is
 # therefore 404 while the root correctly requires authentication.
 if ($preflight.StatusCode -eq 404) {
-  $rootProbe = Invoke-WebRequest -Uri ($DesktopOrigin.TrimEnd('/') + '/') -TimeoutSec 5 -SkipHttpErrorCheck
+  $rootProbe = Invoke-WebRequest -Uri ($DesktopOrigin.TrimEnd('/') + '/') -TimeoutSec 5
   $authenticatedServer = $rootProbe.StatusCode -in @(401, 403)
 }
 if (-not $authenticatedServer -and ($preflight.StatusCode -ne 200 -or $preflight.Content -notmatch 'dsh-agent-control-plugin')) { throw 'The selected server is not serving Agent Control.' }
@@ -72,3 +72,5 @@ if (-not $authenticatedServer) {
 }
 $status = if ($authenticatedServer) { 'Host and client deployed; installed hashes verified (Desktop HTTP authentication active)' } else { 'Host and client deployed; client served hash verified' }
 [pscustomobject]@{ Status=$status; Sha256=$sourceHash; HostSha256=$hostHash; ManifestSha256=$manifestHash; Backup=$backupRoot; Origin=$DesktopOrigin; Reload='Restart Desktop to activate the Host and renderer changes.' } | ConvertTo-Json
+
+

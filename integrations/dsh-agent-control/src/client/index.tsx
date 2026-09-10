@@ -32,6 +32,7 @@ export class WorkspaceController {
   sessionSnapshot = (): { id: string } | undefined => this.requestedSession
   openSession = (id: string): void => { this.requestedSession = { id }; this.openValue = false; this.bridgeValue = true; this.sessions.activate(); if (id) this.sessions.select(id); this.emit() }
   showNative = (): void => { this.bridgeValue = false; this.openValue = false; this.emit() }
+  togglePlugin = (): void => { this.bridgeValue = !this.bridgeValue; this.openValue = this.bridgeValue; this.emit() }
   open = (): void => { this.panelValue = 'overview'; this.openValue = true; this.emit() }
   openKanban = (): void => { this.panelValue = 'tasks'; this.openValue = true; this.emit() }
   close = (): void => { this.openValue = false; this.emit() }
@@ -43,7 +44,7 @@ type FooterProps = PropsRuntime<'sidebar.footer.action'> & Injected
 
 export function FooterAction({ wide, controller }: FooterProps) {
   useEffect(() => { controller.sessions.activate(); void controller.sessions.loadSessions() }, [controller])
-  return <div><Button size="sm" className={css.footerButton} type="button" onClick={controller.open} aria-label="Open Agent Control">
+  return <div><Button size="sm" className={css.footerButton} type="button" onClick={controller.togglePlugin} aria-label="Toggle Agent Control" title="Enable or disable all Agent Control features">
     <span aria-hidden="true">⌘</span>{wide && <span>Agent Control</span>}
   </Button><Button size="sm" type="button" className={css.footerButton} aria-label="Open Kanban" onClick={controller.openKanban}><span aria-hidden="true">▦</span>{wide && <span>Kanban</span>}</Button></div>
 }
