@@ -239,12 +239,6 @@ export function Sessions({ store, views: providedViews, refreshToken, initialSes
   const history = selectedId && detail ? <>
     {detail.error && <div className={css.notice} role="alert">{detail.error}<Button size="sm" onClick={() => void store.refreshDetail(selectedId)}>Retry session</Button></div>}
     {selected?.['historyCompleteness'] === 'terminal-only' && <div className={css.coverageNotice}>This source provides turn summaries only. Messages and tool details are not available.</div>}
-    {detail.approvals.map(item => <ApprovalCard key={str(item['id'])} item={item} disabled={Boolean(busy || !canAct)} decide={async choice => {
-      if (!await store.act(selectedId, 'resolve_approval', { approvalId: str(item['id']), choice })) throw new Error(store.snapshot().details[selectedId]?.notice || 'Approval could not be submitted.')
-    }} />)}
-    {detail.inputs.map(item => <InputCard key={str(item['id'])} item={item} disabled={Boolean(busy || !canAct)} submit={async answers => {
-      if (!await store.act(selectedId, 'respond_user_input', { requestId: str(item['id']), answers })) throw new Error(store.snapshot().details[selectedId]?.notice || 'Answers could not be submitted.')
-    }} />)}
     {detail.eventsError && <div className={css.notice} role="alert">{detail.eventsError}<Button size="sm" onClick={() => void store.loadEvents(selectedId, true)}>Reload available history</Button></div>}
     {detail.events.length === 0 && <p className={css.empty}>{detail.eventsLoading ? 'Loading latest history…' : detail.loaded ? 'No retained events.' : 'History has not loaded.'}</p>}
     {detail.hasMore && <Button size="sm" className={css.loadEarlier} disabled={detail.eventsLoading} onClick={() => void store.loadEvents(selectedId)}>{detail.eventsLoading ? 'Loading…' : 'Load earlier messages'}</Button>}
@@ -252,6 +246,15 @@ export function Sessions({ store, views: providedViews, refreshToken, initialSes
   </> : null
   const composer = selectedId && detail ? <>
     {detail.notice && <div className={css.notice} role="status">{detail.notice}{detail.action?.['status'] === 'accepted' && <Button size="sm" onClick={() => void store.checkAction(selectedId)}>Check outcome</Button>}</div>}
+    {/* Pending approvals/inputs are the blocking action, so pin them directly above the
+        input (always visible) rather than at the top of a long scrolled-away history.
+        Gate only on canAct — a pending approval must be resolvable even mid-turn. */}
+    {detail.approvals.map(item => <ApprovalCard key={str(item['id'])} item={item} disabled={!canAct} decide={async choice => {
+      if (!await store.act(selectedId, 'resolve_approval', { approvalId: str(item['id']), choice })) throw new Error(store.snapshot().details[selectedId]?.notice || 'Approval could not be submitted.')
+    }} />)}
+    {detail.inputs.map(item => <InputCard key={str(item['id'])} item={item} disabled={!canAct} submit={async answers => {
+      if (!await store.act(selectedId, 'respond_user_input', { requestId: str(item['id']), answers })) throw new Error(store.snapshot().details[selectedId]?.notice || 'Answers could not be submitted.')
+    }} />)}
     {selected && !canAct && !detail.loading && !detail.error && <small className={css.readOnly}>This session is read-only: its worker is offline or session actions are unavailable.</small>}
     <SessionComposer value={detail.draft} busy={Boolean(busy)} canSend={Boolean(canAct)} active={selected?.['status'] === 'active'} attachments={detail.draftAttachments}
       modelControl={selected ? <BridgeModelControl store={store} sessionId={selectedId} workerId={str(selected['workerId'])} selected={detail.model || str(selected['model'])} selectedEffort={detail.reasoningEffort} locked={Boolean(busy || !canAct || selected['activeTurnId'])} /> : undefined}
