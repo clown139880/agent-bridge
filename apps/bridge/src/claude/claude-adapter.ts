@@ -206,14 +206,16 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       // has received this message.
       const images = await this.materialize(attachments);
       session.input.push(userMessage(prompt, images));
-      // Echo the user turn so DSH renders the first message (with its image refs).
-      this.emitSessionEvent(session, "message.completed", `claude:${sessionId}:first:user`,
-        { role: "user", text: truncate(prompt), attachments: attachments ?? [] });
       session.pendingTurnStart = true;
       await Promise.race([
         initPromise,
         new Promise<void>((_, reject) => setTimeout(() => reject(new Error("Timed out waiting for Claude session init")), 60_000)),
       ]);
+      // Echo the user turn AFTER init — session.discovered has now created the row,
+      // so the event persists (emitting it earlier would be dropped as an unknown
+      // session). This is why the first prompt was previously invisible in DSH.
+      this.emitSessionEvent(session, "message.completed", `claude:${sessionId}:first:user`,
+        { role: "user", text: truncate(prompt), attachments: attachments ?? [] });
     } else {
       // With no first prompt, Claude stays silent — no init, no native id — until a
       // turn is submitted. Announce the session now (keyed on the stable public id
