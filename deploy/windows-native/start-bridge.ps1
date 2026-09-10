@@ -22,7 +22,7 @@ try {
         $_.ProcessId -ne $PID -and
         $_.ExecutablePath -and
         $_.ExecutablePath -ieq $runtime -and
-        $_.CommandLine -match 'apps[/\\]bridge[/\\]src[/\\]index\.ts'
+        $_.CommandLine -match 'apps[/\\]bridge[/\\](dist[/\\]index\.js|src[/\\]index\.ts)'
     })
     if ($staleBridges.Count -gt 0) {
         $processes = @(Get-CimInstance Win32_Process)
