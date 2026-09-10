@@ -228,14 +228,21 @@ export class ClaudeCodeAdapter implements AgentAdapter {
 
   private async consume(session: ClaudeSession): Promise<void> {
     if (!session.query) return;
+    let streamError: string | undefined;
     try {
       for await (const message of session.query) {
         this.handleMessage(session, message);
       }
+    } catch (error) {
+      // The Claude subprocess stream died (crash, bad stdin, protocol error). Surface
+      // the reason so the turn doesn't fail silently as a bare "Turn failed".
+      streamError = error instanceof Error ? error.message : String(error);
+      if (session.ended) return;
+      log.error({ error: streamError, sessionId: session.sessionId }, "Claude session stream failed");
     } finally {
-      // Stream exhausted: any active turn is done. Emit a terminal event if one
-      // is still open (e.g. process exit without a final result).
-      if (session.activeTurnId) this.finishTurn(session, "completed");
+      // Any still-open turn is terminal: failed if the stream errored, else completed
+      // (e.g. process exit without a final result).
+      if (session.activeTurnId) this.finishTurn(session, streamError ? "failed" : "completed", streamError);
     }
   }
 
@@ -351,7 +358,10 @@ export class ClaudeCodeAdapter implements AgentAdapter {
   private handleResult(session: ClaudeSession, message: SDKResultMessage): void {
     session.updatedAt = Date.now();
     const failed = message.is_error || message.subtype !== "success";
-    this.finishTurn(session, failed ? "failed" : "completed", message.result);
+    // On failure, fall back to the result subtype so DSH shows a reason instead of a bare "Turn failed".
+    const summary = failed ? (message.result?.trim() || message.subtype || "error") : message.result;
+    if (failed) log.warn({ sessionId: session.sessionId, subtype: message.subtype, result: message.result }, "Claude turn failed");
+    this.finishTurn(session, failed ? "failed" : "completed", summary);
   }
 
   // ---- turn management ---------------------------------------------------
