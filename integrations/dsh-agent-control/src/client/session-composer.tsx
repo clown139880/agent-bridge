@@ -89,7 +89,14 @@ export function SessionComposer(props: ComposerProps) {
   const { value, busy, canSend, active, attachments, modelControl, context, onChange, onSend, onStop, onAddImage, onRemoveAttachment } = props
   const ExternalComposer = (ConversationUi as unknown as { ExternalComposer?: ExternalComposerFace }).ExternalComposer
   if (!ExternalComposer) return <CompatibleSessionComposer {...props} />
-  return <div className={css.bridgeComposerSeat} data-composer-seat
+  // The native ExternalComposer already renders the full sticky InputBar seat
+  // (its own `[data-composer-seat]`). Do NOT wrap it in a second seat: the old
+  // `bridgeComposerSeat` wrapper added a competing `data-composer-seat` and
+  // `align-items:center`, which collapsed the stretch-driven native
+  // contenteditable and stole focus/clicks — leaving the input unusable. The
+  // attach bar and paste/drop capture ride a layout-transparent wrapper so
+  // image upload keeps working without disturbing the native seat.
+  return <div className={css.bridgeAttachSeat}
     onPaste={canSend ? event => pasteImages(event, onAddImage) : undefined}
     onDrop={canSend ? event => dropImages(event, onAddImage) : undefined}
     onDragOver={canSend ? event => event.preventDefault() : undefined}>

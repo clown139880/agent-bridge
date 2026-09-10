@@ -202,6 +202,11 @@
 }
 .integratedConversation .composer .sendButton svg { width:16px; height:16px; fill:none; stroke:currentColor; stroke-width:1.7; stroke-linecap:round; stroke-linejoin:round; }
 .bridgeComposerSeat { flex:none; display:flex; flex-direction:column; align-items:center; padding:0 var(--dsh-composer-side-clearance,16px) 8px; }
+/* Wrapper for the native ExternalComposer path: it must NOT become a second
+   `[data-composer-seat]` nor center/shrink the native composer. `stretch` keeps
+   the native contenteditable full width; the native seat owns sticky/elevation. */
+.bridgeAttachSeat { flex:none; display:flex; flex-direction:column; align-items:stretch; }
+.bridgeAttachSeat>.composerAttachBar { box-sizing:border-box; width:100%; max-width:var(--dsh-composer-card-max-width,calc(var(--dsh-chat-content-width) + 32px)); margin:0 auto; padding:2px var(--dsh-composer-side-clearance,16px) 0; }
 .integratedConversation .bridgeComposerSurface { margin:0 auto; }
 .integratedConversation .bridgeComposerSurface textarea { box-sizing:border-box; width:100%; min-height:24px; max-height:336px; resize:none; border:0; outline:none; padding:4px 8px 0 16px; background:transparent; color:var(--dsw-alias-label-primary,#eee); caret-color:var(--dsw-alias-state-business-primary,#679efe); font:inherit; line-height:calc(24px + var(--dsh-content-font-delta,0px)); }
 .integratedConversation .bridgeComposerSurface .composerBottom { padding:2px 8px 6px; }

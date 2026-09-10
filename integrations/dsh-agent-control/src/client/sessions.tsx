@@ -7,6 +7,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import type { ComponentType, ReactNode, RefAttributes, UIEventHandler } from 'react'
 import type { JsonObject } from '../types.js'
 import { asArray, asRecord, groupSessions, sessionTitle, str } from './session-model.js'
+import { nativeRow, nativeVisible, subagentRunningCounts, type NativeSessionSummary } from './session-native.js'
 import { SessionStore } from './session-store.js'
 import { eventTime, SessionTimeline } from './session-timeline.js'
 import { SessionViewStore } from './session-view-state.js'
@@ -39,9 +40,7 @@ const CompatibleSessionBrowser: ComponentType<ExternalSessionBrowserProps> = ({ 
 const RECENT_WINDOW_MS = 24 * 60 * 60 * 1000
 const activeStatus = (status: string): boolean => ['active', 'waiting_for_approval', 'waiting_for_input'].includes(status)
 
-export interface NativeSessionSummary {
-  id: string; displayTitle: string; cwd?: string; running: boolean; completed?: boolean; blank: boolean; updatedAt: number
-}
+export type { NativeSessionSummary }
 export interface NativeSessionSource {
   list: { getSnapshot(): { ids: string[]; byId: Record<string, NativeSessionSummary>; current?: string; phase: string }; subscribe(listener: () => void): () => void }
   open(id: string): void
@@ -76,20 +75,21 @@ export function UnifiedSessions({ store, views, nativeSessions, nativeWorkspaces
   const groups = useMemo(() => {
     const needle = query.trim().toLocaleLowerCase()
     const archived = new Set(workspaces.archivedSessionIds)
+    const runningSubagents = subagentRunningCounts(native.byId)
     const result: UnifiedGroup[] = workspaces.items.map(workspace => ({
       key: `workspace:${workspace.workspaceId}`, label: workspace.title, baseLabel: workspace.title, environments: ['local DSH'], cwd: workspace.path,
       expanded: views.groupMode(`workspace:${workspace.workspaceId}`) !== 'collapsed', canCreate: true,
       nativeWorkspaceId: workspace.workspaceId, sessions: workspace.sessionIds.flatMap(id => {
         const session = native.byId[id]
-        if (!session || archived.has(id) || (session.blank && native.current !== id)) return []
-        return [{ id: `dsh:${id}`, rawId: id, source: 'DSH' as const, title: session.displayTitle, status: session.running ? 'active' : session.completed ? 'completed' : 'idle', unread: session.completed === true, updatedAt: session.updatedAt }]
+        if (!nativeVisible(session, native.current, archived)) return []
+        return [nativeRow(session, runningSubagents.get(id) ?? 0)]
       }),
     }))
     const accounted = new Set(workspaces.items.flatMap(workspace => [...workspace.sessionIds]))
     const ungrouped = native.ids.flatMap(id => {
       const session = native.byId[id]
-      if (accounted.has(id) || !session || archived.has(id) || (session.blank && native.current !== id)) return []
-      return [{ id: `dsh:${id}`, rawId: id, source: 'DSH' as const, title: session.displayTitle, status: session.running ? 'active' : session.completed ? 'completed' : 'idle', unread: session.completed === true, updatedAt: session.updatedAt }]
+      if (accounted.has(id) || !nativeVisible(session, native.current, archived)) return []
+      return [nativeRow(session, runningSubagents.get(id) ?? 0)]
     })
     if (ungrouped.length) result.push({ key: 'native:ungrouped', label: 'Other conversations', baseLabel: 'Other conversations', environments: ['local DSH'], expanded: views.groupMode('native:ungrouped') !== 'collapsed', sessions: ungrouped })
     for (const bridgeGroup of groupSessions(bridge.sessions, query, true, false, view.sort)) {

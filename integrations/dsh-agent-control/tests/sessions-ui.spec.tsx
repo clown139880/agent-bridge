@@ -63,7 +63,7 @@ describe('sessions with real DSH primitives', () => {
 
   it('uses Enter to submit but preserves Shift+Enter and IME confirmation', async () => {
     let sends = 0
-    await act(async () => root.render(createElement(SessionComposer, { value: 'Draft', busy: false, canSend: true, active: false, onChange() {}, onSend() { sends++ }, onStop() {} })))
+    await act(async () => root.render(createElement(SessionComposer, { value: 'Draft', busy: false, canSend: true, active: false, attachments: [], onChange() {}, onSend() { sends++ }, onStop() {}, onAddImage() {}, onRemoveAttachment() {} })))
     const textarea = host.querySelector('textarea')!
     await act(async () => textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', shiftKey: true, bubbles: true, cancelable: true })))
     await act(async () => textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', isComposing: true, bubbles: true, cancelable: true })))
@@ -74,7 +74,7 @@ describe('sessions with real DSH primitives', () => {
 
   it('uses the native primary action to interrupt an active empty session', async () => {
     let stops = 0
-    await act(async () => root.render(createElement(SessionComposer, { value: '', busy: false, canSend: true, active: true, onChange() {}, onSend() {}, onStop() { stops++ } })))
+    await act(async () => root.render(createElement(SessionComposer, { value: '', busy: false, canSend: true, active: true, attachments: [], onChange() {}, onSend() {}, onStop() { stops++ }, onAddImage() {}, onRemoveAttachment() {} })))
     expect(button('Stop').disabled).toBe(false)
     await act(async () => button('Stop').click())
     expect(stops).toBe(1)
@@ -133,7 +133,7 @@ describe('sessions with real DSH primitives', () => {
     await act(async () => root.render(createElement(Sessions, { store: controller.sessions, views: controller.views, initialSessionId: controller.sessionSnapshot()?.id, refreshToken: 1 })))
     const pin = host.querySelector<HTMLButtonElement>('[aria-label="Pin Release check"]')!
     await act(async () => pin.click())
-    expect(new SessionViewStore().snapshot().pinned).toEqual(['thr_approval'])
+    expect(new SessionViewStore().snapshot().pinnedGroups).toEqual(['thr_approval'])
     const select = host.querySelector<HTMLSelectElement>('[aria-label="Group sessions"]')!
     await act(async () => { select.value = 'flat'; select.dispatchEvent(new Event('change', { bubbles: true })) })
     expect(new SessionViewStore().snapshot().grouped).toBe(false)
