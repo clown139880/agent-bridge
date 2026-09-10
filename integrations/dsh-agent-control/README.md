@@ -186,6 +186,13 @@ or silently claim integration success.
 
 ## Architecture notes
 
+The evaluated `dsh-session-hub` data-plane approach is documented in
+[`docs/dsh-session-hub-evaluation.md`](docs/dsh-session-hub-evaluation.md).
+Its official-UI ownership principle is the desired end state, but its old
+ApiProxy route/frame interception is not compatible with DSH
+`0.1.3-alpha.1`; production migration is intentionally gated on a stable DSH
+external-session provider contract.
+
 - Agent Bridge remains the source of truth for external sessions.
 - Hermes remains the source of truth for task lifecycle.
 - DSH Sessions retain only DSH conversation history; this plugin does not copy
