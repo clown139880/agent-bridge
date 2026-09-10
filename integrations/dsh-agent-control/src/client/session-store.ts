@@ -446,7 +446,11 @@ export class SessionStore {
 
   async act(id: string, operation: 'submit_turn' | 'interrupt_turn' | 'resolve_approval' | 'respond_user_input', args: JsonObject = {}): Promise<boolean> {
     const detail = this.detail(id)
-    if (detail.busy || detail.action?.['status'] === 'accepted') return false
+    // Only submit_turn is blocked by an in-flight/unsettled action. resolve_approval,
+    // respond_user_input and interrupt_turn are exactly the operations that UNBLOCK a
+    // stuck session, so they must go through even when a prior action is busy/accepted —
+    // otherwise a lingering `accepted` action makes every approve/deny click a silent no-op.
+    if (operation === 'submit_turn' && (detail.busy || detail.action?.['status'] === 'accepted')) return false
     const input = detail.draft.trim()
     // Send only the ref fields; the local previewUrl stays in the renderer.
     const attachments = detail.draftAttachments.map(a => ({ id: str(a['id']), filename: str(a['filename']), mimeType: str(a['mimeType']), size: typeof a['size'] === 'number' ? a['size'] : 0 }))

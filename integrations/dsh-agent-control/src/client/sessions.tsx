@@ -348,16 +348,11 @@ export function Sessions({ store, views: providedViews, refreshToken, initialSes
 function ApprovalCard({ item, disabled, decide }: { item: JsonObject; disabled: boolean; decide(choice: string): void | Promise<void> }) {
   const choices = asArray(item['choices']).filter((choice): choice is string => typeof choice === 'string')
   const summary = str(item['summary'], str(item['kind']))
-  // Render our own always-clickable buttons rather than DSH's native ExternalApprovalPanel.
-  // Bridge approvals have a different lifecycle from DSH's own sessions; routing them through
-  // the native panel is the recurring "two different sessions" breakage where the approval is
-  // visible but cannot be actioned. These buttons resolve directly via the Bridge API.
-  const [pending, setPending] = useState('')
-  return <div className={css.pending}>
-    <div><strong>Action required</strong><span>{summary}</span></div>
-    {choices.map(choice => <Button size="sm" disabled={disabled || Boolean(pending)} key={choice} type="button"
-      onClick={async () => { setPending(choice); try { await decide(choice) } finally { setPending('') } }}>{pending === choice ? `${choice}…` : choice}</Button>)}
-  </div>
+  // Prefer DSH's native approval panel for a consistent look; fall back to our own buttons
+  // if it isn't exported by this client build. Both call the same decide() → Bridge API.
+  return ExternalApprovalPanel
+    ? <ExternalApprovalPanel requestKey={str(item['id'])} summary={summary.split('\n')[0] ?? summary} detail={summary.includes('\n') ? summary.split('\n').slice(1).join('\n') : undefined} choices={choices} disabled={disabled} onDecide={decide} />
+    : <div className={css.pending}><div><strong>Action required</strong><span>{summary}</span></div>{choices.map(choice => <Button size="sm" disabled={disabled} key={choice} type="button" onClick={() => void decide(choice)}>{choice}</Button>)}</div>
 }
 function InputCard({ item, disabled, submit }: { item: JsonObject; disabled: boolean; submit(answers: JsonObject): void | Promise<void> }) {
   const questions = asArray(item['questions']).map(asRecord)
