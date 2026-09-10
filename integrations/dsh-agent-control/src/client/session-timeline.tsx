@@ -24,17 +24,25 @@ export function eventTime(timestamp: unknown): string {
   const date = new Date(timestamp)
   return Number.isNaN(date.getTime()) ? '' : date.toLocaleString()
 }
-function imageMarker(payload: JsonObject) {
+type ResolveImage = (id: string) => string | undefined
+function imageMarker(payload: JsonObject, resolveImage: ResolveImage) {
   const attachments = asArray(payload['attachments'])
   if (!attachments.length) return null
-  return <p className={css.plainMessage} aria-label="attached images">🖼 {attachments.length} image{attachments.length > 1 ? 's' : ''} attached</p>
+  return <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', padding: '4px 0' }} aria-label="attached images">
+    {attachments.map((value, index) => {
+      const ref = asRecord(value); const id = str(ref['id']); const url = resolveImage(id)
+      return url
+        ? <img key={id || index} src={url} alt={str(ref['filename'], 'image')} style={{ maxHeight: '220px', maxWidth: '280px', objectFit: 'contain', borderRadius: '8px', border: '1px solid var(--dsh-border, #8884)' }} />
+        : <span key={id || index} className={css.plainMessage}>🖼 {str(ref['filename'], 'image')}…</span>
+    })}
+  </div>
 }
-function EventBody({ event, summaryOnly }: { event: JsonObject; summaryOnly: boolean }) {
+function EventBody({ event, summaryOnly, resolveImage }: { event: JsonObject; summaryOnly: boolean; resolveImage: ResolveImage }) {
   const payload = asRecord(event['payload'])
   const type = str(event['type'])
   if (ExternalChatEvent && type === 'message.completed') {
     const role = payload['role'] === 'user' ? 'user' : 'assistant'
-    return <>{<ExternalChatEvent kind={role} text={str(payload['text'], '')} />}{imageMarker(payload)}</>
+    return <>{<ExternalChatEvent kind={role} text={str(payload['text'], '')} />}{imageMarker(payload, resolveImage)}</>
   }
   if (ExternalChatEvent && type === 'command.completed') {
     const exitCode = payload['exitCode']
@@ -49,7 +57,7 @@ function EventBody({ event, summaryOnly }: { event: JsonObject; summaryOnly: boo
   if (type === 'message.completed') return <div className={css.messageBody} data-role={str(payload['role'])}>
     <strong className={css.messageRole}>{str(payload['role'])}</strong>
     {payload['role'] === 'assistant' ? <MarkdownText text={str(payload['text'], '')} labels={markdownLabels} /> : <p className={css.plainMessage}>{str(payload['text'], '')}</p>}
-    {imageMarker(payload)}
+    {imageMarker(payload, resolveImage)}
   </div>
   if (type === 'command.completed') return <details className={css.commandDetails}>
     <summary><code>{str(payload['command'])}</code><span> · {str(payload['status'], 'Settled')} · Exit {str(payload['exitCode'], 'unknown')}</span></summary>
@@ -65,7 +73,7 @@ function EventBody({ event, summaryOnly }: { event: JsonObject; summaryOnly: boo
   if (type.startsWith('approval.') || type.startsWith('user_input.')) return <p className={css.plainMessage}>{type.replaceAll('_', ' ').replace('.', ' · ')} · {str(asRecord(payload['approval'] ?? payload['request'])['summary'], 'Interaction recorded')}</p>
   return <details><summary>{type} · View event</summary><pre>{JSON.stringify(event, null, 2)}</pre></details>
 }
-export function SessionTimeline({ events, raw }: { events: JsonObject[]; raw: boolean }) {
+export function SessionTimeline({ events, raw, resolveImage = () => undefined }: { events: JsonObject[]; raw: boolean; resolveImage?: ResolveImage }) {
   const projected = raw ? events : projectEvents(events)
   const messageTurns = new Set(events.filter(event => event['type'] === 'message.completed' && asRecord(event['payload'])['role'] === 'assistant').map(event => event['turnId']))
   let previousTurn: string | undefined
@@ -75,7 +83,7 @@ export function SessionTimeline({ events, raw }: { events: JsonObject[]; raw: bo
     return <article className={css.transcriptEvent} key={str(event['eventId'])} data-event-id={str(event['eventId'])}>
       {raw && newTurn && <div className={css.turnHeading}>{turn}</div>}
       <time className={css.eventTime}>{eventTime(event['timestamp'])}</time>
-      {raw ? <pre>{JSON.stringify(event, null, 2)}</pre> : <EventBody event={event} summaryOnly={!messageTurns.has(event['turnId'])} />}
+      {raw ? <pre>{JSON.stringify(event, null, 2)}</pre> : <EventBody event={event} summaryOnly={!messageTurns.has(event['turnId'])} resolveImage={resolveImage} />}
     </article>
   })}</>
 }

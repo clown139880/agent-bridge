@@ -39,13 +39,14 @@ export interface SessionState {
   modelCatalogs: Record<string, { catalog?: JsonObject; models: JsonObject[]; loading: boolean; error: string }>
   realtime: 'connecting' | 'live' | 'fallback'
   realtimeError: string
+  attachmentUrls: Record<string, string>
 }
 const emptyDetail = (): SessionDetail => ({ events: [], approvals: [], inputs: [], cursor: null, hasMore: false, loaded: false, loading: false, eventsLoading: false, error: '', eventsError: '', draft: '', draftAttachments: [], model: '', reasoningEffort: '', busy: false, notice: '' })
 const errorText = (error: unknown): string => error instanceof Error ? error.message : 'Bridge request failed.'
 
 /** One configured Bridge connection. Immutable UI snapshots; async writes always target their captured session. */
 export class SessionStore {
-  private state: SessionState = { sessions: [], selected: undefined, cursor: null, hasMore: false, loading: false, loaded: false, error: '', details: {}, modelCatalogs: {}, realtime: 'fallback', realtimeError: '' }
+  private state: SessionState = { sessions: [], selected: undefined, cursor: null, hasMore: false, loading: false, loaded: false, error: '', details: {}, modelCatalogs: {}, realtime: 'fallback', realtimeError: '', attachmentUrls: {} }
   private listeners = new Set<() => void>()
   private generation = 0
   private active = true
@@ -255,6 +256,22 @@ export class SessionStore {
     if (!this.detail(id).loaded) void this.loadEvents(id)
   }
   setDraft(id: string, draft: string): void { this.patchDetail(id, { draft }) }
+  private attachmentPending = new Set<string>()
+  /** Resolve an attachment id to a data URL for rendering, fetching it via the Host once. */
+  resolveAttachment(id: string): string | undefined {
+    if (!id) return undefined
+    const cached = this.state.attachmentUrls[id]
+    if (cached) return cached
+    if (!this.attachmentPending.has(id)) {
+      this.attachmentPending.add(id)
+      void this.rpc('download', { attachmentId: id }).then(value => {
+        const row = asRecord(value); const mime = str(row['mimeType']); const data = str(row['base64'])
+        this.attachmentPending.delete(id)
+        if (data) this.patch({ attachmentUrls: { ...this.state.attachmentUrls, [id]: `data:${mime || 'image/png'};base64,${data}` } })
+      }).catch(() => this.attachmentPending.delete(id))
+    }
+    return undefined
+  }
   removeDraftAttachment(id: string, attachmentId: string): void {
     this.patchDetail(id, { draftAttachments: this.detail(id).draftAttachments.filter(a => str(a['id']) !== attachmentId) })
   }

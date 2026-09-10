@@ -248,7 +248,7 @@ export function Sessions({ store, views: providedViews, refreshToken, initialSes
     {detail.eventsError && <div className={css.notice} role="alert">{detail.eventsError}<Button size="sm" onClick={() => void store.loadEvents(selectedId, true)}>Reload available history</Button></div>}
     {detail.events.length === 0 && <p className={css.empty}>{detail.eventsLoading ? 'Loading latest history…' : detail.loaded ? 'No retained events.' : 'History has not loaded.'}</p>}
     {detail.hasMore && <Button size="sm" className={css.loadEarlier} disabled={detail.eventsLoading} onClick={() => void store.loadEvents(selectedId)}>{detail.eventsLoading ? 'Loading…' : 'Load earlier messages'}</Button>}
-    <SessionTimeline events={detail.events} raw={raw} />
+    <SessionTimeline events={detail.events} raw={raw} resolveImage={id => store.resolveAttachment(id)} />
   </> : null
   const composer = selectedId && detail ? <>
     {detail.notice && <div className={css.notice} role="status">{detail.notice}{detail.action?.['status'] === 'accepted' && <Button size="sm" onClick={() => void store.checkAction(selectedId)}>Check outcome</Button>}</div>}

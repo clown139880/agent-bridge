@@ -63,6 +63,7 @@ export class BridgeClient {
         return this.write(`/sessions/${id}/turns`, this.pick(args, ['input', 'delivery', 'expectedTurnId', 'model', 'reasoningEffort', 'attachments']), signal)
       }
       case 'upload': return this.write('/attachments', this.pick(args, ['filename', 'content', 'mimeType']), signal)
+      case 'download': return this.download(`/attachments/${this.segment(textArg(args, 'attachmentId')!)}`, signal)
       case 'interrupt_turn': {
         const id = this.segment(textArg(args, 'sessionId')!)
         return this.write(`/sessions/${id}/interrupt`, this.pick(args, ['expectedTurnId']), signal)
@@ -102,6 +103,23 @@ export class BridgeClient {
 
   private async write(path: string, body: JsonObject, signal?: AbortSignal): Promise<JsonValue> {
     return this.request('POST', path, body, randomUUID(), signal)
+  }
+
+  /** Fetch binary attachment bytes and return them base64-encoded for the renderer. */
+  private async download(path: string, outerSignal?: AbortSignal): Promise<JsonValue> {
+    const timeout = AbortSignal.timeout(this.config.timeoutMs)
+    const signal = outerSignal ? AbortSignal.any([outerSignal, timeout]) : timeout
+    let response: Response
+    try {
+      response = await fetch(new URL(`/api/v1${path}`, this.config.origin), { headers: { authorization: `Bearer ${this.token!}` }, signal, cache: 'no-store' })
+    } catch (error) {
+      if (signal.aborted) throw new ControlError('bridge_timeout', 'Agent Bridge request timed out or was cancelled.', 504, true)
+      throw new ControlError('bridge_unavailable', error instanceof Error ? error.message : 'Agent Bridge unavailable.', 503, true)
+    }
+    if (!response.ok) throw new ControlError('attachment_unavailable', `Agent Bridge returned HTTP ${response.status}.`, response.status)
+    const mimeType = response.headers.get('content-type')?.split(';', 1)[0]?.trim() ?? 'application/octet-stream'
+    const base64 = Buffer.from(await response.arrayBuffer()).toString('base64')
+    return { mimeType, base64 }
   }
 
   private async request(method: 'GET' | 'POST' | 'DELETE', path: string, body?: JsonObject, idempotencyKey?: string, outerSignal?: AbortSignal): Promise<JsonValue> {
