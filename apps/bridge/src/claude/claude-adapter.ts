@@ -51,7 +51,8 @@ interface PendingUserInput {
 }
 
 interface ClaudeSession {
-  sessionId: string; // native Claude session id (uuid); starts as a temp id until system/init
+  sessionId: string; // stable bridge-assigned public id; never changes for the session's lifetime
+  nativeSessionId?: string; // Claude's own session uuid, learned from system/init; used for resume
   requestId?: string; // bridge-side start id (run id / action id) used to link discovered session to its run
   cwd: string;
   projectPath: string;
@@ -74,7 +75,7 @@ interface ClaudeSession {
   pendingApprovals: Map<string, PendingApproval>;
   pendingUserInput?: PendingUserInput;
   sessionAllowedTools: Set<string>;
-  resolveInit?: (sessionId: string) => void;
+  resolveInit?: () => void;
   ended: boolean;
 }
 
@@ -135,9 +136,14 @@ export class ClaudeCodeAdapter implements AgentAdapter {
 
   async startSession(requestId: string, projectPath: string, prompt?: string, resumeSessionId?: string, model?: string): Promise<string> {
     const cwd = await resolveProjectPath(projectPath, this.options.allowedRoots);
-    const tempId = resumeSessionId ?? `pending:${requestId}`;
+    // The public id is bridge-assigned and stable for the session's lifetime.
+    // Claude's own uuid is learned later from system/init (see handleSystem) and
+    // kept as nativeSessionId for resume; unlike Codex, Claude does not expose a
+    // session id until it has processed a first user message.
+    const sessionId = resumeSessionId ?? `claude-${randomUUID()}`;
     const session: ClaudeSession = {
-      sessionId: tempId,
+      sessionId,
+      nativeSessionId: resumeSessionId,
       requestId,
       cwd,
       projectPath: cwd,
@@ -156,9 +162,9 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       sessionAllowedTools: new Set(),
       ended: false,
     };
-    this.sessions.set(tempId, session);
+    this.sessions.set(sessionId, session);
 
-    const initPromise = new Promise<string>((resolve) => {
+    const initPromise = new Promise<void>((resolve) => {
       session.resolveInit = resolve;
     });
 
@@ -173,25 +179,31 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       },
     });
 
-    // Consume the stream in the background; startSession only awaits init.
+    // Consume the stream in the background.
     void this.consume(session).catch((error) => {
       if (!session.ended) log.error({ error, sessionId: session.sessionId }, "Claude session stream failed");
     });
 
-    // Push the first prompt immediately so Claude begins (and emits init), but
-    // defer the turn-start events until after session.discovered is emitted
-    // (on init) so downstream sees discovered before any turn events.
     if (prompt) {
+      // Push the first prompt so Claude begins (and emits init). Turn-start events
+      // are deferred until after session.discovered (on init) so downstream sees
+      // discovered before any turn events. Await init here so the turn is wired up
+      // and spawn failures surface synchronously — init only arrives once Claude
+      // has received this message.
       session.input.push(userMessage(prompt));
       session.pendingTurnStart = true;
+      await Promise.race([
+        initPromise,
+        new Promise<void>((_, reject) => setTimeout(() => reject(new Error("Timed out waiting for Claude session init")), 60_000)),
+      ]);
+    } else {
+      // With no first prompt, Claude stays silent — no init, no native id — until a
+      // turn is submitted. Announce the session now (keyed on the stable public id
+      // as its native id, so it is unique) so the control-plane persists it and can
+      // accept that first turn. Claude's own uuid is recorded from init later.
+      this.emitDiscovered(session);
     }
-
-    // Wait until Claude reports its real session id (first system/init).
-    const nativeId = await Promise.race([
-      initPromise,
-      new Promise<string>((_, reject) => setTimeout(() => reject(new Error("Timed out waiting for Claude session init")), 60_000)),
-    ]);
-    return nativeId;
+    return sessionId;
   }
 
   private async consume(session: ClaudeSession): Promise<void> {
@@ -226,36 +238,41 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     }
   }
 
+  /** Announce a session to the control-plane exactly once so it persists a row. */
+  private emitDiscovered(session: ClaudeSession): void {
+    if (session.discovered) return;
+    session.discovered = true;
+    this.emit({
+      type: "session.discovered",
+      requestId: session.requestId,
+      sessionId: session.sessionId,
+      // Fall back to the stable public id so the native key is always unique;
+      // an empty native id would make the control-plane collapse distinct sessions.
+      nativeSessionId: session.nativeSessionId ?? session.sessionId,
+      agentType: "claude-code",
+      projectPath: session.projectPath,
+      projectName: basename(session.projectPath),
+      title: session.title,
+      promptSummary: session.promptSummary,
+      status: session.activeTurnId ? "working" : "waiting",
+      createdAt: session.createdAt,
+      projectIdentity: session.projectIdentity,
+    });
+  }
+
   private handleSystem(session: ClaudeSession, message: SDKSystemMessage): void {
     if (message.subtype !== "init" || !message.session_id) return;
-    const nativeId = message.session_id;
-    if (session.sessionId !== nativeId) {
-      this.sessions.delete(session.sessionId);
-      session.sessionId = nativeId;
-      this.sessions.set(nativeId, session);
-    }
-    if (!session.discovered) {
-      session.discovered = true;
-      this.emit({
-        type: "session.discovered",
-        requestId: session.requestId,
-        sessionId: nativeId,
-        nativeSessionId: nativeId,
-        agentType: "claude-code",
-        projectPath: session.projectPath,
-        projectName: basename(session.projectPath),
-        title: session.title,
-        promptSummary: session.promptSummary,
-        status: session.activeTurnId ? "working" : "waiting",
-        createdAt: session.createdAt,
-        projectIdentity: session.projectIdentity,
-      });
-    }
+    // Learn Claude's own uuid for resume, but keep the stable public id as the
+    // session key — never rename it out from under the control-plane.
+    session.nativeSessionId = message.session_id;
+    // Fires on the first turn of a session created with an initial prompt; a
+    // session created without one was already announced at create time.
+    this.emitDiscovered(session);
     if (session.pendingTurnStart && !session.activeTurnId) {
       session.pendingTurnStart = false;
       this.startTurnEvents(session);
     }
-    session.resolveInit?.(nativeId);
+    session.resolveInit?.();
     session.resolveInit = undefined;
   }
 
@@ -566,7 +583,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       .filter((s) => s.discovered)
       .map((s) => ({
         sessionId: s.sessionId,
-        nativeSessionId: s.sessionId,
+        nativeSessionId: s.nativeSessionId ?? s.sessionId,
         agentType: "claude-code" as const,
         projectPath: s.projectPath,
         projectName: basename(s.projectPath),
