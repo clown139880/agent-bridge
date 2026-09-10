@@ -8,7 +8,7 @@ export interface AgentControlConfig { bridge: BridgeConfig; kanban: KanbanConfig
 const BRIDGE_OPERATIONS = new Set<BridgeCall['operation']>([
   'workers', 'models', 'snapshot', 'sessions', 'session', 'delete_session', 'session_events', 'create_session', 'submit_turn',
   'interrupt_turn', 'approvals', 'approval', 'resolve_approval', 'user_input', 'user_input_request',
-  'respond_user_input', 'action',
+  'respond_user_input', 'action', 'upload', 'download',
 ])
 const KANBAN_OPERATIONS = new Set<KanbanCall['operation']>([
   'list', 'show', 'create', 'comment', 'link', 'request_review', 'request_changes', 'unblock',
