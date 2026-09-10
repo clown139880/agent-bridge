@@ -96,8 +96,16 @@ export interface BridgeStreamEvent {
 export interface BridgeCall {
   operation: 'workers' | 'models' | 'snapshot' | 'sessions' | 'session' | 'delete_session' | 'session_events' | 'create_session' |
     'submit_turn' | 'interrupt_turn' | 'approvals' | 'approval' | 'resolve_approval' |
-    'user_input' | 'user_input_request' | 'respond_user_input' | 'action'
+    'user_input' | 'user_input_request' | 'respond_user_input' | 'action' | 'upload'
   args?: JsonObject
+}
+
+/** Image attachment reference returned by the control-plane upload endpoint. */
+export interface AttachmentRef {
+  id: string
+  filename: string
+  mimeType: string
+  size: number
 }
 
 export interface KanbanCall {

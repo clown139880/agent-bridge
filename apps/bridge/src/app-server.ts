@@ -9,6 +9,7 @@ import type {
   AgentEvent,
   ApprovalChoice,
   ApprovalKind,
+  AttachmentRef,
   BridgeToControlMessage,
   SessionDiscoveredMessage,
   SessionState,
@@ -19,6 +20,11 @@ import { isPathWithinRoots } from "./path-utils.js";
 import type { AgentAdapter } from "./agent-adapter.js";
 
 const log = pino({ name: "codex-app-server" });
+
+/** Codex has no image input block yet; attachments to a codex session are dropped. */
+function warnDroppedAttachments(attachments?: AttachmentRef[]): void {
+  if (attachments?.length) log.warn({ count: attachments.length }, "Codex does not support attachments; dropping them");
+}
 const execFileAsync = promisify(execFile);
 
 interface RpcMessage {
@@ -202,7 +208,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
     this.desktopScannerStarted = false;
   }
 
-  async startSession(requestId: string, projectPath: string, prompt?: string, resumeSessionId?: string, model?: string): Promise<string> {
+  async startSession(requestId: string, projectPath: string, prompt?: string, resumeSessionId?: string, model?: string, attachments?: AttachmentRef[]): Promise<string> {
+    warnDroppedAttachments(attachments);
     await this.ensureReady();
     const cwd = await resolveProjectPath(projectPath, this.options.allowedRoots);
     if (prompt) this.pendingStartPrompts.set(cwd, prompt);
@@ -225,7 +232,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
     }
   }
 
-  async input(sessionId: string, text: string, model?: string): Promise<void> {
+  async input(sessionId: string, text: string, model?: string, attachments?: AttachmentRef[]): Promise<void> {
+    warnDroppedAttachments(attachments);
     await this.ensureReady();
     const userInput = this.pendingUserInput.get(sessionId);
     if (userInput) {
@@ -259,14 +267,15 @@ export class CodexAppServerAdapter implements AgentAdapter {
     }
   }
 
-  async createSessionAction(actionId: string, projectPath: string, input?: string, model?: string): Promise<{ sessionId: string; turnId?: string }> {
-    const sessionId = await this.startSession(actionId, projectPath, input, undefined, model);
+  async createSessionAction(actionId: string, projectPath: string, input?: string, model?: string, attachments?: AttachmentRef[]): Promise<{ sessionId: string; turnId?: string }> {
+    const sessionId = await this.startSession(actionId, projectPath, input, undefined, model, attachments);
     return { sessionId, turnId: this.activeTurns.get(sessionId) };
   }
 
   submitTurnAction(actionId: string, sessionId: string, text: string,
-    delivery: "auto" | "steer" | "start_turn", expectedTurnId?: string, model?: string, reasoningEffort?: string): Promise<{
+    delivery: "auto" | "steer" | "start_turn", expectedTurnId?: string, model?: string, reasoningEffort?: string, attachments?: AttachmentRef[]): Promise<{
       sessionId: string; turnId?: string; resolvedAction: "steer" | "start_turn" }> {
+    warnDroppedAttachments(attachments);
     return this.serial(sessionId, async () => {
       await this.ensureReady();
       if (this.pendingUserInput.has(sessionId)) throw domainError("user_input_pending", "structured user input is pending");

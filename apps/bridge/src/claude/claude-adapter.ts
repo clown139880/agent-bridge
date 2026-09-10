@@ -8,11 +8,13 @@ import pino from "pino";
 import type {
   ApprovalChoice,
   ApprovalKind,
+  AttachmentRef,
   SessionState,
   StructuredSessionEventType,
   UserInputQuestion,
 } from "@agent-bridge/protocol";
 import type { AgentAdapter, AdapterEmit } from "../agent-adapter.js";
+import type { AttachmentFetcher, FetchedAttachment } from "../attachments.js";
 import { resolveProjectPath, summarizePrompt } from "../app-server.js";
 import { PushableAsyncIterable, query, type Query } from "./sdk/index.js";
 import type {
@@ -95,9 +97,21 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       claudeHome: string;
       allowedRoots: string[];
       scanExisting: boolean;
+      fetchAttachment?: AttachmentFetcher;
     },
     private readonly emit: AdapterEmit,
   ) {}
+
+  /** Fetch attachment bytes for image blocks; non-image types are skipped in v1. */
+  private async materialize(attachments?: AttachmentRef[]): Promise<FetchedAttachment[]> {
+    if (!attachments?.length || !this.options.fetchAttachment) return [];
+    const images = attachments.filter((ref) => ref.mimeType.toLowerCase().startsWith("image/"));
+    const fetched = await Promise.all(images.map(async (ref) => {
+      try { return await this.options.fetchAttachment!(ref); }
+      catch (error) { log.warn({ error, id: ref.id }, "Unable to fetch attachment"); return undefined; }
+    }));
+    return fetched.filter((item): item is FetchedAttachment => Boolean(item));
+  }
 
   async start(): Promise<void> {
     if (this.options.command) process.env.CLAUDE_COMMAND = this.options.command;
@@ -134,7 +148,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
 
   // ---- session lifecycle -------------------------------------------------
 
-  async startSession(requestId: string, projectPath: string, prompt?: string, resumeSessionId?: string, model?: string): Promise<string> {
+  async startSession(requestId: string, projectPath: string, prompt?: string, resumeSessionId?: string, model?: string, attachments?: AttachmentRef[]): Promise<string> {
     const cwd = await resolveProjectPath(projectPath, this.options.allowedRoots);
     // The public id is bridge-assigned and stable for the session's lifetime.
     // Claude's own uuid is learned later from system/init (see handleSystem) and
@@ -190,7 +204,11 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       // discovered before any turn events. Await init here so the turn is wired up
       // and spawn failures surface synchronously — init only arrives once Claude
       // has received this message.
-      session.input.push(userMessage(prompt));
+      const images = await this.materialize(attachments);
+      session.input.push(userMessage(prompt, images));
+      // Echo the user turn so DSH renders the first message (with its image refs).
+      this.emitSessionEvent(session, "message.completed", `claude:${sessionId}:first:user`,
+        { role: "user", text: truncate(prompt), attachments: attachments ?? [] });
       session.pendingTurnStart = true;
       await Promise.race([
         initPromise,
@@ -336,14 +354,14 @@ export class ClaudeCodeAdapter implements AgentAdapter {
 
   // ---- turn management ---------------------------------------------------
 
-  private beginTurn(session: ClaudeSession, text: string): void {
+  private beginTurn(session: ClaudeSession, text: string, images?: FetchedAttachment[]): void {
     if (session.activeTurnId) {
       // Active turn: steer by pushing another user message (queued as next input).
-      session.input.push(userMessage(text));
+      session.input.push(userMessage(text, images));
       return;
     }
     this.startTurnEvents(session);
-    session.input.push(userMessage(text));
+    session.input.push(userMessage(text, images));
   }
 
   /** Assign a turn id and emit agent.started + turn.started. */
@@ -376,20 +394,21 @@ export class ClaudeCodeAdapter implements AgentAdapter {
 
   // ---- input / actions ---------------------------------------------------
 
-  async input(sessionId: string, text: string, _model?: string): Promise<void> {
+  async input(sessionId: string, text: string, _model?: string, attachments?: AttachmentRef[]): Promise<void> {
     // Claude's model is fixed at query start; mid-session model overrides are ignored.
     const session = this.require(sessionId);
     if (session.pendingUserInput) {
-      // Interpret free text as the answer to the pending question(s).
+      // Interpret free text as the answer to the pending question(s); images are
+      // not meaningful as an answer, so they are dropped here.
       const answers = mapFreeTextAnswer(session.pendingUserInput.questions, text);
       this.resolveUserInput(session, session.pendingUserInput.publicId, answers);
       return;
     }
-    this.beginTurn(session, text);
+    this.beginTurn(session, text, await this.materialize(attachments));
   }
 
-  async createSessionAction(actionId: string, projectPath: string, input?: string, model?: string): Promise<{ sessionId: string; turnId?: string }> {
-    const sessionId = await this.startSession(actionId, projectPath, input, undefined, model);
+  async createSessionAction(actionId: string, projectPath: string, input?: string, model?: string, attachments?: AttachmentRef[]): Promise<{ sessionId: string; turnId?: string }> {
+    const sessionId = await this.startSession(actionId, projectPath, input, undefined, model, attachments);
     return { sessionId, turnId: this.sessions.get(sessionId)?.activeTurnId };
   }
 
@@ -401,6 +420,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     expectedTurnId?: string,
     _model?: string,
     _reasoningEffort?: string,
+    attachments?: AttachmentRef[],
   ): Promise<{ sessionId: string; turnId?: string; resolvedAction: "steer" | "start_turn" }> {
     const session = this.require(sessionId);
     if (session.pendingUserInput) throw domainError("user_input_pending", "structured user input is pending");
@@ -410,8 +430,8 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     if (delivery === "steer" && !activeTurnId) throw domainError("no_active_turn", "session has no active turn");
     if (delivery === "start_turn" && activeTurnId) throw domainError("turn_already_active", "session already has an active turn");
     const resolvedAction = activeTurnId ? "steer" : "start_turn";
-    this.beginTurn(session, text);
-    this.emitSessionEvent(session, "message.completed", `claude:${sessionId}:action:${actionId}:user`, { role: "user", text: truncate(text) });
+    this.beginTurn(session, text, await this.materialize(attachments));
+    this.emitSessionEvent(session, "message.completed", `claude:${sessionId}:action:${actionId}:user`, { role: "user", text: truncate(text), attachments: attachments ?? [] });
     return { sessionId, turnId: session.activeTurnId, resolvedAction };
   }
 
@@ -701,8 +721,16 @@ export class ClaudeCodeAdapter implements AgentAdapter {
 
 // ---- module helpers ------------------------------------------------------
 
-function userMessage(text: string): SDKUserMessage {
-  return { type: "user", message: { role: "user", content: text } };
+function userMessage(text: string, images?: FetchedAttachment[]): SDKUserMessage {
+  if (!images?.length) return { type: "user", message: { role: "user", content: text } };
+  const content = [
+    ...(text ? [{ type: "text", text }] : []),
+    ...images.map((image) => ({
+      type: "image",
+      source: { type: "base64", media_type: image.mediaType, data: image.base64 },
+    })),
+  ];
+  return { type: "user", message: { role: "user", content } };
 }
 
 function approvalKindForTool(toolName: string): ApprovalKind {

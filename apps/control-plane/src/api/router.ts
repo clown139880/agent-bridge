@@ -5,7 +5,7 @@ import { parseWorkerId, workerId as buildWorkerId, type AgentType, type ActionKi
 import { BridgeRegistry } from "../bridge-registry.js";
 import { AgentControlSse, SseCursorError } from "./sse.js";
 import { ActionServiceError, SessionActionService } from "./session-actions.js";
-import { ApiProblem, integerParam as integer, jsonBody, stringField as string } from "./validation.js";
+import { ApiProblem, integerParam as integer, jsonBody, stringField as string, attachmentsField, uploadRequest } from "./validation.js";
 
 /** Map a worker-id prefix to an agent type, or undefined for an unknown prefix. */
 function agentTypeForWorkerPrefix(prefix: string): AgentType | undefined {
@@ -18,7 +18,7 @@ function capabilityForAgent(agentType: AgentType): string {
 }
 
 interface Principal { id: string; read: boolean; write: boolean; }
-interface ApiOptions { workerToken?: string; readToken?: string; writeToken?: string;
+interface ApiOptions { workerToken?: string; readToken?: string; writeToken?: string; bridgeToken?: string;
   sseKeepaliveMs: number; ssePollMs: number; sseMaxBackpressure: number; actionTimeoutMs: number; }
 
 function equalSecret(left: string, right: string): boolean {
@@ -70,6 +70,9 @@ export class AgentControlApi {
       if(request.method==="GET"&&url.pathname==="/api/v1/approvals"){this.pendingList("approval",url,response);return true;}
       if(request.method==="GET"&&url.pathname==="/api/v1/user-input"){this.pendingList("user_input",url,response);return true;}
       if(request.method==="GET"&&url.pathname==="/api/v1/stream"){this.sse.open(request,response,url);return true;}
+      if(request.method==="POST"&&url.pathname==="/api/v1/attachments"){await this.createAttachment(request,response);return true;}
+      const attachment=url.pathname.match(/^\/api\/v1\/attachments\/([^/]+)$/);
+      if(request.method==="GET"&&attachment){this.getAttachment(decodeURIComponent(attachment[1]!),response);return true;}
       const action=url.pathname.match(/^\/api\/v1\/actions\/([^/]+)$/);
       if(request.method==="GET"&&action){const row=this.store.action(decodeURIComponent(action[1]!));
         if(!row)throw new ApiProblem(404,"action_not_found","action not found");this.ok(response,actionJson(row));return true;}
@@ -90,6 +93,8 @@ export class AgentControlApi {
     if(this.options.writeToken&&equalSecret(token,this.options.writeToken))return{id:"control:write",read:true,write:true};
     if(this.options.readToken&&equalSecret(token,this.options.readToken))return{id:"control:read",read:true,write:false};
     if(this.options.workerToken&&equalSecret(token,this.options.workerToken))return{id:"worker:legacy",read:true,write:true};
+    // The bridge authenticates with its registration token to fetch attachment bytes.
+    if(this.options.bridgeToken&&equalSecret(token,this.options.bridgeToken))return{id:"bridge",read:true,write:false};
     throw new ApiProblem(401,"unauthorized","valid bearer token required");
   }
 
@@ -168,11 +173,26 @@ export class AgentControlApi {
     const parsed=parseWorkerId(workerId);const agentType=parsed?agentTypeForWorkerPrefix(parsed.prefix):undefined;
     if(!parsed||!agentType)throw new ApiProblem(400,"invalid_worker_id","workerId must be <codex|claude>@machine");
     const machineId=parsed.machineId,workspace=string(body.workspace,"workspace",true)!,input=string(body.input,"input"),
-      model=string(body.model,"model");
+      model=string(body.model,"model"),attachments=attachmentsField(body.attachments);
     this.requireActionBridge(machineId);
     const created=this.createAction(principal,key,"/api/v1/sessions",body,"create_session",machineId);
-    if(!created.existing)this.dispatch(created.action,{type:"action.create_session",actionId:created.action.actionId,agentType,projectPath:workspace,input,model});
+    if(!created.existing)this.dispatch(created.action,{type:"action.create_session",actionId:created.action.actionId,agentType,projectPath:workspace,input,model,attachments});
     this.ok(response,actionJson(this.store.action(created.action.actionId)!),202);
+  }
+
+  private async createAttachment(request:IncomingMessage,response:ServerResponse):Promise<void>{
+    const body=await jsonBody(request);
+    const {filename,mimeType,bytes}=uploadRequest(body);
+    const ref=this.store.putAttachment(bytes,mimeType,filename);
+    this.ok(response,{...ref,previewUrl:`/api/v1/attachments/${ref.id}`},201);
+  }
+
+  private getAttachment(id:string,response:ServerResponse):void{
+    const row=this.store.getAttachment(id);
+    if(!row){this.problem(response,new ApiProblem(404,"attachment_not_found","attachment not found"),randomUUID());return;}
+    response.writeHead(200,{"content-type":row.mimeType,"content-length":String(row.size),
+      "cache-control":"private, max-age=31536000, immutable"});
+    response.end(Buffer.from(row.bytes));
   }
 
   private async sessionRoute(request:IncomingMessage,response:ServerResponse,url:URL,principal:Principal,
@@ -211,6 +231,7 @@ export class AgentControlApi {
     if(prior){this.ok(response,actionJson(prior),202);return;}
     const delivery=body.delivery??"auto";if(!["auto","steer","start_turn"].includes(String(delivery)))throw new ApiProblem(400,"invalid_parameter","invalid delivery");
     const expected=string(body.expectedTurnId,"expectedTurnId"),model=string(body.model,"model"),reasoningEffort=string(body.reasoningEffort,"reasoningEffort"),
+      attachments=attachmentsField(body.attachments),
       active=typeof session.activeTurnId==="string"?session.activeTurnId:undefined;
     if(Number(session.pendingApprovalCount)>0)throw new ApiProblem(409,"approval_pending","resolve pending approval first");
     if(Number(session.pendingUserInputCount)>0)throw new ApiProblem(409,"user_input_pending","resolve pending user input first");
@@ -221,7 +242,7 @@ export class AgentControlApi {
     const machineId=String(session.machineId);this.requireActionBridge(machineId);
     const created=this.createAction(principal,key,path,body,"submit_turn",machineId,String(session.sessionId));
     if(!created.existing)this.dispatch(created.action,{type:"action.submit_turn",actionId:created.action.actionId,
-      sessionId:String(session.sessionId),input,delivery:delivery as "auto"|"steer"|"start_turn",expectedTurnId:expected,model,reasoningEffort});
+      sessionId:String(session.sessionId),input,delivery:delivery as "auto"|"steer"|"start_turn",expectedTurnId:expected,model,reasoningEffort,attachments});
     this.ok(response,actionJson(this.store.action(created.action.actionId)!),202);
   }
 

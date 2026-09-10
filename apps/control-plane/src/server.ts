@@ -14,6 +14,7 @@ import {
   type AgentType,
   type ApprovalChoice,
   type ApprovalRequestMessage,
+  type AttachmentRef,
   type BridgeToControlMessage,
   type ControlToBridgeMessage,
   type RegisterMessage,
@@ -23,6 +24,7 @@ import {
 } from "@agent-bridge/protocol";
 import type { ControlGateway } from "./matrix.js";
 import { AgentControlApi } from "./api/router.js";
+import { MAX_JSON_BODY_BYTES } from "./api/validation.js";
 import { BridgeRegistry, type BridgeConnection } from "./bridge-registry.js";
 import { WebhookNotifier, type WebhookOptions } from "./webhook.js";
 
@@ -46,6 +48,7 @@ interface PendingRunLaunch {
   prompt: string;
   resumeSessionId?: string;
   model?: string;
+  attachments?: AttachmentRef[];
   targetVersion: string;
   epoch: string;
   timeout: NodeJS.Timeout;
@@ -120,7 +123,7 @@ export class ControlPlane {
       workerApiToken?: string;
       controlApiReadToken?: string;
       controlApiWriteToken?: string;
-      retention?: { sessionEventsMs: number; streamEventsMs: number; actionsMs: number };
+      retention?: { sessionEventsMs: number; streamEventsMs: number; actionsMs: number; attachmentsMs: number };
       sse?: { keepaliveMs: number; pollMs: number; maxBackpressure: number; actionTimeoutMs?: number };
       bridgeUpdate?: {
         latestVersion: string;
@@ -134,10 +137,12 @@ export class ControlPlane {
     this.webhook = new WebhookNotifier(options.webhook);
     this.controlStore = new AgentControlStore(store.db, options.retention ?? {
       sessionEventsMs: 30 * 86_400_000, streamEventsMs: 7 * 86_400_000, actionsMs: 86_400_000,
+      attachmentsMs: 7 * 86_400_000,
     });
     this.controlApi = new AgentControlApi(store, this.controlStore, this.registry, {
       workerToken: options.workerApiToken, readToken: options.controlApiReadToken,
-      writeToken: options.controlApiWriteToken, sseKeepaliveMs: options.sse?.keepaliveMs ?? 15_000,
+      writeToken: options.controlApiWriteToken, bridgeToken: options.bridgeToken,
+      sseKeepaliveMs: options.sse?.keepaliveMs ?? 15_000,
       ssePollMs: options.sse?.pollMs ?? 250, sseMaxBackpressure: options.sse?.maxBackpressure ?? 3,
       actionTimeoutMs: options.sse?.actionTimeoutMs ?? 30_000,
     });
@@ -357,6 +362,7 @@ export class ControlPlane {
       const agentType = parsedWorker ? agentTypeForWorkerPrefix(parsedWorker.prefix) : "codex-cli";
       const projectPath = stringField(body, "projectPath");
       const prompt = stringField(body, "prompt");
+      const attachments = attachmentsFromBody(body);
       const requestedRunId = optionalStringField(body, "runId");
       const taskId = optionalStringField(body, "taskId");
       const conversationId = optionalStringField(body, "conversationId");
@@ -427,14 +433,14 @@ export class ControlPlane {
       });
       if (this.bridgeNeedsUpdate(bridge) && !allowStaleVersion) {
         this.queueRunForUpdate({ runId, machineId, agentType, projectPath, prompt,
-          resumeSessionId: effectiveResumeSessionId, model });
+          resumeSessionId: effectiveResumeSessionId, model, attachments });
         this.sendUpdateAnnouncement(bridge.socket);
       } else {
         if (allowStaleVersion && this.bridgeNeedsUpdate(bridge)) {
           log.warn({ machineId, runId, currentVersion: bridge.bridgeVersion,
             targetVersion: this.options.bridgeUpdate?.latestVersion }, "Audited stale bridge version override");
         }
-        this.sendStartAgent(bridge, runId, projectPath, prompt, effectiveResumeSessionId, model, agentType);
+        this.sendStartAgent(bridge, runId, projectPath, prompt, effectiveResumeSessionId, model, agentType, attachments);
       }
       this.json(response, 202, workerRunJson(this.store.getWorkerRun(runId)!));
       return;
@@ -476,11 +482,12 @@ export class ControlPlane {
           const body = await readJson(request);
           const input = stringField(body, "text");
           const model = optionalStringField(body, "model");
+          const attachments = attachmentsFromBody(body);
           if (!input) {
             this.json(response, 400, { error: "text is required" });
             return;
           }
-          this.send(bridge.socket, { type: "agent_input", sessionId: run.sessionId, text: input, model });
+          this.send(bridge.socket, { type: "agent_input", sessionId: run.sessionId, text: input, model, attachments });
         } else {
           this.send(bridge.socket, { type: "stop_agent", sessionId: run.sessionId });
         }
@@ -781,14 +788,15 @@ export class ControlPlane {
       clearTimeout(pending.timeout);
       this.pendingRunLaunches.delete(runId);
       this.store.updateWorkerRun(runId, "starting");
-      this.sendStartAgent(bridge, runId, pending.projectPath, pending.prompt, pending.resumeSessionId, pending.model, pending.agentType);
+      this.sendStartAgent(bridge, runId, pending.projectPath, pending.prompt, pending.resumeSessionId, pending.model, pending.agentType, pending.attachments);
     }
   }
 
   private sendStartAgent(bridge: BridgeConnection, runId: string, projectPath: string,
-    prompt: string, resumeSessionId?: string, model?: string, agentType: AgentType = "codex-cli"): void {
+    prompt: string, resumeSessionId?: string, model?: string, agentType: AgentType = "codex-cli",
+    attachments?: AttachmentRef[]): void {
     this.send(bridge.socket, { type: "start_agent", sessionId: runId, resumeSessionId,
-      agentType, projectPath, prompt, model });
+      agentType, projectPath, prompt, model, attachments });
   }
 
   private replayControlActions(machineId: string): void {
@@ -796,13 +804,15 @@ export class ControlPlane {
       if (action.kind === "create_session") this.registry.send(machineId, { type: "action.create_session",
         actionId: action.actionId, projectPath: String(request.workspace),
         input: typeof request.input === "string" ? request.input : undefined,
-        model: typeof request.model === "string" ? request.model : undefined });
+        model: typeof request.model === "string" ? request.model : undefined,
+        attachments: attachmentsFromBody(request) });
       else if (action.kind === "submit_turn" && action.sessionId) this.registry.send(machineId, {
         type: "action.submit_turn", actionId: action.actionId, sessionId: action.sessionId,
         input: String(request.input), delivery: (request.delivery ?? "auto") as "auto"|"steer"|"start_turn",
         expectedTurnId: typeof request.expectedTurnId === "string" ? request.expectedTurnId : undefined,
         model: typeof request.model === "string" ? request.model : undefined,
-        reasoningEffort: typeof request.reasoningEffort === "string" ? request.reasoningEffort : undefined });
+        reasoningEffort: typeof request.reasoningEffort === "string" ? request.reasoningEffort : undefined,
+        attachments: attachmentsFromBody(request) });
       else if (action.kind === "interrupt_turn" && action.sessionId) this.registry.send(machineId, {
         type: "action.interrupt_turn", actionId: action.actionId, sessionId: action.sessionId,
         expectedTurnId: typeof request.expectedTurnId === "string" ? request.expectedTurnId : undefined });
@@ -1165,7 +1175,7 @@ async function readJson(request: IncomingMessage): Promise<Record<string, unknow
   for await (const chunk of request) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     size += buffer.length;
-    if (size > 1_000_000) throw new Error("request body exceeds 1 MB");
+    if (size > MAX_JSON_BODY_BYTES) throw new Error("request body too large");
     chunks.push(buffer);
   }
   if (!chunks.length) return {};
@@ -1182,6 +1192,17 @@ function stringField(body: Record<string, unknown>, name: string): string | unde
 function optionalStringField(body: Record<string, unknown>, name: string): string | undefined {
   const value = body[name];
   return value === undefined ? undefined : stringField(body, name);
+}
+
+/** Best-effort read of attachment refs from a worker-API body or a replayed action body. */
+function attachmentsFromBody(body: Record<string, unknown>): AttachmentRef[] | undefined {
+  const value = body.attachments;
+  if (!Array.isArray(value) || value.length === 0) return undefined;
+  return value
+    .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
+    .map((item) => ({ id: String(item.id ?? ""), filename: String(item.filename ?? ""),
+      mimeType: String(item.mimeType ?? ""), size: typeof item.size === "number" ? item.size : 0 }))
+    .filter((ref) => ref.id && ref.mimeType);
 }
 
 function workerRunJson(run: WorkerRunRecord): Record<string, unknown> {

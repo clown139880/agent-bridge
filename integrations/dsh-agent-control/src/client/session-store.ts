@@ -17,6 +17,7 @@ export interface SessionDetail {
   error: string
   eventsError: string
   draft: string
+  draftAttachments: JsonObject[]
   model: string
   reasoningEffort: string
   busy: boolean
@@ -39,7 +40,7 @@ export interface SessionState {
   realtime: 'connecting' | 'live' | 'fallback'
   realtimeError: string
 }
-const emptyDetail = (): SessionDetail => ({ events: [], approvals: [], inputs: [], cursor: null, hasMore: false, loaded: false, loading: false, eventsLoading: false, error: '', eventsError: '', draft: '', model: '', reasoningEffort: '', busy: false, notice: '' })
+const emptyDetail = (): SessionDetail => ({ events: [], approvals: [], inputs: [], cursor: null, hasMore: false, loaded: false, loading: false, eventsLoading: false, error: '', eventsError: '', draft: '', draftAttachments: [], model: '', reasoningEffort: '', busy: false, notice: '' })
 const errorText = (error: unknown): string => error instanceof Error ? error.message : 'Bridge request failed.'
 
 /** One configured Bridge connection. Immutable UI snapshots; async writes always target their captured session. */
@@ -254,6 +255,18 @@ export class SessionStore {
     if (!this.detail(id).loaded) void this.loadEvents(id)
   }
   setDraft(id: string, draft: string): void { this.patchDetail(id, { draft }) }
+  removeDraftAttachment(id: string, attachmentId: string): void {
+    this.patchDetail(id, { draftAttachments: this.detail(id).draftAttachments.filter(a => str(a['id']) !== attachmentId) })
+  }
+  /** Upload an image to the control-plane and stage its ref (plus a local preview) on the draft. */
+  async addDraftImage(id: string, file: { filename: string; mimeType: string; base64: string }): Promise<void> {
+    try {
+      const ref = asRecord(await this.rpc('upload', { filename: file.filename, mimeType: file.mimeType, content: file.base64 }))
+      // previewUrl is renderer-only (the renderer cannot reach the control-plane); stripped before send.
+      const staged = { ...ref, previewUrl: `data:${file.mimeType};base64,${file.base64}` }
+      this.patchDetail(id, { draftAttachments: [...this.detail(id).draftAttachments, staged], notice: '' })
+    } catch (error) { this.patchDetail(id, { notice: errorText(error) }) }
+  }
   setModel(id: string, model: string, reasoningEffort?: string): void { this.patchDetail(id, { model, reasoningEffort: reasoningEffort ?? '' }) }
   invalidateModels(): void { this.patch({ modelCatalogs: {} }) }
   async loadModels(workerId: string): Promise<void> {
@@ -398,14 +411,16 @@ export class SessionStore {
     const detail = this.detail(id)
     if (detail.busy || detail.action?.['status'] === 'accepted') return false
     const input = detail.draft.trim()
-    if (operation === 'submit_turn' && !input) return false
+    // Send only the ref fields; the local previewUrl stays in the renderer.
+    const attachments = detail.draftAttachments.map(a => ({ id: str(a['id']), filename: str(a['filename']), mimeType: str(a['mimeType']), size: typeof a['size'] === 'number' ? a['size'] : 0 }))
+    if (operation === 'submit_turn' && !input && attachments.length === 0) return false
     if (!detail.session || detail.error) { this.patchDetail(id, { notice: 'Session information is unavailable. Refresh and try again.' }); return false }
     if (detail.session['status'] === 'offline' || !Array.isArray(detail.session['capabilities']) || !detail.session['capabilities'].includes('session-actions')) return false
     const turn = detail.session['activeTurnId']
     if (operation === 'interrupt_turn' && typeof turn !== 'string') return false
     const model = detail.model.trim()
     const reasoningEffort = detail.reasoningEffort.trim()
-    const payload = operation === 'submit_turn' ? { sessionId: id, input, delivery: 'auto', ...(typeof turn === 'string' ? { expectedTurnId: turn } : { ...(model ? { model } : {}), ...(reasoningEffort ? { reasoningEffort } : {}) }) }
+    const payload = operation === 'submit_turn' ? { sessionId: id, input, delivery: 'auto', ...(attachments.length ? { attachments } : {}), ...(typeof turn === 'string' ? { expectedTurnId: turn } : { ...(model ? { model } : {}), ...(reasoningEffort ? { reasoningEffort } : {}) }) }
       : operation === 'interrupt_turn' ? { sessionId: id, ...(typeof turn === 'string' ? { expectedTurnId: turn } : {}) } : args
     this.patchDetail(id, { busy: true, notice: '' })
     try {
@@ -413,7 +428,7 @@ export class SessionStore {
       requiredId(action, 'actionId')
       this.patchDetail(id, { action, notice: operation === 'submit_turn' ? '' : `Action ${str(action['status'])} · ${str(action['actionId'])}` })
       // Keep the submitted text until the action is confirmed. A failed asynchronous receipt remains retryable.
-      if (operation === 'submit_turn') this.submitted.set(id, { actionId: requiredId(action, 'actionId'), draft: detail.draft })
+      if (operation === 'submit_turn') this.submitted.set(id, { actionId: requiredId(action, 'actionId'), draft: detail.draft, attachments })
       this.settle(id, action)
       if (this.active) { await this.refreshDetail(id); await this.refreshLatestEvents(id) }
       return true
@@ -423,7 +438,7 @@ export class SessionStore {
       return false
     } finally { this.patchDetail(id, { busy: false }) }
   }
-  private submitted = new Map<string, { actionId: string; draft: string }>()
+  private submitted = new Map<string, { actionId: string; draft: string; attachments: JsonObject[] }>()
   private checking = new Set<string>()
   private removeSession(id: string): void {
     const sessions = this.state.sessions.filter(row => row['sessionId'] !== id)
@@ -441,7 +456,7 @@ export class SessionStore {
     }
     const sent = this.submitted.get(id)
     if (status === 'succeeded' && sent && sent.actionId === action['actionId']) {
-      if (this.detail(id).draft === sent.draft) this.patchDetail(id, { draft: '' })
+      if (this.detail(id).draft === sent.draft) this.patchDetail(id, { draft: '', draftAttachments: [] })
       this.submitted.delete(id)
     }
     if (status === 'failed') this.patchDetail(id, { notice: `Action failed: ${str(asRecord(action['error'])['message'], 'Unknown error')}` })

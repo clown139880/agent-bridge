@@ -159,6 +159,18 @@ export interface HeartbeatMessage {
   blockedSessionIds?: string[];
 }
 
+/**
+ * Reference to an uploaded attachment (image/file) stored on the control-plane.
+ * Messages carry refs, never the bytes; the bridge fetches bytes by id at send
+ * time. Mirrors hapi's AttachmentMetadata (minus the host-local `path`).
+ */
+export interface AttachmentRef {
+  id: string;
+  filename: string;
+  mimeType: string;
+  size: number;
+}
+
 export interface StartAgentMessage {
   type: "start_agent";
   sessionId: string;
@@ -167,6 +179,7 @@ export interface StartAgentMessage {
   projectPath: string;
   prompt?: string;
   model?: string;
+  attachments?: AttachmentRef[];
 }
 
 export interface AgentInputMessage {
@@ -174,6 +187,7 @@ export interface AgentInputMessage {
   sessionId: string;
   text: string;
   model?: string;
+  attachments?: AttachmentRef[];
 }
 
 export interface StopAgentMessage {
@@ -311,6 +325,7 @@ export interface CreateSessionActionMessage {
   projectPath: string;
   input?: string;
   model?: string;
+  attachments?: AttachmentRef[];
 }
 export interface SubmitTurnActionMessage {
   type: "action.submit_turn";
@@ -321,6 +336,7 @@ export interface SubmitTurnActionMessage {
   expectedTurnId?: string;
   model?: string;
   reasoningEffort?: string;
+  attachments?: AttachmentRef[];
 }
 export interface InterruptTurnActionMessage {
   type: "action.interrupt_turn";

@@ -166,4 +166,19 @@ export function migrateDatabase(db: DatabaseSync): void {
       db.exec("COMMIT");
     } catch (error) { try { db.exec("ROLLBACK"); } catch {} throw error; }
   }
+  const applied5 = db.prepare("SELECT 1 FROM schema_migrations WHERE version=5").get();
+  if (!applied5) {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      db.exec(`
+        CREATE TABLE attachments (
+          id TEXT PRIMARY KEY, mime_type TEXT NOT NULL, filename TEXT NOT NULL,
+          size INTEGER NOT NULL, bytes BLOB NOT NULL, created_at INTEGER NOT NULL
+        );
+        CREATE INDEX attachments_created_idx ON attachments(created_at);
+      `);
+      db.prepare("INSERT INTO schema_migrations(version,applied_at) VALUES (5,?)").run(Date.now());
+      db.exec("COMMIT");
+    } catch (error) { try { db.exec("ROLLBACK"); } catch {} throw error; }
+  }
 }

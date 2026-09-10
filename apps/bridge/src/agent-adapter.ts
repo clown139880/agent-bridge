@@ -1,4 +1,4 @@
-import type { ApprovalChoice, BridgeToControlMessage, CodexModelInfo, SessionState } from "@agent-bridge/protocol";
+import type { ApprovalChoice, AttachmentRef, BridgeToControlMessage, CodexModelInfo, SessionState } from "@agent-bridge/protocol";
 
 /**
  * Common surface every agent backend exposes to {@link BridgeClient}. Codex talks
@@ -13,12 +13,12 @@ export interface AgentAdapter {
   stop(): void;
 
   /** Start (or resume) a session for a project, optionally kicking off a first turn. Returns the native session id. */
-  startSession(requestId: string, projectPath: string, prompt?: string, resumeSessionId?: string, model?: string): Promise<string>;
+  startSession(requestId: string, projectPath: string, prompt?: string, resumeSessionId?: string, model?: string, attachments?: AttachmentRef[]): Promise<string>;
   /** Deliver free-form text to a session (answers pending input, steers an active turn, or starts a new turn). */
-  input(sessionId: string, text: string, model?: string): Promise<void>;
+  input(sessionId: string, text: string, model?: string, attachments?: AttachmentRef[]): Promise<void>;
 
   /** Idempotent action: create a session. */
-  createSessionAction(actionId: string, projectPath: string, input?: string, model?: string): Promise<{ sessionId: string; turnId?: string }>;
+  createSessionAction(actionId: string, projectPath: string, input?: string, model?: string, attachments?: AttachmentRef[]): Promise<{ sessionId: string; turnId?: string }>;
   /** Idempotent action: submit a turn with explicit delivery semantics. */
   submitTurnAction(
     actionId: string,
@@ -28,6 +28,7 @@ export interface AgentAdapter {
     expectedTurnId?: string,
     model?: string,
     reasoningEffort?: string,
+    attachments?: AttachmentRef[],
   ): Promise<{ sessionId: string; turnId?: string; resolvedAction: "steer" | "start_turn" }>;
   /** Idempotent action: interrupt the active turn. */
   interruptAction(sessionId: string, expectedTurnId?: string): Promise<{ sessionId: string; turnId: string }>;

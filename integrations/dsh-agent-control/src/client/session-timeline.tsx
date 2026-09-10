@@ -24,12 +24,17 @@ export function eventTime(timestamp: unknown): string {
   const date = new Date(timestamp)
   return Number.isNaN(date.getTime()) ? '' : date.toLocaleString()
 }
+function imageMarker(payload: JsonObject) {
+  const attachments = asArray(payload['attachments'])
+  if (!attachments.length) return null
+  return <p className={css.plainMessage} aria-label="attached images">🖼 {attachments.length} image{attachments.length > 1 ? 's' : ''} attached</p>
+}
 function EventBody({ event, summaryOnly }: { event: JsonObject; summaryOnly: boolean }) {
   const payload = asRecord(event['payload'])
   const type = str(event['type'])
   if (ExternalChatEvent && type === 'message.completed') {
     const role = payload['role'] === 'user' ? 'user' : 'assistant'
-    return <ExternalChatEvent kind={role} text={str(payload['text'], '')} />
+    return <>{<ExternalChatEvent kind={role} text={str(payload['text'], '')} />}{imageMarker(payload)}</>
   }
   if (ExternalChatEvent && type === 'command.completed') {
     const exitCode = payload['exitCode']
@@ -44,6 +49,7 @@ function EventBody({ event, summaryOnly }: { event: JsonObject; summaryOnly: boo
   if (type === 'message.completed') return <div className={css.messageBody} data-role={str(payload['role'])}>
     <strong className={css.messageRole}>{str(payload['role'])}</strong>
     {payload['role'] === 'assistant' ? <MarkdownText text={str(payload['text'], '')} labels={markdownLabels} /> : <p className={css.plainMessage}>{str(payload['text'], '')}</p>}
+    {imageMarker(payload)}
   </div>
   if (type === 'command.completed') return <details className={css.commandDetails}>
     <summary><code>{str(payload['command'])}</code><span> · {str(payload['status'], 'Settled')} · Exit {str(payload['exitCode'], 'unknown')}</span></summary>

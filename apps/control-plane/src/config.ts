@@ -51,6 +51,7 @@ export const config = {
     sessionEventsMs: duration("CONTROL_SESSION_EVENT_RETENTION_MS", 30 * 86_400_000),
     streamEventsMs: duration("CONTROL_STREAM_RETENTION_MS", 7 * 86_400_000),
     actionsMs: duration("CONTROL_ACTION_RETENTION_MS", 86_400_000),
+    attachmentsMs: duration("CONTROL_ATTACHMENT_RETENTION_MS", 7 * 86_400_000),
   },
   sse: {
     keepaliveMs: duration("CONTROL_SSE_KEEPALIVE_MS", 15_000),

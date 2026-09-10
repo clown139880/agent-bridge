@@ -10,6 +10,14 @@ export interface RetentionOptions {
   sessionEventsMs: number;
   streamEventsMs: number;
   actionsMs: number;
+  attachmentsMs: number;
+}
+
+export interface StoredAttachment {
+  id: string;
+  filename: string;
+  mimeType: string;
+  size: number;
 }
 
 export interface StreamRow {
@@ -527,7 +535,25 @@ export class AgentControlStore {
       this.db.prepare("DELETE FROM events WHERE event_schema=2 AND created_at<?").run(now-this.retention.sessionEventsMs);
       this.db.prepare("DELETE FROM idempotency_keys WHERE expires_at<?").run(now);
       this.db.prepare("DELETE FROM actions WHERE expires_at<?").run(now);
+      this.db.prepare("DELETE FROM attachments WHERE created_at<?").run(now-this.retention.attachmentsMs);
     });
+  }
+
+  /** Store attachment bytes content-addressed by sha256; returns the ref (deduped). */
+  putAttachment(bytes: Uint8Array, mimeType: string, filename: string): StoredAttachment {
+    const id = createHash("sha256").update(bytes).digest("hex");
+    this.db.prepare(`INSERT INTO attachments(id,mime_type,filename,size,bytes,created_at)
+      VALUES (?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`)
+      .run(id, mimeType, filename, bytes.length, bytes, Date.now());
+    return { id, filename, mimeType, size: bytes.length };
+  }
+
+  getAttachment(id: string): (StoredAttachment & { bytes: Uint8Array }) | undefined {
+    const row = this.db.prepare("SELECT id,mime_type,filename,size,bytes FROM attachments WHERE id=?").get(id) as
+      Record<string, unknown> | undefined;
+    if (!row) return undefined;
+    return { id: String(row.id), filename: String(row.filename), mimeType: String(row.mime_type),
+      size: Number(row.size), bytes: row.bytes as Uint8Array };
   }
 
   private mapSession(row: Record<string, unknown>, detail: boolean): Record<string, unknown> {

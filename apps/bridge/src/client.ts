@@ -15,6 +15,7 @@ import {
 import { CodexAppServerAdapter } from "./app-server.js";
 import { config } from "./config.js";
 import { ClaudeCodeAdapter } from "./claude/claude-adapter.js";
+import { makeAttachmentFetcher } from "./attachments.js";
 import type { AgentAdapter } from "./agent-adapter.js";
 import { BridgeSelfUpdater } from "./self-updater.js";
 
@@ -102,6 +103,7 @@ export class BridgeClient {
         claudeHome: options.claudeHome ?? `${process.env.HOME ?? ""}/.claude`,
         allowedRoots: options.allowedRoots,
         scanExisting: options.claudeScanExisting ?? false,
+        fetchAttachment: makeAttachmentFetcher(options.url, options.token),
       }, this.adapterEmit("claude-code")));
     }
     if (!this.adapters.size) throw new Error(`No known agent providers enabled: ${providers.join(",")}`);
@@ -258,7 +260,7 @@ export class BridgeClient {
               message: this.admissionMessage() });
             break;
           }
-          void this.adapterForType(message.agentType).startSession(message.sessionId, message.projectPath, message.prompt, message.resumeSessionId, message.model)
+          void this.adapterForType(message.agentType).startSession(message.sessionId, message.projectPath, message.prompt, message.resumeSessionId, message.model, message.attachments)
             .catch((error) => this.send({ type: "error", sessionId: message.sessionId, message: error instanceof Error ? error.message : String(error) }));
           break;
         case "agent_input":
@@ -267,7 +269,7 @@ export class BridgeClient {
               message: this.admissionMessage() });
             break;
           }
-          void this.adapterForSession(message.sessionId).input(message.sessionId, message.text, message.model)
+          void this.adapterForSession(message.sessionId).input(message.sessionId, message.text, message.model, message.attachments)
             .catch((error) => this.send({ type: "error", sessionId: message.sessionId, message: error instanceof Error ? error.message : String(error) }));
           break;
         case "approval_response":
@@ -352,10 +354,10 @@ export class BridgeClient {
         throw Object.assign(new Error(this.admissionMessage()), { code: "update_required", retryable: true });
       }
       if(message.type==="action.create_session"){
-        const value=await this.adapterForType(message.agentType).createSessionAction(message.actionId,message.projectPath,message.input,message.model);
+        const value=await this.adapterForType(message.agentType).createSessionAction(message.actionId,message.projectPath,message.input,message.model,message.attachments);
         result={type:"action.result",actionId:message.actionId,kind,status:"succeeded",...value,timestamp:Date.now()};
       }else if(message.type==="action.submit_turn"){
-        const value=await this.adapterForSession(message.sessionId).submitTurnAction(message.actionId,message.sessionId,message.input,message.delivery,message.expectedTurnId,message.model,message.reasoningEffort);
+        const value=await this.adapterForSession(message.sessionId).submitTurnAction(message.actionId,message.sessionId,message.input,message.delivery,message.expectedTurnId,message.model,message.reasoningEffort,message.attachments);
         result={type:"action.result",actionId:message.actionId,kind,status:"succeeded",...value,timestamp:Date.now()};
       }else if(message.type==="action.interrupt_turn"){
         const value=await this.adapterForSession(message.sessionId).interruptAction(message.sessionId,message.expectedTurnId);
