@@ -4,6 +4,25 @@ Agent-operable steps to update the **DSH Agent Control plugin** inside the
 Windows desktop client. Read `AGENTS.md` (“DSH Agent Control plugin deployment”)
 first — its rules win over convenience.
 
+## TL;DR — update from WSL (the method actually used day to day)
+
+From the repo in WSL:
+
+```bash
+deploy/windows-native/install-plugin-from-wsl.sh          # build + install + restart TokensCowork
+NO_RESTART=1 deploy/windows-native/install-plugin-from-wsl.sh   # build + install only
+```
+
+It builds the plugin (`CI=true` so pnpm 11 doesn't abort the non-TTY modules
+purge), copies the bundle into the Windows profile plugin dir, verifies the
+installed files hash-match the source, and restarts the client. This works
+because WSL reaches the Windows filesystem at `/mnt/c` and drives Windows via
+`powershell.exe`; the bundle is pure JS built deterministically from the
+committed source, so a WSL build == a Windows build (hash-verified). The plugin
+must already be registered in the profile once (`dsh plugin add`, see below);
+after that this script is all you need. Methods A/B below are the manual
+equivalents and the background.
+
 ## The setup on this machine
 
 - **Client:** `TokensCowork` (Electron, DeepSeek Harness build), launched from
