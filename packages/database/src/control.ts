@@ -163,15 +163,22 @@ export class AgentControlStore {
     this.transaction(() => {
       this.db.prepare(`UPDATE machines SET bridge_version=?,protocol_version=?,features_json=?,connected_at=? WHERE id=?`)
         .run(bridgeVersion ?? null, protocolVersion ?? 1, JSON.stringify(features ?? []), now, machineId);
-      const machine = this.db.prepare("SELECT * FROM machines WHERE id=?").get(machineId);
-      this.appendStream("worker.upserted", "worker", `codex@${machineId}`, null, this.workerWire(machine as Record<string,unknown>));
+      const machine = this.db.prepare("SELECT * FROM machines WHERE id=?").get(machineId) as Record<string,unknown>;
+      for (const { agentType, label } of this.machineAgents(parseJson<string[]>(machine.capabilities, []))) {
+        const wire = this.workerWire(machine, agentType, label);
+        this.appendStream("worker.upserted", "worker", String(wire.id), null, wire);
+      }
     });
   }
 
   markMachineOffline(machineId: string): void {
     this.transaction(() => {
       this.db.prepare("UPDATE machines SET status='offline' WHERE id=?").run(machineId);
-      this.appendStream("worker.offline", "worker", `codex@${machineId}`, null, { machineId, status: "offline" });
+      const machine = this.db.prepare("SELECT capabilities FROM machines WHERE id=?").get(machineId) as Record<string,unknown> | undefined;
+      for (const { agentType } of this.machineAgents(machine ? parseJson<string[]>(machine.capabilities, []) : [])) {
+        const wid = buildWorkerId(agentType, machineId);
+        this.appendStream("worker.offline", "worker", wid, null, { workerId: wid, machineId, status: "offline" });
+      }
       const sessions=this.db.prepare("SELECT id FROM sessions WHERE machine_id=?").all(machineId) as Array<{id:string}>;
       this.db.prepare("UPDATE sessions SET activity_status='offline' WHERE machine_id=?").run(machineId);
       for(const session of sessions)this.appendStream("session.updated","session",session.id,session.id,this.session(session.id));
@@ -591,11 +598,19 @@ export class AgentControlStore {
       :{requestId:row.id,...common,questions:row.request.questions,answers:row.decision?.answers??null};
   }
 
-  private workerWire(row:Record<string,unknown>):Record<string,unknown>{
+  private workerWire(row:Record<string,unknown>,agentType:AgentType,label:string):Record<string,unknown>{
     const machineId=String(row.id),capabilities=parseJson<string[]>(row.capabilities,[]),features=parseJson<string[]>(row.features_json,[]);
-    return{id:`codex@${machineId}`,machineId,name:`Codex @ ${String(row.name)}`,status:String(row.status),
+    return{id:buildWorkerId(agentType,machineId),machineId,name:`${label} @ ${String(row.name)}`,status:String(row.status),
       platform:String(row.platform),hostname:String(row.hostname),capabilities:[...new Set([...capabilities,...features])],
       workspaces:[],recentWorkspaces:[],lastSeenAt:Number(row.last_seen_at),bridgeVersion:row.bridge_version?String(row.bridge_version):null,
       activeSessionCount:0};
+  }
+
+  /** The agent workers a machine hosts, mirroring the /workers listing: Codex is
+   *  always present; Claude appears when the bridge advertises the capability. */
+  private machineAgents(capabilities:string[]):Array<{agentType:AgentType;label:string}>{
+    const agents:Array<{agentType:AgentType;label:string}>=[{agentType:"codex-cli",label:"Codex"}];
+    if(capabilities.includes("claude-code"))agents.push({agentType:"claude-code",label:"Claude"});
+    return agents;
   }
 }
