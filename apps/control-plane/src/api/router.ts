@@ -30,7 +30,9 @@ function actionJson(action: ActionRow): Record<string,unknown> {
     createdAt:action.createdAt,updatedAt:action.updatedAt};
 }
 function pendingJson(row: PendingRow): Record<string,unknown> {
-  const common={sessionId:row.sessionId,runId:row.runId,turnId:row.turnId,
+  // `id` is the generic identity key every client uses for pending rows (list dedup,
+  // stream upserts, resolve). Keep approvalId/requestId too for callers that read them.
+  const common={id:row.id,sessionId:row.sessionId,runId:row.runId,turnId:row.turnId,
     workerId:buildWorkerId((row.agentType??"codex-cli") as AgentType,row.machineId),
     status:row.status,requestedAt:row.requestedAt,resolvedAt:row.resolvedAt};
   if(row.kind==="approval")return {approvalId:row.id,...common,kind:row.request.kind,summary:row.request.summary,
