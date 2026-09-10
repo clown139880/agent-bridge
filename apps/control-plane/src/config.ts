@@ -1,4 +1,17 @@
 import "dotenv/config";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
+// The fleet version lives in the repo-root package.json (same value BRIDGE_LATEST_VERSION
+// tracks). Report it in lifecycle webhooks so the operator sees which control-plane is live.
+const controlPlaneVersion = ((): string => {
+  try {
+    return String(JSON.parse(readFileSync(
+      fileURLToPath(new URL("../../../package.json", import.meta.url)), "utf8")).version ?? "unknown");
+  } catch {
+    return "unknown";
+  }
+})();
 
 function required(name: string): string {
   const value = process.env[name];
@@ -31,6 +44,7 @@ if (bridgeUpdatePublishedAt !== undefined && !Number.isFinite(bridgeUpdatePublis
 }
 
 export const config = {
+  version: controlPlaneVersion,
   matrixEnabled,
   matrixHomeserver: matrixEnabled ? required("MATRIX_HOMESERVER") : "",
   matrixUserId: matrixEnabled ? required("MATRIX_USER_ID") : "",

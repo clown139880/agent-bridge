@@ -116,6 +116,7 @@ export class ControlPlane {
     private readonly store: Store,
     private readonly matrix: ControlGateway,
     private readonly options: {
+      version?: string;
       host: string;
       port: number;
       bridgeToken?: string;
@@ -187,6 +188,15 @@ export class ControlPlane {
     this.cleanupTimer = setInterval(() => this.controlStore.cleanup(), 60 * 60_000);
     this.cleanupTimer.unref();
     log.info({ host: this.options.host, port: this.options.port, roomId: this.roomId }, "Control plane listening");
+    // Announce the control-plane restart and the version it is advertising to the fleet.
+    // This is the operator's "control-plane upgraded / broadcasting version" signal.
+    this.webhook.notify({
+      type: "control_plane.up",
+      version: this.options.version ?? "unknown",
+      latest_bridge_version: this.options.bridgeUpdate?.latestVersion ?? null,
+      update_source: this.options.bridgeUpdate?.source ?? null,
+      update_published_at: this.options.bridgeUpdate?.publishedAt ?? null,
+    });
   }
 
   async stop(): Promise<void> {
@@ -599,6 +609,22 @@ export class ControlPlane {
         this.releasePendingRuns(registeredId);
         this.replayControlActions(registeredId);
         log.info({ machineId: registeredId }, "Bridge registered");
+        // Operator-facing counterpart to bridge.offline: a bridge (re)connected. `needs_update`
+        // and `latest_bridge_version` let Dorothy show whether this bridge will self-update.
+        this.webhook.notify({
+          type: "bridge.online",
+          machine_id: registeredId,
+          name: message.name || registeredId,
+          platform: message.platform ?? null,
+          hostname: message.hostname ?? null,
+          bridge_version: message.bridgeVersion ?? null,
+          protocol_version: message.protocolVersion ?? null,
+          capabilities: message.capabilities,
+          latest_bridge_version: this.options.bridgeUpdate?.latestVersion ?? null,
+          needs_update: Boolean(this.options.bridgeUpdate
+            && (!message.bridgeVersion
+              || compareBridgeVersions(message.bridgeVersion, this.options.bridgeUpdate.latestVersion) < 0)),
+        });
         return;
       }
       const registeredMachineId = machineId;

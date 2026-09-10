@@ -21,6 +21,7 @@ const matrix = config.matrixEnabled ? new MatrixGateway({
   allowedUserId: config.matrixAllowedUserId,
 }, callbacks) : new NoopMatrixGateway();
 control = new ControlPlane(store, matrix, {
+  version: config.version,
   host: config.host,
   port: config.port,
   bridgeToken: config.bridgeToken,

@@ -35,9 +35,10 @@ export class WebhookNotifier {
   }
 
   /**
-   * Send an event. `event.type` must be one of the route's allowlisted event
-   * types (bridge_update, bridge_update.status, bridge_update.available,
-   * bridge.offline). Returns immediately; the POST runs in the background.
+   * Send an event. The `engine-notify` route forwards machine-scoped events
+   * (bridge.online, bridge.offline, bridge_update.status) for machines it knows,
+   * plus the machine-less control_plane.up. Returns immediately; the POST runs
+   * in the background.
    */
   notify(event: Record<string, unknown> & { type: string }): void {
     if (!this.options?.url || !this.options?.secret) return;
