@@ -16,6 +16,16 @@ const RPC_CHANNEL = '/agent-control'
 type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue }
 type RecordValue = Record<string, JsonValue>
 
+/** Persisted master switch: when off, the plugin removes all its shadowing
+ *  surfaces so the native DSH sidebar/conversation show through. */
+const SURFACES_KEY = 'agent-control:surfaces-enabled'
+function readSurfacesEnabled(): boolean {
+  try { return globalThis.localStorage?.getItem(SURFACES_KEY) !== 'off' } catch { return true }
+}
+function writeSurfacesEnabled(on: boolean): void {
+  try { globalThis.localStorage?.setItem(SURFACES_KEY, on ? 'on' : 'off') } catch { /* storage unavailable */ }
+}
+
 export class WorkspaceController {
   readonly sessions: SessionStore
   readonly views = new SessionViewStore()
@@ -24,15 +34,19 @@ export class WorkspaceController {
   private openValue = false
   private bridgeValue = false
   private panelValue: 'overview' | 'tasks' = 'overview'
+  private enabledValue = readSurfacesEnabled()
   private readonly listeners = new Set<() => void>()
   subscribe = (listener: () => void): (() => void) => { this.listeners.add(listener); return () => this.listeners.delete(listener) }
+  /** Master on/off for every plugin surface (stable ref for useSyncExternalStore). */
+  surfacesEnabled = (): boolean => this.enabledValue
+  toggleSurfaces = (): void => { this.setSurfaces(!this.enabledValue) }
+  setSurfaces = (on: boolean): void => { if (this.enabledValue === on) return; this.enabledValue = on; writeSurfacesEnabled(on); if (!on) { this.openValue = false; this.bridgeValue = false } this.emit() }
   snapshot = (): boolean => this.openValue
   bridgeSnapshot = (): boolean => this.bridgeValue
   panelSnapshot = (): 'overview' | 'tasks' => this.panelValue
   sessionSnapshot = (): { id: string } | undefined => this.requestedSession
   openSession = (id: string): void => { this.requestedSession = { id }; this.openValue = false; this.bridgeValue = true; this.sessions.activate(); if (id) this.sessions.select(id); this.emit() }
   showNative = (): void => { this.bridgeValue = false; this.openValue = false; this.emit() }
-  togglePlugin = (): void => { this.bridgeValue = !this.bridgeValue; this.openValue = this.bridgeValue; this.emit() }
   open = (): void => { this.panelValue = 'overview'; this.openValue = true; this.emit() }
   openKanban = (): void => { this.panelValue = 'tasks'; this.openValue = true; this.emit() }
   close = (): void => { this.openValue = false; this.emit() }
@@ -43,10 +57,21 @@ interface Injected { controller: WorkspaceController }
 type FooterProps = PropsRuntime<'sidebar.footer.action'> & Injected
 
 export function FooterAction({ wide, controller }: FooterProps) {
-  useEffect(() => { controller.sessions.activate(); void controller.sessions.loadSessions() }, [controller])
-  return <div><Button size="sm" className={css.footerButton} type="button" onClick={controller.togglePlugin} aria-label="Toggle Agent Control" title="Enable or disable all Agent Control features">
-    <span aria-hidden="true">⌘</span>{wide && <span>Agent Control</span>}
-  </Button><Button size="sm" type="button" className={css.footerButton} aria-label="Open Kanban" onClick={controller.openKanban}><span aria-hidden="true">▦</span>{wide && <span>Kanban</span>}</Button></div>
+  const enabled = useSyncExternalStore(controller.subscribe, controller.surfacesEnabled, controller.surfacesEnabled)
+  useEffect(() => { if (enabled) { controller.sessions.activate(); void controller.sessions.loadSessions() } }, [controller, enabled])
+  return <div>
+    <Button size="sm" className={css.footerButton} type="button" onClick={controller.toggleSurfaces}
+      aria-label={enabled ? 'Disable Agent Control (reveal native DSH)' : 'Enable Agent Control'}
+      title={enabled ? 'Agent Control is ON — click to disable and reveal the native DSH sidebar/conversation' : 'Agent Control is OFF — click to enable the plugin'}>
+      <span aria-hidden="true">{enabled ? '◉' : '○'}</span>{wide && <span>{enabled ? 'Plugin On' : 'Plugin Off'}</span>}
+    </Button>
+    {enabled && <>
+      <Button size="sm" className={css.footerButton} type="button" onClick={controller.open} aria-label="Open Agent Control">
+        <span aria-hidden="true">⌘</span>{wide && <span>Agent Control</span>}
+      </Button>
+      <Button size="sm" type="button" className={css.footerButton} aria-label="Open Kanban" onClick={controller.openKanban}><span aria-hidden="true">▦</span>{wide && <span>Kanban</span>}</Button>
+    </>}
+  </div>
 }
 
 interface UnifiedInjected extends Injected { nativeSessions: NativeSessionSource; nativeWorkspaces: NativeWorkspaceSource }
@@ -262,7 +287,23 @@ export function apply(ctx: ClientContext): void {
     const disposers = [remote.$on('llm/adapters-updated', refresh), remote.$on('settings/document-updated', refresh), remote.$on('credentials/reference-updated', refresh)]
     return () => { for (const dispose of disposers) dispose(); controller.sessions.dispose() }
   })
-  installBridgeSurfaces(ctx, controller)
+  // The footer stays registered in every state so the on/off toggle is always reachable.
   ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({ name: 'sidebar.footer.action', id: 'agent-control', order: 20, inject: (): Injected => ({ controller }) }, FooterAction))
-  ctx.slots.inject('shell.overlay', () => ctx.slots.register({ name: 'shell.overlay', id: 'agent-control', order: 10, inject: (): Injected => ({ controller }) }, WorkspaceOverlay))
+  // Every shadowing surface lives in a disposable fork gated by the master switch;
+  // disposing it removes the slot registrations and restores DSH's native occupants.
+  let fork: { dispose(): void } | undefined
+  const syncSurfaces = (): void => {
+    const on = controller.surfacesEnabled()
+    if (on && !fork) {
+      fork = ctx.plugin((scope: ClientContext) => {
+        installBridgeSurfaces(scope, controller)
+        scope.slots.inject('shell.overlay', () => scope.slots.register({ name: 'shell.overlay', id: 'agent-control', order: 10, inject: (): Injected => ({ controller }) }, WorkspaceOverlay))
+      }) as unknown as { dispose(): void }
+    } else if (!on && fork) { fork.dispose(); fork = undefined }
+  }
+  ctx.effect(() => {
+    const unsubscribe = controller.subscribe(syncSurfaces)
+    syncSurfaces()
+    return () => { unsubscribe(); fork?.dispose(); fork = undefined }
+  })
 }
