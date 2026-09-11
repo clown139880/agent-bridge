@@ -64,10 +64,12 @@ fs.writeFileSync(target, source);
     await mount('dsh-workspace');
     await mount('dsh-attachment-local', {dshHome: path.join(folder,'attachment-home')});
     const remote = {sessionId:'r', workerId:'w', workspace:'/remote/project', title:'Bridge runtime fixture', status:'idle', updatedAt:3};
-    const bridge = {call: async ({operation}) => {
-      if (operation === 'workers') return {workers:[{id:'w', hostname:'remote.example', name:'Remote fixture'}]};
+    const bridge = {call: async ({operation,args}) => {
+      if (operation === 'workers') return {workers:[{id:'w', machineId:'remote-machine',hostname:'remote.example', name:'Remote fixture',status:'online'}]};
       if (operation === 'sessions') return {data:[remote],hasMore:false};
-      if (operation === 'session_events') return {data:rows,hasMore:false};
+      if (operation === 'session') return {...remote,sessionId:args.sessionId};
+      if (operation === 'create_session') { assert.equal(args.workerId,'w'); assert.equal(args.workspace,remote.workspace); return {status:'succeeded',sessionId:'new-r'}; }
+      if (operation === 'session_events') return {data:args.sessionId === 'new-r' ? [] : rows,hasMore:false};
       throw new Error('Unexpected Bridge operation: '+operation);
     }};
     let target = new plugin.AgentBridgeImportTarget(ctx, bridge, 'http://runtime-fixture.invalid', path.join(folder,'bridge'));
@@ -91,6 +93,15 @@ fs.writeFileSync(target, source);
       assert.equal(resumed.id, id);
       assert.equal(resumed.session.deriveMessages().length, 4);
       console.log('PASS: installed DSH Agent creation, preset mounting, JSONL persistence, workspace registry and resume');
+      stage = 'native directory source selection and creation';
+      const creation = await target.creationSources(resumed.session.header.cwd);
+      assert.equal(creation.sources.length,1);
+      assert.equal(creation.sources[0].workerId,'w');
+      const created = await target.createInWorkspace(resumed.session.header.cwd,creation.sources[0].id);
+      assert.notEqual(created.id,resumed.id);
+      assert.equal(created.session.header.cwd,resumed.session.header.cwd);
+      assert.ok(await ctx.sessionPersistence.stat(created.id));
+      console.log('PASS: remote directory source resolution -> Bridge creation -> selectable native session in the same workspace');
       stage = 'native provider turn';
       let submitted = false;
       const receiptRows = [
