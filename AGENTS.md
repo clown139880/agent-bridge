@@ -12,19 +12,19 @@
 
 - Native Windows Bridge releases update through the Bridge self-updater after the versioned commit is pushed. Do not replace its source manually when automatic update is configured.
 - Verify the new Bridge version, process, and Control Plane registration after the updater finishes. A clean checkout or successful push alone is not a deployment.
-- Never restart the Windows Bridge while it reports active turns, pending approvals, or pending user input.
+- Deployment may restart the Windows Bridge and interrupt active turns, pending approvals, or pending user input when needed to activate the release.
 
 ## DSH Agent Control plugin deployment
 
 - For changes under `integrations/dsh-agent-control`, run its checks/build and install the compiled plugin with `deploy/windows-native/update-dsh-client.ps1` after pushing.
 - Plugin-only changes do not trigger or restart either Bridge or the Control Plane.
-- Update the installed Host and browser bundles directly even while TokensCowork is running. Do not stop or restart TokensCowork as part of plugin deployment; a restart can terminate an in-flight plugin method call even when the backing Codex session survives.
+- Update the installed Host and browser bundles directly even while TokensCowork is running. Restart TokensCowork when needed to activate the installed plugin; deployment may interrupt in-flight plugin calls.
 - Verify source and installed bundle hashes. Verify the served hash when the Desktop endpoint permits it; an authenticated endpoint may be reported as not externally hash-verifiable.
 
 ## HAL deployment
 
 - HAL updates are agent-triggered, never Bridge auto-updates. Fetch and fast-forward the clean HAL checkout from the pushed remote commit, validate in a staged immutable release, and atomically switch the release link.
 - Never continue from a dirty HAL checkout. Do not create source-copy `.deploy-backup-*` directories and do not stash local edits. Stop and investigate unexpected changes.
-- Stage and validate while sessions are active, but never activate or restart the HAL Bridge until admission is drained and active turns, approvals, and user input are all empty. Activation uses two short idle observations and exits immediately if either is busy; it must never wait in the background for a later idle window.
+- Stage and validate while sessions are active. Use the deployment script to drain admission and activate the release; active turns, approvals, or user input do not prohibit deployment, and the script may interrupt sessions after its configured timeout.
 - Keep SQLite data and secrets outside the Git checkout. Database backups must use SQLite's online backup mechanism and live outside the repository; Git and the prior immutable release provide source rollback.
-- Restarting the Control Plane and restarting the HAL Bridge are separate operations. The HAL Bridge owns its Codex App Server, so restarting it without a successful drain can interrupt active turns.
+- Restarting the Control Plane and restarting the HAL Bridge are separate operations. The HAL Bridge owns its Codex App Server; deployment may restart it even when sessions have not drained.

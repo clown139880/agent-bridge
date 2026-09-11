@@ -102,11 +102,10 @@ No backups are kept — overwrite in place.
 
 ## Activation / restart
 
-- **Default: do NOT restart TokensCowork for a plugin update** (AGENTS.md): a
-  restart can terminate an in-flight plugin method call. Renderer bundles are
-  picked up on reload; Host-side changes may need a restart.
-- **Only restart when the operator explicitly asks**, or a Host-side change
-  requires it. To restart from WSL:
+- Restart TokensCowork when required to activate Host-side plugin changes
+  (AGENTS.md). Deployment may interrupt in-flight plugin calls; pending
+  approvals and active sessions do not block activation. Renderer bundles are
+  picked up on reload. To restart from WSL:
   ```bash
   powershell.exe -NoProfile -Command "Get-Process TokensCowork -EA SilentlyContinue | Stop-Process -Force; Start-Sleep 3; Start-Process 'C:\Users\clown\AppData\Local\Programs\TokensCowork\TokensCowork.exe'"
   ```
