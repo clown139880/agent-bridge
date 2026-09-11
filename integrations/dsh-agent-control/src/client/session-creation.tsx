@@ -1,5 +1,6 @@
-import { useSyncExternalStore } from 'react'
-import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
+import { useEffect, useState, useSyncExternalStore } from 'react'
+import css from './workspace.module.css'
+import { useDialog } from './dialog.js'
 
 type Source = { id: string; name: string; workerId?: string; machineId: string; workspace: string; available: boolean }
 type Options = { workspaceId?: string; cwd?: string; sessionId?: string }
@@ -55,15 +56,22 @@ export class SessionCreationController {
 
 export function SessionSourcePicker({ controller }: { controller: SessionCreationController }) {
   const pending = useSyncExternalStore(controller.subscribe, controller.snapshot, controller.snapshot)
+  const [selected, setSelected] = useState('')
+  const ref = useDialog(!!pending, controller.cancel)
+  useEffect(() => { setSelected(pending?.sources.find(source => source.available)?.id ?? '') }, [pending])
   if (!pending) return null
-  return <div role="dialog" aria-modal="true" aria-label="选择新会话来源" style={{pointerEvents:'auto',position:'fixed',inset:0,zIndex:1100,background:'#0006',display:'grid',placeItems:'center'}}>
-    <section style={{width:'min(560px,90vw)',padding:24,borderRadius:16,background:'#fff',color:'#17252b',boxShadow:'0 16px 60px #0004'}}>
-      <header style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}><strong>选择新会话来源</strong><Button onClick={controller.cancel}>取消</Button></header>
-      <p>选择执行这个新对话的 worker。</p>
-      {pending.sources.map(source => <Button key={source.id} disabled={!source.available} onClick={() => controller.select(source)} style={{display:'block',width:'100%',textAlign:'left',whiteSpace:'normal',height:'auto',padding:14,marginTop:10,border:'1px solid #c8d5d2',borderRadius:10,color:'#17252b',background:'#f4faf8'}}>
-        <strong>{source.name}{source.available ? '' : ' · 离线'}</strong>
-        <span style={{display:'block',marginTop:6,fontSize:12,overflowWrap:'anywhere'}}>{source.machineId} · {source.workspace}</span>
-      </Button>)}
-    </section>
+  const choice = pending.sources.find(source => source.id === selected && source.available)
+  return <div className={css.sourceOverlay} onMouseDown={event => { if (event.target === event.currentTarget) controller.cancel() }}>
+    <div ref={ref} tabIndex={-1} role="dialog" aria-modal="true" aria-labelledby="bridge-source-title" aria-describedby="bridge-source-help" className={css.sourceDialog}>
+      <header className={css.dialogHeader}><div><span className={css.eyebrow}>新建对话</span><h2 id="bridge-source-title">选择运行此对话的 Agent</h2></div><button type="button" className={css.iconButton} aria-label="关闭来源选择" onClick={controller.cancel}>×</button></header>
+      <p id="bridge-source-help" className={css.help}>对话将在所选机器的目录中运行。</p>
+      <fieldset className={css.sourceList}><legend className={css.srOnly}>可用 Agent</legend>{pending.sources.map(source => <label key={source.id} className={`${css.sourceCard} ${selected === source.id ? css.sourceSelected : ''} ${!source.available ? css.sourceOffline : ''}`}>
+        <input type="radio" name="bridge-source" value={source.id} checked={selected === source.id} disabled={!source.available} onChange={() => setSelected(source.id)} />
+        <span className={css.sourceIcon} aria-hidden="true">{source.name.startsWith('Claude') ? 'Cl' : source.id === 'dsh' ? 'DS' : 'Cx'}</span>
+        <span className={css.sourceInfo}><span className={css.sourceName}><strong>{source.name}</strong><span className={css.availability}>{source.available ? '可用' : '离线'}</span></span><span className={css.sourceMachine}>{source.id === 'dsh' ? '本机' : source.machineId}</span><code className={css.sourcePath}>{source.workspace}</code></span>
+      </label>)}</fieldset>
+      {!choice && <p className={css.help} role="status">暂无在线 Agent，请稍后重试。</p>}
+      <footer className={css.dialogFooter}><button type="button" onClick={controller.cancel}>取消</button><button type="button" className={css.primary} disabled={!choice} onClick={() => { if (choice) controller.select(choice) }}>创建对话 <span aria-hidden="true">→</span></button></footer>
+    </div>
   </div>
 }
