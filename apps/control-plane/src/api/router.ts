@@ -72,6 +72,19 @@ export class AgentControlApi {
       if(request.method!=="GET"&&!principal.write)throw new ApiProblem(403,"forbidden","write scope is required");
       if(request.method==="GET"&&!principal.read)throw new ApiProblem(403,"forbidden","read scope is required");
       if(request.method==="GET"&&url.pathname==="/api/v1/workers"){this.workers(response);return true;}
+      const workerDelete=url.pathname.match(/^\/api\/v1\/workers\/([^/]+)$/);
+      if(request.method==="DELETE"&&workerDelete){
+        const id=decodeURIComponent(workerDelete[1]!), parsed=parseWorkerId(id);
+        const agent=parsed&&agentTypeForWorkerPrefix(parsed.prefix);
+        if(!parsed||!agent)throw new ApiProblem(400,'invalid_worker_id','invalid worker id');
+        await jsonBody(request);
+        // Recheck after the awaited body read; an offline worker may reconnect.
+        if(this.bridges.get(parsed.machineId))throw new ApiProblem(409,'worker_online','只能删除离线 worker');
+        const machine=this.legacy.listMachines().find(row=>row.id===parsed.machineId);
+        if(!machine || (!this.store.workerRemoved(id) && !this.machineWorkers(machine).some(row=>row.id===id)))throw new ApiProblem(404,'worker_not_found','worker not found');
+        const deletedSessions=this.store.deleteWorker(id,parsed.machineId,agent);
+        this.ok(response,{workerId:id,deleted:true,deletedSessions});return true;
+      }
       const workerModels=url.pathname.match(/^\/api\/v1\/workers\/([^/]+)\/models$/);
       if(request.method==="GET"&&workerModels){const workerId=decodeURIComponent(workerModels[1]!);const machineId=parseWorkerId(workerId)?.machineId??workerId;
         try{this.ok(response,await this.bridges.requestModels(machineId));}catch(error){throw new ApiProblem(503,'model_catalog_unavailable',error instanceof Error?error.message:String(error));}return true;}
@@ -114,7 +127,8 @@ export class AgentControlApi {
     const bridge=this.bridges.get(machine.id);const workspaces=this.legacy.listProjectPaths(machine.id);
     const recent=workspaces.map(path=>{const row=this.store.db.prepare("SELECT MAX(updated_at) AS t,COUNT(*) AS n FROM sessions WHERE machine_id=? AND project_path=?").get(machine.id,path) as {t:number;n:number};return{path,name:path.replace(/[\\/]$/,"").split(/[\\/]/).at(-1)||path,lastUsedAt:Number(row.t),sessionCount:Number(row.n)};});
     const active=Number((this.store.db.prepare("SELECT COUNT(*) AS n FROM sessions WHERE machine_id=? AND activity_status IN ('active','waiting_for_approval','waiting_for_input')").get(machine.id) as {n:number}).n);
-    return{id:buildWorkerId(agentType,machine.id),machineId:machine.id,agentType,name:`${label} @ ${machine.name}`,status:bridge?"online":"offline",
+    const sessionCount=Number((this.store.db.prepare('SELECT COUNT(*) AS n FROM sessions WHERE machine_id=? AND agent_type=?').get(machine.id,agentType) as {n:number}).n);
+    return{id:buildWorkerId(agentType,machine.id),machineId:machine.id,agentType,sessionCount,name:`${label} @ ${machine.name}`,status:bridge?"online":"offline",
       platform:machine.platform,hostname:machine.hostname,capabilities:[...new Set([...machine.capabilities,...(bridge?.features??[])])],
       workspaces,recentWorkspaces:recent,lastSeenAt:machine.lastSeenAt,bridgeVersion:bridge?.bridgeVersion??null,activeSessionCount:active};
   }
@@ -122,7 +136,7 @@ export class AgentControlApi {
     // Codex is always listed for backward compatibility; Claude appears when the bridge advertises it.
     const rows=[this.workerJson(machine,"codex-cli","Codex")];
     if(machine.capabilities.includes(capabilityForAgent("claude-code")))rows.push(this.workerJson(machine,"claude-code","Claude"));
-    return rows;
+    return rows.filter(row=>row.status==='online'||!this.store.workerRemoved(String(row.id)));
   }
   private workers(response:ServerResponse):void{this.ok(response,{workers:this.legacy.listMachines().flatMap(m=>this.machineWorkers(m)),streamCursor:this.store.streamCursor()});}
   private snapshot(url:URL,response:ServerResponse):void{

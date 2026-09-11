@@ -43,6 +43,30 @@ async function fixture() {
   return {path,store,control,internals,sent,base,headers,async close(){await control.stop();store.db.close();rmSync(path,{force:true});}};
 }
 
+test('offline worker deletion is scoped, durable, and rejects online workers',async()=>{
+  const f=await fixture();try{
+    const remove=()=>fetch(`${f.base}/workers/codex%40dev`,{method:'DELETE',headers:f.headers,body:'{}'});
+    assert.equal((await remove()).status,409);
+    assert.equal((await fetch(`${f.base}/workers/codex%40dev`,{method:'DELETE',headers:{...f.headers,authorization:'Bearer read'},body:'{}'})).status,403);
+    f.store.upsertMachine({id:'dev',name:'Workstation',platform:'linux',hostname:'dev.local',capabilities:['codex-cli','claude-code']});
+    f.store.createSession({id:'claude-retain',machineId:'dev',agentType:'claude-code',projectName:'repo',projectPath:'/work/repo',matrixRoomId:'',matrixThreadId:null,nativeSessionId:'claude-retain',status:'idle',createdAt:1,updatedAt:1});
+    f.internals.bridges.delete('dev');
+    const receipt=await (await remove()).json() as any;
+    assert.equal(receipt.deletedSessions,2);
+    assert.ok(f.store.getSession('claude-retain'));
+    assert.equal(f.internals.controlStore.session('thread-1'),undefined);
+    assert.equal(f.internals.controlStore.isSessionDeleted('thread-1'),true);
+    const workers=await fetch(`${f.base}/workers`,{headers:f.headers}).then(r=>r.json()) as any;
+    assert.deepEqual(workers.workers.map((w:any)=>w.id),['claude@dev']);
+    assert.equal((await (await remove()).json() as any).deletedSessions,0);
+    f.internals.controlStore.updateMachineConnection('dev','0.6.38',1,[]);
+    assert.equal(f.internals.controlStore.workerRemoved('codex@dev'),false);
+    assert.equal(f.internals.controlStore.isSessionDeleted('thread-1'),true);
+    const restored=await fetch(`${f.base}/workers`,{headers:f.headers}).then(r=>r.json()) as any;
+    assert.deepEqual(restored.workers.map((w:any)=>w.id),['codex@dev','claude@dev']);
+  }finally{await f.close();}
+});
+
 test("Agent Control REST exposes snapshot, pagination, actions, idempotency and pending CAS",async()=>{
   const f=await fixture();try{
     const snapshot=await fetch(`${f.base}/snapshot`,{headers:f.headers}).then(r=>r.json()) as any;

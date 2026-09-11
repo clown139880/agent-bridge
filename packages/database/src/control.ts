@@ -174,6 +174,7 @@ export class AgentControlStore {
       const machine = this.db.prepare("SELECT * FROM machines WHERE id=?").get(machineId) as Record<string,unknown>;
       for (const { agentType, label } of this.machineAgents(parseJson<string[]>(machine.capabilities, []))) {
         const wire = this.workerWire(machine, agentType, label);
+        this.db.prepare("DELETE FROM deleted_workers WHERE worker_id=?").run(String(wire.id));
         this.appendStream("worker.upserted", "worker", String(wire.id), null, wire);
       }
     });
@@ -491,7 +492,10 @@ export class AgentControlStore {
   }
 
   deleteSession(id: string): boolean {
-    return this.transaction(() => {
+    return this.transaction(() => this.deleteSessionRecord(id));
+  }
+
+  private deleteSessionRecord(id: string): boolean {
       const row = this.db.prepare("SELECT machine_id FROM sessions WHERE id=?").get(id) as { machine_id: string } | undefined;
       if (!row) return false;
       const now = Date.now();
@@ -507,6 +511,16 @@ export class AgentControlStore {
       this.db.prepare("DELETE FROM sessions WHERE id=?").run(id);
       this.appendStream("session.deleted", "session", id, id, { sessionId: id, deletedAt: now });
       return true;
+  }
+
+  workerRemoved(id: string): boolean { return Boolean(this.db.prepare('SELECT 1 FROM deleted_workers WHERE worker_id=?').get(id)); }
+
+  deleteWorker(id: string, machineId: string, agentType: AgentType): number {
+    return this.transaction(() => {
+      const sessions = this.db.prepare('SELECT id FROM sessions WHERE machine_id=? AND agent_type=?').all(machineId, agentType) as {id:string}[];
+      for (const session of sessions) this.deleteSessionRecord(session.id);
+      this.db.prepare('INSERT INTO deleted_workers(worker_id,deleted_at) VALUES(?,?) ON CONFLICT(worker_id) DO UPDATE SET deleted_at=excluded.deleted_at').run(id,Date.now());
+      return sessions.length;
     });
   }
 

@@ -17,9 +17,12 @@ export function mergeWorkspaces(rows: readonly WorkspaceRow[], catalog: readonly
   const result: WorkspaceRow[] = []
   for (const row of rows) {
     const members = row.sessionIds.map(id => entries.get(id))
-    const first = members[0]
+    const first = members.find(Boolean)
     const key = first ? first.machineId + '\0' + first.workspace : ''
-    if (!first || members.some(entry => !entry || entry.machineId + '\0' + entry.workspace !== key)) { result.push(row); continue }
+    // Older presentation directories may also contain a blank native DSH session,
+    // archived ids, or a deleted remote id. They must not veto known siblings.
+    const presentation = /[\\/]\.dsh[\\/]agent-bridge[\\/]workspaces[\\/]/.test(row.path)
+    if (!first || members.some(entry => entry ? entry.machineId + '\0' + entry.workspace !== key : !presentation)) { result.push(row); continue }
     const previous = groups.get(key)
     if (previous) {
       previous.sessionIds = [...new Set([...previous.sessionIds, ...row.sessionIds])]

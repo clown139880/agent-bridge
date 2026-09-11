@@ -93,7 +93,16 @@ function ErrorBanner({ error, retry }: { error: string; retry(): void }) {
   return <div className={css.error} role="alert"><span>{error}</span><button type="button" onClick={retry}>重试</button></div>
 }
 
-export function Overview({ data, openSession }: { data: RecordValue; openSession(id: string): void }) {
+function DeleteWorker({ worker, refresh }: { worker: RecordValue; refresh(): Promise<void> }) {
+  const [open, setOpen] = useState(false), [busy, setBusy] = useState(false), [error, setError] = useState('')
+  const ref = useDialog(open, () => { if (!busy) setOpen(false) })
+  return <><button type="button" onClick={() => { setError(''); setOpen(true) }}>删除</button>{open && <div className={css.drawerBackdrop}><div ref={ref} tabIndex={-1} role="dialog" aria-modal="true" aria-label="删除离线 Worker" className={css.modal}>
+    <h2>删除 {str(worker['name'])}？</h2><p>将移除此离线 worker 及其全部 {Number(worker['sessionCount'] ?? 0)} 个会话。历史消息、待处理请求也会清除，客户端会同步移除。项目文件保留。</p><p className={css.help}>同机器的其他 worker 不受影响。此 worker 重新连接后会重新显示，已删除的会话不会恢复。</p>
+    {error && <p role="alert">{error}</p>}<footer className={css.dialogFooter}><button disabled={busy} onClick={() => setOpen(false)}>取消</button><button disabled={busy} onClick={() => { setBusy(true); void call('bridge', 'delete_worker', { workerId: str(worker['id']) }).then(async () => { setOpen(false); await refresh() }).catch(cause => setError(cause instanceof Error ? cause.message : '删除失败')).finally(() => setBusy(false)) }}>{busy ? '正在删除…' : '删除 Worker 和全部会话'}</button></footer>
+  </div></div>}</>
+}
+
+export function Overview({ data, openSession, refresh = async () => {} }: { data: RecordValue; openSession(id: string): void; refresh?(): Promise<void> }) {
   const bridge = asRecord(data['bridge'])
   const workers = asArray(bridge['workers']).map(asRecord)
   const sessions = asArray(bridge['sessions']).map(asRecord)
@@ -117,6 +126,7 @@ export function Overview({ data, openSession }: { data: RecordValue; openSession
         <span className={statusClass(str(worker['status']))} />
         <div><strong>{str(worker['name'])}</strong><small>{str(worker['hostname'])} · Bridge {str(worker['bridgeVersion'], '版本未知')} · {str(asArray(sessionProvider['workers']).map(asRecord).find(item => item['workerId'] === worker['id'])?.['sessions'], '0')} 个对话</small></div>
         <span className={css.rowMeta}>{statusLabel(worker['status'])}</span>
+        {worker['status'] === 'offline' && <DeleteWorker worker={worker} refresh={refresh} />}
       </div>)}</section>
       <section className={css.panel}><h2>最近对话</h2>{sessions.length === 0 && <Empty>暂无对话</Empty>}{sessions.slice(0, 6).map(session => <button type="button" className={`${css.row} ${css.rowButton}`} key={str(session['sessionId'])} onClick={() => openSession(str(session['sessionId']))}>
         <span className={statusClass(str(session['status']))} />
@@ -226,7 +236,7 @@ function WorkspaceOverlay({ controller }: Injected) {
     finally { if (epoch === requestEpoch.current) setLoading(false) }
   }, [tab, sessionStore])
   useEffect(() => { if (open) void refresh(); return () => { requestEpoch.current++ } }, [open, refresh])
-  const content = useMemo(() => { if (!data) return null; if (tab === 'tasks') return <Tasks snapshot={data} refresh={refresh} openSession={controller.openSession} />; return <Overview data={data} openSession={controller.openSession} /> }, [data, refresh, tab, sessionStore, controller])
+  const content = useMemo(() => { if (!data) return null; if (tab === 'tasks') return <Tasks snapshot={data} refresh={refresh} openSession={controller.openSession} />; return <Overview data={data} openSession={controller.openSession} refresh={refresh} /> }, [data, refresh, tab, sessionStore, controller])
   if (!open) return null
   return <div ref={ref} tabIndex={-1} className={css.workspace} role="dialog" aria-modal="true" aria-label="Agent Control workspace" aria-busy={loading}>
     <header className={css.topbar}><div className={css.title}><span className={css.logo}>AC</span><div><strong>Agent Control</strong><small>机器、对话与任务</small></div></div><nav aria-label="管理视图">{(['overview', 'tasks'] as const).map(item => <button aria-current={tab === item ? 'page' : undefined} className={tab === item ? css.activeTab : ''} key={item} type="button" onClick={() => { setError(''); setTab(item) }}>{item === 'tasks' ? 'Kanban 看板' : '运行概览'}</button>)}</nav><div className={css.topActions}><button type="button" aria-label="Refresh Agent Control" onClick={() => void refresh()} disabled={loading}>{loading ? '刷新中…' : '↻ 刷新'}</button><button type="button" onClick={controller.close}>关闭</button></div></header>

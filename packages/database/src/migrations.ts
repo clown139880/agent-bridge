@@ -181,4 +181,14 @@ export function migrateDatabase(db: DatabaseSync): void {
       db.exec("COMMIT");
     } catch (error) { try { db.exec("ROLLBACK"); } catch {} throw error; }
   }
+  const applied6 = db.prepare("SELECT 1 FROM schema_migrations WHERE version=6").get();
+  if (!applied6) {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      db.exec('CREATE TABLE deleted_workers (worker_id TEXT PRIMARY KEY, deleted_at INTEGER NOT NULL)');
+      db.prepare('INSERT INTO schema_migrations(version,applied_at) VALUES(6,?)').run(Date.now());
+      db.exec('COMMIT');
+    } catch (error) { try { db.exec('ROLLBACK'); } catch {} throw error; }
+  }
+
 }

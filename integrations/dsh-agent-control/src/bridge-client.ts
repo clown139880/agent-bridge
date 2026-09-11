@@ -48,6 +48,7 @@ export class BridgeClient {
     const args = call.args ?? {}
     switch (call.operation) {
       case 'workers': return this.request('GET', '/workers', undefined, undefined, signal)
+      case 'delete_worker': return this.request('DELETE', `/workers/${this.segment(textArg(args, 'workerId')!)}`, {}, randomUUID(), signal)
       case 'models': return this.request('GET', `/workers/${this.segment(textArg(args, 'workerId')!)}/models`, undefined, undefined, signal)
       case 'snapshot': return this.request('GET', `/snapshot?${query(args, ['sessionLimit'])}`, undefined, undefined, signal)
       case 'sessions': return this.request('GET', `/sessions?${query(args, ['workerId', 'status', 'workspace', 'taskId', 'runId', 'segment', 'dayStart', 'sort', 'order', 'limit', 'cursor'])}`, undefined, undefined, signal)

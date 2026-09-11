@@ -110,7 +110,7 @@ export class AgentBridgeImportTarget {
         await delay(300, undefined, { signal: fused })
         receipt = record(await this.bridge.call({ operation: 'action', args: { actionId: str(receipt['actionId']) } }, fused))
       }
-      if (receipt['status'] !== 'succeeded' || receipt['sessionId'] !== binding['sessionId']) throw new Error('删除失败：' + JSON.stringify(receipt['error'] ?? receipt['status']))
+      if ((receipt['status'] !== 'succeeded' && receipt['deleted'] !== true) || receipt['sessionId'] !== binding['sessionId']) throw new Error('删除失败：' + JSON.stringify(receipt['error'] ?? receipt['status']))
       await this.host.workspaceRegistry.archiveSession(nativeId)
       this.deleted.add(nativeId)
       await this.handles.get(nativeId)?.dispose()
