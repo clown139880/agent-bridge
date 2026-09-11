@@ -66,6 +66,7 @@ export class AgentBridgeLlmAdapter extends LlmAdapter {
         if (receipt['status'] === 'accepted') receipt = record(await this.service.bridge.call({ operation: 'action', args: { actionId: str(receipt['actionId']) } }, signal))
         if (['failed', 'cancelled', 'expired'].includes(str(receipt['status']))) throw new Error('Bridge action ' + str(receipt['status']) + ': ' + JSON.stringify(receipt['error'] ?? {}))
         turnId = str(receipt['turnId'], turnId || expectedTurnId)
+        if (receipt['status'] === 'succeeded' && !turnId) throw new Error('Bridge action succeeded without a turn identity; cannot safely attribute its output')
         const page = await readHistory(this.service.bridge, remoteId, cursor, signal)
         cursor = page.cursor
         for (const row of page.rows) if (!seen.has(str(row['eventId']))) { seen.add(str(row['eventId'])); buffered.push(row) }
@@ -91,8 +92,10 @@ export class AgentBridgeLlmAdapter extends LlmAdapter {
             // Some workers report session state without a retained turn.completed event.
             if (!current['activeTurnId'] && current['status'] === 'idle') {
               const finalPage = await readHistory(this.service.bridge, remoteId, cursor, signal)
-              if (finalPage.rows.length) { buffered.push(...finalPage.rows.filter(row => !seen.has(str(row['eventId'])))); cursor = finalPage.cursor }
-              else finished = true
+              const newRows = finalPage.rows.filter(row => !seen.has(str(row['eventId'])))
+              for (const row of newRows) { seen.add(str(row['eventId'])); buffered.push(row) }
+              cursor = finalPage.cursor
+              if (!newRows.length) finished = true
             }
           }
         }

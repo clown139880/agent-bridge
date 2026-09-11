@@ -160,7 +160,7 @@ curl -H "Authorization: Bearer $AGENT_BRIDGE_CONTROL_TOKEN" http://127.0.0.1:878
 curl -H "Authorization: Bearer $AGENT_BRIDGE_CONTROL_TOKEN" http://127.0.0.1:8787/api/v1/snapshot
 ```
 
-Then open Agent Control and check Sessions. If the deployed Bridge still only
+Then check the provider status in Agent Control and open DSH's original Sessions tree. If the deployed Bridge still only
 implements legacy workers/runs, `/workers` succeeds while `/snapshot` and
 `/sessions` correctly surface backend errors; the plugin does not invent data
 or silently claim integration success.

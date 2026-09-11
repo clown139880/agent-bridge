@@ -95,7 +95,7 @@ function Overview({ data }: { data: RecordValue }) {
   const columns = asArray(board['columns']).map(asRecord)
   const sessionProvider = asRecord(data['sessionProvider'])
   return <div className={css.page}>
-    {sessionProvider['registered'] !== true ? <div role="alert">Bridge session sync is waiting for the Host services.</div> : typeof sessionProvider['error'] === 'string' && sessionProvider['error'] ? <div role="alert">Bridge session sync: {sessionProvider['error']}</div> : <div>Bridge conversations in Sessions: {Number(sessionProvider['nativeSessions'] ?? 0)}</div>}
+    {!('sessionProvider' in data) ? <div role="alert">The running Host has not loaded the Bridge session provider. Updating browser files alone does not activate session sync.</div> : sessionProvider['registered'] !== true ? <div role="alert">Bridge session sync is waiting for the Host services.</div> : typeof sessionProvider['error'] === 'string' && sessionProvider['error'] ? <div role="alert">Bridge session sync: {sessionProvider['error']}</div> : <div>Bridge conversations in Sessions: {Number(sessionProvider['nativeSessions'] ?? 0)}</div>}
     <div className={css.metrics}>
       <Metric label="Workers online" value={workers.filter(worker => worker['status'] === 'online').length} tone="good" />
       <Metric label="Active" value={Number(counts['active'] ?? 0)} />

@@ -157,6 +157,33 @@ describe('Bridge native turn', () => {
     await expect(run()).rejects.toThrow('failed')
     await f.target.dispose()
   })
+  it('finishes an idle turn when retained history repeats without a cursor or completion event', async () => {
+    const f = await fixture([])
+    const agent = await f.target.ensure(summary)
+    let submitted = false
+    f.bridge.call.mockImplementation(async request => {
+      if (request.operation === 'session_events') return page(submitted ? [row('answer', 'message.completed', { role: 'assistant', text: 'done' })] : [])
+      if (request.operation === 'session') return { ...summary, status: 'idle', activeTurnId: null }
+      if (request.operation === 'submit_turn') { submitted = true; return { status: 'succeeded', turnId: 't1' } }
+      return page([])
+    })
+    const adapter = new AgentBridgeLlmAdapter({ bridge: f.bridge } as unknown as AgentControlService, f.target, 1)
+    const chunks = []
+    for await (const chunk of adapter.stream({ sessionId: agent.id, provider: 'agent-bridge', model: 'remote', signal: AbortSignal.timeout(1000), messages: [{ role: 'user', content: [{ type: 'text', text: 'go' }] }] } as GenerateOptions)) chunks.push(chunk)
+    expect(chunks.filter(chunk => chunk.type === 'text-delta')).toHaveLength(1)
+    expect(chunks.at(-1)?.type).toBe('finish')
+    await f.target.dispose()
+  })
+  it('rejects successful actions without a turn identity instead of polling forever', async () => {
+    const f = await fixture([])
+    const agent = await f.target.ensure(summary)
+    f.bridge.call.mockImplementation(async request => request.operation === 'session_events' ? page([]) :
+      request.operation === 'submit_turn' ? { actionId: 'a', status: 'succeeded' } : { ...summary, activeTurnId: null })
+    const adapter = new AgentBridgeLlmAdapter({ bridge: f.bridge } as unknown as AgentControlService, f.target, 1)
+    const run = async () => { for await (const _chunk of adapter.stream({ sessionId: agent.id, provider: 'agent-bridge', model: 'remote', messages: [{ role: 'user', content: [{ type: 'text', text: 'go' }] }] } as GenerateOptions)) { /* drain */ } }
+    await expect(run()).rejects.toThrow('without a turn identity')
+    await f.target.dispose()
+  })
 })
 
 describe('pending question mapping', () => {

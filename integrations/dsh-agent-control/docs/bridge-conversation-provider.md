@@ -123,6 +123,17 @@ diagnostic rather than relayed through a non-secret UI.
 - Verify installed artifact hashes and the actual served UI/provider state.
   Disk hash equality alone does not prove the Host reloaded the provider.
 
+`scripts/verify-runtime.cjs` runs with the installed Electron executable and
+`ELECTRON_RUN_AS_NODE=1`, passing the absolute `resources/app.asar` path. It
+uses an isolated temporary directory and the actual installed DSH services to
+check Agent creation, preset mounting, JSONL persistence, workspace attachment,
+resume, and a native turn against a controlled Bridge fixture.
+
+If the running Host response lacks `sessionProvider`, the browser reports that
+the Host has not loaded the provider. Refreshing or replacing browser artifacts
+cannot activate Host code. Do not assume CLI profile patch watching also applies
+to an already-running Desktop Host, or restart Desktop to hide this distinction.
+
 ## Current limits
 
 The native Bridge model choice follows the remote session. Worker-specific
