@@ -97,7 +97,7 @@ Permission modes are enforced before a transport call:
 - `operator`: also unblock, reassign, and reclaim.
 
 Worker-only Hermes operations (`claim`, `heartbeat`, `complete`, and `block`) and
-all delete/archive operations are absent from the service and model tool roster.
+delete/archive operations remain absent from the model tool roster. Explicit desktop UI deletion is supported through the trusted Host RPC.
 Every model-facing mutation additionally returns DSH's native `ask` decision in
 `tools/pre-execute`, so the configured approval channel remains authoritative.
 
@@ -186,3 +186,18 @@ advance cards automatically. Host-only credentials stay in the Bridge client.
 - src/client/: additive Agent Control / Kanban overlay.
 - python/kanban_adapter.py: controlled Hermes domain adapter.
 - fixtures/: development-only management overlay preview.
+
+### Session menu deletion
+
+The native sidebar ellipsis menu now contains **删除会话** alongside rename, fork,
+and archive. It targets the clicked row, even if another session is selected.
+Bridge sessions use confirmed Control Plane deletion. Local DSH sessions use
+logical deletion: a durable marker and native archive remove the conversation
+from the list; original logs are retained for recovery and fork lineage. Project
+files are never removed. Running sessions must finish before deletion.
+
+The client compatibility adapter wraps the existing `sidebar.workspaces` slot
+component and recognizes the native rename/fork/archive menu by its item IDs.
+It preserves the original slot identity, store, locale, callbacks, and directory
+picker. Unloading restores the original component. Tests exercise the published
+DSH row implementation; changes to that upstream contract need revalidation.

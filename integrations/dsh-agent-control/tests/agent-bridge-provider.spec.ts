@@ -298,3 +298,24 @@ describe('pending question mapping', () => {
     expect(() => bridgeUserInputToQuestions({ questions: [{ id: 'secret', isSecret: true }] })).toThrow('Secret')
   })
 })
+
+describe('local DSH deletion', () => {
+  it('removes only the chosen idle local record, keeps its log, and restores the deletion after reload', async () => {
+    const f = await fixture()
+    f.stored.set('session-local', { header: { id: 'session-local' }, events: [] })
+    const archive = vi.fn(async () => {})
+    f.host.workspaceRegistry.archiveSession = archive
+    expect(await f.target.deleteNative('session-local')).toEqual({ deleted: true, nativeId: 'session-local' })
+    expect(archive).toHaveBeenCalledWith('session-local')
+    expect(f.bridge.call).not.toHaveBeenCalled()
+    expect(f.stored.has('session-local')).toBe(true)
+    archive.mockClear()
+    const restarted = new AgentBridgeImportTarget(f.host, f.bridge, f.target.origin, f.target.dataRoot)
+    await restarted.restoreLocalDeletions()
+    expect(archive).toHaveBeenCalledWith('session-local')
+    await expect(f.target.deleteNative('../outside')).rejects.toThrow('无效')
+    await expect(f.target.deleteNative('agent-bridge-unloaded')).rejects.toThrow('尚未加载')
+    f.agents.set('session-local', { status: 'running', session: Session.create(SessionId('session-local'), []) } as unknown as Agent)
+    await expect(f.target.deleteNative('session-local')).rejects.toThrow('请先结束')
+  })
+})

@@ -1,4 +1,4 @@
-import { useState, useSyncExternalStore } from 'react'
+import { useEffect, useState, useSyncExternalStore } from 'react'
 import { useDialog } from './dialog.js'
 import css from './workspace.module.css'
 
@@ -8,6 +8,7 @@ type WorkspaceSnapshot = { items: readonly WorkspaceRow[]; archivedSessionIds: r
 type Source<T> = { getSnapshot(): T; subscribe(listener: () => void): () => void }
 type Workspaces = { list: Source<WorkspaceSnapshot>; rename(id: string, title: string): Promise<unknown>; delete(id: string): Promise<void>; insertSessionBefore(id: string, session: string, before?: string): Promise<unknown> }
 export type CatalogSessions = { list: Source<{ current?: string }>; clear(): void; refresh(): Promise<void> }
+export const DELETE_SESSION_EVENT = 'agent-control:delete-session'
 type Rpc = (operation: string, args?: Record<string, string>) => Promise<unknown>
 
 /** Merge presentation accounts, keeping every original session/cwd and execution binding intact. */
@@ -50,7 +51,7 @@ export class NativeCatalog {
     if (!Array.isArray(data.sessions)) throw new Error('会话目录不可用')
     if (JSON.stringify(this.entries) !== JSON.stringify(data.sessions)) { this.entries = data.sessions; this.emit() }
   }
-  async remove(entry: NativeEntry): Promise<void> {
+  async remove(entry: Pick<NativeEntry, 'nativeId'>): Promise<void> {
     const result = await this.rpc('delete_native', { nativeId: entry.nativeId }) as { deleted?: boolean }
     if (!result.deleted) throw new Error('尚未确认删除成功')
     if (this.sessions.list.getSnapshot().current === entry.nativeId) this.sessions.clear()
@@ -93,17 +94,23 @@ export class NativeCatalog {
 
 export function DeleteNativeSession({ catalog }: { catalog: NativeCatalog }) {
   const entries = useSyncExternalStore(catalog.subscribe, catalog.snapshot, catalog.snapshot)
-  const selection = useSyncExternalStore(catalog.sessions.list.subscribe, catalog.sessions.list.getSnapshot, catalog.sessions.list.getSnapshot)
-  const entry = entries.find(row => row.nativeId === selection.current)
   const [pending, setPending] = useState<NativeEntry>()
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const ref = useDialog(!!pending, () => { if (!busy) setPending(undefined) })
-  if (!entry && !pending) return null
-  return <><button type="button" className={css.deleteSession} onClick={() => { setError(''); setPending(entry) }}>删除会话</button>{pending && <div className={css.sourceOverlay}>
+  useEffect(() => {
+    const request = (event: Event) => {
+      const detail = (event as CustomEvent<{ nativeId: string; title: string }>).detail
+      if (!detail || typeof detail.nativeId !== 'string' || busy) return
+      setError(''); setPending(entries.find(row => row.nativeId === detail.nativeId) ?? { nativeId: detail.nativeId, sessionId: detail.nativeId.startsWith('agent-bridge-') ? '?' : '', machineId: '', workspace: '', title: detail.title || 'DSH 对话', status: '', worker: 'DSH' })
+    }
+    window.addEventListener(DELETE_SESSION_EVENT, request)
+    return () => window.removeEventListener(DELETE_SESSION_EVENT, request)
+  }, [entries, busy])
+  return <>{pending && <div className={css.sourceOverlay}>
     <div ref={ref} tabIndex={-1} role="dialog" aria-modal="true" aria-labelledby="delete-session-title" className={css.sourceDialog}>
-      <h2 id="delete-session-title">删除此会话？</h2><p className={css.deleteTitle}>{pending.title}</p><p className={css.help}>{pending.worker} · {pending.workspace}</p>
-      <p>将删除 Bridge 中的会话并从客户端列表移除。工作目录和项目文件会保留。</p>
+      <h2 id="delete-session-title">删除此会话？</h2><p className={css.deleteTitle}>{pending.title}</p><p className={css.help}>{pending.worker}{pending.workspace ? ' · ' + pending.workspace : ''}</p>
+      <p>{pending.sessionId ? '将删除 Bridge 中的会话并从客户端列表移除。' : '将删除此 DSH 对话的列表记录。底层日志保留以便恢复。'}工作目录和项目文件会保留。</p>
       {error && <p role="alert">{error}</p>}
       <footer className={css.dialogFooter}><button type="button" disabled={busy} onClick={() => setPending(undefined)}>取消</button><button type="button" className={css.dangerButton} disabled={busy} onClick={() => { setBusy(true); void catalog.remove(pending).then(() => setPending(undefined)).catch(cause => setError(cause instanceof Error ? cause.message : '删除失败')).finally(() => setBusy(false)) }}>{busy ? '正在删除…' : '确认删除'}</button></footer>
     </div></div>}</>

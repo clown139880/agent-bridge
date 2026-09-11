@@ -152,6 +152,16 @@ fs.writeFileSync(target, source);
       assert.ok(ctx.workspaceRegistry.archivedSessionIds.includes(resumed.id));
       assert.ok(!target.catalog().sessions.some(row => row.nativeId === resumed.id));
       console.log('PASS: confirmed remote deletion -> native workspace archive -> catalog removal');
+      stage = 'local DSH deletion';
+      const local = await ctx.agents.create({sessionId:'session-local-delete',meta:{cwd:folder,createdAt:Date.now()},seed:[],agentOptions:{provider:'agent-bridge',model:'remote'}});
+      try {
+        await ctx.sessions.flush(local.agent.session);
+        await target.deleteNative(local.agent.id);
+        assert.ok(ctx.workspaceRegistry.archivedSessionIds.includes(local.agent.id));
+        assert.ok(await ctx.sessionPersistence.stat(local.agent.id),'local deletion preserves the original log');
+        await target.restoreLocalDeletions();
+        console.log('PASS: local DSH logical deletion -> durable removal marker -> native archive, with original log retained');
+      } finally { await local.dispose(); }
     } finally { await target.dispose(); }
   } finally { await ctx.fiber.dispose(); }
 })().catch(error => { console.error(error); process.exitCode = 1; }).finally(async () => { clearTimeout(deadline); await fs.promises.rm(folder, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); });

@@ -1,3 +1,4 @@
+import { installSessionMenu } from './session-menu.js'
 import { useDialog } from './dialog.js'
 import { NativeCatalog, DeleteNativeSession, type CatalogSessions } from './native-catalog.js'
 import { MarkdownText } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -253,7 +254,8 @@ export function apply(ctx: ClientContext): void {
   const creation = new SessionCreationController((operation, args) => call('bridge', operation, args))
   const catalog = new NativeCatalog((operation, args) => call('bridge', operation, args), ctx.get('sessions') as unknown as CatalogSessions)
   ctx.effect(() => catalog.install(ctx.get('workspaces') as unknown as Parameters<NativeCatalog['install']>[0]))
-  ctx.slots.inject('conversation.session.header.actions', () => ctx.slots.register({ name: 'conversation.session.header.actions', id: 'agent-control-delete-session', order: 30, inject: () => ({ catalog }) } as never, DeleteNativeSession))
+  ctx.effect(() => installSessionMenu(ctx.slots))
+  ctx.slots.inject('shell.overlay', () => ctx.slots.register({ name: 'shell.overlay', id: 'agent-control-delete-session', order: 12, inject: () => ({ catalog }) }, DeleteNativeSession))
   ctx.effect(() => {
     let disposed = false
     let uninstall: (() => void) | undefined

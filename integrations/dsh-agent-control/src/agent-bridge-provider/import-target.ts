@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { mkdir, realpath, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, realpath, readFile, writeFile, readdir } from 'node:fs/promises'
 import { homedir, hostname } from 'node:os'
 import { isAbsolute, join, basename, relative } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
@@ -97,7 +97,24 @@ export class AgentBridgeImportTarget {
   }
   async deleteNative(nativeId: string, signal?: AbortSignal): Promise<JsonObject> {
     const binding = this.binding(nativeId)
-    if (!binding) throw new Error('不是 Bridge 会话')
+    if (!binding) {
+      // Imported ids must never fall through to local-only removal when their
+      // Bridge binding has not loaded yet.
+      if (nativeId.startsWith('agent-bridge-')) throw new Error('Bridge 会话尚未加载，请稍后重试')
+      if (!/^[A-Za-z0-9_-]+$/.test(nativeId)) throw new Error('无效的会话 ID')
+      if (!this.host.workspaceRegistry.archiveSession) throw new Error('客户端不支持会话移除')
+      if (this.isBusy(nativeId)) throw new Error('请先结束当前回合并处理待确认事项，再删除会话')
+      const agent = this.host.agents.get(nativeId)
+      if (!agent && !await this.host.sessionPersistence.stat(nativeId)) throw new Error('会话不存在')
+      if (this.isBusy(nativeId)) throw new Error('会话正在运行，请稍后重试')
+      // Logical deletion is durable and separate from ordinary archive. Keep
+      // the original log intact; it may contain lineage used by forked sessions.
+      const directory = join(this.dataRoot, 'deleted-native-sessions')
+      await mkdir(directory, { recursive: true })
+      await writeFile(join(directory, nativeId + '.json'), JSON.stringify({ nativeId, deletedAt: Date.now() }), { flag: 'w' })
+      await this.host.workspaceRegistry.archiveSession(nativeId)
+      return { deleted: true, nativeId }
+    }
     if (!this.host.workspaceRegistry.archiveSession) throw new Error('客户端不支持会话移除')
     if (this.isBusy(nativeId) || ['active', 'waiting_for_approval', 'waiting_for_input'].includes(str(binding['status']))) throw new Error('请先结束当前回合并处理待确认事项，再删除会话')
     if (this.deleting.has(nativeId)) throw new Error('正在删除此会话')
@@ -198,6 +215,16 @@ export class AgentBridgeImportTarget {
     try { await writeFile(join(folder, 'preset.yml'), 'name: Agent Bridge\ndescription: Bridge remote sessions\n', { flag: 'wx' }) }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error }
     await presets.resolve(PROVIDER)
+  }
+  async restoreLocalDeletions(): Promise<void> {
+    const directory = join(this.dataRoot, 'deleted-native-sessions')
+    const files = await readdir(directory).catch((error: NodeJS.ErrnoException) => { if (error.code === 'ENOENT') return []; throw error })
+    for (const file of files) {
+      if (!/^[A-Za-z0-9_-]+\.json$/.test(file)) continue
+      const record = JSON.parse(await readFile(join(directory, file), 'utf8')) as { nativeId?: string }
+      if (record.nativeId + '.json' !== file) throw new Error('无效的本地删除记录')
+      await this.host.workspaceRegistry.archiveSession?.(record.nativeId!)
+    }
   }
   start(): void {
     const tick = async () => {

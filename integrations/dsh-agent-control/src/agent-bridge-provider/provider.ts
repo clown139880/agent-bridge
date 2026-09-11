@@ -40,7 +40,7 @@ export function registerAgentBridgeProvider(ctx: Context, service: AgentControlS
     }) as never, { global: true })
     scoped.effect(() => {
       let disposed = false
-      const ready = target.ensurePreset().then(() => { if (!disposed) target.start() }).catch(error => {
+      const ready = target.restoreLocalDeletions().then(() => target.ensurePreset()).then(() => { if (!disposed) target.start() }).catch(error => {
         target.error = String(error); scoped.logger.warn('Agent Bridge provider: ' + String(error))
       })
       return async () => {
