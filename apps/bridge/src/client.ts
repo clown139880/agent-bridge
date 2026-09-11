@@ -94,6 +94,7 @@ export class BridgeClient {
         desktopHome: options.desktopHome,
         desktopScanIntervalMs: options.desktopScanIntervalMs,
         desktopReplayExisting: options.desktopReplayExisting,
+        fetchAttachment: makeAttachmentFetcher(options.url, options.token),
         reconnectMs: options.reconnectMs,
       }, this.adapterEmit("codex-cli")));
     }

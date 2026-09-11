@@ -103,6 +103,24 @@ describe('native history projection', () => {
 })
 
 describe('native session catalog', () => {
+  it('removes native visibility only after a confirmed remote delete and rejects busy sessions', async () => {
+    const f = await fixture()
+    await f.target.refresh()
+    const id = nativeSessionId('http://bridge.test', 'remote-1')
+    f.host.workspaceRegistry.archiveSession = vi.fn(async () => {})
+    f.target.setBusy(id, true)
+    await expect(f.target.deleteNative(id)).rejects.toThrow('当前回合')
+    f.target.setBusy(id, false)
+    const original = f.bridge.call.getMockImplementation()!
+    f.bridge.call.mockImplementation(async (request, signal) => request.operation === 'delete_session' ? { status: 'failed', error: { message: 'offline' } } : original(request, signal))
+    await expect(f.target.deleteNative(id)).rejects.toThrow('删除失败')
+    expect(f.host.workspaceRegistry.archiveSession).not.toHaveBeenCalled()
+    f.bridge.call.mockImplementation(async (request, signal) => request.operation === 'delete_session' ? { status: 'succeeded', sessionId: 'remote-1' } : original(request, signal))
+    await f.target.deleteNative(id)
+    expect(f.host.workspaceRegistry.archiveSession).toHaveBeenCalledWith(id)
+    await f.target.refresh()
+    expect(f.agents.has(id)).toBe(false)
+  })
   it('offers only workers on the remote directory machine and never DSH on a presentation folder', async () => {
     const f = await fixture()
     const originalCall = f.bridge.call.getMockImplementation()!
@@ -128,7 +146,7 @@ describe('native session catalog', () => {
     const id = nativeSessionId('http://bridge.test', 'remote-1')
     expect([...f.agents.keys()]).toEqual(['local-session', id])
     expect(f.target.binding(id)?.['workspace']).toBe('/remote/repo')
-    expect(f.host.workspaceRegistry.create).toHaveBeenCalledWith(expect.stringContaining('workspaces'), 'repo · Remote worker')
+    expect(f.host.workspaceRegistry.create).toHaveBeenCalledWith(expect.stringContaining('workspaces'), 'repo @ w')
     expect(f.stored.has(id)).toBe(true)
     await f.target.refresh()
     expect(f.create).toHaveBeenCalledTimes(1)

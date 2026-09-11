@@ -28,6 +28,11 @@ export class AgentControlService {
     const args = request.args ?? {}
     if (request.domain === 'bridge') {
       if (request.operation === 'provider_status') return { registered: !!this.importTarget, ...(this.importTarget?.status() ?? {}) }
+      if (request.operation === 'native_catalog') return this.importTarget?.catalog() ?? { sessions: [] }
+      if (request.operation === 'delete_native') {
+        if (!this.importTarget || typeof args['nativeId'] !== 'string') throw new ControlError('invalid_parameter', 'nativeId is required.', 400)
+        return this.importTarget.deleteNative(args['nativeId'], signal)
+      }
       if (request.operation === 'creation_sources' || request.operation === 'create_native') {
         if (!this.importTarget) throw new ControlError('invalid_operation', 'Bridge provider is not ready.', 400)
         if (typeof args['cwd'] !== 'string' || !args['cwd']) throw new ControlError('invalid_parameter', 'cwd is required.', 400)

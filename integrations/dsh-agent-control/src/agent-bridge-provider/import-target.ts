@@ -12,6 +12,18 @@ import { ACK_EVENT, BINDING_EVENT, PROVIDER, projectNativeEvents, record, str } 
 import { relayPendingInteractions } from './approval-bridge.js'
 
 const hash = (value: string) => createHash('sha256').update(value).digest('hex').slice(0, 32)
+export function usefulTitle(title: unknown): boolean {
+  return typeof title === 'string' && !!title.trim() && !/^(?:Bridge\s*[·:]\s*\S+|.+\s·\s[\da-f]{8}(?:-[\da-f-]+)?|(?:new|untitled)(?:\s+(?:session|conversation|chat))?|新(?:建)?(?:会话|对话)|[\da-f]{8}(?:-[\da-f-]+)?)$/i.test(title.trim())
+}
+export function promptTitle(row: JsonObject, events: readonly NativeEvent[]): string {
+  if (usefulTitle(row['title'])) return str(row['title'])
+  const prompts = events.filter(event => event.type === 'user/message' && record(event.data['source'])['kind'] === 'user')
+  const recovered = prompts.find(event => JSON.stringify(event.data['content']).includes('【恢复的首条用户消息】'))
+  const first = recovered ?? prompts[0]
+  const text = first && Array.isArray(first.data['content']) ? first.data['content'].map(block => record(block)['type'] === 'text' ? str(record(block)['text']) : '').join(' ') : ''
+  const prompt = (text || str(row['promptSummary'])).replace(/^【恢复的首条用户消息】\s*/, '').replace(/\s+/g, ' ').trim()
+  return prompt ? Array.from(prompt).slice(0, 64).join('') + (Array.from(prompt).length > 64 ? '…' : '') : 'Bridge · ' + str(row['sessionId']).slice(0, 8)
+}
 export function nativeSessionId(origin: string, sessionId: string): string {
   return 'agent-bridge-' + hash(new URL(origin).origin + '\0' + sessionId)
 }
@@ -52,6 +64,8 @@ export class AgentBridgeImportTarget {
   private readonly placementOverrides = new Map<string, string>()
   error = ''
   lastSyncAt = 0
+  private readonly deleting = new Set<string>()
+  private readonly deleted = new Set<string>()
   constructor(readonly host: NativeHost, readonly bridge: Pick<BridgeClient, 'call'>, readonly origin: string,
     readonly dataRoot = join(homedir(), '.dsh', 'agent-bridge')) {}
 
@@ -70,6 +84,40 @@ export class AgentBridgeImportTarget {
     const counts: Record<string, number> = {}
     for (const [id, binding] of this.bindings) if (this.host.agents.get(id)) counts[str(binding['workerId'])] = (counts[str(binding['workerId'])] ?? 0) + 1
     return { sourceSelection: true, imageForwarding: true, nativeSessions: Object.values(counts).reduce((a, b) => a + b, 0), workers: Object.entries(counts).map(([workerId, sessions]) => ({ workerId, name: str(this.workers.get(workerId)?.['name'], workerId), sessions })), error: this.error, lastSyncAt: this.lastSyncAt }
+  }
+  catalog(): JsonObject {
+    return { sessions: [...this.bindings].filter(([id]) => !this.deleted.has(id)).map(([nativeId, binding]) => {
+      const worker = this.workers.get(str(binding['workerId']))
+      const machineId = str(worker?.['machineId'], str(binding['workerId']))
+      const agent = this.host.agents.get(nativeId)
+      return { nativeId, sessionId: str(binding['sessionId']), machineId, workspace: str(binding['workspace']),
+        title: agent ? promptTitle(binding, sessionEvents(nativeSession(agent))) : str(binding['title']),
+        status: str(binding['status']), worker: str(worker?.['name'], str(binding['workerId'])) }
+    }) }
+  }
+  async deleteNative(nativeId: string, signal?: AbortSignal): Promise<JsonObject> {
+    const binding = this.binding(nativeId)
+    if (!binding) throw new Error('不是 Bridge 会话')
+    if (!this.host.workspaceRegistry.archiveSession) throw new Error('客户端不支持会话移除')
+    if (this.isBusy(nativeId) || ['active', 'waiting_for_approval', 'waiting_for_input'].includes(str(binding['status']))) throw new Error('请先结束当前回合并处理待确认事项，再删除会话')
+    if (this.deleting.has(nativeId)) throw new Error('正在删除此会话')
+    this.deleting.add(nativeId)
+    try {
+      const fused = AbortSignal.any([this.abort.signal, AbortSignal.timeout(60000), ...(signal ? [signal] : [])])
+      let receipt = record(await this.bridge.call({ operation: 'delete_session', args: { sessionId: str(binding['sessionId']) } }, fused))
+      while (receipt['status'] === 'accepted') {
+        if (!str(receipt['actionId'])) throw new Error('删除操作缺少标识')
+        await delay(300, undefined, { signal: fused })
+        receipt = record(await this.bridge.call({ operation: 'action', args: { actionId: str(receipt['actionId']) } }, fused))
+      }
+      if (receipt['status'] !== 'succeeded' || receipt['sessionId'] !== binding['sessionId']) throw new Error('删除失败：' + JSON.stringify(receipt['error'] ?? receipt['status']))
+      await this.host.workspaceRegistry.archiveSession(nativeId)
+      this.deleted.add(nativeId)
+      await this.handles.get(nativeId)?.dispose()
+      this.handles.delete(nativeId)
+      this.versions.delete(nativeId)
+      return { deleted: true, nativeId }
+    } finally { this.deleting.delete(nativeId) }
   }
   /** An execution location is machine + remote directory, separate from a future logical project. */
   async creationSources(cwd: string): Promise<JsonObject> {
@@ -189,6 +237,18 @@ export class AgentBridgeImportTarget {
       if (!next || cursors.has(next)) throw new Error('Bridge session cursor did not advance')
       cursors.add(next); cursor = next
     } while (true)
+    // The complete control-plane catalog is authoritative. Retry local cleanup after
+    // a confirmed remote deletion even if the previous Host exited before archiving.
+    const retained = new Set(summaries.map(row => str(row['sessionId'])))
+    for (const [id, binding] of this.bindings) {
+      if (retained.has(str(binding['sessionId'])) || this.isBusy(id) || this.deleting.has(id) || this.deleted.has(id)) continue
+      if (this.host.workspaceRegistry.archiveSession) {
+        await this.host.workspaceRegistry.archiveSession(id)
+        this.deleted.add(id)
+        await this.handles.get(id)?.dispose()
+        this.handles.delete(id)
+      }
+    }
     const failures: string[] = []
     // Bounded concurrent hydration. A single broken/offline session cannot hide all other sessions.
     let index = 0
@@ -197,6 +257,7 @@ export class AgentBridgeImportTarget {
         const row = summaries[index++]!
         const remoteId = str(row['sessionId'])
         const id = nativeSessionId(this.origin, remoteId)
+        if (this.deleting.has(id) || this.deleted.has(id)) continue
         try {
           this.abort.signal.throwIfAborted()
           const current = this.host.agents.get(id)
@@ -244,7 +305,7 @@ export class AgentBridgeImportTarget {
     const machineId = str(worker?.['machineId'], str(row['workerId']))
     const cwd = join(this.dataRoot, 'workspaces', hash(new URL(this.origin).origin + '\0' + machineId + '\0' + path))
     await mkdir(cwd, { recursive: true })
-    return { cwd, title: path.replace(/\\/g, '/').split('/').filter(Boolean).at(-1) + ' · ' + (worker?.['machineId'] ? machineId : str(worker?.['name'], str(row['workerId']))) }
+    return { cwd, title: path.replace(/\\/g, '/').split('/').filter(Boolean).at(-1) + ' @ ' + machineId }
   }
   private async materialize(id: string, row: JsonObject): Promise<Agent> {
     this.abort.signal.throwIfAborted()
@@ -272,7 +333,7 @@ export class AgentBridgeImportTarget {
           { type: 'turn/start', data: { turn: 1 }, seq: seed.length, time },
           { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } }, seq: seed.length + 1, time },
         )
-        seed.push({ type: 'session/title', data: { title: str(row['title'], 'Bridge · ' + remoteId.slice(0, 8)), messageSeqs: [], source: { kind: 'user' } }, seq: seed.length, time })
+        seed.push({ type: 'session/title', data: { title: promptTitle(row, seed), messageSeqs: [], source: { kind: 'user' } }, seq: seed.length, time })
         handle = await this.host.agents.create({ sessionId: id, meta: { cwd: placement.cwd, createdAt: time, agentPreset: PROVIDER }, seed, agentOptions: options, setup })
         if (history.cursor) this.cursors.set(id, history.cursor)
       }
@@ -283,9 +344,11 @@ export class AgentBridgeImportTarget {
     const session = nativeSession(agent)
     const previousBinding = [...sessionEvents(session)].reverse().find(event => event.type === BINDING_EVENT)
     if (JSON.stringify(previousBinding?.data) !== JSON.stringify(binding)) session.append(BINDING_EVENT, binding)
-    const title = str(row['title'], 'Bridge · ' + remoteId.slice(0, 8))
+    const title = promptTitle(row, sessionEvents(session))
     const previous = [...sessionEvents(session)].reverse().find(e => e.type === 'session/title')
-    if (previous?.data['title'] !== title) session.append('session/title', { title, messageSeqs: [], source: { kind: 'user' } })
+    const previousBindingTitle = previousBinding ? promptTitle(previousBinding.data, sessionEvents(session)) : ''
+    // Preserve explicit DSH renames, while allowing older importer-owned titles to improve.
+    if (previous?.data['title'] !== title && (!usefulTitle(previous?.data['title']) || previous?.data['title'] === previousBindingTitle)) session.append('session/title', { title, messageSeqs: [], source: { kind: 'user' } })
     if (!await this.host.sessions.flush(agent.session)) throw new Error('Native session has no persistence writer')
     const cwd = session.header.cwd ?? placement.cwd
     const workspace = await this.host.workspaceRegistry.resolveByPath(cwd) ?? await this.host.workspaceRegistry.create(cwd, placement.title)

@@ -18,12 +18,21 @@ import type {
 import { CodexDesktopSessionScanner } from "./desktop-sessions.js";
 import { isPathWithinRoots } from "./path-utils.js";
 import type { AgentAdapter } from "./agent-adapter.js";
+import type { AttachmentFetcher } from "./attachments.js";
 
 const log = pino({ name: "codex-app-server" });
 
-/** Codex has no image input block yet; attachments to a codex session are dropped. */
-function warnDroppedAttachments(attachments?: AttachmentRef[]): void {
-  if (attachments?.length) log.warn({ count: attachments.length }, "Codex does not support attachments; dropping them");
+/** Resolve through the authenticated attachment store; never pass an opaque ref as a local path. */
+export async function codexInput(text: string, attachments?: AttachmentRef[], fetchAttachment?: AttachmentFetcher): Promise<Record<string, unknown>[]> {
+  const input: Record<string, unknown>[] = text ? [{ type: "text", text, text_elements: [] }] : [];
+  for (const ref of attachments ?? []) {
+    if (!fetchAttachment) throw new Error("Codex image attachment storage is unavailable");
+    if (!/^image\/(png|jpeg|webp|gif)$/i.test(ref.mimeType)) throw new Error("Unsupported Codex image attachment type");
+    const image = await fetchAttachment(ref);
+    if (!/^image\/(png|jpeg|webp|gif)$/i.test(image.mediaType)) throw new Error("Attachment is not a supported image");
+    input.push({ type: "image", url: `data:${image.mediaType};base64,${image.base64}` });
+  }
+  return input;
 }
 const execFileAsync = promisify(execFile);
 
@@ -147,6 +156,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
       desktopHome?: string;
       desktopScanIntervalMs?: number;
       desktopReplayExisting?: boolean;
+      fetchAttachment?: AttachmentFetcher;
     },
     private readonly emit: (message: BridgeToControlMessage) => void,
   ) {
@@ -209,7 +219,6 @@ export class CodexAppServerAdapter implements AgentAdapter {
   }
 
   async startSession(requestId: string, projectPath: string, prompt?: string, resumeSessionId?: string, model?: string, attachments?: AttachmentRef[]): Promise<string> {
-    warnDroppedAttachments(attachments);
     await this.ensureReady();
     const cwd = await resolveProjectPath(projectPath, this.options.allowedRoots);
     if (prompt) this.pendingStartPrompts.set(cwd, prompt);
@@ -219,13 +228,13 @@ export class CodexAppServerAdapter implements AgentAdapter {
         const threadCwd = await resolveProjectPath(thread.cwd, this.options.allowedRoots);
         if (threadCwd !== cwd) throw new Error(`Codex thread ${resumeSessionId} belongs to ${threadCwd}, not ${cwd}`);
         await this.discoverThread(thread, prompt, requestId);
-        if (prompt) await this.startTurn(thread.id, prompt, model);
+        if (prompt || attachments?.length) await this.startTurn(thread.id, prompt ?? "", model, attachments);
         return thread.id;
       }
       const result = await this.request<{ thread: CodexThread }>("thread/start", { cwd, ...(model ? { model } : {}) });
       this.subscribedThreads.add(result.thread.id);
       await this.discoverThread(result.thread, prompt, requestId);
-      if (prompt) await this.startTurn(result.thread.id, prompt, model);
+      if (prompt || attachments?.length) await this.startTurn(result.thread.id, prompt ?? "", model, attachments);
       return result.thread.id;
     } finally {
       if (prompt && this.pendingStartPrompts.get(cwd) === prompt) this.pendingStartPrompts.delete(cwd);
@@ -233,10 +242,10 @@ export class CodexAppServerAdapter implements AgentAdapter {
   }
 
   async input(sessionId: string, text: string, model?: string, attachments?: AttachmentRef[]): Promise<void> {
-    warnDroppedAttachments(attachments);
     await this.ensureReady();
     const userInput = this.pendingUserInput.get(sessionId);
     if (userInput) {
+      if (attachments?.length) throw domainError("user_input_pending", "answer the pending question before sending images");
       const answers = parseUserInputAnswers(text, userInput.questions);
       this.respond(userInput.requestId, { answers });
       this.pendingUserInput.delete(sessionId);
@@ -254,7 +263,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
     await this.ensureThreadSubscribed(sessionId);
     const activeTurnId = this.activeTurns.get(sessionId);
     if (activeTurnId && model) throw domainError("model_not_applicable", "model cannot be changed while steering an active turn");
-    const input = [{ type: "text", text, text_elements: [] }];
+    const input = await codexInput(text, attachments, this.options.fetchAttachment);
     if (activeTurnId) {
       await this.request("turn/steer", { threadId: sessionId, expectedTurnId: activeTurnId, input });
     } else {
@@ -275,7 +284,6 @@ export class CodexAppServerAdapter implements AgentAdapter {
   submitTurnAction(actionId: string, sessionId: string, text: string,
     delivery: "auto" | "steer" | "start_turn", expectedTurnId?: string, model?: string, reasoningEffort?: string, attachments?: AttachmentRef[]): Promise<{
       sessionId: string; turnId?: string; resolvedAction: "steer" | "start_turn" }> {
-    warnDroppedAttachments(attachments);
     return this.serial(sessionId, async () => {
       await this.ensureReady();
       if (this.pendingUserInput.has(sessionId)) throw domainError("user_input_pending", "structured user input is pending");
@@ -288,7 +296,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
       if (delivery === "steer" && !activeTurnId) throw domainError("no_active_turn", "session has no active turn");
       if (delivery === "start_turn" && activeTurnId) throw domainError("turn_already_active", "session already has an active turn");
       const resolvedAction = activeTurnId ? "steer" : "start_turn";
-      const input = [{ type: "text", text, text_elements: [] }];
+      const input = await codexInput(text, attachments, this.options.fetchAttachment);
       if (activeTurnId) await this.request("turn/steer", { threadId: sessionId, expectedTurnId: activeTurnId, input });
       else {
         if(model)this.pendingTurnModels.set(sessionId,model);
@@ -301,7 +309,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
         }
       }
       this.emitSessionEvent("message.completed", sessionId, `action:${actionId}:user`,
-        { role: "user", text }, this.activeTurns.get(sessionId));
+        { role: "user", text, ...(attachments?.length ? { attachments } : {}) }, this.activeTurns.get(sessionId));
       return { sessionId, turnId: this.activeTurns.get(sessionId), resolvedAction };
     });
   }
@@ -937,11 +945,12 @@ export class CodexAppServerAdapter implements AgentAdapter {
     }
   }
 
-  private async startTurn(threadId: string, text: string, model?: string): Promise<void> {
+  private async startTurn(threadId: string, text: string, model?: string, attachments?: AttachmentRef[]): Promise<void> {
+    const input = await codexInput(text, attachments, this.options.fetchAttachment);
     if(model)this.pendingTurnModels.set(threadId,model);
     let result:{turn?:CodexTurn};
     try{result=await this.request<{turn?:CodexTurn}>("turn/start", {threadId,
-      input:[{type:"text",text,text_elements:[]}],...(model?{model}:{})});}
+      input,...(model?{model}:{})});}
     finally{this.pendingTurnModels.delete(threadId);}
     if(result.turn?.id){this.activeTurns.set(threadId,result.turn.id);
       const actual=result.turn.model??model;if(actual)this.turnModels.set(result.turn.id,actual);}

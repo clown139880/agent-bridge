@@ -1,7 +1,9 @@
 import { useDialog } from './dialog.js'
+import { NativeCatalog, DeleteNativeSession, type CatalogSessions } from './native-catalog.js'
 import { MarkdownText } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
+import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
@@ -239,6 +241,9 @@ export function apply(ctx: ClientContext): void {
   const remote = (ctx as unknown as { remote: { session: { modelCatalog(): Promise<{ ok: true; value: JsonValue } | { ok: false; error: { code: string; message: string } }> }; $on(event: string, listener: () => void): () => void } }).remote
   const nativeSessions = (ctx as unknown as { get(name: string): unknown }).get('sessions') as unknown as { open(id: string): void } | undefined
   const creation = new SessionCreationController((operation, args) => call('bridge', operation, args))
+  const catalog = new NativeCatalog((operation, args) => call('bridge', operation, args), ctx.get('sessions') as unknown as CatalogSessions)
+  ctx.effect(() => catalog.install(ctx.get('workspaces') as unknown as Parameters<NativeCatalog['install']>[0]))
+  ctx.slots.inject('conversation.session.header.actions', () => ctx.slots.register({ name: 'conversation.session.header.actions', id: 'agent-control-delete-session', order: 30, inject: () => ({ catalog }) } as never, DeleteNativeSession))
   ctx.effect(() => {
     let disposed = false
     let uninstall: (() => void) | undefined
