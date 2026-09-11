@@ -126,8 +126,14 @@ fs.writeFileSync(target, source);
       const sharp = sharpModule.default ?? sharpModule;
       const imageBytes = await sharp({create:{width:16,height:16,channels:3,background:'#0080ff'}}).png().toBuffer();
       const imageRef = await ctx.attachments.saveImage({data:imageBytes,mediaType:'image/png',name:'probe.png'});
+      // Reproduce an import advancing the log while the instantiated loop retains its old counter.
+      for (const event of plugin.projectNativeEvents([{...rows[1],eventId:'background-import'}], resumed.session.snapshotEvents())) {
+        resumed.session.append(event.type,event.data,...(event.surfaceOp ? [{surfaceOp:event.surfaceOp}] : []));
+      }
       resumed.followup(createUserMessage({content:[{type:'text',text:'runtime probe'},{type:'image',attachment:imageRef}],source:{kind:'user'}}));
       await resumed.whenIdle();
+      const turnIds = resumed.session.snapshotEvents().filter(event => event.type === 'turn/start').map(event => event.data.turn);
+      assert.equal(new Set(turnIds).size,turnIds.length,'native follow-up must not reuse a background-import turn number');
       assert.equal(submitted,true);
       assert.equal(uploadedImage.mimeType,'image/png');
       assert.ok(Buffer.from(uploadedImage.content,'base64').length > 0);

@@ -7,7 +7,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { Context } from '@deepseek-ai/cordis'
 import type { BridgeClient } from '../bridge-client.js'
 import type { JsonObject } from '../types.js'
-import { appendSessionEvent, nativeSession, sessionEvents, type NativeHost, type NativeHandle, type NativeEvent } from './dsh-compat.js'
+import { appendSessionEvent, guardImportedTurnNumbers, nativeSession, sessionEvents, type NativeHost, type NativeHandle, type NativeEvent } from './dsh-compat.js'
 import { ACK_EVENT, BINDING_EVENT, PROVIDER, projectNativeEvents, record, str } from './mapping.js'
 import { relayPendingInteractions } from './approval-bridge.js'
 
@@ -278,6 +278,7 @@ export class AgentBridgeImportTarget {
       }
       this.handles.set(id, handle); agent = handle.agent
     }
+    guardImportedTurnNumbers(nativeSession(agent))
     await this.syncHistory(id, agent)
     const session = nativeSession(agent)
     const previousBinding = [...sessionEvents(session)].reverse().find(event => event.type === BINDING_EVENT)

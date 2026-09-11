@@ -5,7 +5,7 @@ import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
 import type { JsonObject, JsonValue } from '../src/types.js'
 import { AgentBridgeImportTarget, nativeSessionId, readHistory } from '../src/agent-bridge-provider/import-target.js'
 import { ACK_EVENT, BINDING_EVENT, projectNativeEvents, projectStreamChunks } from '../src/agent-bridge-provider/mapping.js'
-import { nativeSession, sessionEvents, appendSessionEvent, type NativeHost, type NativeEvent } from '../src/agent-bridge-provider/dsh-compat.js'
+import { nativeSession, sessionEvents, appendSessionEvent, guardImportedTurnNumbers, type NativeHost, type NativeEvent } from '../src/agent-bridge-provider/dsh-compat.js'
 import { AgentBridgeLlmAdapter } from '../src/agent-bridge-provider/adapter.js'
 import { uploadPromptImages } from '../src/agent-bridge-provider/attachments.js'
 import type { AgentControlService } from '../src/service.js'
@@ -58,6 +58,24 @@ async function fixture(rows = [row('u', 'message.completed', { role: 'user', tex
 }
 
 describe('native history projection', () => {
+  it('keeps imported and cached native loop turn numbers distinct', () => {
+    const session = Session.create(SessionId('turn-identity'), projectNativeEvents([row('first')], []) as never)
+    guardImportedTurnNumbers(session as never)
+    guardImportedTurnNumbers(session as never)
+    projectNativeEvents([row('background')], sessionEvents(session as never)).forEach(event => appendSessionEvent(session as never, event))
+    session.append('turn/start', { turn: 2 })
+    session.append('step/start', { turn: 2, step: 1 })
+    session.append('turn/end', { turn: 2, reason: { kind: 'completed' } })
+    const events = session.snapshotEvents()
+    expect(events.filter(event => event.type === 'turn/start').map(event => event.data.turn)).toEqual([1, 2, 3])
+    expect(events.at(-2)?.data).toEqual({ turn: 3, step: 1 })
+    expect((events.at(-1)?.data as { turn: number }).turn).toBe(3)
+  })
+  it('does not reuse tool identities for repeated remote item IDs', () => {
+    const events = projectNativeEvents(['one', 'two'].map(eventId => ({ ...row(eventId, 'command.completed', { command: 'pwd' }), itemId: 'same-item' })), [])
+    const ids = events.filter(event => event.type === 'tool/call').map(event => event.data['callId'])
+    expect(new Set(ids).size).toBe(2)
+  })
   it('replays real message/command/file events through DSH Session, and appends no duplicate events', () => {
     const rows = [row('u', 'message.completed', { role: 'user', text: 'hello' }), row('a'),
       row('cmd', 'command.completed', { command: 'pwd', output: '/repo', exitCode: 0 }),

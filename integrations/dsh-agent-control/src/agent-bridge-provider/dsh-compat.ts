@@ -41,3 +41,22 @@ export function appendSessionEvent(session: NativeSession, event: Pick<NativeEve
   if (event.surfaceOp) session.append(event.type, event.data, { surfaceOp: event.surfaceOp })
   else session.append(event.type, event.data)
 }
+
+const guardedSessions = new WeakSet<NativeSession>()
+/** The native loop caches its turn counter at construction; background imports advance the log. */
+export function guardImportedTurnNumbers(session: NativeSession): void {
+  if (guardedSessions.has(session)) return
+  guardedSessions.add(session)
+  const append = session.append.bind(session)
+  let maximum = sessionEvents(session).reduce((n, event) => Math.max(n, Number(event.data['turn']) || 0), 0)
+  let sourceTurn = -1
+  let logTurn = -1
+  session.append = (type, data, options) => {
+    if (type === 'turn/start' && typeof data['turn'] === 'number') {
+      sourceTurn = data['turn']
+      logTurn = Math.max(maximum + 1, sourceTurn)
+      maximum = logTurn
+    }
+    return append(type, data['turn'] === sourceTurn && logTurn !== sourceTurn ? { ...data, turn: logTurn } : data, options)
+  }
+}

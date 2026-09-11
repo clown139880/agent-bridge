@@ -54,7 +54,7 @@ export function projectNativeEvents(rows: readonly JsonObject[], existing: reado
         const recovered = payload['recoveredFirstPrompt'] === true && existing.some(e => e.type === 'assistant/message')
         add('user/message', { id: 'bridge:' + id, role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: (recovered ? '【恢复的首条用户消息】\n' : '') + str(payload['text']) }] }, time, true)
       } else {
-        const callId = 'bridge:' + str(row['itemId'], id)
+        const callId = 'bridge:' + id
         const name = type === 'command.completed' ? 'agent-bridge:command' : type === 'file_change.completed' ? 'agent-bridge:files' : 'agent-bridge:tool'
         const args = JSON.stringify(type === 'command.completed' ? { command: payload['command'], cwd: payload['cwd'] } : payload)
         const text = str(payload['text'])
