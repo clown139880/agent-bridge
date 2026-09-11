@@ -239,6 +239,23 @@ describe('pending question mapping', () => {
     expect(ask).toHaveBeenCalledOnce()
     expect(call).toHaveBeenCalledWith({operation:'resolve_approval',args:{approvalId:'approval',choice:'deny'}},expect.any(AbortSignal))
   })
+  it('cancels an obsolete native question when the remote approval disappears', async () => {
+    let pending = true
+    let aborted = false
+    const ask = ({signal}: {signal:AbortSignal}) => new Promise((_resolve,reject) => signal.addEventListener('abort',() => {aborted=true;reject(new Error('cancelled'))},{once:true}))
+    const services = {userQuestions:{ask},logger:{warn:vi.fn()}} as unknown as Context
+    const agent = {status:'idle'} as Agent
+    const call = vi.fn<BridgeClient['call']>(async request => request.operation === 'approvals' && pending ? page([{id:'p',sessionId:'r',status:'pending',choices:['allow','deny','allow-session']}]) : page([]))
+    const jobs = new Map<string,Promise<void>>()
+    await relayPendingInteractions({call},agent,'r',jobs,new AbortController().signal,services)
+    const active = [...jobs.values()]
+    pending=false
+    await relayPendingInteractions({call},agent,'r',jobs,new AbortController().signal,services)
+    await Promise.all(active)
+    expect(aborted).toBe(true)
+    expect(jobs.size).toBe(0)
+    expect(services.logger.warn).not.toHaveBeenCalled()
+  })
   it('preserves multiple selected answers and rejects secret questions', () => {
     const pending = { id: 'q', questions: [{ id: 'one', question: 'Which?' }] }
     expect(userInputAnswerToBridge(pending, { answers: [{ id: 'one', selected: ['a', 'b'], custom: 'c' }] })).toEqual({ requestId: 'q', answers: { one: { answers: ['a', 'b', 'c'] } } })

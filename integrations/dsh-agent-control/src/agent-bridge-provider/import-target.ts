@@ -205,7 +205,7 @@ export class AgentBridgeImportTarget {
             if (!this.isBusy(id)) this.versions.set(id, Number(row['updatedAt']))
           }
           this.host.emit('api-session/status', id, row['status'] === 'active' || row['status'] === 'waiting_for_approval' || row['status'] === 'waiting_for_input')
-          if (['waiting_for_approval', 'waiting_for_input'].includes(str(row['status'])) && !this.isBusy(id)) {
+          if ((['waiting_for_approval', 'waiting_for_input'].includes(str(row['status'])) || this.interactions.has(id)) && !this.isBusy(id)) {
             const agent = this.host.agents.get(id)
             if (agent) {
               let jobs = this.interactions.get(id)

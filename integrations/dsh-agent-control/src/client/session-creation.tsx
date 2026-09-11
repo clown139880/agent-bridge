@@ -1,6 +1,5 @@
 import { useSyncExternalStore } from 'react'
 import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
-import css from './workspace.module.css'
 
 type Source = { id: string; name: string; workerId?: string; machineId: string; workspace: string; available: boolean }
 type Options = { workspaceId?: string; cwd?: string; sessionId?: string }
@@ -57,12 +56,14 @@ export class SessionCreationController {
 export function SessionSourcePicker({ controller }: { controller: SessionCreationController }) {
   const pending = useSyncExternalStore(controller.subscribe, controller.snapshot, controller.snapshot)
   if (!pending) return null
-  return <div className={css.workspace} role="dialog" aria-modal="true" aria-label="选择新会话来源">
-    <header className={css.topbar}><strong>选择新会话来源</strong><Button onClick={controller.cancel}>取消</Button></header>
-    <p>在所选机器的目录中启动会话。</p>
-    {pending.sources.map(source => <div key={source.id}>
-      <Button disabled={!source.available} onClick={() => controller.select(source)}>{source.name}{source.available ? '' : ' · 离线'}</Button>
-      <p>{source.machineId} · {source.workspace}</p>
-    </div>)}
+  return <div role="dialog" aria-modal="true" aria-label="选择新会话来源" style={{pointerEvents:'auto',position:'fixed',inset:0,zIndex:1100,background:'#0006',display:'grid',placeItems:'center'}}>
+    <section style={{width:'min(560px,90vw)',padding:24,borderRadius:16,background:'#fff',color:'#17252b',boxShadow:'0 16px 60px #0004'}}>
+      <header style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}><strong>选择新会话来源</strong><Button onClick={controller.cancel}>取消</Button></header>
+      <p>选择执行这个新对话的 worker。</p>
+      {pending.sources.map(source => <Button key={source.id} disabled={!source.available} onClick={() => controller.select(source)} style={{display:'block',width:'100%',textAlign:'left',whiteSpace:'normal',height:'auto',padding:14,marginTop:10,border:'1px solid #c8d5d2',borderRadius:10,color:'#17252b',background:'#f4faf8'}}>
+        <strong>{source.name}{source.available ? '' : ' · 离线'}</strong>
+        <span style={{display:'block',marginTop:6,fontSize:12,overflowWrap:'anywhere'}}>{source.machineId} · {source.workspace}</span>
+      </Button>)}
+    </section>
   </div>
 }

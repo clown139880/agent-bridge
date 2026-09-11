@@ -57,15 +57,26 @@ async function pendingRows(bridge: Pick<BridgeClient, 'call'>, operation: 'appro
 }
 
 /** Polling never awaits the human. Each pending id has one scoped, cancellable native request. */
+const interactionControllers = new WeakMap<Map<string, Promise<void>>, Map<string, AbortController>>()
 export async function relayPendingInteractions(bridge: Pick<BridgeClient, 'call'>, agent: Agent, remoteId: string,
   jobs: Map<string, Promise<void>>, signal: AbortSignal, services = agent.ctx): Promise<void> {
   const [approvals, questions] = await Promise.all([
     pendingRows(bridge, 'approvals', remoteId, signal), pendingRows(bridge, 'user_input', remoteId, signal),
   ])
+  let controllers = interactionControllers.get(jobs)
+  if (!controllers) { controllers = new Map(); interactionControllers.set(jobs, controllers) }
+  const live = new Set([...approvals.map(row => 'approval:' + str(row['id'])), ...questions.map(row => 'question:' + str(row['id']))])
+  for (const [key, controller] of controllers) if (!live.has(key)) {
+    controller.abort(); controllers.delete(key); jobs.delete(key)
+  }
   for (const [kind, rows] of [['approval', approvals], ['question', questions]] as const) for (const row of rows) {
     const key = kind + ':' + str(row['id'])
     if (jobs.has(key)) continue
+    const controller = new AbortController()
+    controllers.set(key, controller)
+    const requestSignal = AbortSignal.any([signal, controller.signal])
     const run = async () => {
+      const signal = requestSignal
       if (kind === 'approval') {
         const choices = Array.isArray(row['choices']) ? row['choices'].map(value => str(value)).filter(Boolean) : []
         let choice = ''
@@ -89,6 +100,6 @@ export async function relayPendingInteractions(bridge: Pick<BridgeClient, 'call'
         if (current['status'] === 'pending') await bridge.call({ operation: 'respond_user_input', args: userInputAnswerToBridge(row, answer) }, signal)
       }
     }
-    jobs.set(key, run().catch(error => { jobs.delete(key); if (!signal.aborted) services.logger.warn('Bridge interaction: ' + String(error)) }))
+    jobs.set(key, run().catch(error => { jobs.delete(key); controllers.delete(key); if (!requestSignal.aborted) services.logger.warn('Bridge interaction: ' + String(error)) }))
   }
 }
