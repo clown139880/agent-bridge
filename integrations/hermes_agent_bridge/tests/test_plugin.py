@@ -8,7 +8,7 @@ import integrations.hermes_agent_bridge as plugin
 def test_dispatch_tick_only_starts_matching_external_lanes(monkeypatch):
     started = []
     settings = {
-        "worker_prefix": "codex@",
+        "worker_prefixes": ("codex@",),
         "max_in_progress": 2,
         "api_url": "http://127.0.0.1:8787",
         "poll_interval": 3,
@@ -37,10 +37,50 @@ def test_dispatch_tick_does_nothing_without_secret(monkeypatch):
     monkeypatch.setattr(plugin, "_spawn_supervisor", lambda *_args: (_ for _ in ()).throw(AssertionError()))
 
     plugin._dispatch_tick(
-        {"worker_prefix": "codex@", "max_in_progress": 1},
+        {"worker_prefixes": ("codex@",), "max_in_progress": 1},
         board="main",
         result=SimpleNamespace(skipped_nonspawnable=["task-a"]),
     )
+
+
+def test_normalize_prefixes_parses_multiple_lanes_and_defaults():
+    assert plugin._normalize_prefixes("codex@") == ("codex@",)
+    assert plugin._normalize_prefixes("codex@,claude@") == ("codex@", "claude@")
+    # Whitespace, case, blanks, and duplicates are all normalized away.
+    assert plugin._normalize_prefixes(" Codex@ , claude@ ,, codex@ ") == ("codex@", "claude@")
+    assert plugin._normalize_prefixes(["Codex@", "CLAUDE@"]) == ("codex@", "claude@")
+    assert plugin._normalize_prefixes("") == ("codex@",)
+    assert plugin._normalize_prefixes(None) == ("codex@",)
+
+
+def test_matches_lane_recognizes_every_configured_prefix(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    from hermes_cli.kanban_db import create_board, create_task
+    from hermes_cli.kanban_db_connect import connect_closing
+
+    board = "special-forces"
+    create_board(board)
+    with connect_closing(board=board) as conn:
+        claude_task = create_task(
+            conn, title="Claude lane", assignee="claude@hal",
+            workspace_kind="dir", workspace_path="/work/repo", board=board,
+        )
+        codex_task = create_task(
+            conn, title="Codex lane", assignee="codex@dev",
+            workspace_kind="dir", workspace_path="/work/repo", board=board,
+        )
+        other_task = create_task(
+            conn, title="Human lane", assignee="alice",
+            workspace_kind="dir", workspace_path="/work/repo", board=board,
+        )
+
+    # codex@-only config leaves the claude@ special-forces card unclaimed...
+    assert not plugin._matches_lane(claude_task, board, ("codex@",))
+    assert plugin._matches_lane(codex_task, board, ("codex@",))
+    # ...while a multi-prefix config claims both agent lanes but not humans.
+    assert plugin._matches_lane(claude_task, board, ("codex@", "claude@"))
+    assert plugin._matches_lane(codex_task, board, ("codex@", "claude@"))
+    assert not plugin._matches_lane(other_task, board, ("codex@", "claude@"))
 
 
 def test_register_exposes_all_read_only_discovery_tools(monkeypatch):

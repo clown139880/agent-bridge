@@ -61,7 +61,7 @@ def test_relay_posts_one_correlated_decision_and_suppresses_duplicate(monkeypatc
     relay = ApprovalRelay(
         api=Api(),
         profile_name="default",
-        worker_prefix="codex@",
+        worker_prefixes=("codex@",),
         poll_interval=1,
         scan=lambda *_args: [approval],
         present=lambda _profile, _approval: "allow-session",
@@ -89,7 +89,7 @@ def test_unavailable_gateway_leaves_remote_approval_pending():
             raise AssertionError("must not answer without a live Hermes approval surface")
 
     relay = ApprovalRelay(
-        api=Api(), profile_name="default", worker_prefix="codex@", poll_interval=1,
+        api=Api(), profile_name="default", worker_prefixes=("codex@",), poll_interval=1,
         scan=lambda *_args: [], present=lambda *_args: None,
     )
     relay._inflight.add((approval.run_id, approval.approval_id))

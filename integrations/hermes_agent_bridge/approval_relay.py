@@ -49,7 +49,7 @@ def _approval_choice(choice: str | None, offered: tuple[str, ...]) -> str:
 
 
 def _pending_approvals(
-    api: WorkerApi, profile_name: str, worker_prefix: str,
+    api: WorkerApi, profile_name: str, worker_prefixes: tuple[str, ...],
 ) -> list[PendingRemoteApproval]:
     from hermes_cli.kanban_db import list_boards, list_tasks
     from hermes_cli.kanban_db_connect import connect_closing
@@ -64,7 +64,8 @@ def _pending_approvals(
             tasks = list_tasks(conn, status="running")
             for task in tasks:
                 assignee = str(task.assignee or "")
-                if not assignee.lower().startswith(worker_prefix) or task.current_run_id is None:
+                lane = assignee.lower()
+                if not any(lane.startswith(prefix) for prefix in worker_prefixes) or task.current_run_id is None:
                     continue
                 sub = _owned_subscription(list_notify_subs(conn, task.id), profile_name)
                 if sub is None:
@@ -170,14 +171,14 @@ class ApprovalRelay:
         *,
         api: WorkerApi,
         profile_name: str,
-        worker_prefix: str,
+        worker_prefixes: tuple[str, ...],
         poll_interval: float,
         scan: Callable[..., list[PendingRemoteApproval]] = _pending_approvals,
         present: Callable[[str, PendingRemoteApproval], str | None] = _present_native,
     ) -> None:
         self.api = api
         self.profile_name = profile_name
-        self.worker_prefix = worker_prefix
+        self.worker_prefixes = worker_prefixes
         self.poll_interval = poll_interval
         self.scan = scan
         self.present = present
@@ -206,7 +207,7 @@ class ApprovalRelay:
                 self._inflight.discard(key)
 
     def tick(self) -> None:
-        for approval in self.scan(self.api, self.profile_name, self.worker_prefix):
+        for approval in self.scan(self.api, self.profile_name, self.worker_prefixes):
             key = (approval.run_id, approval.approval_id)
             with self._lock:
                 if key in self._inflight or key in self._answered:

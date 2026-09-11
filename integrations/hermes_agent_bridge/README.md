@@ -2,6 +2,16 @@
 
 This plugin dispatches Hermes Kanban cards assigned to `codex@machine` through Agent Bridge and relays remote approvals back to Hermes.
 
+## Worker lanes (`worker_prefix`)
+
+The plugin only dispatches, claims, and relays approvals for cards whose assignee starts with one of its configured lane prefixes. `worker_prefix` defaults to `codex@` and accepts a comma-separated list so one worker can serve several lanes at once:
+
+```yaml
+worker_prefix: "codex@,claude@"
+```
+
+Matching is case-insensitive. With the example above, both the default `codex@machine` lane and the `claude@machine` special-forces lane are claimed; a card assigned to `claude@hal` under a `codex@`-only config stays READY and is never picked up.
+
 ## Read-only session tools
 
 - `agent_bridge_sessions(workerId?, workspace?, q?, taskId?, active?, limit?)` searches `GET /api/v1/sessions` for a session to resume.

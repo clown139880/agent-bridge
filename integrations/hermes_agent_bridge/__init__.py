@@ -21,10 +21,26 @@ _children: dict[str, subprocess.Popen] = {}
 _relays: dict[str, ApprovalRelay] = {}
 
 
+def _normalize_prefixes(value: Any) -> tuple[str, ...]:
+    """Parse the worker_prefix config into an ordered, lowercased prefix tuple.
+
+    Accepts a comma-separated string ("codex@,claude@") or any iterable so one
+    worker can serve several lanes (for example the claude@ special-forces lane
+    alongside the default codex@ lane).  Falls back to ("codex@",) when empty.
+    """
+    parts = value.split(",") if isinstance(value, str) else list(value or ())
+    prefixes: list[str] = []
+    for part in parts:
+        prefix = str(part).strip().lower()
+        if prefix and prefix not in prefixes:
+            prefixes.append(prefix)
+    return tuple(prefixes) or ("codex@",)
+
+
 def _settings(ctx) -> dict[str, Any]:
     return {
         "api_url": str(ctx.get_config("api_url", "http://127.0.0.1:8787")).rstrip("/"),
-        "worker_prefix": str(ctx.get_config("worker_prefix", "codex@")).lower(),
+        "worker_prefixes": _normalize_prefixes(ctx.get_config("worker_prefix", "codex@")),
         "poll_interval": max(1.0, float(ctx.get_config("poll_interval_seconds", 3))),
         "heartbeat_interval": max(5.0, float(ctx.get_config("heartbeat_interval_seconds", 30))),
         "claim_ttl": max(60, int(ctx.get_config("claim_ttl_seconds", 900))),
@@ -41,14 +57,17 @@ def _prune_children() -> None:
             _children.pop(task_id, None)
 
 
-def _matches_lane(task_id: str, board: str, worker_prefix: str) -> bool:
+def _matches_lane(task_id: str, board: str, worker_prefixes: tuple[str, ...]) -> bool:
     try:
         from hermes_cli.kanban_db import get_task
         from hermes_cli.kanban_db_connect import connect_closing
 
         with connect_closing(board=board) as conn:
             task = get_task(conn, task_id)
-        return bool(task and task.assignee and task.assignee.lower().startswith(worker_prefix))
+        if not task or not task.assignee:
+            return False
+        assignee = task.assignee.lower()
+        return any(assignee.startswith(prefix) for prefix in worker_prefixes)
     except Exception as exc:
         logger.warning("agent-bridge could not inspect Kanban task %s: %s", task_id, exc)
         return False
@@ -67,7 +86,7 @@ def _spawn_supervisor(task_id: str, board: str, settings: dict[str, Any]) -> Non
         "--claim-ttl", str(settings["claim_ttl"]),
         "--api-failure-timeout", str(settings["failure_timeout"]),
         "--completion-mode", settings["completion_mode"],
-        "--worker-prefix", settings["worker_prefix"],
+        "--worker-prefix", ",".join(settings["worker_prefixes"]),
     ]
     if settings.get("reviewer"):
         args.extend(("--reviewer", str(settings["reviewer"])))
@@ -96,7 +115,7 @@ def _dispatch_tick(settings: dict[str, Any], **payload) -> None:
         if capacity <= 0:
             break
         task_id = str(task_id)
-        if task_id in _children or not _matches_lane(task_id, board, settings["worker_prefix"]):
+        if task_id in _children or not _matches_lane(task_id, board, settings["worker_prefixes"]):
             continue
         _spawn_supervisor(task_id, board, settings)
         capacity -= 1
@@ -195,7 +214,7 @@ def register(ctx) -> None:
         relay = ApprovalRelay(
             api=WorkerApi(settings["api_url"], token),
             profile_name=profile_name,
-            worker_prefix=settings["worker_prefix"],
+            worker_prefixes=settings["worker_prefixes"],
             poll_interval=settings["poll_interval"],
         )
         _relays[profile_name] = relay

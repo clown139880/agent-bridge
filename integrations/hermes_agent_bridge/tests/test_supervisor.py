@@ -10,6 +10,7 @@ from integrations.hermes_agent_bridge.supervisor import (
     UPDATE_ADMISSION_STATUSES,
     _conversation_id,
     _event_summary,
+    _normalize_prefixes,
     _remote_workspace,
     _resume_session_id,
     _settle,
@@ -84,7 +85,7 @@ def test_malformed_resume_directive_is_rejected(body):
         _resume_session_id(body)
 
 
-def _supervisor_args(task_id: str, board: str) -> SimpleNamespace:
+def _supervisor_args(task_id: str, board: str, worker_prefix: str = "codex@") -> SimpleNamespace:
     return SimpleNamespace(
         task_id=task_id,
         board=board,
@@ -96,7 +97,7 @@ def _supervisor_args(task_id: str, board: str) -> SimpleNamespace:
         stalled_blocked_timeout=300,
         completion_mode="done",
         reviewer=None,
-        worker_prefix="codex@",
+        worker_prefix=worker_prefix,
     )
 
 
@@ -145,6 +146,63 @@ def test_supervisor_passes_explicit_resume_only(tmp_path, monkeypatch, body, exp
     assert supervise(_supervisor_args(task_id, board)) == 0
     assert starts[0]["resume_session_id"] == expected_resume
     assert starts[0]["conversation_id"] == f"hermes-task:{board}:{task_id}"
+
+
+def test_normalize_prefixes_parses_comma_separated_lanes():
+    assert _normalize_prefixes("codex@") == ("codex@",)
+    assert _normalize_prefixes("codex@,claude@") == ("codex@", "claude@")
+    assert _normalize_prefixes(" Codex@ , CLAUDE@ ,, codex@") == ("codex@", "claude@")
+    assert _normalize_prefixes("") == ("codex@",)
+    assert _normalize_prefixes(None) == ("codex@",)
+
+
+def test_supervisor_claims_claude_lane_only_when_prefix_is_configured(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    monkeypatch.setenv("AGENT_BRIDGE_WORKER_API_TOKEN", "secret")
+    from hermes_cli.kanban_db import create_board, create_task
+    from hermes_cli.kanban_db_connect import connect_closing
+    import integrations.hermes_agent_bridge.supervisor as supervisor_module
+
+    board = "claude-lane"
+    create_board(board)
+    with connect_closing(board=board) as conn:
+        task_id = create_task(
+            conn,
+            title="Special forces work",
+            assignee="claude@hal",
+            workspace_kind="dir",
+            workspace_path="/work/repo",
+            board=board,
+        )
+
+    starts = []
+
+    class FakeApi:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def start(self, **kwargs):
+            starts.append(kwargs)
+            return {}
+
+        def run(self, _run_id):
+            return {"status": "completed"}
+
+        def events(self, _run_id, _after):
+            return {"next": 0, "events": []}
+
+    class UnexpectedApi:
+        def __init__(self, *_args, **_kwargs):
+            raise AssertionError("codex@-only lane must not claim a claude@ card")
+
+    # A codex@-only supervisor leaves the claude@ card untouched (never starts a run).
+    monkeypatch.setattr(supervisor_module, "WorkerApi", UnexpectedApi)
+    assert supervise(_supervisor_args(task_id, board, worker_prefix="codex@")) == 0
+
+    # Adding claude@ to the lane lets the same card be claimed and dispatched.
+    monkeypatch.setattr(supervisor_module, "WorkerApi", FakeApi)
+    assert supervise(_supervisor_args(task_id, board, worker_prefix="codex@,claude@")) == 0
+    assert starts and starts[0]["worker_id"] == "claude@hal"
 
 
 def test_malformed_resume_directive_blocks_before_start(tmp_path, monkeypatch):

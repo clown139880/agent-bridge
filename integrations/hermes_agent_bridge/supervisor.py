@@ -43,8 +43,19 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--stalled-blocked-timeout", type=float, default=300)
     parser.add_argument("--completion-mode", choices=("done", "review"), default="done")
     parser.add_argument("--reviewer")
-    parser.add_argument("--worker-prefix", default="codex@")
+    parser.add_argument("--worker-prefix", default="codex@",
+                        help="Comma-separated assignee prefixes this lane serves, e.g. 'codex@,claude@'.")
     return parser
+
+
+def _normalize_prefixes(value: str | None) -> tuple[str, ...]:
+    """Parse the comma-separated --worker-prefix into an ordered, lowercased tuple."""
+    prefixes: list[str] = []
+    for part in (value or "").split(","):
+        prefix = part.strip().lower()
+        if prefix and prefix not in prefixes:
+            prefixes.append(prefix)
+    return tuple(prefixes) or ("codex@",)
 
 
 def _remote_workspace(task) -> str:
@@ -136,9 +147,12 @@ def supervise(args: argparse.Namespace) -> int:
         logger.error("%s is not set", TOKEN_ENV)
         return 2
     claimer = f"{socket.gethostname() or 'unknown'}:{os.getpid()}:agent-bridge"
+    worker_prefixes = _normalize_prefixes(args.worker_prefix)
     with connect_closing(board=args.board) as conn:
         task = get_task(conn, args.task_id)
-        if task is None or not task.assignee or not task.assignee.startswith(args.worker_prefix):
+        if task is None or not task.assignee or not any(
+            task.assignee.lower().startswith(prefix) for prefix in worker_prefixes
+        ):
             return 0
         source_status = task.status
         claim = claim_review_task if source_status == "review" else claim_task
