@@ -1,4 +1,5 @@
 import { useDialog } from './dialog.js'
+import { MarkdownText } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
@@ -14,6 +15,7 @@ import { SessionCreationController, SessionSourcePicker, type CreationSessions, 
 
 
 const RPC_CHANNEL = '/agent-control'
+const markdownLabels = { code: { copyLabel:'复制', copiedLabel:'已复制' }, footnotes:'脚注' }
 type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue }
 type RecordValue = Record<string, JsonValue>
 
@@ -170,7 +172,7 @@ function TaskDrawer({ data, associatedSessions, openSession, close, refresh }: {
   return <div className={css.drawerBackdrop} onMouseDown={event => { if (event.target === event.currentTarget && !busy) close() }}><div ref={ref} tabIndex={-1} role="dialog" aria-modal="true" aria-label="任务详情" className={css.drawer}>
     <header><div><small>{str(task['id'])}</small><h2>{str(task['title'])}</h2></div><button type="button" className={css.iconButton} aria-label="关闭任务详情" disabled={busy} onClick={close}>×</button></header>
     <div className={css.taskFacts}><span>{statusLabel(task['status'])}</span><span>{str(task['assignee'], '未分配')}</span><span>P{str(task['priority'], '0')}</span></div>
-    <p className={css.body}>{str(task['body'], '暂无描述。')}</p>
+    <div className={css.markdown}><MarkdownText text={str(task['body'], '暂无描述。')} labels={markdownLabels} /></div>
     <div className={css.taskActions}>
       {(task['status'] === 'ready' || task['status'] === 'running') && <button type="button" disabled={busy} onClick={() => setReviewOpen(value => !value)}>申请审核</button>}
       {task['status'] === 'blocked' && <button type="button" disabled={busy} onClick={() => { setBusy(true); void call('kanban', 'unblock', { taskId: str(task['id']) }).then(refresh).catch(error => setNotice(error instanceof Error ? error.message : 'Unblock failed')).finally(() => setBusy(false)) }}>解除阻塞</button>}
@@ -179,8 +181,8 @@ function TaskDrawer({ data, associatedSessions, openSession, close, refresh }: {
     {notice && <div className={css.error} role="alert">{notice}</div>}
     {associatedSessions.length > 0 && <><h3>关联对话</h3>{associatedSessions.map(session => <button className={css.sessionLink} type="button" key={str(session['sessionId'])} onClick={() => openSession(str(session['sessionId']))}>{sessionTitle(session)} · {str(session['status'])}</button>)}</>}
     <h3>依赖关系</h3><p>上游：{asArray(links['parents']).map(String).join(', ') || '无'}<br />下游：{asArray(links['children']).map(String).join(', ') || '无'}</p>
-    <h3>执行记录</h3>{runs.length === 0 ? <Empty>暂无执行记录。</Empty> : runs.map(run => <div className={css.run} key={str(run['id'])}><strong>Run {str(run['id'])}</strong><span>{str(run['outcome'], str(run['status']))}</span><p>{str(run['summary'], '')}</p></div>)}
-    <h3>评论</h3>{comments.length === 0 && <p className={css.help}>暂无评论。</p>}{comments.map(item => <div className={css.comment} key={str(item['id'])}><strong>{str(item['author'])}</strong><p>{str(item['body'])}</p></div>)}
+    <h3>执行记录</h3>{runs.length === 0 ? <Empty>暂无执行记录。</Empty> : runs.map(run => <div className={css.run} key={str(run['id'])}><strong>执行 #{str(run['id'])}</strong><span>{statusLabel(run['outcome'] ?? run['status'])}</span><div className={css.markdown}><MarkdownText text={str(run['summary'], '')} labels={markdownLabels} /></div></div>)}
+    <h3>评论</h3>{comments.length === 0 && <p className={css.help}>暂无评论。</p>}{comments.map(item => <div className={css.comment} key={str(item['id'])}><strong>{str(item['author'])}</strong><div className={css.markdown}><MarkdownText text={str(item['body'])} labels={markdownLabels} /></div></div>)}
     <form className={css.commentForm} onSubmit={event => void post(event)}><textarea aria-label="添加评论" value={comment} disabled={busy} onChange={event => setComment(event.target.value)} placeholder="添加评论…" /><button type="submit" disabled={busy || !comment.trim()}>{busy ? '正在提交…' : '发表评论'}</button></form>
   </div></div>
 }

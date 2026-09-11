@@ -56,12 +56,12 @@ const client: UserConfig = {
       return [
         `const css = ${JSON.stringify(css)};`,
         `const tagId = ${JSON.stringify(`${packageId}/workspace`)};`,
-        "if (typeof document !== 'undefined' && !document.querySelector('style[data-plugin-css=' + JSON.stringify(tagId) + ']')) {",
-        "  const tag = document.createElement('style');",
+        "if (typeof document !== 'undefined') {",
+        "  const tag = document.querySelector('style[data-plugin-css=' + JSON.stringify(tagId) + ']') ?? document.createElement('style');",
         `  tag.dataset.plugin = ${JSON.stringify(packageId)};`,
         '  tag.dataset.pluginCss = tagId;',
         '  tag.textContent = css;',
-        '  document.head.appendChild(tag);',
+        '  if (!tag.isConnected) document.head.appendChild(tag);',
         '}',
         `export default ${JSON.stringify(classes)};`,
       ].join('\n')
