@@ -64,8 +64,10 @@ if (require.main === module) {
     const saved = path.join(backup, relative);
     fs.mkdirSync(path.dirname(saved), { recursive: true });
     fs.writeFileSync(saved, original, { flag: 'wx' });
-    const output = Buffer.from(fixed.map(row => JSON.stringify(row)).join('\n') + '\n');
-    fs.writeFileSync(file + '.repairing', compressed ? zlib.zstdCompressSync(output) : output, { flag: 'wx' });
+    // DSH reads the header frame independently; it must contain exactly one line.
+    const lines = fixed.map(row => JSON.stringify(row) + '\n');
+    const output = compressed ? Buffer.concat(lines.map(line => zlib.zstdCompressSync(Buffer.from(line)))) : Buffer.from(lines.join(''));
+    fs.writeFileSync(file + '.repairing', output, { flag: 'wx' });
     fs.renameSync(file + '.repairing', file);
   }
   if (process.argv.includes('--apply')) console.log('Backups: ' + backup);
