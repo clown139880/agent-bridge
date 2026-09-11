@@ -133,6 +133,20 @@ test("Agent Control REST exposes snapshot, pagination, actions, idempotency and 
   }finally{await f.close();}
 });
 
+test("complete worker inventory clears a vanished live turn and its approval", async () => {
+  const f = await fixture();
+  try {
+    f.internals.controlStore.updateSessionActivity('thread-1','waiting_for_approval','old-turn');
+    await f.internals.handleBridgeMessage('dev',{type:'state.snapshot',generation:'restart',complete:false,sessions:[],approvals:[],userInputs:[]});
+    assert.equal(f.internals.controlStore.session('thread-1')?.activeTurnId,'old-turn');
+    await f.internals.handleBridgeMessage('dev',{type:'state.snapshot',generation:'restart',complete:true,sessions:[],approvals:[],userInputs:[]});
+    const session=f.internals.controlStore.session('thread-1');
+    assert.equal(session?.activeTurnId,null);
+    assert.equal(session?.status,'offline');
+    assert.equal(session?.lastTurnStatus,'interrupted');
+  } finally { await f.close(); }
+});
+
 test("a session snapshot repairs a replay timestamp newer than the real thread activity", async () => {
   const f = await fixture();
   try {

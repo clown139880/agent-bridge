@@ -650,6 +650,19 @@ export class ControlPlane {
         { type: "approval_request", ...approval });
       for (const input of message.userInputs) this.controlStore.upsertUserInput(machineId, input);
       if (message.complete) {
+        // A restarted worker may no longer own an old live session. Its complete
+        // inventory must clear that old turn, otherwise clients steer forever.
+        const present = new Set(message.sessions.map(session => session.sessionId));
+        const stale = this.store.db.prepare("SELECT id,active_turn_id FROM sessions WHERE machine_id=? AND (active_turn_id IS NOT NULL OR activity_status IN ('active','waiting_for_approval','waiting_for_input'))")
+          .all(machineId) as Array<{id:string;active_turn_id:string|null}>;
+        for (const session of stale) if (!present.has(session.id)) {
+          if (session.active_turn_id) this.controlStore.appendSessionEvent(machineId, {
+            type: "session.event", sessionId: session.id, turnId: session.active_turn_id,
+            eventId: `snapshot:${session.id}:${session.active_turn_id}:interrupted`,
+            eventType: "turn.interrupted", timestamp: Date.now(), payload: {reason:"worker no longer owns this turn"},
+          });
+          this.controlStore.updateSessionActivity(session.id, "offline", undefined, "interrupted");
+        }
         const pendingIds = new Set([...message.approvals.map((item) => item.approvalId),
           ...message.userInputs.map((item) => item.requestId)]);
         const rows = this.store.db.prepare("SELECT id FROM pending_requests WHERE machine_id=? AND status='pending'")
