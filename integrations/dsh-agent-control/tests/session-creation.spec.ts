@@ -8,7 +8,7 @@ describe('native directory creation', () => {
     const controller = new SessionCreationController(rpc)
     const original = vi.fn(async (_options?: {workspaceId?:string}) => 'native-local')
     const sessions = {create:original,refresh:vi.fn(async () => {})}
-    const reuseBlank = vi.fn(async () => 'wrong-dsh-blank')
+    const reuseBlank = vi.fn(async (_workspaceId: string) => 'wrong-dsh-blank')
     const navigation = {connectWorkspace:reuseBlank}
     const dispose = controller.install(sessions,{list:{getSnapshot:() => ({items:[{workspaceId:'workspace',path:'/presentation'}]})}},navigation)
     const result = navigation.connectWorkspace('workspace')
