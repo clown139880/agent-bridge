@@ -143,6 +143,15 @@ fs.writeFileSync(target, source);
       await target.syncHistory(resumed.id);
       assert.equal(resumed.session.deriveMessages().filter(message => message.content.some(block => block.text === 'remote response')).length,1);
       console.log('PASS: installed native image storage -> Bridge upload -> turn attachment -> native response, followed by deduplicated reconciliation');
+      stage = 'native deletion';
+      bridge.call = async ({operation,args}) => {
+        if (operation === 'delete_session') return {status:'succeeded',sessionId:args.sessionId};
+        throw new Error('Unexpected deletion operation: '+operation);
+      };
+      await target.deleteNative(resumed.id);
+      assert.ok(ctx.workspaceRegistry.archivedSessionIds.includes(resumed.id));
+      assert.ok(!target.catalog().sessions.some(row => row.nativeId === resumed.id));
+      console.log('PASS: confirmed remote deletion -> native workspace archive -> catalog removal');
     } finally { await target.dispose(); }
   } finally { await ctx.fiber.dispose(); }
 })().catch(error => { console.error(error); process.exitCode = 1; }).finally(async () => { clearTimeout(deadline); await fs.promises.rm(folder, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); });
