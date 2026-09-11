@@ -19,7 +19,8 @@ Compatibility is pinned and tested against the published DSH developer preview
 Bridge remains authoritative for remote execution. DSH owns its presentation
 projection; there is no second session browser or composer. Initial history
 hydration is eager and bounded to four concurrent jobs. The native model choice
-currently follows the remote session; non-text attachments fail explicitly.
+currently follows the remote session. Images use native attachment storage and
+Bridge uploads. Directory creation offers machine-specific DSH/Bridge sources.
 
 See [the session-provider design](docs/bridge-conversation-provider.md) for the
 data path, runtime contracts, deployment checks and current limits.

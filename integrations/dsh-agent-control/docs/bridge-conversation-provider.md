@@ -39,7 +39,7 @@ Native composer
   -> DSH stream chunks / native session history
 
 The implementation materializes presentation agents with no remote subprocess
-per native agent. Only explicit user prompts submit Bridge actions. Initial
+per native agent. Explicit creation or user prompts submit Bridge actions. Initial
 retained history is hydrated with four concurrent jobs; subsequent reconciliation
 uses changed metadata, live status and per-session cursors. Reconciliation runs
 every five seconds and is abortable. An individual session failure does not hide
@@ -55,12 +55,27 @@ agent-bridge- namespace. They cannot collide with a raw DSH/Codex ID. The bindin
 and acknowledged Bridge event IDs live in the native session log, so restart and
 repeat reconciliation do not copy the same transcript again.
 
-A directory on a worker whose hostname matches the Host can share the existing
+A directory on a worker whose hostname and platform match the Host can share the existing
 native workspace when the directory exists locally. Remote or missing directories
 use an isolated presentation directory under ~/.dsh/agent-bridge/workspaces,
-keyed by control plane, worker and original directory. Those directories contain
+keyed by control plane, machine identity and original directory. Those directories contain
 no copied project source. The original worker/path remain in the durable binding.
-Equal paths on different remote workers never merge accidentally.
+Workers on the same machine can share that location; equal paths on different
+machines remain distinct. Existing persisted presentation directories retain
+their identity; this release does not rewrite old session headers to merge them.
+Windows and WSL remain separate execution locations even when their hostnames match.
+
+The original directory New Session action now opens a source picker through a
+narrow, disposable wrapper around the client Sessions.create method. The Host
+resolves the directory's binding and advertises only workers on its machine.
+DSH is offered only for a real Host directory, never a remote presentation folder.
+The Host revalidates the selected source, creates the remote session, materializes
+it, and the client refreshes its native list before returning the new identity.
+Cancel creates nothing. Offline sources remain visible but cannot be selected.
+
+A future logical project can associate multiple machine/directory locations.
+That association and shared project memory are separate from execution routing;
+neither is inferred from a matching basename or implemented by this release.
 
 Presentation agents use the empty agent-bridge preset. The provider installs
 that preset into the configured writable preset root, refuses to overwrite a
@@ -137,8 +152,15 @@ to an already-running Desktop Host, or restart Desktop to hide this distinction.
 ## Current limits
 
 The native Bridge model choice follows the remote session. Worker-specific
-model catalog selection and native attachment forwarding remain follow-up work;
-non-text prompt content fails explicitly instead of being silently discarded.
+model catalog selection remains follow-up work. Current-message images are read
+through the native attachment store, uploaded to Bridge, and submitted as refs.
+Image-only prompts carry a neutral `[Image attached]` text marker for Bridge's
+nonempty input contract. Arbitrary file forwarding remains unsupported.
+Claude transcript discovery recovers original first-user text, including content
+block arrays, using a stable event id and canonical public session identity.
+For already-materialized conversations, recovered prompts are appended with a
+recovery label; existing native logs are not destructively rewritten. Cold imports
+order the recovered prompt by its original timestamp.
 History completeness is bounded by what Bridge retains. This plugin cannot
 reconstruct events the control plane no longer has.
 

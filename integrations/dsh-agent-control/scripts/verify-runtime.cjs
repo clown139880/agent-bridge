@@ -62,6 +62,7 @@ fs.writeFileSync(target, source);
     await mount('dsh-storage-json', {root: path.join(folder, 'storage')});
     await mount('dsh-storage-domain', {backend: 'json'});
     await mount('dsh-workspace');
+    await mount('dsh-attachment-local', {dshHome: path.join(folder,'attachment-home')});
     const remote = {sessionId:'r', workerId:'w', workspace:'/remote/project', title:'Bridge runtime fixture', status:'idle', updatedAt:3};
     const bridge = {call: async ({operation}) => {
       if (operation === 'workers') return {workers:[{id:'w', hostname:'remote.example', name:'Remote fixture'}]};
@@ -97,24 +98,34 @@ fs.writeFileSync(target, source);
         {eventId:'reply-assistant',sessionId:'r',turnId:'reply',type:'message.completed',timestamp:5,payload:{role:'assistant',text:'remote response'}},
         {eventId:'reply-end',sessionId:'r',turnId:'reply',type:'turn.completed',timestamp:6,payload:{status:'completed'}},
       ];
-      bridge.call = async ({operation}) => {
+      let uploadedImage;
+      let submittedAttachments;
+      bridge.call = async ({operation,args}) => {
+        if (operation === 'upload') { uploadedImage = args; return {id:'fixture-image',filename:'probe.png',mimeType:'image/png',size:Buffer.from(args.content,'base64').length}; }
         if (operation === 'session_events') return {data:submitted ? [...rows,...receiptRows] : rows,hasMore:false};
         if (operation === 'session') return remote;
-        if (operation === 'submit_turn') { submitted = true; return {status:'succeeded',actionId:'fixture-action',turnId:'reply'}; }
+        if (operation === 'submit_turn') { submitted = true; submittedAttachments = args.attachments; return {status:'succeeded',actionId:'fixture-action',turnId:'reply'}; }
         if (operation === 'approvals' || operation === 'user_input') return {data:[],hasMore:false};
         throw new Error('Unexpected Bridge operation: '+operation);
       };
       const adapter = new plugin.AgentBridgeLlmAdapter({bridge}, target, 1);
       ctx.llm.registerAdapter(['agent-bridge'], adapter);
       const {createUserMessage} = await installed('dsh-llm');
-      resumed.followup(createUserMessage({content:[{type:'text',text:'runtime probe'}],source:{kind:'user'}}));
+      const sharpModule = require(path.join(base,'sharp'));
+      const sharp = sharpModule.default ?? sharpModule;
+      const imageBytes = await sharp({create:{width:16,height:16,channels:3,background:'#0080ff'}}).png().toBuffer();
+      const imageRef = await ctx.attachments.saveImage({data:imageBytes,mediaType:'image/png',name:'probe.png'});
+      resumed.followup(createUserMessage({content:[{type:'text',text:'runtime probe'},{type:'image',attachment:imageRef}],source:{kind:'user'}}));
       await resumed.whenIdle();
       assert.equal(submitted,true);
+      assert.equal(uploadedImage.mimeType,'image/png');
+      assert.ok(Buffer.from(uploadedImage.content,'base64').length > 0);
+      assert.equal(submittedAttachments[0].id,'fixture-image');
       assert.ok(resumed.session.deriveMessages().some(message => message.content.some(block => block.text === 'remote response')));
       adapter.commitAcks(resumed.id);
       await target.syncHistory(resumed.id);
       assert.equal(resumed.session.deriveMessages().filter(message => message.content.some(block => block.text === 'remote response')).length,1);
-      console.log('PASS: installed native Agent loop -> Bridge adapter -> native response, followed by deduplicated reconciliation');
+      console.log('PASS: installed native image storage -> Bridge upload -> turn attachment -> native response, followed by deduplicated reconciliation');
     } finally { await target.dispose(); }
   } finally { await ctx.fiber.dispose(); }
-})().catch(error => { console.error(error); process.exitCode = 1; }).finally(() => { clearTimeout(deadline); fs.rmSync(folder, { recursive: true, force: true }); });
+})().catch(error => { console.error(error); process.exitCode = 1; }).finally(async () => { clearTimeout(deadline); await fs.promises.rm(folder, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); });

@@ -10,6 +10,7 @@ import css from './workspace.module.css'
 import { openBridgeStream } from './bridge-stream.js'
 
 import { SessionStore, type BridgeRpc } from './session-store.js'
+import { SessionCreationController, SessionSourcePicker, type CreationSessions, type CreationWorkspaces } from './session-creation.js'
 
 
 const RPC_CHANNEL = '/agent-control'
@@ -96,6 +97,9 @@ function Overview({ data }: { data: RecordValue }) {
   const sessionProvider = asRecord(data['sessionProvider'])
   return <div className={css.page}>
     {!('sessionProvider' in data) ? <div role="alert">The running Host has not loaded the Bridge session provider. Updating browser files alone does not activate session sync.</div> : sessionProvider['registered'] !== true ? <div role="alert">Bridge session sync is waiting for the Host services.</div> : typeof sessionProvider['error'] === 'string' && sessionProvider['error'] ? <div role="alert">Bridge session sync: {sessionProvider['error']}</div> : <div>Bridge conversations in Sessions: {Number(sessionProvider['nativeSessions'] ?? 0)}</div>}
+    {asArray(sessionProvider['workers']).map(asRecord).map(worker => <div key={str(worker['workerId'])}>{str(worker['name'])}: {str(worker['sessions'])} sessions</div>)}
+    <p>本机 Bridge 会话与 DSH 会话位于原来的本机目录中。</p>
+    {sessionProvider['sourceSelection'] === true ? <p>目录的新建按钮可选择来源；支持图片提交。</p> : <p role="status">来源选择和图片转发需要 Host 加载新版插件；当前仍使用旧版新建行为。</p>}
     <div className={css.metrics}>
       <Metric label="Workers online" value={workers.filter(worker => worker['status'] === 'online').length} tone="good" />
       <Metric label="Active" value={Number(counts['active'] ?? 0)} />
@@ -212,6 +216,16 @@ export function apply(ctx: ClientContext): void {
   connection = (ctx as unknown as { connection: RpcConnection }).connection
   const remote = (ctx as unknown as { remote: { session: { modelCatalog(): Promise<{ ok: true; value: JsonValue } | { ok: false; error: { code: string; message: string } }> }; $on(event: string, listener: () => void): () => void } }).remote
   const nativeSessions = (ctx as unknown as { get(name: string): unknown }).get('sessions') as unknown as { open(id: string): void } | undefined
+  const creation = new SessionCreationController((operation, args) => call('bridge', operation, args))
+  ctx.effect(() => {
+    let disposed = false
+    let uninstall: (() => void) | undefined
+    void call('bridge', 'provider_status').then(status => {
+      if (!disposed && asRecord(status)['sourceSelection'] === true) uninstall = creation.install(ctx.get('sessions') as unknown as CreationSessions, ctx.get('workspaces') as unknown as CreationWorkspaces)
+    }).catch(() => { /* Preserve native creation while the Host provider is unavailable. */ })
+    return () => { disposed = true; uninstall?.() }
+  })
+  ctx.slots.inject('shell.overlay', () => ctx.slots.register({ name: 'shell.overlay', id: 'agent-control-session-source', order: 11, inject: () => ({ controller: creation }) }, SessionSourcePicker))
   const controller = new WorkspaceController(undefined, async () => {
     const response = await remote.session.modelCatalog()
     if (!response.ok) throw new Error(`${response.error.code}: ${response.error.message}`)

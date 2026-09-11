@@ -8,6 +8,7 @@ import type { AgentBridgeImportTarget } from './import-target.js'
 import { readHistory } from './import-target.js'
 import { lastUserText, projectStreamChunks, PROVIDER, record, str } from './mapping.js'
 import { relayPendingInteractions } from './approval-bridge.js'
+import { uploadPromptImages } from './attachments.js'
 
 export const AGENT_BRIDGE_PROVIDER = PROVIDER
 export class AgentBridgeLlmAdapter extends LlmAdapter {
@@ -15,9 +16,9 @@ export class AgentBridgeLlmAdapter extends LlmAdapter {
   constructor(private readonly service: AgentControlService, private readonly target: AgentBridgeImportTarget, private readonly pollMs = 600) { super() }
   providerInfo(provider: string): LlmProviderInfo { return { id: provider, name: 'Agent Bridge' } }
   override async listModels(): Promise<readonly LlmModelInfo[]> {
-    return [{ provider: PROVIDER, id: 'remote', name: 'Follow remote session' }]
+    return [{ provider: PROVIDER, id: 'remote', name: 'Follow remote session', inputModalities: ['text', 'image'] }]
   }
-  override async resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> { return { provider, id: model, name: model } }
+  override async resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> { return { provider, id: model, name: model, inputModalities: ['text', 'image'] } }
   servesAgent(agent: Agent): boolean { return !!this.target.binding(String(agent.id)) }
   attachAgent(_agent: Agent): void {}
   detachAgent(id: unknown): void { this.pendingAcks.delete(String(id)) }
@@ -35,11 +36,10 @@ export class AgentBridgeLlmAdapter extends LlmAdapter {
     if (!agent) throw new Error('Bridge session has no native Agent')
     const remoteId = str(binding['sessionId'])
     const signal = options.signal ?? new AbortController().signal
-    const input = lastUserText(options)
-    if (!input.trim()) throw new Error('Bridge requires a text prompt')
-    // Image/file admission cannot silently discard content that the native composer accepted.
-    const lastUser = [...options.messages].reverse().find(message => message.role === 'user' && message.source?.kind === 'user')
-    if (lastUser?.content.some(block => block.type !== 'text')) throw new Error('Bridge attachment forwarding is not available for this native session yet')
+    let input = lastUserText(options)
+    const attachments = await uploadPromptImages(options, agent, this.service.bridge, signal)
+    if (!input.trim() && !attachments.length) throw new Error('Bridge requires text or an image')
+    if (!input.trim()) input = '[Image attached]'
     this.target.setBusy(nativeId, true)
     const interactionAbort = new AbortController()
     const interactionSignal = AbortSignal.any([signal, interactionAbort.signal])
@@ -53,6 +53,7 @@ export class AgentBridgeLlmAdapter extends LlmAdapter {
       const session = record(await this.service.bridge.call({ operation: 'session', args: { sessionId: remoteId } }, signal))
       const expectedTurnId = str(session['activeTurnId'])
       const args: JsonObject = { sessionId: remoteId, input, delivery: 'auto', ...(expectedTurnId ? { expectedTurnId } : {}) }
+      if (attachments.length) args['attachments'] = attachments
       // Native provider catalogs are not remote model catalogs.
       if (!expectedTurnId && options.provider === PROVIDER && options.model !== 'remote') args['model'] = options.model
       if (!expectedTurnId && options.reasoningEffort) args['reasoningEffort'] = options.reasoningEffort

@@ -7,6 +7,7 @@ import { AgentBridgeImportTarget, nativeSessionId, readHistory } from '../src/ag
 import { ACK_EVENT, BINDING_EVENT, projectNativeEvents, projectStreamChunks } from '../src/agent-bridge-provider/mapping.js'
 import { nativeSession, sessionEvents, appendSessionEvent, type NativeHost, type NativeEvent } from '../src/agent-bridge-provider/dsh-compat.js'
 import { AgentBridgeLlmAdapter } from '../src/agent-bridge-provider/adapter.js'
+import { uploadPromptImages } from '../src/agent-bridge-provider/attachments.js'
 import type { AgentControlService } from '../src/service.js'
 import type { BridgeClient } from '../src/bridge-client.js'
 import { bridgeUserInputToQuestions, userInputAnswerToBridge } from '../src/agent-bridge-provider/approval-bridge.js'
@@ -83,6 +84,24 @@ describe('native history projection', () => {
 })
 
 describe('native session catalog', () => {
+  it('offers only workers on the remote directory machine and never DSH on a presentation folder', async () => {
+    const f = await fixture()
+    const originalCall = f.bridge.call.getMockImplementation()!
+    f.bridge.call.mockImplementation(async (request, signal) => request.operation === 'workers' ? {workers:[
+      {id:'w',machineId:'machine-a',hostname:'remote-host',name:'Codex',status:'online'},
+      {id:'claude',machineId:'machine-a',hostname:'remote-host',name:'Claude',status:'online'},
+      {id:'other',machineId:'machine-b',hostname:'remote-host',name:'Other machine',status:'online'},
+    ]} : originalCall(request,signal))
+    await f.target.refresh()
+    const agent = [...f.agents.values()][0]!
+    const cwd = nativeSession(agent).header.cwd!
+    const sources = (await f.target.creationSources(cwd))['sources'] as JsonObject[]
+    expect(sources.map(source => source['workerId'])).toEqual(['w','claude'])
+    expect(sources.every(source => source['workspace'] === '/remote/repo')).toBe(true)
+    await expect(f.target.createInWorkspace(cwd,'other\0/remote/repo')).rejects.toThrow('unavailable')
+    expect(f.bridge.call.mock.calls.some(([request]) => request.operation === 'create_session')).toBe(false)
+    await f.target.dispose()
+  })
   it('automatically merges remote sessions into the native registry without touching native sessions', async () => {
     const f = await fixture()
     f.agents.set('local-session', { id: 'local-session' } as Agent)
@@ -121,6 +140,21 @@ describe('native session catalog', () => {
 })
 
 describe('Bridge native turn', () => {
+  it('uploads only current-message images through the native store and preserves repeated occurrences', async () => {
+    const ref = {attachmentId:'sha256:fixture',mediaType:'image/png',name:'test.png'}
+    const readImage = vi.fn(async () => ({ref,data:Buffer.from('image bytes')}))
+    const agent = {ctx:{get:() => ({readImage})}} as unknown as Agent
+    const call = vi.fn<BridgeClient['call']>(async () => ({id:'uploaded',filename:'test.png',mimeType:'image/png',size:11}))
+    const options = {messages:[{role:'user',source:{kind:'user'},content:[{type:'image',attachment:{...ref,attachmentId:'old'}}]},
+      {role:'user',source:{kind:'user'},content:[{type:'text',text:'look'},{type:'image',attachment:ref},{type:'image',attachment:ref}]}]} as unknown as GenerateOptions
+    const uploaded = await uploadPromptImages(options,agent,{call},new AbortController().signal)
+    expect(uploaded).toHaveLength(2)
+    expect(readImage).toHaveBeenCalledOnce()
+    expect(call).toHaveBeenCalledWith({operation:'upload',args:{filename:'test.png',mimeType:'image/png',content:Buffer.from('image bytes').toString('base64')}},expect.any(AbortSignal))
+    readImage.mockRejectedValueOnce(new Error('missing image'))
+    await expect(uploadPromptImages(options,agent,{call},new AbortController().signal)).rejects.toThrow('missing image')
+    expect(call).toHaveBeenCalledOnce()
+  })
   it('settles on the matching remote turn, excludes old/foreign output and does not execute remote tools locally', async () => {
     const f = await fixture([])
     const agent = await f.target.ensure(summary)

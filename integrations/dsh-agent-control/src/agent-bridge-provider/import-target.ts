@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto'
 import { mkdir, realpath, readFile, writeFile } from 'node:fs/promises'
 import { homedir, hostname } from 'node:os'
-import { isAbsolute, join, basename } from 'node:path'
+import { isAbsolute, join, basename, relative } from 'node:path'
+import { setTimeout as delay } from 'node:timers/promises'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { Context } from '@deepseek-ai/cordis'
 import type { BridgeClient } from '../bridge-client.js'
@@ -48,6 +49,7 @@ export class AgentBridgeImportTarget {
   private timer: ReturnType<typeof setTimeout> | undefined
   private refreshJob: Promise<void> | undefined
   private readonly versions = new Map<string, number>()
+  private readonly placementOverrides = new Map<string, string>()
   error = ''
   lastSyncAt = 0
   constructor(readonly host: NativeHost, readonly bridge: Pick<BridgeClient, 'call'>, readonly origin: string,
@@ -65,7 +67,62 @@ export class AgentBridgeImportTarget {
     return undefined
   }
   status(): JsonObject {
-    return { nativeSessions: [...this.bindings.keys()].filter(id => !!this.host.agents.get(id)).length, error: this.error, lastSyncAt: this.lastSyncAt }
+    const counts: Record<string, number> = {}
+    for (const [id, binding] of this.bindings) if (this.host.agents.get(id)) counts[str(binding['workerId'])] = (counts[str(binding['workerId'])] ?? 0) + 1
+    return { sourceSelection: true, imageForwarding: true, nativeSessions: Object.values(counts).reduce((a, b) => a + b, 0), workers: Object.entries(counts).map(([workerId, sessions]) => ({ workerId, name: str(this.workers.get(workerId)?.['name'], workerId), sessions })), error: this.error, lastSyncAt: this.lastSyncAt }
+  }
+  /** An execution location is machine + remote directory, separate from a future logical project. */
+  async creationSources(cwd: string): Promise<JsonObject> {
+    const workerPage = record(await this.bridge.call({ operation: 'workers' }, this.abort.signal))
+    if (!Array.isArray(workerPage['workers'])) throw new Error('Invalid Bridge worker page')
+    this.workers.clear()
+    for (const item of workerPage['workers']) { const worker = record(item); this.workers.set(str(worker['id']), worker) }
+    const canonical = await realpath(cwd)
+    const locations = new Map<string, { machineId: string; workspace: string }>()
+    const relativePath = relative(this.dataRoot, canonical)
+    let local = relativePath === '..' || relativePath.startsWith('../') || relativePath.startsWith('..\\') || isAbsolute(relativePath)
+    // A presentation folder must never be offered as a real DSH execution directory.
+    if (relative(this.dataRoot, canonical) === '') local = false
+    for (const [id, binding] of this.bindings) {
+      const agent = this.host.agents.get(id)
+      if (!agent || nativeSession(agent).header.cwd !== canonical) continue
+      const worker = this.workers.get(str(binding['workerId']))
+      const machineId = str(worker?.['machineId'], str(binding['workerId']))
+      const workspace = str(binding['workspace'])
+      locations.set(machineId + '\0' + workspace, { machineId, workspace })
+      if (worker && this.isLocalWorker(worker) && await realpath(workspace).catch(() => '') === canonical) local = true
+    }
+    if (local) for (const worker of this.workers.values()) if (this.isLocalWorker(worker)) {
+      // Existing directories on this Host are a valid local source; the Bridge still enforces allowed roots.
+      const machineId = str(worker['machineId'], str(worker['id']))
+      locations.set(machineId + '\0' + canonical, { machineId, workspace: canonical })
+    }
+    const sources: JsonObject[] = local ? [{ id: 'dsh', name: 'DSH · ' + hostname(), machineId: 'local-dsh', workspace: canonical, available: true }] : []
+    for (const location of locations.values()) for (const worker of this.workers.values()) {
+      if (str(worker['machineId'], str(worker['id'])) !== location.machineId) continue
+      const id = str(worker['id']) + '\0' + location.workspace
+      if (sources.some(source => source['id'] === id)) continue
+      sources.push({ id, workerId: str(worker['id']), name: str(worker['name'], str(worker['id'])), ...location, available: worker['status'] === 'online' })
+    }
+    return { cwd: canonical, sources }
+  }
+  async createInWorkspace(cwd: string, sourceId: string, signal?: AbortSignal): Promise<Agent> {
+    const context = await this.creationSources(cwd)
+    const source = (context['sources'] as JsonObject[]).find(item => item['id'] === sourceId && item['workerId'])
+    if (!source || source['available'] !== true) throw new Error('Selected Bridge source is unavailable in this directory')
+    const fused = AbortSignal.any([this.abort.signal, AbortSignal.timeout(60000), ...(signal ? [signal] : [])])
+    let receipt = record(await this.bridge.call({ operation: 'create_session', args: { workerId: str(source['workerId']), workspace: str(source['workspace']) } }, fused))
+    while (receipt['status'] === 'accepted') {
+      if (!str(receipt['actionId'])) throw new Error('Bridge create action has no identity')
+      await delay(300, undefined, { signal: fused })
+      receipt = record(await this.bridge.call({ operation: 'action', args: { actionId: str(receipt['actionId']) } }, fused))
+    }
+    if (receipt['status'] !== 'succeeded' || !str(receipt['sessionId'])) throw new Error('Bridge session creation failed: ' + JSON.stringify(receipt['error'] ?? receipt['status']))
+    this.placementOverrides.set(nativeSessionId(this.origin, str(receipt['sessionId'])), str(context['cwd']))
+    return this.open(str(receipt['sessionId']))
+  }
+  private isLocalWorker(worker: JsonObject): boolean {
+    return str(worker['hostname']).toLowerCase() === hostname().toLowerCase() && (!worker['platform'] || worker['platform'] === process.platform)
   }
   isBusy(nativeId: string): boolean { return this.busy.has(nativeId) || this.host.agents.get(nativeId)?.status === 'running' }
   setBusy(nativeId: string, value: boolean): void { if (value) this.busy.add(nativeId); else this.busy.delete(nativeId) }
@@ -181,12 +238,13 @@ export class AgentBridgeImportTarget {
   private async workspace(row: JsonObject): Promise<{ cwd: string; title: string }> {
     const path = str(row['workspace'])
     const worker = this.workers.get(str(row['workerId']))
-    if (worker && str(worker['hostname']).toLowerCase() === hostname().toLowerCase() && isAbsolute(path)) {
+    if (worker && this.isLocalWorker(worker) && isAbsolute(path)) {
       try { return { cwd: await realpath(path), title: basename(path) } } catch { /* remote/missing paths use an isolated presentation directory */ }
     }
-    const cwd = join(this.dataRoot, 'workspaces', hash(new URL(this.origin).origin + '\0' + str(row['workerId']) + '\0' + path))
+    const machineId = str(worker?.['machineId'], str(row['workerId']))
+    const cwd = join(this.dataRoot, 'workspaces', hash(new URL(this.origin).origin + '\0' + machineId + '\0' + path))
     await mkdir(cwd, { recursive: true })
-    return { cwd, title: path.replace(/\\/g, '/').split('/').filter(Boolean).at(-1) + ' · ' + str(worker?.['name'], str(row['workerId'])) }
+    return { cwd, title: path.replace(/\\/g, '/').split('/').filter(Boolean).at(-1) + ' · ' + (worker?.['machineId'] ? machineId : str(worker?.['name'], str(row['workerId']))) }
   }
   private async materialize(id: string, row: JsonObject): Promise<Agent> {
     this.abort.signal.throwIfAborted()
@@ -196,6 +254,7 @@ export class AgentBridgeImportTarget {
     let agent = this.host.agents.get(id)
     if (agent && this.isBusy(id)) return agent
     const placement = await this.workspace(row)
+    placement.cwd = this.placementOverrides.get(id) ?? placement.cwd
     const model = str(row['model'], 'remote')
     if (!agent) {
       const stored = await this.host.sessionPersistence.stat(id)

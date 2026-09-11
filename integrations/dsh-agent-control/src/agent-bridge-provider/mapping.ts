@@ -35,7 +35,9 @@ export function projectNativeEvents(rows: readonly JsonObject[], existing: reado
   const add = (type: string, data: JsonObject, time: number, surface = false) => {
     output.push({ type, data, seq: existing.length + output.length, time, ...(surface ? { surfaceOp: 'append' as const } : {}) })
   }
-  for (const row of rows) {
+  // Backfilled transcript prompts carry their original timestamp.
+  const ordered = existing.some(e => e.type === 'user/message' || e.type === 'assistant/message') ? rows : [...rows].sort((a, b) => Number(a['timestamp']) - Number(b['timestamp']))
+  for (const row of ordered) {
     const id = str(row['eventId'])
     if (!id || seen.has(id)) continue
     seen.add(id)
@@ -49,7 +51,8 @@ export function projectNativeEvents(rows: readonly JsonObject[], existing: reado
       add('turn/start', { turn }, time)
       add('step/start', { turn, step: 1 }, time)
       if (isMessage && payload['role'] === 'user') {
-        add('user/message', { id: 'bridge:' + id, role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: str(payload['text']) }] }, time, true)
+        const recovered = payload['recoveredFirstPrompt'] === true && existing.some(e => e.type === 'assistant/message')
+        add('user/message', { id: 'bridge:' + id, role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: (recovered ? '【恢复的首条用户消息】\n' : '') + str(payload['text']) }] }, time, true)
       } else {
         const callId = 'bridge:' + str(row['itemId'], id)
         const name = type === 'command.completed' ? 'agent-bridge:command' : type === 'file_change.completed' ? 'agent-bridge:files' : 'agent-bridge:tool'

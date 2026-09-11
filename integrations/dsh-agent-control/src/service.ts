@@ -28,6 +28,14 @@ export class AgentControlService {
     const args = request.args ?? {}
     if (request.domain === 'bridge') {
       if (request.operation === 'provider_status') return { registered: !!this.importTarget, ...(this.importTarget?.status() ?? {}) }
+      if (request.operation === 'creation_sources' || request.operation === 'create_native') {
+        if (!this.importTarget) throw new ControlError('invalid_operation', 'Bridge provider is not ready.', 400)
+        if (typeof args['cwd'] !== 'string' || !args['cwd']) throw new ControlError('invalid_parameter', 'cwd is required.', 400)
+        if (request.operation === 'creation_sources') return this.importTarget.creationSources(args['cwd'])
+        if (typeof args['sourceId'] !== 'string') throw new ControlError('invalid_parameter', 'sourceId is required.', 400)
+        const agent = await this.importTarget.createInWorkspace(args['cwd'], args['sourceId'], signal)
+        return { nativeSessionId: String(agent.id) }
+      }
       if (request.operation === 'import') {
         if (!this.importTarget) throw new ControlError('invalid_operation', 'AgentBridge import target is not registered.', 400)
         const sessionId = args['sessionId']
