@@ -55,6 +55,22 @@ type ControlInternals = {
   handleBridgeMessage(machineId: string, message: BridgeToControlMessage): Promise<void>;
 };
 
+test('Claude transcript discovery and first prompt preserve the public Bridge session identity', async () => {
+  const item = fixture();
+  try {
+    const discovered = { type:'session.discovered' as const, sessionId:'claude-public',nativeSessionId:'native-uuid',agentType:'claude-code' as const,projectPath:'/work/agent-bridge',projectName:'agent-bridge',status:'waiting' as const,createdAt:Date.now() };
+    await item.internals.handleBridgeMessage('dev',discovered);
+    await item.internals.handleBridgeMessage('dev',{...discovered,sessionId:'native-uuid'});
+    const recovered = {type:'session.event' as const,sessionId:'native-uuid',eventType:'message.completed' as const,eventId:'claude:native-uuid:first:user',timestamp:Date.now(),payload:{role:'user',text:'original prompt',recoveredFirstPrompt:true}};
+    await item.internals.handleBridgeMessage('dev',recovered);
+    await item.internals.handleBridgeMessage('dev',recovered);
+    assert.equal(item.store.getSession('native-uuid'),undefined);
+    const rows = item.store.db.prepare('SELECT session_id, event_id FROM events WHERE event_id=?').all('claude:claude-public:first:user');
+    assert.equal(rows.length,1);
+    assert.equal(rows[0]?.session_id,'claude-public');
+  } finally { item.dispose(); }
+});
+
 function fixture(): {
   control: ControlPlane;
   internals: ControlInternals;

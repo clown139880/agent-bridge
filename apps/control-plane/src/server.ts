@@ -659,6 +659,14 @@ export class ControlPlane {
       return;
     }
     if (message.type === "session.event") {
+      // Claude inventory is keyed by its native transcript id, while sessions
+      // launched through Bridge retain their original public identity.
+      const canonical = this.store.getSession(message.sessionId) ?? this.store.getSessionByNative(machineId, message.sessionId);
+      if (canonical && canonical.machineId === machineId && canonical.id !== message.sessionId) {
+        const oldId = message.sessionId;
+        message = { ...message, sessionId: canonical.id,
+          eventId: message.eventId === `claude:${oldId}:first:user` ? `claude:${canonical.id}:first:user` : message.eventId };
+      }
       this.controlStore.appendSessionEvent(machineId, message);
       const status = activityForStructuredEvent(message.eventType);
       if (status) this.controlStore.updateSessionActivity(message.sessionId, status.activity,
@@ -1034,8 +1042,8 @@ export class ControlPlane {
       const workerRun = message.requestId ? this.store.getWorkerRun(message.requestId) : undefined;
       if (workerRun && !workerRun.sessionId) this.store.attachWorkerRun(workerRun.id, session.id, message.status);
       if (!workerRun && !session.matrixThreadId && message.title?.trim()) await this.publishPassiveSession(session, message);
-      const previousUpdatedAt=this.controlStore.session(message.sessionId)?.updatedAt;
-      this.controlStore.upsertSession(machineId, stateForDiscovery(message,
+      const previousUpdatedAt=this.controlStore.session(session.id)?.updatedAt;
+      this.controlStore.upsertSession(machineId, stateForDiscovery({ ...message, sessionId: session.id },
         typeof previousUpdatedAt==="number"?previousUpdatedAt:undefined));
       return;
     }

@@ -729,6 +729,12 @@ export class ClaudeCodeAdapter implements AgentAdapter {
           status: "waiting",
           createdAt: meta.createdAt ?? Date.now(),
         });
+        if (meta.firstUserText) this.emit({
+          type: "session.event", sessionId: nativeId,
+          eventType: "message.completed", eventId: `claude:${nativeId}:first:user`,
+          timestamp: meta.firstUserAt ?? meta.createdAt ?? Date.now(),
+          payload: { role: "user", text: meta.firstUserText, recoveredFirstPrompt: true },
+        });
       }
     }
   }
@@ -831,13 +837,14 @@ interface SessionMeta {
   cwd?: string;
   createdAt?: number;
   firstUserText?: string;
+  firstUserAt?: number;
 }
 
 /** Read cwd / first user prompt from the head of a Claude transcript .jsonl. */
-function readSessionMeta(path: string): SessionMeta | undefined {
+export function readSessionMeta(path: string): SessionMeta | undefined {
   let head: string;
   try {
-    head = readFileSync(path, "utf8").slice(0, 64 * 1024);
+    head = readFileSync(path, "utf8");
   } catch {
     return undefined;
   }
@@ -855,9 +862,16 @@ function readSessionMeta(path: string): SessionMeta | undefined {
       const t = Date.parse(row.timestamp);
       if (!Number.isNaN(t)) meta.createdAt = t;
     }
-    if (!meta.firstUserText && row.type === "user") {
+    if (!meta.firstUserText && row.type === "user" && row.isMeta !== true && row.isSidechain !== true) {
       const msg = row.message as { content?: unknown } | undefined;
       if (typeof msg?.content === "string") meta.firstUserText = msg.content;
+      else if (Array.isArray(msg?.content)) meta.firstUserText = msg.content
+        .filter((block): block is { type: "text"; text: string } => block?.type === "text" && typeof block.text === "string")
+        .map(block => block.text).join("\n") || undefined;
+      if (meta.firstUserText && typeof row.timestamp === "string") {
+        const time = Date.parse(row.timestamp);
+        if (Number.isFinite(time)) meta.firstUserAt = time;
+      }
     }
     if (meta.cwd && meta.firstUserText) break;
   }
