@@ -26,6 +26,7 @@ const host: UserConfig = {
   platform: 'node',
   target: 'node22.19.0',
   dts: true,
+  sourcemap: true,
   clean: true,
   external: [/^@deepseek-ai\//],
 }

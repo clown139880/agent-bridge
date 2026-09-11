@@ -48,7 +48,7 @@ describe('SessionStore', () => {
 
   it('deletes one session, drops its cached detail and selects the neighboring session', async () => {
     const rpc = vi.fn<BridgeRpc>(async (operation, args) => operation === 'delete_session'
-      ? { sessionId: args?.['sessionId'] ?? null, deleted: true }
+      ? { sessionId: args?.['sessionId'] ?? null, actionId: 'delete-a', kind: 'delete_session', status: 'succeeded' }
       : operation === 'sessions' ? page([session('a'), session('b')]) : baseRpc(operation, args))
     const store = new SessionStore(rpc)
     await store.loadSessions(); store.select('a')

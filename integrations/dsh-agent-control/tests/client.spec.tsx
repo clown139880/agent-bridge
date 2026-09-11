@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest'
 import { FooterAction, WorkspaceController, inject } from '../src/client/index.js'
 
 describe('client components', () => {
-  it('waits for the native session services before registering the unified sidebar', () => {
+  it('waits for native session services without replacing their UI', () => {
     expect(inject).toEqual(expect.arrayContaining(['sessions', 'workspaces']))
   })
 
@@ -27,13 +27,13 @@ describe('client components', () => {
   })
 
   it('contains no Host token, Bridge origin, or Hermes path in the browser source', () => {
-    const source = ['index.tsx', 'sessions.tsx', 'session-store.ts', 'bridge-model-control.tsx'].map(file => readFileSync(new URL(`../src/client/${file}`, import.meta.url), 'utf8')).join('\n')
+    const source = ['index.tsx', 'session-store.ts'].map(file => readFileSync(new URL(`../src/client/${file}`, import.meta.url), 'utf8')).join('\n')
     expect(source).not.toMatch(/Authorization|Bearer|AGENT_BRIDGE|WORKER_API_TOKEN|127\.0\.0\.1:8787|hermesRoot|hermesHome/)
-    expect(source).toContain('Model for next turn')
+    expect(source).not.toMatch(/name: 'sidebar.workspaces'|name: 'conversation'|ExternalComposer|ExternalSessionBrowser/)
   })
 
   it('uses the Agent Bridge sessionId contract for session operations', () => {
-    const source = ['index.tsx', 'sessions.tsx'].map(file => readFileSync(new URL(`../src/client/${file}`, import.meta.url), 'utf8')).join('\n')
+    const source = readFileSync(new URL('../src/client/index.tsx', import.meta.url), 'utf8')
     expect(source).toContain("session['sessionId']")
     expect(source).not.toContain("session['id']")
     expect(source).not.toContain("selected['id']")

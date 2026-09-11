@@ -8,40 +8,21 @@ Compatibility is pinned and tested against the published DSH developer preview
 
 ## What it provides
 
-- Sidebar **Agent Control** and **Kanban** shortcuts opening an additive `shell.overlay` workspace.
-- Overview and Hermes Kanban views; DSH / Bridge source switching places external sessions in the main sidebar and conversation area.
-- Kanban loads independently of Bridge overview and hides empty columns by default, with a toggle to reveal them.
-- Paginated Sessions browser with workspace/flat grouping, loaded-title/path search,
-  attention filtering, and chronological history continuation beyond the first 200 events.
-- DSH-native `MarkdownText` and `TerminalBlock` presentation, file-change details,
-  turn boundaries/summaries, and an optional raw-event view with real event timestamps.
-- Per-session drafts and async state, auto steer/start submission with `expectedTurnId`, interruption,
-  approvals, structured input discovery, task creation/details/comments/runs, and real assignee selection.
-- 24 registered model tools covering workers/sessions/events/actions/pending requests and
-  Kanban query/create/comment/dependency/review/operator operations.
-- One Host-owned `AgentControlService` shared by UI requests and model tools.
-- Live and mock Bridge transports, plus sidecar/HTTP/mock Kanban transports.
+- Bridge conversations automatically join the existing native DSH Sessions tree.
+- Stable identities, paginated retained-history projection, workspace grouping,
+  persistence/resume and incremental reconciliation.
+- Native conversation/composer backed by the agent-bridge execution provider;
+  remote tool activities are displayed without executing them locally.
+- Native pending approvals/questions, guarded turn submission and interruption.
+- Additive Agent Control / Hermes Kanban management overlays and model tools.
 
-On DSH `0.1.3-alpha.1`, the Bridge composer uses the public `ExternalComposer`:
-the same Lexical contenteditable, plain-text/history registration, keyboard map,
-placeholder, send control, CSS module, and layout seat as the native InputBar.
-Only the controlled draft and submit target are injected by the Bridge adapter.
-Older releases retain the textarea/Button compatibility path. A UI regression
-test covers project creation and sending through the public composer contract.
-The transcript and composer consume ConversationRoot's published content width,
-composer width/clearance, bubble, input surface, elevation, typography, and action
-color variables. Entering Bridge expands a collapsed sidebar once so the external
-session browser is immediately available. Structural turn boundary events remain
-available in raw mode but do not add empty rows to the normal transcript.
-The current external composer intentionally exposes plain text only. Attachments,
-slash commands, references, permission/model controls, and the full native reader
-still require target-neutral capability adapters; unsupported controls are not
-shown. Its public `modelControl` seat matches the native trailing model position,
-so a Bridge model selector can be injected once the protocol capability is ready.
-Running sessions also use the native primary action as Stop while the draft is
-empty, and return to Send as soon as the user types. `ComposerSurface` remains the
-lower-level public card primitive.
+Bridge remains authoritative for remote execution. DSH owns its presentation
+projection; there is no second session browser or composer. Initial history
+hydration is eager and bounded to four concurrent jobs. The native model choice
+currently follows the remote session; non-text attachments fail explicitly.
 
+See [the session-provider design](docs/bridge-conversation-provider.md) for the
+data path, runtime contracts, deployment checks and current limits.
 The browser calls the same-origin `/agent-control` Host RPC channel. It never
 receives the Bridge origin, bearer token, Hermes filesystem paths, or sidecar
 environment. Assistant prose uses DSH's untrusted Markdown renderer (raw HTML and
@@ -186,95 +167,21 @@ or silently claim integration success.
 
 ## Architecture notes
 
-The evaluated `dsh-session-hub` data-plane approach is documented in
-[`docs/dsh-session-hub-evaluation.md`](docs/dsh-session-hub-evaluation.md).
-Its official-UI ownership principle is the desired end state, but its old
-ApiProxy route/frame interception is not compatible with DSH
-`0.1.3-alpha.1`; production migration is intentionally gated on a stable DSH
-external-session provider contract.
+The [Bridge conversation provider](docs/bridge-conversation-provider.md) is the
+current design. The earlier session-hub evaluation and UI-shadow implementation
+are historical. Bridge remains authoritative for remote sessions; DSH stores a
+native presentation projection and uses its original tree and conversation.
 
-- Agent Bridge remains the source of truth for external sessions.
-- Hermes remains the source of truth for task lifecycle.
-- DSH Sessions retain only DSH conversation history; this plugin does not copy
-  external threads into the DSH session store.
-- Task/session association is displayed when the Bridge projection supplies
-  `taskId`/`runId`; it never advances a Kanban card.
-- Lists load through `/sessions` pagination, independently of the overview's
-  bounded snapshot. Search and counts describe loaded rows; load more to widen
-  the search. Refresh refills the number of rows already loaded.
-- History starts at the oldest retained event and exposes forward continuation.
-  Once caught up, visible Sessions poll the selected session/pending requests
-  and new events every five seconds. Incomplete history does not auto-drain in
-  the background. A cursor error retains the displayed data and offers a baseline reload.
-- Mutations require the worker's `session-actions` capability. Accepted actions
-  remain pending until their receipt is checked; failed sends retain the draft.
-  Session drafts/history/receipts survive tab switches and closing/reopening the overlay
-  for the lifetime of the mounted plugin. They are not persisted across page reloads.
-- Host SSE, unified native/external navigation, persistent view preferences,
-  full-text search, and native Chat/Workspace browser extraction remain future work.
+Hermes remains authoritative for task lifecycle. Session/task links do not
+advance cards automatically. Host-only credentials stay in the Bridge client.
 
 ## Repository layout
 
-Round 5 uses DSH's published Button component in the workspace and reader controls,
-alongside the existing MarkdownText and TerminalBlock. The integrated reader follows
-the `--dsw-alias-*`, `--dsh-content-font-size`, and conversation-width axes. Assistant
-content is an unboxed reading flow; the composer shares its alignment. Turn ids remain
-available in Raw events. This shares primitives and theme/font axes, not the complete
-native Chat layout implementation.
-
-Project headings offer `+` to create an empty conversation in that exact worker and
-directory; the detail header has the same action for pinned/flat views. Worker status
-and `session-actions` gate creation. Accepted receipts are polled, duplicate clicks
-are suppressed, and only confirmed success selects the new session. If the user has
-selected another session meanwhile, the receipt offers Open conversation instead.
-Live creation uses the existing Host RPC; no initial agent message is sent.
-
-View options now defaults to Newest created, with Recently updated as an alternative.
-Groups follow their newest matching loaded row. Equal update timestamps break by
-creation time. Sorting is limited to loaded rows: the deployed Host still fetches
-pages in server update order. The backend currently changes updatedAt when a worker
-goes offline; a future activity timestamp and server-side sort plumbing are required
-for authoritative global last-conversation-activity ordering.
-
-Round 4 replaces the footer's five-row shortcut list with a DSH / Bridge source
-switch. Bridge mode temporarily shadows `sidebar.workspaces` and `conversation`
-using the published slot priority/disposal contract. The full browser and reader
-share one store in the normal shell columns; returning to DSH removes both
-registrations and restores native occupants. Native selection changes also exit
-Bridge mode. Entering Bridge closes the native details panel. Agent Control's
-overview and Kanban remain an overlay; its Sessions navigation opens Bridge mode.
-
-The footer preloads the first session page on mount without loading transcripts.
-Reopening Bridge reuses the in-memory list; refresh remains explicit. This does
-not provide a persistent offline list cache or merge native and external rows in
-one tree. Advanced list controls live under View options to preserve vertical space.
-
-Session UI rounds 2–3 add a `Bridge sessions` section in DSH's sidebar footer,
-sharing the overlay's session store. It opens recent or pinned loaded sessions
-directly. Pins, grouping, collapsed groups, and event-anchored reading positions
-persist in origin-local storage; transcript text, drafts, and credentials do not.
-Preferences are scoped to the browser origin, not to a Bridge backend identity.
-The reader offers first/latest loaded jumps and renders terminal-only summaries
-as Markdown by default. Bulk collapse/expand operates on visible groups; Locate
-current clears search and attention filters, reveals the selected group, and
-scrolls the list to its row. Search and counts cover loaded sessions only.
-
-These remain additive sidebar shortcuts and a plugin overlay, not registration
-in DSH's native session tree. Pinned sessions must be loaded to appear. Reading
-positions in later history pages restore when those pages are loaded manually.
-
-
-- `src/index.ts`: Host plugin, schema, route, prompt, and approval policy.
-- `src/bridge-client.ts`: Agent Control v1 client and mock transport.
-- `src/kanban-client.ts`: permission gate and Kanban transports.
-- `src/tools.ts`: model-facing DSH tool definitions.
-- `src/client/`: DSH Client Module closure and Slots workspace.
-- `python/kanban_adapter.py`: controlled Hermes domain adapter.
-- `fixtures/`: stable mock fixture samples.
-- `tests/`: unit, lifecycle, client, security, and isolated integration checks.
-
-## Non-goals
-
-This package does not publish to npm, deploy production services, modify DSH or
-Hermes source, delete sessions/tasks/files/databases, or treat agent prose as
-completion proof.
+- src/index.ts: Host plugin, schema, RPC, prompt and approval policy.
+- src/agent-bridge-provider/: catalog synchronization, native projection and execution.
+- src/bridge-client.ts: Agent Control v1 client and mock transport.
+- src/kanban-client.ts: permission gate and Kanban transports.
+- src/tools.ts: model-facing DSH tool definitions.
+- src/client/: additive Agent Control / Kanban overlay.
+- python/kanban_adapter.py: controlled Hermes domain adapter.
+- fixtures/: development-only management overlay preview.

@@ -1,0 +1,4 @@
+# AgentBridge owns the model context, tools, sandbox, and approvals. The DSH
+# Host adapter binds this otherwise-empty DSH presentation session to the
+# Agent Bridge control plane, so nothing is composed here.
+[]

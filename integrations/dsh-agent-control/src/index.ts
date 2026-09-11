@@ -2,6 +2,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
 import { ControlError, errorResponse } from './errors.js'
 import { AgentControlService, type AgentControlConfig } from './service.js'
+import { registerAgentBridgeProvider } from './agent-bridge-provider/provider.js'
 import { MUTATING_TOOL_NAMES, registerTools } from './tools.js'
 import type { DashboardRequest } from './types.js'
 
@@ -10,6 +11,9 @@ export * from './errors.js'
 export * from './kanban-client.js'
 export * from './service.js'
 export * from './types.js'
+export { AgentBridgeImportTarget } from './agent-bridge-provider/import-target.js'
+export { AgentBridgeLlmAdapter } from './agent-bridge-provider/adapter.js'
+export { projectNativeEvents } from './agent-bridge-provider/mapping.js'
 export { MUTATING_TOOL_NAMES, TOOL_SPECS } from './tools.js'
 export const name = 'agent-control'
 export const inject = ['tools', 'systemPrompt', 'connection']
@@ -67,6 +71,7 @@ export function apply(ctx: Context, config: Config): void {
   const service = new AgentControlService(config)
   ctx.provide('agentControl', service)
   ctx.effect(() => () => { service.dispose() }, 'agent-control: service lifecycle')
+  registerAgentBridgeProvider(ctx, service)
   registerTools(ctx, service)
   ctx.systemPrompt.section({ name: 'tool:agent-control', order: 2650, text: [
     'Agent Control orchestration rules:',

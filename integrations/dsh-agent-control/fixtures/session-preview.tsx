@@ -76,7 +76,7 @@ async function boot() {
       plugin.apply(ctx)
       ready = true
       const footer = rows.find(row => row.name === 'sidebar.footer.action')
-      ;(footer?.inject()['controller'] as { openSession?(id: string): void } | undefined)?.openSession?.('')
+      ;(footer?.inject()['controller'] as { open?(): void } | undefined)?.open?.()
       render()
     } catch (error) {
       showError('Plugin initialization failed', error)

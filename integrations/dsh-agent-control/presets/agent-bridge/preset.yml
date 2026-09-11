@@ -1,0 +1,3 @@
+name: Agent Bridge
+description: 通过 Agent Bridge 控制面驱动的外部编码 Agent，DSH 负责原生会话呈现。
+order: 5

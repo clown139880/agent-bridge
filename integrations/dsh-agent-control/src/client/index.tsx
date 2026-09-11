@@ -8,123 +8,54 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import type { FormEvent, ReactNode } from 'react'
 import css from './workspace.module.css'
 import { openBridgeStream } from './bridge-stream.js'
-import { Sessions, UnifiedSessions, type NativeSessionSource, type NativeWorkspaceSource } from './sessions.js'
+
 import { SessionStore, type BridgeRpc } from './session-store.js'
-import { SessionViewStore } from './session-view-state.js'
+
 
 const RPC_CHANNEL = '/agent-control'
 type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue }
 type RecordValue = Record<string, JsonValue>
 
-/** Persisted master switch: when off, the plugin removes all its shadowing
- *  surfaces so the native DSH sidebar/conversation show through. */
-const SURFACES_KEY = 'agent-control:surfaces-enabled'
-function readSurfacesEnabled(): boolean {
-  try { return globalThis.localStorage?.getItem(SURFACES_KEY) !== 'off' } catch { return true }
-}
-function writeSurfacesEnabled(on: boolean): void {
-  try { globalThis.localStorage?.setItem(SURFACES_KEY, on ? 'on' : 'off') } catch { /* storage unavailable */ }
-}
-
+/** Management overlay only. DSH owns its session tree and conversation. */
 export class WorkspaceController {
   readonly sessions: SessionStore
-  readonly views = new SessionViewStore()
-  constructor(rpc: BridgeRpc = (operation, args) => call('bridge', operation, args), loadNativeModelCatalog?: () => Promise<JsonValue>) { this.sessions = new SessionStore(rpc, loadNativeModelCatalog, openBridgeStream) }
-  private requestedSession: { id: string } | undefined
+  error = ''
   private openValue = false
-  private bridgeValue = false
   private panelValue: 'overview' | 'tasks' = 'overview'
-  private enabledValue = readSurfacesEnabled()
-  private readonly listeners = new Set<() => void>()
-  subscribe = (listener: () => void): (() => void) => { this.listeners.add(listener); return () => this.listeners.delete(listener) }
-  /** Master on/off for every plugin surface (stable ref for useSyncExternalStore). */
-  surfacesEnabled = (): boolean => this.enabledValue
-  toggleSurfaces = (): void => { this.setSurfaces(!this.enabledValue) }
-  setSurfaces = (on: boolean): void => { if (this.enabledValue === on) return; this.enabledValue = on; writeSurfacesEnabled(on); if (!on) { this.openValue = false; this.bridgeValue = false } this.emit() }
+  private listeners = new Set<() => void>()
+  constructor(private readonly rpc: BridgeRpc = (operation, args) => call('bridge', operation, args),
+    loadNativeModelCatalog?: () => Promise<JsonValue>, private readonly openNative?: (id: string) => void) {
+    this.sessions = new SessionStore(rpc, loadNativeModelCatalog, openBridgeStream)
+  }
+  subscribe = (listener: () => void): (() => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener) } }
   snapshot = (): boolean => this.openValue
-  bridgeSnapshot = (): boolean => this.bridgeValue
   panelSnapshot = (): 'overview' | 'tasks' => this.panelValue
-  sessionSnapshot = (): { id: string } | undefined => this.requestedSession
-  openSession = (id: string): void => { this.requestedSession = { id }; this.openValue = false; this.bridgeValue = true; this.sessions.activate(); if (id) this.sessions.select(id); this.emit() }
-  showNative = (): void => { this.bridgeValue = false; this.openValue = false; this.emit() }
-  open = (): void => { this.panelValue = 'overview'; this.openValue = true; this.emit() }
-  openKanban = (): void => { this.panelValue = 'tasks'; this.openValue = true; this.emit() }
+  openSession = (id: string): void => { void this.openLinkedSession(id) }
+  private async openLinkedSession(id: string): Promise<void> {
+    try {
+      const result = asRecord(await this.rpc('import' as never, { sessionId: id }))
+      if (typeof result['nativeSessionId'] !== 'string') throw new Error('Native session identity is missing')
+      this.openNative?.(result['nativeSessionId'])
+      this.error = ''; this.openValue = false
+    } catch (error) { this.error = error instanceof Error ? error.message : String(error) }
+    this.emit()
+  }
+  open = (): void => { this.panelValue = 'overview'; this.openValue = true; this.sessions.activate(); this.emit() }
+  openKanban = (): void => { this.panelValue = 'tasks'; this.openValue = true; this.sessions.activate(); this.emit() }
   close = (): void => { this.openValue = false; this.emit() }
   private emit(): void { for (const listener of this.listeners) listener() }
 }
-
 interface Injected { controller: WorkspaceController }
 type FooterProps = PropsRuntime<'sidebar.footer.action'> & Injected
 
 export function FooterAction({ wide, controller }: FooterProps) {
-  const enabled = useSyncExternalStore(controller.subscribe, controller.surfacesEnabled, controller.surfacesEnabled)
-  useEffect(() => { if (enabled) { controller.sessions.activate(); void controller.sessions.loadSessions() } }, [controller, enabled])
   return <div>
-    <Button size="sm" className={css.footerButton} type="button" onClick={controller.toggleSurfaces}
-      aria-label={enabled ? 'Disable Agent Control (reveal native DSH)' : 'Enable Agent Control'}
-      title={enabled ? 'Agent Control is ON — click to disable and reveal the native DSH sidebar/conversation' : 'Agent Control is OFF — click to enable the plugin'}>
-      <span aria-hidden="true">{enabled ? '◉' : '○'}</span>{wide && <span>{enabled ? 'Plugin On' : 'Plugin Off'}</span>}
+    <Button size="sm" className={css.footerButton} type="button" onClick={controller.open} aria-label="Open Agent Control">
+      <span aria-hidden="true">⌘</span>{wide && <span>Agent Control</span>}
     </Button>
-    {enabled && <>
-      <Button size="sm" className={css.footerButton} type="button" onClick={controller.open} aria-label="Open Agent Control">
-        <span aria-hidden="true">⌘</span>{wide && <span>Agent Control</span>}
-      </Button>
-      <Button size="sm" type="button" className={css.footerButton} aria-label="Open Kanban" onClick={controller.openKanban}><span aria-hidden="true">▦</span>{wide && <span>Kanban</span>}</Button>
-    </>}
+    <Button size="sm" type="button" className={css.footerButton} aria-label="Open Kanban" onClick={controller.openKanban}><span aria-hidden="true">▦</span>{wide && <span>Kanban</span>}</Button>
   </div>
 }
-
-interface UnifiedInjected extends Injected { nativeSessions: NativeSessionSource; nativeWorkspaces: NativeWorkspaceSource }
-export function BridgeSidebar({ controller, nativeSessions, nativeWorkspaces, wide, expandSidebar }: UnifiedInjected & { wide: boolean; expandSidebar(): void }) {
-  const requestedExpansion = useRef(false)
-  const bridgeSelected = useSyncExternalStore(controller.subscribe, controller.bridgeSnapshot, controller.bridgeSnapshot)
-  useEffect(() => {
-    if (!wide && !requestedExpansion.current) { requestedExpansion.current = true; expandSidebar() }
-  }, [wide, expandSidebar])
-  if (!wide) return <Button size="sm" className={css.footerButton} type="button" onClick={expandSidebar} aria-label="Expand Bridge sessions">B</Button>
-  return <div className={css.integratedSidebar}><UnifiedSessions store={controller.sessions} views={controller.views} nativeSessions={nativeSessions} nativeWorkspaces={nativeWorkspaces} bridgeSelected={bridgeSelected} openBridge={controller.openSession} openNative={id => { controller.showNative(); nativeSessions.open(id) }} /></div>
-}
-
-export function BridgeConversation({ controller }: Injected) {
-  const column = useRef<HTMLDivElement>(null)
-  useEffect(() => {
-    if (!column.current || typeof ResizeObserver === 'undefined') return
-    const element = column.current
-    const update = () => element.style.setProperty('--dsh-conversation-column-width', `${element.clientWidth}px`)
-    update()
-    const observer = new ResizeObserver(update); observer.observe(element)
-    return () => observer.disconnect()
-  }, [])
-  return <div ref={column} className={css.integratedConversation} aria-label="Bridge conversation" title="Session UI · Round 20"><Sessions store={controller.sessions} views={controller.views} surface="detail" refreshToken={null} onRefresh={() => void controller.sessions.refresh()} onBack={controller.showNative} /></div>
-}
-
-/** Scoped single-slot shadows: removing each registration restores DSH's original occupant. */
-export function installBridgeSurfaces(ctx: ClientContext, controller: WorkspaceController): void {
-  const bind = (mount: () => () => void): (() => void) => {
-    let dispose: (() => void) | undefined
-    const update = () => {
-      if (controller.bridgeSnapshot() && !dispose) dispose = mount()
-      else if (!controller.bridgeSnapshot() && dispose) { dispose(); dispose = undefined }
-    }
-    const unsubscribe = controller.subscribe(update)
-    update()
-    return () => { unsubscribe(); dispose?.() }
-  }
-  const nativeSessions = ctx.get('sessions') as unknown as NativeSessionSource | undefined
-  const nativeWorkspaces = ctx.get('workspaces') as unknown as NativeWorkspaceSource | undefined
-  if (nativeSessions?.list && nativeWorkspaces?.list) ctx.slots.inject('sidebar.workspaces', () => ctx.slots.register({ name: 'sidebar.workspaces', priority: -100, inject: () => ({ controller, nativeSessions, nativeWorkspaces }) }, BridgeSidebar))
-  ctx.slots.inject('conversation', () => bind(() => { ctx.layout.closeDetails(); return ctx.slots.register({ name: 'conversation', priority: -100, inject: () => ({ controller }) }, BridgeConversation) }))
-  ctx.effect(() => {
-    const native = nativeSessions
-    if (!native?.list) return () => {}
-    let current = native.list.getSnapshot().current
-    return native.list.subscribe(() => {
-      const next = native.list!.getSnapshot().current
-      if (next !== current) { current = next; if (controller.bridgeSnapshot()) controller.showNative() }
-    })
-  })
-}
-
 function useController(controller: WorkspaceController): boolean {
   return useSyncExternalStore(controller.subscribe, controller.snapshot, controller.snapshot)
 }
@@ -162,7 +93,9 @@ function Overview({ data }: { data: RecordValue }) {
   const counts = asRecord(data['counts'])
   const board = asRecord(data['board'])
   const columns = asArray(board['columns']).map(asRecord)
+  const sessionProvider = asRecord(data['sessionProvider'])
   return <div className={css.page}>
+    {sessionProvider['registered'] !== true ? <div role="alert">Bridge session sync is waiting for the Host services.</div> : typeof sessionProvider['error'] === 'string' && sessionProvider['error'] ? <div role="alert">Bridge session sync: {sessionProvider['error']}</div> : <div>Bridge conversations in Sessions: {Number(sessionProvider['nativeSessions'] ?? 0)}</div>}
     <div className={css.metrics}>
       <Metric label="Workers online" value={workers.filter(worker => worker['status'] === 'online').length} tone="good" />
       <Metric label="Active" value={Number(counts['active'] ?? 0)} />
@@ -247,7 +180,7 @@ function WorkspaceOverlay({ controller }: Injected) {
   const open = useController(controller)
   const panel = useSyncExternalStore(controller.subscribe, controller.panelSnapshot, controller.panelSnapshot)
   const sessionStore = controller.sessions
-  const [tab, setTab] = useState<'overview' | 'sessions' | 'tasks'>('overview')
+  const [tab, setTab] = useState<'overview' | 'tasks'>('overview')
   useEffect(() => { if (open) setTab(panel) }, [panel, open])
   const [data, setData] = useState<RecordValue>()
   const [error, setError] = useState('')
@@ -263,13 +196,14 @@ function WorkspaceOverlay({ controller }: Injected) {
     } catch (cause) { if (epoch === requestEpoch.current) setError(cause instanceof Error ? cause.message : 'Agent Control unavailable') }
     finally { if (epoch === requestEpoch.current) setLoading(false) }
   }, [tab, sessionStore])
-  useEffect(() => { if (open && tab !== 'sessions') void refresh() }, [open, refresh, tab])
+  useEffect(() => { if (open) void refresh() }, [open, refresh, tab])
   useEffect(() => { if (!open) return; const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape') controller.close() }; window.addEventListener('keydown', onKey); return () => window.removeEventListener('keydown', onKey) }, [controller, open])
-  const content = useMemo(() => { if (tab === 'sessions') return <Sessions store={sessionStore} views={controller.views} refreshToken={data} />; if (!data) return null; if (tab === 'tasks') return <Tasks snapshot={data} refresh={refresh} openSession={controller.openSession} />; return <Overview data={data} /> }, [data, refresh, tab, sessionStore, controller])
+  const content = useMemo(() => { if (!data) return null; if (tab === 'tasks') return <Tasks snapshot={data} refresh={refresh} openSession={controller.openSession} />; return <Overview data={data} /> }, [data, refresh, tab, sessionStore, controller])
   if (!open) return null
   return <div className={css.workspace} role="dialog" aria-modal="true" aria-label="Agent Control workspace">
-    <header className={css.topbar}><div className={css.title}><span className={css.logo}>AC</span><div><strong>Agent Control</strong><small>Session UI · Round 20</small></div></div><nav>{(['overview', 'sessions', 'tasks'] as const).map(item => <Button size="sm" className={tab === item ? css.activeTab : ''} key={item} type="button" onClick={() => item === 'sessions' ? controller.openSession('') : setTab(item)}>{item === 'tasks' ? 'Kanban' : item}</Button>)}</nav><div className={css.topActions}><Button size="sm" type="button" aria-label="Refresh Agent Control" onClick={() => void (tab === 'sessions' ? sessionStore.refresh() : refresh())} disabled={tab !== 'sessions' && loading}>↻</Button><Button size="sm" type="button" onClick={controller.close}>Close</Button></div></header>
-    {tab !== 'sessions' && error ? <ErrorBanner error={error} retry={() => void refresh()} /> : tab !== 'sessions' && loading && !data ? <div className={css.loading}>Loading Agent Control…</div> : content}
+    <header className={css.topbar}><div className={css.title}><span className={css.logo}>AC</span><div><strong>Agent Control</strong><small>Bridge orchestration</small></div></div><nav>{(['overview', 'tasks'] as const).map(item => <Button size="sm" className={tab === item ? css.activeTab : ''} key={item} type="button" onClick={() => setTab(item)}>{item === 'tasks' ? 'Kanban' : item}</Button>)}</nav><div className={css.topActions}><Button size="sm" type="button" aria-label="Refresh Agent Control" onClick={() => void refresh()} disabled={loading}>↻</Button><Button size="sm" type="button" onClick={controller.close}>Close</Button></div></header>
+    {controller.error && <div role="alert">{controller.error}</div>}
+    {error ? <ErrorBanner error={error} retry={() => void refresh()} /> : loading && !data ? <div className={css.loading}>Loading Agent Control…</div> : content}
   </div>
 }
 
@@ -277,33 +211,17 @@ export const inject = ['slots', 'connection', 'layout', 'remote', 'remote.sessio
 export function apply(ctx: ClientContext): void {
   connection = (ctx as unknown as { connection: RpcConnection }).connection
   const remote = (ctx as unknown as { remote: { session: { modelCatalog(): Promise<{ ok: true; value: JsonValue } | { ok: false; error: { code: string; message: string } }> }; $on(event: string, listener: () => void): () => void } }).remote
+  const nativeSessions = (ctx as unknown as { get(name: string): unknown }).get('sessions') as unknown as { open(id: string): void } | undefined
   const controller = new WorkspaceController(undefined, async () => {
     const response = await remote.session.modelCatalog()
     if (!response.ok) throw new Error(`${response.error.code}: ${response.error.message}`)
     return response.value
-  })
+  }, id => nativeSessions?.open(id))
   ctx.effect(() => {
     const refresh = () => controller.sessions.invalidateModels()
     const disposers = [remote.$on('llm/adapters-updated', refresh), remote.$on('settings/document-updated', refresh), remote.$on('credentials/reference-updated', refresh)]
     return () => { for (const dispose of disposers) dispose(); controller.sessions.dispose() }
   })
-  // The footer stays registered in every state so the on/off toggle is always reachable.
   ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({ name: 'sidebar.footer.action', id: 'agent-control', order: 20, inject: (): Injected => ({ controller }) }, FooterAction))
-  // Every shadowing surface lives in a disposable fork gated by the master switch;
-  // disposing it removes the slot registrations and restores DSH's native occupants.
-  let fork: { dispose(): void } | undefined
-  const syncSurfaces = (): void => {
-    const on = controller.surfacesEnabled()
-    if (on && !fork) {
-      fork = ctx.plugin((scope: ClientContext) => {
-        installBridgeSurfaces(scope, controller)
-        scope.slots.inject('shell.overlay', () => scope.slots.register({ name: 'shell.overlay', id: 'agent-control', order: 10, inject: (): Injected => ({ controller }) }, WorkspaceOverlay))
-      }) as unknown as { dispose(): void }
-    } else if (!on && fork) { fork.dispose(); fork = undefined }
-  }
-  ctx.effect(() => {
-    const unsubscribe = controller.subscribe(syncSurfaces)
-    syncSurfaces()
-    return () => { unsubscribe(); fork?.dispose(); fork = undefined }
-  })
+  ctx.slots.inject('shell.overlay', () => ctx.slots.register({ name: 'shell.overlay', id: 'agent-control', order: 10, inject: (): Injected => ({ controller }) }, WorkspaceOverlay))
 }
