@@ -10,7 +10,7 @@ import css from './workspace.module.css'
 import { openBridgeStream } from './bridge-stream.js'
 
 import { SessionStore, type BridgeRpc } from './session-store.js'
-import { SessionCreationController, SessionSourcePicker, type CreationSessions, type CreationWorkspaces } from './session-creation.js'
+import { SessionCreationController, SessionSourcePicker, type CreationSessions, type CreationWorkspaces, type CreationNavigation } from './session-creation.js'
 
 
 const RPC_CHANNEL = '/agent-control'
@@ -109,7 +109,7 @@ function Overview({ data }: { data: RecordValue }) {
     <div className={css.twoCol}>
       <section className={css.panel}><h2>Workers</h2>{workers.length === 0 ? <Empty>No workers reported.</Empty> : workers.map(worker => <div className={css.row} key={str(worker['id'])}>
         <span className={statusClass(str(worker['status']))} />
-        <div><strong>{str(worker['name'])}</strong><small>{str(worker['hostname'])} · {asArray(worker['capabilities']).length} capabilities</small></div>
+        <div><strong>{str(worker['name'])}</strong><small>{str(worker['hostname'])} · Bridge {str(worker['bridgeVersion'], '版本未知')} · {asArray(worker['capabilities']).length} capabilities</small></div>
         <span className={css.rowMeta}>{str(worker['status'])}</span>
       </div>)}</section>
       <section className={css.panel}><h2>Recent sessions</h2>{sessions.slice(0, 6).map(session => <div className={css.row} key={str(session['sessionId'])}>
@@ -211,7 +211,7 @@ function WorkspaceOverlay({ controller }: Injected) {
   </div>
 }
 
-export const inject = ['slots', 'connection', 'layout', 'remote', 'remote.session', 'sessions', 'workspaces']
+export const inject = ['slots', 'connection', 'layout', 'remote', 'remote.session', 'sessions', 'workspaces', 'uiWorkspace']
 export function apply(ctx: ClientContext): void {
   connection = (ctx as unknown as { connection: RpcConnection }).connection
   const remote = (ctx as unknown as { remote: { session: { modelCatalog(): Promise<{ ok: true; value: JsonValue } | { ok: false; error: { code: string; message: string } }> }; $on(event: string, listener: () => void): () => void } }).remote
@@ -220,9 +220,8 @@ export function apply(ctx: ClientContext): void {
   ctx.effect(() => {
     let disposed = false
     let uninstall: (() => void) | undefined
-    void call('bridge', 'provider_status').then(status => {
-      if (!disposed && asRecord(status)['sourceSelection'] === true) uninstall = creation.install(ctx.get('sessions') as unknown as CreationSessions, ctx.get('workspaces') as unknown as CreationWorkspaces)
-    }).catch(() => { /* Preserve native creation while the Host provider is unavailable. */ })
+    // Resolve sources at click time; Host startup must not permanently disable interception.
+    if (!disposed) uninstall = creation.install(ctx.get('sessions') as unknown as CreationSessions, ctx.get('workspaces') as unknown as CreationWorkspaces, ctx.get('uiWorkspace') as unknown as CreationNavigation)
     return () => { disposed = true; uninstall?.() }
   })
   ctx.slots.inject('shell.overlay', () => ctx.slots.register({ name: 'shell.overlay', id: 'agent-control-session-source', order: 11, inject: () => ({ controller: creation }) }, SessionSourcePicker))

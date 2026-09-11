@@ -1,12 +1,13 @@
 import { LlmAdapter } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { Context } from '@deepseek-ai/cordis'
 import type { GenerateOptions, LlmModelInfo, LlmProviderInfo, LlmResolvedModelInfo, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { setTimeout as delay } from 'node:timers/promises'
 import type { AgentControlService } from '../service.js'
 import type { JsonObject } from '../types.js'
 import type { AgentBridgeImportTarget } from './import-target.js'
 import { readHistory } from './import-target.js'
-import { lastUserText, projectStreamChunks, PROVIDER, record, str } from './mapping.js'
+import { lastUserText, PROVIDER, record, str } from './mapping.js'
 import { relayPendingInteractions } from './approval-bridge.js'
 import { uploadPromptImages } from './attachments.js'
 
@@ -51,14 +52,15 @@ export class AgentBridgeLlmAdapter extends LlmAdapter {
       let cursor = baseline.cursor
       const seen = new Set(baseline.rows.map(row => str(row['eventId'])))
       const session = record(await this.service.bridge.call({ operation: 'session', args: { sessionId: remoteId } }, signal))
-      const expectedTurnId = str(session['activeTurnId'])
+      const expectedTurnId = ['active', 'waiting_for_approval', 'waiting_for_input'].includes(str(session['status'])) ? str(session['activeTurnId']) : ''
       const args: JsonObject = { sessionId: remoteId, input, delivery: 'auto', ...(expectedTurnId ? { expectedTurnId } : {}) }
       if (attachments.length) args['attachments'] = attachments
       // Native provider catalogs are not remote model catalogs.
       if (!expectedTurnId && options.provider === PROVIDER && options.model !== 'remote') args['model'] = options.model
       if (!expectedTurnId && options.reasoningEffort) args['reasoningEffort'] = options.reasoningEffort
       receipt = record(await this.service.bridge.call({ operation: 'submit_turn', args }, signal))
-      let index = 0
+      let text = ''
+      let opened = false
       let finished = false
       const buffered: JsonObject[] = []
       this.pendingAcks.set(nativeId, [])
@@ -77,16 +79,23 @@ export class AgentBridgeLlmAdapter extends LlmAdapter {
             const payload = record(row['payload'])
             if (row['type'] === 'message.completed') {
               if (payload['role'] === 'user' && payload['text'] === input) this.pendingAcks.get(nativeId)!.push(row)
-              else if (payload['role'] === 'assistant') {
-                for (const chunk of projectStreamChunks(row, index)) yield chunk
-                index++
-                this.pendingAcks.get(nativeId)!.push(row)
-              }
+            }
+            // A single text block works with native renderers that show only the first
+            // block while streaming. Remote commands are display text, never local calls.
+            const rendered = row['type'] === 'message.completed' && payload['role'] === 'assistant' ? str(payload['text'])
+              : row['type'] === 'command.completed' ? '远端命令：' + str(payload['command']) + '\n\n' + str(payload['output'])
+              : row['type'] === 'tool.completed' ? '远端工具：' + str(payload['toolName'], 'tool') + '\n\n' + str(payload['output'], JSON.stringify(payload)) : ''
+            if (rendered) {
+              if (!opened) { yield { type: 'block-start', index: 0, blockType: 'text' }; opened = true }
+              const delta = (text ? '\n\n' : '') + rendered
+              text += delta
+              yield { type: 'text-delta', index: 0, text: delta }
+              this.pendingAcks.get(nativeId)!.push(row)
             }
             if (row['type'] === 'turn.failed' || (row['type'] === 'turn.completed' && payload['status'] === 'failed')) throw new Error('Bridge turn failed: ' + JSON.stringify(payload))
             if (row['type'] === 'turn.completed' || row['type'] === 'turn.interrupted') finished = true
           }
-          await relayPendingInteractions(this.service.bridge, agent, remoteId, pending, interactionSignal)
+          if (!finished) await relayPendingInteractions(this.service.bridge, agent, remoteId, pending, interactionSignal, this.target.host as unknown as Context)
           if (!finished && receipt['status'] === 'succeeded') {
             const current = record(await this.service.bridge.call({ operation: 'session', args: { sessionId: remoteId } }, signal))
             if (current['status'] === 'offline' || current['status'] === 'error') throw new Error('Bridge session became ' + str(current['status']))
@@ -102,6 +111,7 @@ export class AgentBridgeLlmAdapter extends LlmAdapter {
         }
         if (!finished) await delay(this.pollMs, undefined, { signal })
       }
+      if (opened) yield { type: 'block-end', index: 0, block: { type: 'text', text } }
       yield { type: 'finish', reason: { kind: 'stop' }, replayState: { response: { actionId: str(receipt['actionId']), turnId } } }
     } finally {
       interactionAbort.abort()

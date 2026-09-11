@@ -5,7 +5,8 @@ import css from './workspace.module.css'
 type Source = { id: string; name: string; workerId?: string; machineId: string; workspace: string; available: boolean }
 type Options = { workspaceId?: string; cwd?: string; sessionId?: string }
 export interface CreationSessions { create(options?: Options): Promise<string>; refresh(): Promise<void> }
-export interface CreationWorkspaces { list: { getSnapshot(): { items: { id: string; path: string }[] } } }
+export interface CreationWorkspaces { list: { getSnapshot(): { items: { workspaceId: string; path: string }[] } } }
+export interface CreationNavigation { connectWorkspace(workspaceId: string): Promise<string> }
 type Rpc = (operation: string, args: Record<string, string>) => Promise<unknown>
 type Pending = { sources: Source[]; resolve(source: Source): void; reject(error: Error): void }
 
@@ -19,12 +20,13 @@ export class SessionCreationController {
   private emit() { for (const listener of this.listeners) listener() }
   select = (source: Source) => { const pending = this.pending; this.pending = undefined; this.emit(); pending?.resolve(source) }
   cancel = () => { const pending = this.pending; this.pending = undefined; this.emit(); pending?.reject(new Error('Session creation cancelled')) }
-  install(sessions: CreationSessions, workspaces: CreationWorkspaces): () => void {
+  install(sessions: CreationSessions, workspaces: CreationWorkspaces, navigation?: CreationNavigation): () => void {
     const original = sessions.create
     const controller = this
     async function create(this: CreationSessions, options?: Options): Promise<string> {
       if (options?.sessionId) return original.call(this, options)
-      const cwd = options?.cwd ?? workspaces.list.getSnapshot().items.find(item => item.id === options?.workspaceId)?.path
+      const cwd = options?.cwd ?? workspaces.list.getSnapshot().items.find(item => item.workspaceId === options?.workspaceId)?.path
+      if (options?.workspaceId && !cwd) throw new Error('目录尚未加载，请刷新后重试')
       if (!cwd) return original.call(this, options)
       const result = await controller.rpc('creation_sources', { cwd }) as { sources: Source[] }
       if (!Array.isArray(result.sources)) throw new Error('Bridge directory sources are unavailable')
@@ -40,7 +42,15 @@ export class SessionCreationController {
       return created.nativeSessionId
     }
     sessions.create = create
-    return () => { controller.cancel(); if (sessions.create === create) sessions.create = original }
+    const connect = navigation?.connectWorkspace
+    // Native navigation otherwise reuses a blank DSH session without calling create.
+    const createInDirectory = (workspaceId: string) => sessions.create({ workspaceId })
+    if (navigation) navigation.connectWorkspace = createInDirectory
+    return () => {
+      controller.cancel()
+      if (sessions.create === create) sessions.create = original
+      if (navigation && connect && navigation.connectWorkspace === createInDirectory) navigation.connectWorkspace = connect
+    }
   }
 }
 

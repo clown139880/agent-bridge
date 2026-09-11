@@ -58,7 +58,7 @@ async function pendingRows(bridge: Pick<BridgeClient, 'call'>, operation: 'appro
 
 /** Polling never awaits the human. Each pending id has one scoped, cancellable native request. */
 export async function relayPendingInteractions(bridge: Pick<BridgeClient, 'call'>, agent: Agent, remoteId: string,
-  jobs: Map<string, Promise<void>>, signal: AbortSignal): Promise<void> {
+  jobs: Map<string, Promise<void>>, signal: AbortSignal, services = agent.ctx): Promise<void> {
   const [approvals, questions] = await Promise.all([
     pendingRows(bridge, 'approvals', remoteId, signal), pendingRows(bridge, 'user_input', remoteId, signal),
   ])
@@ -70,12 +70,12 @@ export async function relayPendingInteractions(bridge: Pick<BridgeClient, 'call'
         const choices = Array.isArray(row['choices']) ? row['choices'].map(value => str(value)).filter(Boolean) : []
         let choice = ''
         if (agent.status === 'running' && choices.length === 2 && choices.includes('allow') && choices.includes('deny')) {
-          const outcome = await agent.ctx.approval.request({ agent, signal, ...bridgeApprovalToRequest(row) })
+          const outcome = await services.approval.request({ agent, signal, ...bridgeApprovalToRequest(row) })
           if (outcome === 'allowed-once') choice = 'allow'
           else if (outcome === 'rejected') choice = 'deny'
           else return // cancellation/unavailable must not become an external decision
         } else {
-          const answer = await agent.ctx.userQuestions.ask({ agent, signal, questions: [{ id: 'decision', question: str(row['summary'], 'Remote approval'), options: choices.map(label => ({ label })) }] })
+          const answer = await services.userQuestions.ask({ agent, signal, questions: [{ id: 'decision', question: str(row['summary'], 'Remote approval'), options: choices.map(label => ({ label })) }] })
           choice = answer.answers.find(item => item.id === 'decision')?.selected[0] ?? ''
           if (!choices.includes(choice)) throw new Error('Select an advertised Bridge approval choice')
         }
@@ -83,12 +83,12 @@ export async function relayPendingInteractions(bridge: Pick<BridgeClient, 'call'
         const current = record(await bridge.call({ operation: 'approval', args: { approvalId: str(row['id']) } }, signal))
         if (current['status'] === 'pending') await bridge.call({ operation: 'resolve_approval', args: { approvalId: str(row['id']), choice } }, signal)
       } else {
-        const answer = await agent.ctx.userQuestions.ask({ agent, signal, ...bridgeUserInputRequest(row) })
+        const answer = await services.userQuestions.ask({ agent, signal, ...bridgeUserInputRequest(row) })
         signal.throwIfAborted()
         const current = record(await bridge.call({ operation: 'user_input_request', args: { requestId: str(row['id']) } }, signal))
         if (current['status'] === 'pending') await bridge.call({ operation: 'respond_user_input', args: userInputAnswerToBridge(row, answer) }, signal)
       }
     }
-    jobs.set(key, run().catch(error => { if (!signal.aborted) agent.ctx.logger.warn('Bridge interaction: ' + String(error)) }))
+    jobs.set(key, run().catch(error => { jobs.delete(key); if (!signal.aborted) services.logger.warn('Bridge interaction: ' + String(error)) }))
   }
 }

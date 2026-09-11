@@ -8,16 +8,20 @@ describe('native directory creation', () => {
     const controller = new SessionCreationController(rpc)
     const original = vi.fn(async (_options?: {workspaceId?:string}) => 'native-local')
     const sessions = {create:original,refresh:vi.fn(async () => {})}
-    const dispose = controller.install(sessions,{list:{getSnapshot:() => ({items:[{id:'workspace',path:'/presentation'}]})}})
-    const result = sessions.create({workspaceId:'workspace'} as never)
+    const reuseBlank = vi.fn(async () => 'wrong-dsh-blank')
+    const navigation = {connectWorkspace:reuseBlank}
+    const dispose = controller.install(sessions,{list:{getSnapshot:() => ({items:[{workspaceId:'workspace',path:'/presentation'}]})}},navigation)
+    const result = navigation.connectWorkspace('workspace')
     await vi.waitFor(() => expect(controller.snapshot()).toBeDefined())
     controller.select(source)
     await expect(result).resolves.toBe('native-remote')
     expect(original).not.toHaveBeenCalled()
+    expect(reuseBlank).not.toHaveBeenCalled()
     expect(sessions.refresh).toHaveBeenCalledOnce()
     expect(rpc).toHaveBeenLastCalledWith('create_native',{cwd:'/presentation',sourceId:'remote'})
     dispose()
     expect(sessions.create).toBe(original)
+    expect(navigation.connectWorkspace).toBe(reuseBlank)
   })
   it('preserves native DSH creation and cancels without creating a remote session', async () => {
     const local = {id:'dsh',name:'DSH',machineId:'local',workspace:'/local',available:true}

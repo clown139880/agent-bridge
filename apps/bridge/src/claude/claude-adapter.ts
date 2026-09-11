@@ -398,7 +398,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
 
   /** Assign a turn id and emit agent.started + turn.started. */
   private startTurnEvents(session: ClaudeSession): string {
-    const turnId = `${session.sessionId}:t${++session.turnSeq}`;
+    const turnId = `${session.sessionId}:t${++session.turnSeq}:${randomUUID()}`;
     session.activeTurnId = turnId;
     this.appendLog(session, "Turn started");
     this.emit({ type: "agent.started", sessionId: session.sessionId, timestamp: Date.now(), summary: "New turn started" });
@@ -752,7 +752,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     if (session.logs.length > LOG_LIMIT) session.logs.splice(0, session.logs.length - LOG_LIMIT);
   }
 
-  private emitSessionEvent(session: ClaudeSession, eventType: StructuredSessionEventType, eventId: string, payload: Record<string, unknown>, turnId?: string): void {
+  private emitSessionEvent(session: ClaudeSession, eventType: StructuredSessionEventType, eventId: string, payload: Record<string, unknown>, turnId = session.activeTurnId): void {
     this.emit({ type: "session.event", eventType, sessionId: session.sessionId, eventId, timestamp: Date.now(), turnId, payload });
   }
 }

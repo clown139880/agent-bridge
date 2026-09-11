@@ -10,7 +10,8 @@ import { AgentBridgeLlmAdapter } from '../src/agent-bridge-provider/adapter.js'
 import { uploadPromptImages } from '../src/agent-bridge-provider/attachments.js'
 import type { AgentControlService } from '../src/service.js'
 import type { BridgeClient } from '../src/bridge-client.js'
-import { bridgeUserInputToQuestions, userInputAnswerToBridge } from '../src/agent-bridge-provider/approval-bridge.js'
+import { bridgeUserInputToQuestions, userInputAnswerToBridge, relayPendingInteractions } from '../src/agent-bridge-provider/approval-bridge.js'
+import type { Context } from '@deepseek-ai/cordis'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -175,7 +176,9 @@ describe('Bridge native turn', () => {
     for await (const chunk of adapter.stream({ sessionId: agent.id, provider: 'agent-bridge', model: 'remote',
       messages: [{ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'go' }] }] } as GenerateOptions)) chunks.push(chunk)
     expect(chunks.at(-1)?.type).toBe('finish')
-    expect(chunks.filter(c => c.type === 'text-delta')).toEqual([{ type: 'text-delta', index: 0, text: 'foreign' }])
+    expect(chunks.filter(c => c.type === 'text-delta')).toEqual([{ type: 'text-delta', index: 0, text: 'foreign' }, { type: 'text-delta', index: 0, text: '\n\n远端命令：pwd\n\n/repo' }])
+    expect(chunks.filter(c => c.type === 'block-start')).toHaveLength(1)
+    expect(chunks.filter(c => c.type === 'block-end')).toHaveLength(1)
     expect(chunks.some(c => c.type === 'tool-call-delta')).toBe(false)
     adapter.commitAcks(String(agent.id))
     expect(sessionEvents(nativeSession(agent)).some(e => e.data['eventId'] === 'foreign')).toBe(true)
@@ -221,6 +224,21 @@ describe('Bridge native turn', () => {
 })
 
 describe('pending question mapping', () => {
+  it('uses the injected Host services for an idle remote approval instead of the isolated Agent context', async () => {
+    const ask = vi.fn(async () => ({answers:[{id:'decision',selected:['deny']}]}))
+    const agent = {status:'idle',ctx:new Proxy({}, {get:() => {throw new Error('without inject')}})} as unknown as Agent
+    const services = {userQuestions:{ask},logger:{warn:vi.fn()}} as unknown as Context
+    const call = vi.fn<BridgeClient['call']>(async request => {
+      if (request.operation === 'approvals') return page([{id:'approval',sessionId:'remote-1',status:'pending',summary:'write tmp',choices:['allow','deny','allow-session']}])
+      if (request.operation === 'approval') return {status:'pending'}
+      return page([])
+    })
+    const jobs = new Map<string,Promise<void>>()
+    await relayPendingInteractions({call},agent,'remote-1',jobs,new AbortController().signal,services)
+    await Promise.all(jobs.values())
+    expect(ask).toHaveBeenCalledOnce()
+    expect(call).toHaveBeenCalledWith({operation:'resolve_approval',args:{approvalId:'approval',choice:'deny'}},expect.any(AbortSignal))
+  })
   it('preserves multiple selected answers and rejects secret questions', () => {
     const pending = { id: 'q', questions: [{ id: 'one', question: 'Which?' }] }
     expect(userInputAnswerToBridge(pending, { answers: [{ id: 'one', selected: ['a', 'b'], custom: 'c' }] })).toEqual({ requestId: 'q', answers: { one: { answers: ['a', 'b', 'c'] } } })

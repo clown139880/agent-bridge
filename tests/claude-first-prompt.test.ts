@@ -6,6 +6,23 @@ import { join } from 'node:path';
 import { ClaudeCodeAdapter, readSessionMeta } from '../apps/bridge/src/claude/claude-adapter.js';
 import type { BridgeToControlMessage } from '../packages/protocol/src/index.js';
 
+test('Claude turn ids survive adapter restarts and message events inherit their active turn', () => {
+  const events: BridgeToControlMessage[] = [];
+  const adapter = new ClaudeCodeAdapter({command:'',allowedRoots:[]}, event => events.push(event));
+  const seam = adapter as unknown as {
+    startTurnEvents(session: unknown): string;
+    emitSessionEvent(session: unknown, type: string, id: string, payload: Record<string, unknown>): void;
+  };
+  const first = {sessionId:'same-session',turnSeq:0,logs:[]};
+  const second = {sessionId:'same-session',turnSeq:0,logs:[]};
+  const turn = seam.startTurnEvents(first);
+  assert.notEqual(seam.startTurnEvents(second), turn);
+  seam.emitSessionEvent(first,'message.completed','message',{role:'assistant',text:'answer'});
+  const message = events.at(-1);
+  assert.ok(message?.type === 'session.event');
+  assert.equal(message.turnId, turn);
+});
+
 test('Claude discovery recovers the full first user text after discovery, including block content', async () => {
   const root = mkdtempSync(join(tmpdir(), 'claude-history-'));
   try {

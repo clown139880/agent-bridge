@@ -210,7 +210,7 @@ export class AgentBridgeImportTarget {
             if (agent) {
               let jobs = this.interactions.get(id)
               if (!jobs) { jobs = new Map(); this.interactions.set(id, jobs) }
-              await relayPendingInteractions(this.bridge, agent, remoteId, jobs, this.abort.signal)
+              await relayPendingInteractions(this.bridge, agent, remoteId, jobs, this.abort.signal, this.host as unknown as Context)
             }
           }
         } catch (error) { failures.push(remoteId + ': ' + String(error)) }
