@@ -3,8 +3,12 @@
 An installable, out-of-tree DeepSeek Harness bundle that adds an Agent Bridge
 control surface and a Hermes Kanban workspace without patching DSH itself.
 
-Compatibility is pinned and tested against the published DSH developer preview
-`0.1.2-rc.1`, Cordis `4.0.2`, Node `^22.19.0 || >=24`, and pnpm `11.7.0`.
+The production target is the DSH `0.1.3-alpha.1` runtime bundled with
+TokensCowork. Most development dependencies are pinned to the published
+`0.1.2-rc.1` packages (with selected alpha packages where available), Cordis
+`4.0.2`, Node `^22.19.0 || >=24`, and pnpm `11.7.0`. Because the development
+packages are not identical to the installed runtime, typecheck/build success is
+not runtime compatibility proof; the installed-runtime verifier is required.
 
 ## What it provides
 
@@ -20,7 +24,9 @@ Bridge remains authoritative for remote execution. DSH owns its presentation
 projection; there is no second session browser or composer. Initial history
 hydration is eager and bounded to four concurrent jobs. The native model choice
 currently follows the remote session. Images use native attachment storage and
-Bridge uploads. Directory creation offers machine-specific DSH/Bridge sources.
+Bridge uploads. Directory creation offers local DSH and machine-specific Bridge
+sources. Presentation workspaces for the same machine and remote path are merged
+in the native catalog without rewriting stored session identities or bindings.
 
 See [the session-provider design](docs/bridge-conversation-provider.md) for the
 data path, runtime contracts, deployment checks and current limits.
@@ -148,20 +154,22 @@ pnpm build
 ```
 
 The test suite verifies Bridge header/idempotency behavior, token non-disclosure,
-runtime tool schemas, Cordis registration/disposal, permission gates, UI entry
-state, mock overview aggregation, and real Hermes create/list/show/comment calls
-against a newly created temporary `HERMES_HOME`. It never opens or mutates the
-user's board.
+runtime tool schemas, Cordis registration/disposal, permission gates, provider
+projection and reconciliation, source selection, native catalog merging,
+session-menu deletion, and real Hermes calls against a newly created temporary
+`HERMES_HOME`. It never opens or mutates the user's board.
 
-The Bridge live smoke requires the parallel Control Plane implementation to be
-running with the configured token. Verify at least:
+The Bridge live smoke requires the Control Plane implementation to be running
+with the configured token. Verify at least:
 
 ```sh
 curl -H "Authorization: Bearer $AGENT_BRIDGE_CONTROL_TOKEN" http://127.0.0.1:8787/api/v1/workers
 curl -H "Authorization: Bearer $AGENT_BRIDGE_CONTROL_TOKEN" http://127.0.0.1:8787/api/v1/snapshot
 ```
 
-Then check the provider status in Agent Control and open DSH's original Sessions tree. If the deployed Bridge still only
+Then check the provider status in Agent Control and open DSH's original Sessions
+tree. Bridge conversations should appear there automatically; there is no import
+step, source switch, replacement browser, or replacement composer. If the deployed Bridge still only
 implements legacy workers/runs, `/workers` succeeds while `/snapshot` and
 `/sessions` correctly surface backend errors; the plugin does not invent data
 or silently claim integration success.
@@ -194,7 +202,8 @@ and archive. It targets the clicked row, even if another session is selected.
 Bridge sessions use confirmed Control Plane deletion. Local DSH sessions use
 logical deletion: a durable marker and native archive remove the conversation
 from the list; original logs are retained for recovery and fork lineage. Project
-files are never removed. Running sessions must finish before deletion.
+files are never removed. Running sessions and pending approval/input must settle
+before deletion.
 
 The client compatibility adapter wraps the existing `sidebar.workspaces` slot
 component and recognizes the native rename/fork/archive menu by its item IDs.

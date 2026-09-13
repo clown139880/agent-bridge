@@ -6,7 +6,7 @@
 
 ## 1. 范围与原则
 
-Agent Bridge 是外部 Codex thread/session 的唯一真实状态来源。UI 展示和操控 Bridge session，不把它复制成
+Agent Bridge 是外部 Codex/Claude thread/session 的唯一执行状态来源。UI 展示和操控 Bridge session，不把它复制成
 DSH 原生 Session。Hermes Kanban 仍是 task claim、lease、依赖、review 和完成状态的唯一真实来源；API 中的
 `taskId` 只是关联标识，Bridge 不修改 Kanban。
 
@@ -43,16 +43,20 @@ DSH Host 插件保存 Control token 并代理请求/事件；浏览器 Client �
 | 状态 | Method | Path | 用途 |
 | --- | --- | --- | --- |
 | 现有、扩展 | `GET` | `/workers` | 机器、在线状态、能力、最近 workspace |
+| 新增 | `DELETE` | `/workers/{workerId}` | 永久移除离线 worker 及其投影 |
+| 新增 | `GET` | `/workers/{workerId}/models` | 向目标 Bridge 请求诊断用模型目录 |
 | 新增 | `GET` | `/snapshot` | Workers/Sessions/待办的无竞态 UI 初始快照 |
-| 新增 | `GET` | `/sessions` | 查询所有近期或活动 Codex sessions |
-| 新增 | `POST` | `/sessions` | 创建 Codex session，可同时启动首个 turn |
+| 新增 | `GET` | `/sessions` | 查询所有近期或活动 Agent sessions |
+| 新增 | `POST` | `/sessions` | 创建 Agent session，可同时启动首个 turn |
 | 新增 | `GET` | `/sessions/{sessionId}` | session 详情和关联关系 |
-| 新增 | `DELETE` | `/sessions/{sessionId}` | 通过 Bridge 永久删除 Codex thread |
+| 新增 | `DELETE` | `/sessions/{sessionId}` | 通过 owning Bridge adapter 删除/遗忘 session |
 | 新增 | `GET` | `/sessions/{sessionId}/runs` | session 关联的 Worker runs |
 | 新增 | `GET` | `/sessions/{sessionId}/events` | session 全量结构化事件/对话 |
 | 新增 | `POST` | `/sessions/{sessionId}/turns` | 自动或显式 steer/start-new-turn |
 | 新增 | `POST` | `/sessions/{sessionId}/interrupt` | interrupt 当前 turn |
 | 新增 | `GET` | `/actions/{actionId}` | 查询异步写操作结果 |
+| 新增 | `POST` | `/attachments` | 上传受限图片并取得内容寻址引用 |
+| 新增 | `GET` | `/attachments/{attachmentId}` | 读取已上传图片；Bridge 也用注册 token 读取 |
 | 新增 | `GET` | `/runs` | 按关联字段查询 runs |
 | 现有、扩展 | `POST` | `/runs` | Hermes 创建幂等 Worker run |
 | 现有、扩展 | `GET` | `/runs/{runId}` | Worker run 状态和待审批 |
@@ -93,6 +97,13 @@ export interface WorkspaceRef {
   name: string;
   lastUsedAt: EpochMs;
   sessionCount?: number;
+}
+
+export interface AttachmentRef {
+  id: string;                 // sha256 content id
+  filename: string;
+  mimeType: "image/png" | "image/jpeg" | "image/webp" | "image/gif";
+  size: number;
 }
 
 export interface Worker {
@@ -164,7 +175,7 @@ export interface Run {
   conversationId: string | null;
   workerId: string;
   machineId: string;
-  agent: "codex-cli";
+  agent: AgentType;
   workspace: string;
   sessionId: string | null;
   status: RunStatus;
@@ -390,6 +401,21 @@ lastSeenAt}`，其中 `workspaces` 是路径字符串数组。当前工作树已
 }
 ```
 
+在线且声明 Claude capability 的 machine 同时返回 `codex@machine` 和 `claude@machine` worker。离线 worker
+仍可保留以展示历史 session；被显式删除的 worker 不再因为历史 session 存在而重新出现在目录中。
+
+#### `DELETE /workers/{workerId}`（新增）
+
+请求必须带 `Content-Type: application/json` 和空对象 body。只允许删除离线 worker；在线返回
+`409 worker_online`。成功返回 `{workerId, deleted: true, deletedSessions}`，并永久清理该 worker 的 session
+投影。worker 后续真实重连时会重新注册。
+
+#### `GET /workers/{workerId}/models`（新增）
+
+向 worker 所在 Bridge 请求 App Server model catalog；Bridge 不在线或上游目录失败时返回
+`503 model_catalog_unavailable`。该接口用于兼容和诊断；DSH 原生 Agent Bridge provider 当前仍使用单个
+`remote` model 跟随 session，不把此目录伪装成 DSH 全局 provider catalog。
+
 #### `GET /snapshot`（新增）
 
 用于 Host 打开 UI 时取得同一数据库读事务中的视图和水位，避免“先查列表、后接流”之间漏事件。
@@ -417,13 +443,15 @@ lastSeenAt}`，其中 `workspaces` 是路径字符串数组。当前工作树已
 
 #### `POST /sessions`（新增）
 
-创建新的 Codex thread。请求必须有 `Idempotency-Key`（1–128 个可打印 ASCII 字符，同一 token scope 内唯一）：
+在目标 worker 上创建新的 Agent session。请求必须有 `Idempotency-Key`（1–128 个可打印 ASCII 字符，同一 token scope 内唯一）：
 
 ```ts
 interface CreateSessionRequest {
-  workerId: string;          // required; codex@machine
+  workerId: string;          // required; codex@machine or claude@machine
   workspace: string;         // required; Bridge 所见绝对路径
   input?: string;            // optional; 非空时创建后立即 start turn
+  model?: string;            // optional; only for the initial turn
+  attachments?: AttachmentRef[]; // optional; images only
 }
 ```
 
@@ -444,11 +472,13 @@ interface CreateSessionRequest {
 #### `DELETE /sessions/{sessionId}`（新增）
 
 请求必须带 `Content-Type: application/json`、空对象 body 和 `Idempotency-Key`。Control Plane 创建可靠的
-`delete_session` action，由目标 Bridge 调用 Codex App Server `thread/delete`；202 返回 `ActionReceipt`。
-只有 Codex 确认成功后才删除本地 session、events、pending requests 和 runs，并写 tombstone 防止旧 inventory
-复活。action receipt 和 idempotency key 按正常保留期保留，因此删除成功后的相同 key 重试仍返回原回执。
-Codex 会同时永久删除该 thread 派生的后代 thread，并通过 `thread/deleted` 逐项通知；UI 必须在确认框中
-明确说明该影响。活动中或存在待处理交互的 session 返回 409，Bridge 仍会在执行前进行同样的权威检查。
+`delete_session` action，由目标 Bridge 路由给 owning adapter；202 返回 `ActionReceipt`。Codex adapter 调用
+App Server `thread/delete`，Claude adapter 停止并遗忘 Bridge 内的 session 状态。只有 adapter 确认成功后才
+删除 Control Plane 的 session、events、pending requests 和 runs，并写 tombstone 防止旧 inventory 复活。
+action receipt 和 idempotency key 按正常保留期保留，因此删除成功后的相同 key 重试仍返回原回执。Codex
+会同时永久删除该 thread 派生的后代 thread，并通过 `thread/deleted` 逐项通知；删除 Codex session 的 UI
+必须在确认框中明确说明该影响。活动中或存在待处理交互的 session 返回 409，Bridge 仍会在执行前进行同样的
+权威检查。已经离线、没有 owning adapter 的 session 由 Control Plane 直接清理投影。
 
 #### `GET /sessions/{sessionId}/events`（新增）
 
@@ -469,8 +499,15 @@ interface SubmitTurnRequest {
   input: string; // required, non-empty
   delivery?: "auto" | "steer" | "start_turn"; // default auto
   expectedTurnId?: string; // recommended for steer, forbidden for known-idle start
+  model?: string; // optional; only for a new turn
+  reasoningEffort?: string; // optional; only for a new turn
+  attachments?: AttachmentRef[]; // optional; images only
 }
 ```
+
+`model` 或 `reasoningEffort` 在 active turn/steer 上返回 `409 model_not_applicable`。附件引用必须先由
+`POST /attachments` 创建；每条消息最多 8 张。DSH 原生 provider 支持没有可见文字的图片消息，但会为
+Bridge 的非空 input 契约补入中性文本标记。
 
 服务端须在每 session 串行锁内，以 Bridge 返回的实时状态判定并执行：
 
@@ -501,6 +538,13 @@ interface InterruptRequest { expectedTurnId?: string; }
 `no_active_turn`；ID 已变返回 409 `turn_changed`。重复相同 key 返回原回执，不重复 interrupt。
 
 ### 6.3 Actions
+
+#### `POST /attachments` 与 `GET /attachments/{attachmentId}`
+
+上传 body 为 `{filename, mimeType, content}`，其中 `content` 是 base64。当前只允许 PNG、JPEG、WebP、GIF，
+单图解码后最大 15 MB；成功返回 `201` 的 `AttachmentRef` 和同源 `previewUrl`。内容按 sha256 去重，默认保留
+7 天（`CONTROL_ATTACHMENT_RETENTION_MS`）。读取需要 read token；Bridge 可用自身注册 token 只读获取字节，
+不会把不透明 attachment id 当成本机路径。任意文件和通用 artifact 尚不支持。
 
 #### `GET /actions/{actionId}`（新增）
 
@@ -783,7 +827,8 @@ UI mock 应至少模拟：worker 离线、空列表、100+ session 游标、acti
 1. Bridge 优先分页调用 `thread/list` 并为第一页补读最近 50 turns；App Server 不支持时回退
    `thread/loaded/list(limit=100)`，session 标记 `historyCompleteness=loaded-only`。
 2. Codex Desktop 仍通过 rollout scanner 只提供 terminal-only 历史；不会声称完整对话。
-3. command output 截断至 64 KiB，file changes 最多保留 200 项；首版没有 blob endpoint。
+3. command output 截断至 64 KiB，file changes 最多保留 200 项。图片已有受认证、内容寻址的 blob
+   endpoint；通用文件和大输出 artifact endpoint 尚未实现。
 4. `isSecret=true` 的 user input 固定返回 `409 secret_input_unsupported`，只能在本机回答。
 5. Control Plane 首版明确为单实例。Bridge 将 action 结果以 0600 文件持久化；若进程在 RPC 期间崩溃，
    同 actionId 安全返回 `action_outcome_unknown`，不会盲目重复有副作用的 RPC。

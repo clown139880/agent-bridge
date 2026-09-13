@@ -1,6 +1,6 @@
 # Windows-native deployment
 
-Agent Bridge 0.5.2 supports a native Windows worker using the same Windows
+The current Agent Bridge supports a native Windows worker using the same Windows
 Codex Desktop home. Copy `deploy/windows-native.env.example` to
 `%LOCALAPPDATA%\agent-bridge\bridge.env`, set `BRIDGE_TOKEN` locally, replace
 the `CODEX_COMMAND` placeholder with the verified `codex.exe` path, and run

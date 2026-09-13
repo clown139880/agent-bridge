@@ -1,6 +1,6 @@
 # dsh-session-hub 评估：Bridge session 原生接入 DSH
 
-状态：研究与设计结论；当前不实施生产路径重构
+状态：历史研究与设计结论；后续结果已补记
 
 日期：2026-09-11
 
@@ -17,6 +17,19 @@
 它最值得借鉴的思想是“只接数据层，让 DSH 官方 session runtime 和 UI 拥有展示”；但它依赖旧 DSH 的完整私有/半公开 wire 面，并没有真正解除 DSH 版本耦合。目标客户端 `0.1.3-alpha.1` 已更换 Session API、传输与事件模型，而 Agent Bridge 也不是一台远端 DSH，无法像该项目一样原样转发官方 frame。现在照搬会把 `External*` UI shim 换成更大、更危险的 DSH wire/event shim。
 
 因此，本卡按“有硬阻塞则停止，不硬重写生产路径”的分支执行。目标不变；推荐先推动 DSH 提供稳定的外部 session source/provider 扩展点，再让本插件实现 Bridge provider。这样才能同时得到官方树、官方会话区和真正可维护的版本边界。
+
+### 2026-09-13 后续结果
+
+本评估没有采用 dsh-session-hub 的旧 Gateway/frame 转发实现，关于该方案风险的结论仍有效。随后
+`dace6ee` 采用了另一条已经落地的生产路径：Host 将 Bridge 历史物化为 DSH 原生 Agent/Session/Workspace，
+并注册 `AgentBridgeLlmAdapter` 将原生 Composer 的 turn 路由回 Bridge。旧的
+`ExternalSessionBrowser`、`ExternalConversationSurface` 和 `ExternalComposer` 已删除。
+
+此实现获得了原生 Sessions 树、Conversation、Composer 和 pending interaction UI，但仍是针对当前 DSH
+Host/runtime contract 的兼容层，不等于 DSH 已发布稳定的第三方 `ExternalSessionSource` API。当前架构与限制
+以 [`bridge-conversation-provider.md`](bridge-conversation-provider.md) 和
+[`../../../docs/current-state.md`](../../../docs/current-state.md) 为准；下文“当前插件”的比较均指评估时的
+`dc23451` 旧 UI-shadow 基线。
 
 ## 2. 研究范围与方法
 
@@ -118,7 +131,7 @@ official composer / approval card / workspace action
 
 这个方向确实消除了 `External*` 组件重命名、props、CSS seat 和布局变化带来的维护工作。
 
-## 4. 与当前插件的对比
+## 4. 与评估时插件实现的对比（`dc23451`）
 
 | 维度 | 当前 dsh-agent-control | dsh-session-hub v0.1.0 |
 | --- | --- | --- |
@@ -207,7 +220,7 @@ CHANGELOG 也记录了多次 wire/runtime 假设导致的真机问题，例如 `
 
 不应借鉴：旧 ApiProxy exact routes、手写 DSH stubs 作为兼容证明、直接调用 client runtime 的非扩展方法、把 Bridge events 强行伪造成某一版 DSH frames。
 
-## 7. 推荐实现：DSH 外部 SessionSource 扩展点
+## 7. 当时推荐的长期扩展点：DSH External SessionSource
 
 ### 7.1 必需的上游 contract
 
@@ -249,6 +262,8 @@ interface ExternalSessionSource {
 
 ### 7.3 若上游暂时不提供扩展点
 
+> 后续没有继续扩大旧 UI shim，而是采用原生 session 物化 + execution adapter；本节保留为当时的降级建议。
+
 保持当前实现，不再扩大 UI shim：
 
 - 冻结 `External*` 兼容范围在已验证版本；不为每个新 UI export 继续复制分支；
@@ -260,7 +275,7 @@ interface ExternalSessionSource {
 
 ## 8. 生产重构判定
 
-本次判定为 **不实施**，原因是以下硬阻塞同时成立：
+本次对 **dsh-session-hub Gateway/frame 方案** 的判定为 **不实施**，原因是以下硬阻塞同时成立：
 
 1. 参考实现所依赖的 DSH API/transport/runtime 在目标版本已经变更；
 2. DSH 没有可由第三方注册的稳定 session source/backend contract；

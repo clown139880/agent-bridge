@@ -1,7 +1,8 @@
 # Agent Control UI：Bridge 改造实施计划与首版记录
 
-> 状态：**首版已在当前工作树实施并验证，尚未发布/部署**。基线与仓库版本仍为 `0.4.2`，本卡没有
-> bump 版本或触发 fleet 更新。权威 wire 契约见 [agent-control-api.md](./agent-control-api.md)。
+> 状态：**历史实施计划，首版早已发布并继续演进。** `0.4.2` 是本文的调查基线，不是当前版本；
+> 2026-09-13 的发布版本为 `0.6.38`。当前事实见 [current-state.md](./current-state.md)，权威 wire
+> 契约见 [agent-control-api.md](./agent-control-api.md)。以下 Phase 和“后续”文字保留为实施记录。
 
 实现覆盖 Phase 1–3 及 Phase 4 的兼容性首版：versioned SQLite migration、session/pending/action/outbox
 投影、Bridge inventory 与 action ack、REST/SSE、read/write token 和 legacy Hermes 回归。Matrix 与 legacy
@@ -452,5 +453,7 @@ Matrix reaction 与 Hermes legacy approval 已接入同一 pending reservation C
 POST。跨机 protocol 当前仍由 `parseMessage` 做基础 envelope 检查，再由 handler 隔离异常；完整逐字段 runtime
 schema validation 是后续 hardening，不影响旧 Bridge 注册或 capability 降级。
 
-后续发布/运维卡仍需在目标生产 Codex 版本上 smoke `thread/list` 与历史字段，并完成 Phase 5 灰度。若上游不支持
-`thread/list`，当前实现会明确降级为 loaded-only，而不会影响 legacy Worker API 或伪造完整历史。
+本文当时未完成的发布/运维工作此后已进入版本化 Bridge 自更新、HAL immutable release 和 Windows-native
+发布流程。`thread/list` 仍在目标 Codex 版本上做 smoke；若上游不支持，当前实现会明确降级为 loaded-only，
+不会影响 legacy Worker API 或伪造完整历史。图片 attachment、Claude worker、DSH 原生 session provider、
+session/worker 删除等 `0.4.2` 之后的能力不在本计划范围内，以当前事实文档和 API 契约为准。

@@ -1,6 +1,6 @@
 # Bridge conversations in the native DSH session tree
 
-Date: 2026-09-11
+Date: 2026-09-11; fact update: 2026-09-13 (`e9f80d7`).
 Target: TokensCowork DSH 0.1.3-alpha.1; development dependencies 0.1.2-rc.1.
 
 ## Product contract
@@ -73,15 +73,33 @@ The Host revalidates the selected source, creates the remote session, materializ
 it, and the client refreshes its native list before returning the new identity.
 Cancel creates nothing. Offline sources remain visible but cannot be selected.
 
-A future logical project can associate multiple machine/directory locations.
-That association and shared project memory are separate from execution routing;
-neither is inferred from a matching basename or implemented by this release.
+The client catalog now merges multiple presentation workspaces that resolve to
+the same `(machineId, remote workspace)` for display. It preserves every native
+session id, original cwd and Bridge binding, and does not merge equal paths from
+different machines. This is display reconciliation, not a logical project or
+shared-memory abstraction: cross-machine project association is still not
+inferred from a matching basename.
 
 Presentation agents use the empty agent-bridge preset. The provider installs
 that preset into the configured writable preset root, refuses to overwrite a
 nonempty existing composition, and never inherits local execution tools from a
 remote session. Selecting this preset for an unbound new session fails visibly;
 it does not silently create a remote session or send to a default local provider.
+
+## Titles and deletion
+
+An imported conversation uses a useful remote title when available, otherwise
+the first user message/prompt summary, and finally a short Bridge id. Background
+reconciliation may improve an importer-owned placeholder, but preserves an
+explicit title written through DSH's native rename action.
+
+The native sidebar menu retains rename, fork and archive and adds deletion for
+the clicked row. A Bridge-bound row waits for the reliable Control Plane action
+and owning adapter confirmation before archiving the native projection (Codex
+uses App Server `thread/delete`; Claude forgets the Bridge session). A local DSH
+row is logically deleted through a durable marker plus native archive; its JSONL
+history remains available for recovery and fork lineage. Neither path deletes
+project files, and active or pending-interaction sessions must settle first.
 
 ## Native event contract
 
@@ -134,7 +152,8 @@ diagnostic rather than relayed through a non-secret UI.
 - Verify the bundled running DSH runtime separately from the development pin.
 - Bump only the plugin version, commit and push, then install compiled Host and
   browser artifacts using the repository deployment script.
-- Do not restart TokensCowork, Bridge or Control Plane for a plugin deployment.
+- Update installed Host and browser bundles without restarting Bridge or Control
+  Plane. Restart TokensCowork when the running Host must reload the plugin.
 - Verify installed artifact hashes and the actual served UI/provider state.
   Disk hash equality alone does not prove the Host reloaded the provider.
 
@@ -151,7 +170,8 @@ to an already-running Desktop Host, or restart Desktop to hide this distinction.
 
 ## Current limits
 
-The native Bridge model choice follows the remote session. Worker-specific
+The native Bridge model choice follows the remote session through the provider's
+single `remote` model. Worker-specific
 model catalog selection remains follow-up work. Current-message images are read
 through the native attachment store, uploaded to Bridge, and submitted as refs.
 Image-only prompts carry a neutral `[Image attached]` text marker for Bridge's
@@ -163,6 +183,11 @@ recovery label; existing native logs are not destructively rewritten. Cold impor
 order the recovered prompt by its original timestamp.
 History completeness is bounded by what Bridge retains. This plugin cannot
 reconstruct events the control plane no longer has.
+
+Native catalog discovery and retained-history reconciliation currently poll at
+five-second intervals. An active native turn separately follows its reliable
+action receipt and opaque history cursor; the removed Client `SessionStore` SSE
+surface is not the current provider synchronization path.
 
 The old ExternalSessionBrowser/ExternalConversationSurface/ExternalComposer
 layer and its master switch are removed. Restoring a parallel session UI is not

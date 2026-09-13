@@ -1,8 +1,16 @@
 # Bridge-session logic: refactor exploration
 
-Status: proposal / design only (no production rewrite performed).
+Status: historical proposal. Superseded on 2026-09-11 by the native-session
+provider implemented in `dace6ee`; the files and `External*` UI seams discussed
+below were subsequently removed.
 Audience: maintainers of `integrations/dsh-agent-control/`.
 Date: 2026-09-10.
+
+Current implementation facts are documented in
+[`bridge-conversation-provider.md`](bridge-conversation-provider.md) and the
+repository [`docs/current-state.md`](../../../docs/current-state.md). References
+below to the "current" client, failing suites or follow-up phases describe the
+2026-09-10 baseline only.
 
 ## 1. Why this document exists
 

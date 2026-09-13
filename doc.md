@@ -1,4 +1,9 @@
-# Agent Control Plane MVP
+# Agent Control Plane MVP 原始设计（历史）
+
+> 本文是项目初始的 Matrix-first MVP 设计，不描述 2026-09-13 的生产形态。当前系统以认证的
+> Worker/Session API、Bridge、DSH 原生 session provider 和可选 Matrix 兼容层为主；请以
+> [`docs/current-state.md`](docs/current-state.md)、[`README.md`](README.md) 和
+> [`docs/agent-control-api.md`](docs/agent-control-api.md) 为准。以下目标、阶段和“不做”项只用于解释设计沿革。
 
 ## 1. 项目目标
 

@@ -1,13 +1,15 @@
 # Agent Bridge
 
-把多台机器上的 Codex 暴露成可由 Hermes 调度的远程 worker。Codex 仍运行在开发机上；每台 Bridge 只连接本机 Codex App Server，Control Plane 提供经过认证的 worker API、运行路由和 SQLite 持久化。原有 Matrix gateway 暂时保留为可选兼容层。
+把多台机器上的 Codex 与 Claude Code 暴露成可由 Hermes/DSH 使用的远程 worker。Agent 仍运行在开发机上；每台 Bridge 只连接或启动本机执行端，Control Plane 提供经过认证的 worker/session API、运行路由、可靠 action、SSE 和 SQLite 持久化。原有 Matrix gateway 暂时保留为可选兼容层。
 
-当前版本：`0.6.0`
+当前版本：`0.6.38`
+
+当前代码能力、DSH 接入方式和已知边界以 [`docs/current-state.md`](docs/current-state.md) 为准；较早的轮次记录和方案评估是历史材料。
 
 ## 任务完成定义
 
 涉及 Agent Bridge 代码或发布的任务，只有在改动已推送到远程，且 Control Plane 的版本登记已更新、
-bridge 自更新流程已被触发后，才算真正完成。发布时必须按语义化版本规范 bump 版本（当前为 `0.6.0`），
+bridge 自更新流程已被触发后，才算真正完成。发布时必须按语义化版本规范 bump 版本（当前为 `0.6.38`），
 并在 Control Plane 中将 `BRIDGE_LATEST_VERSION` 登记为该版本；各主机的 bridge 再自行发现、拉取、校验和重启。
 “本地已提交但未推送”或“远程已推送但 Control Plane 尚未登记/通告新版本”都只是中间态，
 不能作为任务的完成结论。若自更新因 active turn、待审批或待输入而延后，任务报告必须记录原因和后续触发路径。
@@ -27,17 +29,21 @@ bridge 自更新流程已被触发后，才算真正完成。发布时必须按�
 - 多台 Bridge 通过带 token 的 WebSocket 接入同一 Control Plane。
 - 使用 SQLite 保存 machine、session 和事件状态。
 - 可选监控官方 Codex Desktop 新完成的 session，并从 Matrix 续接同一个 thread。
+- 同一 Bridge 同时暴露 Codex 与 Claude worker，并在重启后恢复已知 Claude session。
+- 将 Bridge conversation 物化进 DSH 原生 Session/Workspace，复用原生会话树、Conversation、Composer 和待处理交互。
+- 从 DSH 原生输入框向 Codex/Claude 转发图片，支持只含图片的新 turn。
+- 在 DSH 原生目录入口选择本地 DSH 或对应机器上的 Bridge execution source。
+- 在原生行菜单中重命名、归档或删除会话；Bridge 删除等待 owning adapter 确认，本地 DSH 删除保留底层日志。
 
 ## 架构
 
 ```text
-Codex CLI/TUI
-      │  ws://127.0.0.1:4500
-      ▼
-Codex App Server
-      │
-      ▼
-Agent Bridge ───── authenticated WebSocket ─────► Worker Control Plane
+Codex CLI/TUI ── ws://127.0.0.1:4500 ──► Codex App Server ─┐
+                                                            ├─► Agent Bridge
+Claude Code ───────────── local SDK/process adapter ────────┘       │
+                                                                    │ authenticated WebSocket
+                                                                    ▼
+                                                         Worker Control Plane
                                                        │
                                                        ├── authenticated Worker API ◄── Hermes
                                                        ├── SQLite
@@ -51,6 +57,7 @@ Agent Bridge ───── authenticated WebSocket ─────► Worker C
 - Node.js 22.12+
 - pnpm 11
 - Codex CLI
+- 可选：Claude Code（启用 Claude worker 时）
 - Matrix bot 账号
 - 可选：zoxide，用于模糊解析项目目录
 
@@ -89,6 +96,7 @@ Control Plane 主要变量：
 | `CONTROL_SESSION_EVENT_RETENTION_MS` | 结构化 session event 保留期，默认 30 天 |
 | `CONTROL_STREAM_RETENTION_MS` | SSE outbox 补读窗口，默认 7 天 |
 | `CONTROL_ACTION_RETENTION_MS` | action/idempotency 保留期，默认 24 小时 |
+| `CONTROL_ATTACHMENT_RETENTION_MS` | 内容寻址图片附件保留期，默认 7 天 |
 | `CONTROL_ACTION_TIMEOUT_MS` | Bridge action ack 超时，默认 30 秒 |
 | `CONTROL_SSE_KEEPALIVE_MS` / `CONTROL_SSE_POLL_MS` | SSE keepalive 与 outbox 轮询间隔 |
 | `BRIDGE_LATEST_VERSION` | 可选的 bridge 最新版本注册表；与 `BRIDGE_UPDATE_SOURCE` 一起配置 |
@@ -210,6 +218,7 @@ CONTROL_API_WRITE_TOKEN=<读写长随机 token>
 | `POST /api/v1/sessions/:id/interrupt` | 按 `expectedTurnId` 中断当前 turn |
 | `GET/POST /api/v1/approvals*` | 查询并原子处理 approval |
 | `GET/POST /api/v1/user-input*` | 查询并提交结构化回答；secret input 必须在本机处理 |
+| `POST/GET /api/v1/attachments*` | 上传并读取受认证的内容寻址图片附件 |
 | `GET /api/v1/stream` | 带 `Last-Event-ID` 补读的 SSE 状态流 |
 
 所有新增 POST 都必须发送 `Idempotency-Key`。异步响应为 ActionReceipt，可用
@@ -565,11 +574,18 @@ scripts              本地辅助脚本
 
 ## DSH Agent Control 插件
 
-`integrations/dsh-agent-control` 是一个 out-of-tree DSH 插件，为 DSH Web 客户端
-添加 Agent Control sidebar 和 Hermes Kanban 控制面板。它不修改 DSH 本体，通过
-`cordis.patch.yml` 注入一个 Host 服务和 24 个 model tool。该插件已在 monorepo 中
-作为 workspace 成员管理；`pnpm install`、`pnpm check`、`pnpm test`、`pnpm build`
-均覆盖它（分别 55 Bridge + 13 DSH = 68 项测试通过）。
+`integrations/dsh-agent-control` 是一个 out-of-tree DSH 插件。它把 Bridge conversation
+物化为 DSH 原生 Agent、Session 和 Workspace，由原生 Sessions 树、Conversation、Composer、
+approval 和 user-question 界面负责交互；Agent Control 与 Hermes Kanban 只保留为管理 overlay。
+插件不维护第二套会话浏览器或输入框，也不修改 DSH 本体。它通过 `cordis.patch.yml`
+注入 Host 服务、Bridge execution provider 和 24 个 model tool，并作为 monorepo workspace
+成员由根目录的 install/check/test/build 覆盖。
+
+当前插件版本为 `0.1.27`，目标运行时是 TokensCowork 内置 DSH `0.1.3-alpha.1`；开发依赖
+主要固定在 npm 已发布的 `0.1.2-rc.1`，所以发布前还必须运行 installed-runtime verifier。
+现有能力包括稳定身份与分页历史投影、5 秒增量 reconciliation、原生 turn/interrupt、
+approval/question、图片转发、目录 execution source 选择、同机器同路径 workspace 合并、
+标题保留，以及 Bridge 真删除和本地 DSH 逻辑删除。
 
 安装到 DSH Web profile：
 
@@ -578,6 +594,7 @@ dsh plugin --profile agent-control add file:/root/agent-bridge/integrations/dsh-
 dsh --profile agent-control web
 ```
 
-插件详细文档见 `integrations/dsh-agent-control/README.md`。
+插件详细文档见 `integrations/dsh-agent-control/README.md`，当前整体事实见
+[`docs/current-state.md`](docs/current-state.md)。
 
 Codex App Server WebSocket transport 仍属于实验接口。升级 Codex CLI 后应先运行测试，并实际验证 approval request/response schema。

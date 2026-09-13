@@ -1,8 +1,31 @@
-# DSH 外部会话浏览与详情复用方案
+# DSH 外部会话 UI 迭代记录（历史）
 
-日期：2026-09-07，更新于 2026-09-09。状态：统一 DSH/Bridge session 体验已成为后续主线。
+日期：2026-09-07，历史记录更新至 2026-09-09；事实校准于 2026-09-13。
 
-## 后续迭代顺序（2026-09-09）
+> **当前状态：本文件不再描述生产架构。** Round 1–21 记录的是 Bridge 自有/共享 `External*` UI
+> 逐步复用 DSH 外观和组件的过程。从 `dace6ee`（2026-09-11）开始，这条路径已经被原生 session
+> provider 取代：Bridge conversation 物化为 DSH 原生 Agent、Session 和 Workspace，并由原生 Sessions
+> 树、Conversation、Composer、approval 和 user-question 服务接管。旧
+> `ExternalSessionBrowser`、`ExternalConversationSurface`、`ExternalComposer`、来源切换和 master switch
+> 已删除。当前事实请读 [`current-state.md`](current-state.md)，实现契约请读
+> [`bridge-conversation-provider.md`](../integrations/dsh-agent-control/docs/bridge-conversation-provider.md)。
+
+## 2026-09-11 原生 provider 路线落地
+
+- `dace6ee`：新增 `AgentBridgeImportTarget` 与 `AgentBridgeLlmAdapter`，自动同步 Bridge conversation 到
+  DSH 原生 session tree，删除平行 browser/reader/timeline/composer 代码。
+- `30858f0`：原生目录新建增加 DSH/Bridge execution source 选择，原生图片附件通过 Host 和 Bridge 转发。
+- `3862747`、`5781a05`：修复目录路由、approval relay、远端 turn 展示，并清理已经失效的待处理请求。
+- `2fc1250`、`e539c48`：修复导入历史 identity 冲突并提供既有历史修复脚本，保留 header frames。
+- `67143a3`、`d2e8b2e`：支持 Codex 图片、有效标题/显式重命名保留、同机器同路径 presentation workspace
+  合并、离线 worker 清理和完整 inventory 的消失 turn 对账。
+- `e9f80d7`：把删除加入 DSH 原生 session 行菜单；Bridge session 等待 owning adapter 确认（Codex
+  `thread/delete`，Claude 侧遗忘），本地 DSH session 使用持久逻辑删除并保留日志。
+
+当前同步是 Host 侧 5 秒可中止 reconciliation，加上原生 turn 内的 action/history cursor 轮询；下面所述
+Client `SessionStore` snapshot + SSE、共享 External surface 和兼容 fallback 均只代表当时的实现。
+
+## 当时的后续迭代顺序（2026-09-09，已归档）
 
 总目标：让 Bridge session 成为 DSH session 的另一种数据源。会话浏览器、Conversation、Chat、Composer
 和交互组件由 DSH 提供；Bridge 只负责数据投影、能力声明、实时同步和动作适配。后续不再以复制 DSH
