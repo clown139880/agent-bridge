@@ -30,16 +30,16 @@ export class CodexRuntimeResolver {
     this.platform = options.platform ?? process.platform;
     this.installRoot = options.localAppData ? join(options.localAppData, "OpenAI", "Codex", "bin") : undefined;
     this.version = options.version ?? readCodexVersion;
+    const configuredDirectory = dirname(resolve(this.configuredCommand));
     this.managedDesktop = this.platform === "win32" && basename(this.configuredCommand).toLowerCase() === "codex.exe"
-      && Boolean(this.installRoot) && isWithin(dirname(resolve(this.configuredCommand)), this.installRoot!);
+      && Boolean(this.installRoot) && (!complete(configuredDirectory) || isWithin(configuredDirectory, this.installRoot!));
   }
 
   async resolve(): Promise<CodexRuntime> {
     if (!this.managedDesktop) {
       return this.describe(this.configuredCommand);
     }
-    const configuredDirectory = dirname(resolve(this.configuredCommand));
-    if (!this.installRoot || !isWithin(configuredDirectory, this.installRoot)) return this.describe(this.configuredCommand, true);
+    if (!this.installRoot) return this.describe(this.configuredCommand, true);
     const candidates: CodexRuntime[] = [];
     if (existsSync(this.installRoot)) {
       for (const entry of await readdir(this.installRoot, { withFileTypes: true })) {

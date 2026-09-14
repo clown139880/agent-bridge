@@ -27,6 +27,18 @@ test("runtime resolver selects the highest complete Codex Desktop version and de
   }finally{rmSync(root,{recursive:true,force:true});}
 });
 
+test("an incomplete Bridge-local codex executable remains an auto-discovery hint",async()=>{
+  const root=join(tmpdir(),`codex-runtime-hint-${randomUUID()}`);
+  try{
+    const hintDirectory=join(root,"bridge");mkdirSync(hintDirectory,{recursive:true});
+    const hint=join(hintDirectory,"codex.exe");writeFileSync(hint,"0.153.4");
+    const desktop=runtime(root,"desktop","0.154.0");
+    const resolver=new CodexRuntimeResolver(hint,{platform:"win32",localAppData:root,
+      version:async command=>command===desktop?"0.154.0":"0.153.4"});
+    assert.equal((await resolver.resolve()).command,desktop);
+  }finally{rmSync(root,{recursive:true,force:true});}
+});
+
 test("concurrent new work shares one runtime switch and refuses an unowned server",async()=>{
   const current:CodexRuntime={command:"old",directory:"old",version:"1.0.0",fingerprint:"old"};
   const candidate:CodexRuntime={command:"new",directory:"new",version:"2.0.0",fingerprint:"new"};

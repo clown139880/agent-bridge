@@ -4,7 +4,7 @@
 
 代码基线：`e9f80d7`（`agent-bridge-external-session-source`）
 
-版本：Agent Bridge `0.6.39`；DSH Agent Control plugin `0.1.27`
+版本：Agent Bridge `0.6.40`；DSH Agent Control plugin `0.1.27`
 
 本文只描述当前代码定义的生产路径。较早的 UI 复用轮次、重构提案和方案评估保留为历史材料，不能作为当前架构说明。
 
