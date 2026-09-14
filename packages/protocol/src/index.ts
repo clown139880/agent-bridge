@@ -14,7 +14,7 @@ export const AGENT_STATUSES = [
 
 export type AgentStatus = (typeof AGENT_STATUSES)[number];
 export type AgentType = "codex-cli" | "codex-desktop" | "claude-code" | "opencode";
-export const BRIDGE_PROTOCOL_VERSION = 2;
+export const BRIDGE_PROTOCOL_VERSION = 3;
 
 /**
  * Short worker-id prefix per agent family. Worker ids are `${prefix}@${machineId}`.
@@ -383,6 +383,15 @@ export interface ActionResultMessage {
   timestamp: number;
 }
 
+export interface ActionProgressMessage {
+  type: "action.progress";
+  actionId: string;
+  phase: "runtime_switch";
+  leaseMs: number;
+  message?: string;
+  timestamp: number;
+}
+
 export interface SessionDeletedMessage {
   type: "session.deleted";
   sessionId: string;
@@ -418,6 +427,7 @@ export type BridgeToControlMessage =
   | StateSnapshotMessage
   | StructuredSessionEventMessage
   | SessionDeletedMessage
+  | ActionProgressMessage
   | ActionResultMessage
   | LogResponseMessage
   | ModelCatalogResponseMessage

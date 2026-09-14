@@ -2,14 +2,14 @@
 
 把多台机器上的 Codex 与 Claude Code 暴露成可由 Hermes/DSH 使用的远程 worker。Agent 仍运行在开发机上；每台 Bridge 只连接或启动本机执行端，Control Plane 提供经过认证的 worker/session API、运行路由、可靠 action、SSE 和 SQLite 持久化。原有 Matrix gateway 暂时保留为可选兼容层。
 
-当前版本：`0.6.38`
+当前版本：`0.6.39`
 
 当前代码能力、DSH 接入方式和已知边界以 [`docs/current-state.md`](docs/current-state.md) 为准；较早的轮次记录和方案评估是历史材料。
 
 ## 任务完成定义
 
 涉及 Agent Bridge 代码或发布的任务，只有在改动已推送到远程，且 Control Plane 的版本登记已更新、
-bridge 自更新流程已被触发后，才算真正完成。发布时必须按语义化版本规范 bump 版本（当前为 `0.6.38`），
+bridge 自更新流程已被触发后，才算真正完成。发布时必须按语义化版本规范 bump 版本（当前为 `0.6.39`），
 并在 Control Plane 中将 `BRIDGE_LATEST_VERSION` 登记为该版本；各主机的 bridge 再自行发现、拉取、校验和重启。
 “本地已提交但未推送”或“远程已推送但 Control Plane 尚未登记/通告新版本”都只是中间态，
 不能作为任务的完成结论。若自更新因 active turn、待审批或待输入而延后，任务报告必须记录原因和后续触发路径。
@@ -21,6 +21,7 @@ bridge 自更新流程已被触发后，才算真正完成。发布时必须按�
 - 将 Hermes `taskId` 与真实 Codex thread 解耦并持久关联；带 `runId` 的重试不会重复启动。
 - 在不配置第二个 Matrix bot 的情况下作为纯执行面运行。
 - 自动发现通过共享 App Server 启动的 Codex thread。
+- Windows Bridge 在新对话/新 turn 前验证 Codex Desktop runtime；版本变化时会排空活动工作、静默轮换自己管理的 App Server，并在同一 action 上继续执行。
 - 主动启动时直接把用户的首条 prompt 作为 Matrix thread 根消息；被动发现等 session 有明确标题后再同步。
 - 将完成、失败、等待输入和关键进度同步到 Matrix。
 - 在 Matrix thread 中继续对话、查看日志或停止 turn。

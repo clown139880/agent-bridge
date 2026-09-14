@@ -731,6 +731,10 @@ export interface StreamEnvelope<T = unknown> {
   地位相同，先完成者获胜。
 - SSE 与 REST 都是至少一次观察语义；`eventId` 唯一，Bridge upstream event ID 用
   `(machineId, nativeSessionId, upstreamEventId)` 去重。
+- Protocol v3 增加 Bridge→Control Plane 的内部 `action.progress` 消息。Bridge 在新对话前静默轮换
+  Codex runtime 时每 10 秒为对应 action 续租 30 秒；每个 action 的总 lease 上限为创建后 120 秒。
+  该消息不改变公开 ActionReceipt 状态，也不进入 session event stream。轮换成功后原 action 继续，
+  失败时仍以同一个 `actionId` 返回可重试的 `action.result`。
 
 ## 10. 完整 UI 调用示例
 
@@ -832,3 +836,5 @@ UI mock 应至少模拟：worker 离线、空列表、100+ session 游标、acti
 4. `isSecret=true` 的 user input 固定返回 `409 secret_input_unsupported`，只能在本机回答。
 5. Control Plane 首版明确为单实例。Bridge 将 action 结果以 0600 文件持久化；若进程在 RPC 期间崩溃，
    同 actionId 安全返回 `action_outcome_unknown`，不会盲目重复有副作用的 RPC。
+6. Windows 托管 App Server 会在新 conversation/新 turn 前解析完整 Codex Desktop runtime。切换只允许
+   终止 Bridge 自己持有的子进程；若目标端口属于未知进程，action 以可重试错误失败，不按端口杀进程。

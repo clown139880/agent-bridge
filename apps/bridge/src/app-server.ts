@@ -19,6 +19,7 @@ import { CodexDesktopSessionScanner } from "./desktop-sessions.js";
 import { isPathWithinRoots } from "./path-utils.js";
 import type { AgentAdapter } from "./agent-adapter.js";
 import type { AttachmentFetcher } from "./attachments.js";
+import { CodexRuntimeResolver, type CodexRuntime } from "./codex-runtime.js";
 
 const log = pino({ name: "codex-app-server" });
 
@@ -136,6 +137,11 @@ export class CodexAppServerAdapter implements AgentAdapter {
   private desktopScannerStarted = false;
   private readyForUpdate = false;
   private inventoryComplete = false;
+  private readonly runtimeResolver: Pick<CodexRuntimeResolver, "resolve" | "healthy">;
+  private runtime?: CodexRuntime;
+  private runtimeSwitch?: Promise<void>;
+  private rotating = false;
+  private runtimeCommand: string;
   async models(): Promise<import('@agent-bridge/protocol').CodexModelInfo[]> {
     const rows: import('@agent-bridge/protocol').CodexModelInfo[] = [];
     let cursor: string | null = null;
@@ -157,9 +163,14 @@ export class CodexAppServerAdapter implements AgentAdapter {
       desktopScanIntervalMs?: number;
       desktopReplayExisting?: boolean;
       fetchAttachment?: AttachmentFetcher;
+      runtimeResolver?: Pick<CodexRuntimeResolver, "resolve" | "healthy">;
     },
     private readonly emit: (message: BridgeToControlMessage) => void,
   ) {
+    this.runtimeCommand = options.command;
+    this.runtimeResolver = options.runtimeResolver ?? new CodexRuntimeResolver(options.command, {
+      localAppData: process.env.LOCALAPPDATA,
+    });
     if (options.desktopHome) {
       this.desktopScanner = new CodexDesktopSessionScanner({
         codexHome: options.desktopHome,
@@ -277,6 +288,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
   }
 
   async createSessionAction(actionId: string, projectPath: string, input?: string, model?: string, attachments?: AttachmentRef[]): Promise<{ sessionId: string; turnId?: string }> {
+    await this.ensureRuntimeForNewWork(actionId);
     const sessionId = await this.startSession(actionId, projectPath, input, undefined, model, attachments);
     return { sessionId, turnId: this.activeTurns.get(sessionId) };
   }
@@ -285,6 +297,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
     delivery: "auto" | "steer" | "start_turn", expectedTurnId?: string, model?: string, reasoningEffort?: string, attachments?: AttachmentRef[]): Promise<{
       sessionId: string; turnId?: string; resolvedAction: "steer" | "start_turn" }> {
     return this.serial(sessionId, async () => {
+      if (!this.activeTurns.has(sessionId)) await this.ensureRuntimeForNewWork(actionId);
       await this.ensureReady();
       if (this.pendingUserInput.has(sessionId)) throw domainError("user_input_pending", "structured user input is pending");
       if ([...this.pendingApprovals.values()].some((item) => item.sessionId === sessionId && !item.answered))
@@ -435,8 +448,17 @@ export class CodexAppServerAdapter implements AgentAdapter {
 
   private async startInternal(): Promise<void> {
     this.readyForUpdate = false;
-    if (this.options.manageServer && !await this.serverReady()) this.spawnServer();
-    if (this.options.manageServer) await this.waitForServer();
+    if (this.options.manageServer && !this.runtime) {
+      this.runtime = await this.runtimeResolver.resolve();
+      this.runtimeCommand = this.runtime.command;
+      log.info({ command: this.runtime.command, version: this.runtime.version }, "Selected Codex runtime");
+    }
+    if (this.options.manageServer) {
+      const ready = await this.serverReady();
+      if (ready && !this.child) throw runtimeSwitchError(`Codex App Server endpoint is already owned by another process: ${this.options.url}`);
+      if (!ready && !this.child) this.spawnServer();
+      await this.waitForServer();
+    }
     await this.connect();
     await this.restoreLoadedThreads();
     this.readyForUpdate = true;
@@ -448,8 +470,78 @@ export class CodexAppServerAdapter implements AgentAdapter {
     if (this.socket?.readyState !== WebSocket.OPEN) throw new Error("Codex App Server is not connected");
   }
 
+  private async ensureRuntimeForNewWork(actionId: string): Promise<void> {
+    await this.ensureReady();
+    if (!this.options.manageServer) return;
+    const candidate = await this.runtimeResolver.resolve();
+    if (this.runtime && candidate.fingerprint === this.runtime.fingerprint && this.runtimeResolver.healthy(this.runtime)) return;
+    if (!this.runtimeSwitch) {
+      const attempt = this.rotateRuntime(candidate);
+      this.runtimeSwitch = attempt;
+      void attempt.finally(() => {
+        if (this.runtimeSwitch === attempt) this.runtimeSwitch = undefined;
+      }).catch(() => undefined);
+    }
+    await this.waitForRuntimeSwitch(actionId, this.runtimeSwitch);
+  }
+
+  private async waitForRuntimeSwitch(actionId: string, pending: Promise<void>): Promise<void> {
+    const progress = () => this.emit({ type: "action.progress" as const, actionId, phase: "runtime_switch" as const,
+      leaseMs: 30_000, message: "Preparing the updated Codex runtime", timestamp: Date.now() });
+    progress();
+    const timer = setInterval(progress, 10_000);timer.unref();
+    try { await pending; } finally { clearInterval(timer); }
+  }
+
+  private async rotateRuntime(candidate: CodexRuntime): Promise<void> {
+    if (!this.child) throw runtimeSwitchError("Cannot rotate an App Server that is not owned by this Bridge");
+    const deadline = Date.now() + 90_000;
+    while (this.hasManagedActivity()) {
+      if (Date.now() >= deadline) throw runtimeSwitchError("Codex runtime switch is still waiting for active work");
+      await delay(250);
+    }
+
+    // Desktop extraction can still be settling when the first scan observes it.
+    await delay(1_000);
+    const confirmed = await this.runtimeResolver.resolve();
+    if (confirmed.fingerprint !== candidate.fingerprint) candidate = confirmed;
+    this.rotating = true;
+    this.readyForUpdate = false;
+    clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = undefined;
+    try {
+      const socket = this.socket;
+      const child = this.child;
+      if (socket && socket.readyState !== WebSocket.CLOSED) {
+        socket.close(1000, "runtime switch");
+        await waitForSocketClose(socket, 3_000);
+        if (Number(socket.readyState) !== WebSocket.CLOSED) socket.terminate();
+      }
+      if (child && !child.killed) child.kill("SIGTERM");
+      await waitForChildExit(child, 5_000);
+      await this.waitForServerDown(5_000);
+
+      this.runtime = candidate;
+      this.runtimeCommand = candidate.command;
+      this.readyPromise = undefined;
+      this.rotating = false;
+      await this.start();
+      log.info({ command: candidate.command, version: candidate.version }, "Rotated Codex runtime without restarting Bridge");
+    } catch (error) {
+      this.rotating = false;
+      this.readyPromise = undefined;
+      this.scheduleReconnect();
+      throw error;
+    }
+  }
+
+  private hasManagedActivity(): boolean {
+    return this.activeThreads.size > 0 || this.activeTurns.size > 0 || this.pendingApprovals.size > 0
+      || this.pendingUserInput.size > 0 || this.pending.size > 0;
+  }
+
   private spawnServer(): void {
-    const child = spawn(this.options.command, ["app-server", "--listen", this.options.url], {
+    const child = spawn(this.runtimeCommand, ["app-server", "--listen", this.options.url], {
       env: this.options.desktopHome
         ? { ...process.env, CODEX_HOME: this.options.desktopHome }
         : process.env,
@@ -474,6 +566,15 @@ export class CodexAppServerAdapter implements AgentAdapter {
     throw new Error(`Codex App Server did not become ready: ${this.options.url}`);
   }
 
+  private async waitForServerDown(timeoutMs: number): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (!await this.serverReady()) return;
+      await delay(100);
+    }
+    throw runtimeSwitchError("Old Codex App Server did not release its endpoint");
+  }
+
   private async serverReady(): Promise<boolean> {
     try {
       const url = new URL(this.options.url);
@@ -495,7 +596,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
       socket.once("error", (error) => { clearTimeout(timer); reject(error); });
     });
     socket.on("message", (data) => void this.handleMessage(data.toString()));
-    socket.on("close", (code, reason) => this.handleClose(code, reason.toString()));
+    socket.on("close", (code, reason) => this.handleClose(socket, code, reason.toString()));
     socket.on("error", (error) => log.warn({ error }, "App Server WebSocket error"));
     await this.request("initialize", {
       clientInfo: { name: "agent_bridge", title: "Agent Bridge", version: "0.6.0" },
@@ -979,7 +1080,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
     this.socket.send(JSON.stringify({ id, result }));
   }
 
-  private handleClose(code: number, reason: string): void {
+  private handleClose(socket: WebSocket, code: number, reason: string): void {
+    if (this.socket !== socket) return;
     log.warn({ code, reason }, "Disconnected from Codex App Server");
     this.rejectPending(new Error("Codex App Server disconnected"));
     this.socket = undefined;
@@ -989,11 +1091,11 @@ export class CodexAppServerAdapter implements AgentAdapter {
     this.subscribedThreads.clear();
     this.activeThreads.clear();
     this.readyPromise = undefined;
-    this.scheduleReconnect();
+    if (!this.rotating) this.scheduleReconnect();
   }
 
   private scheduleReconnect(): void {
-    if (this.stopping || this.reconnectTimer) return;
+    if (this.stopping || this.rotating || this.reconnectTimer) return;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = undefined;
       void this.start().catch((error) => {
@@ -1197,6 +1299,30 @@ function truncateEventText(text: string): string {
 
 function domainError(code: string, message: string): Error & { code: string; retryable: boolean } {
   return Object.assign(new Error(message), { code, retryable: false });
+}
+
+function runtimeSwitchError(message: string): Error & { code: string; retryable: boolean } {
+  return Object.assign(new Error(message), { code: "runtime_switch_failed", retryable: true });
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function waitForSocketClose(socket: WebSocket, timeoutMs: number): Promise<void> {
+  if (socket.readyState === WebSocket.CLOSED) return;
+  await new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, timeoutMs);
+    socket.once("close", () => { clearTimeout(timer); resolve(); });
+  });
+}
+
+async function waitForChildExit(child: ChildProcess | undefined, timeoutMs: number): Promise<void> {
+  if (!child || child.exitCode !== null || child.signalCode !== null) return;
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => reject(runtimeSwitchError("Old Codex App Server did not exit")), timeoutMs);
+    child.once("exit", () => { clearTimeout(timer); resolve(); });
+  });
 }
 
 function isThreadNotFoundError(error: unknown): boolean {

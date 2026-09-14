@@ -1,10 +1,10 @@
 # Agent Bridge 当前事实基线
 
-更新日期：2026-09-13
+更新日期：2026-09-14
 
 代码基线：`e9f80d7`（`agent-bridge-external-session-source`）
 
-版本：Agent Bridge `0.6.38`；DSH Agent Control plugin `0.1.27`
+版本：Agent Bridge `0.6.39`；DSH Agent Control plugin `0.1.27`
 
 本文只描述当前代码定义的生产路径。较早的 UI 复用轮次、重构提案和方案评估保留为历史材料，不能作为当前架构说明。
 
@@ -15,6 +15,8 @@ Agent Bridge 由三条协作路径组成：
 1. **Bridge / Control Plane**：每台 Bridge 连接本机 Codex App Server，并可管理 Claude Code adapter；Control Plane 提供认证的 REST、SSE、Worker API、可靠 action 和 SQLite 投影。
 2. **DSH 原生会话接入**：DSH Host 将 Bridge conversation 物化为原生 Agent、Session 和 Workspace 记录；原生 Sessions 树、Conversation、Composer、审批和问题界面负责展示与交互。
 3. **Hermes Kanban**：插件提供独立的管理 overlay 和受权限约束的 model tools；Hermes 仍是 task 生命周期的权威，session 同步不会自动推进卡片。
+
+Windows Bridge 把 `CODEX_COMMAND` 视为 Codex Desktop 内容寻址安装目录的提示。它在新 conversation 和空闲 session 的新 turn 前选择语义版本最高且包含 `codex.exe`、`codex-code-mode-host.exe`、`codex-command-runner.exe` 的完整 runtime。若 runtime 变化，Bridge 会让原 action 保持 accepted，等待自己管理的活动 turn、审批、输入和 RPC 清空，只轮换其持有的 App Server 子进程，再恢复 thread inventory 并继续原 action。多个调用共享同一次切换；未知进程占用 App Server 端口时不会被终止。Control Plane 接受有总时限的 `action.progress` lease，避免安全排空期间把 action 提前判为超时。
 
 DSH 中已经没有第二套 Bridge session browser、conversation renderer 或 composer。2026-09-08 至 09-10 使用的
 `ExternalSessionBrowser`、`ExternalConversationSurface` 和 `ExternalComposer` 路径已经删除。

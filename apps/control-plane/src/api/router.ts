@@ -63,6 +63,8 @@ export class AgentControlApi {
     this.actions=new SessionActionService(store,bridges,options.actionTimeoutMs);
   }
 
+  actionsForBridge():SessionActionService{return this.actions;}
+
   async handle(request: IncomingMessage,response: ServerResponse): Promise<boolean> {
     const url=new URL(request.url??"/","http://localhost");
     if(!url.pathname.startsWith("/api/v1/"))return false;

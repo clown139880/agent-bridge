@@ -698,8 +698,12 @@ export class ControlPlane {
       this.controlStore.resolvePending(message.requestId, "resolved_elsewhere");
       return;
     }
+    if (message.type === "action.progress") {
+      this.controlApi.actionsForBridge().renew(message.actionId, message.leaseMs);
+      return;
+    }
     if (message.type === "action.result") {
-      this.controlStore.completeAction(message);
+      this.controlApi.actionsForBridge().complete(message);
       if (message.kind === "delete_session" && message.status === "succeeded" && message.sessionId)
         this.controlStore.deleteSession(message.sessionId);
       return;
