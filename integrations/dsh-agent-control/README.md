@@ -57,6 +57,25 @@ The checked-in bundle defaults target Hal. Override the row in the profile's
 `cordis.patch.yml` for another installation. A patch replaces the complete
 config, so restate both `bridge` and `kanban` objects.
 
+### Upgrading retained Bridge history to Session V3
+
+DSH Session V3 deliberately refuses unclassified V2 events. Agent Bridge V2
+logs contain audited `agent-bridge/binding` and `agent-bridge/event` records, so
+run the compatibility migration once after upgrading DSH and before reopening
+those conversations. Stop TokensCowork first, preview every candidate, and then
+publish immutable V3 successors:
+
+```powershell
+node scripts/migrate-v2-history.cjs
+node scripts/migrate-v2-history.cjs --apply
+```
+
+The migration never changes or deletes `session.v2.jsonl[.zstd]`. It validates
+the Bridge event payloads, applies DSH V3 system-message promotion and sequence
+reference remapping, and creates `session.v3.jsonl[.zstd]` only when no V3
+artifact already exists. An unfamiliar event or seeded log is rejected without
+publishing a successor.
+
 ## Configuration
 
 ```yaml
