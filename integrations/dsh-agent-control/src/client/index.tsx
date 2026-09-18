@@ -254,7 +254,9 @@ export function apply(ctx: ClientContext): void {
   const creation = new SessionCreationController((operation, args) => call('bridge', operation, args))
   const catalog = new NativeCatalog((operation, args) => call('bridge', operation, args), ctx.get('sessions') as unknown as CatalogSessions)
   ctx.effect(() => catalog.install(ctx.get('workspaces') as unknown as Parameters<NativeCatalog['install']>[0]))
-  ctx.effect(() => installSessionMenu(ctx.slots))
+  // TokensCowork creates its root workspace hook before third-party plugins load.
+  // Override that captured hook on the native slot while retaining its component.
+  ctx.effect(() => installSessionMenu(ctx.slots, catalog.useWorkspaces))
   ctx.slots.inject('shell.overlay', () => ctx.slots.register({ name: 'shell.overlay', id: 'agent-control-delete-session', order: 12, inject: () => ({ catalog }) }, DeleteNativeSession))
   ctx.effect(() => {
     let disposed = false

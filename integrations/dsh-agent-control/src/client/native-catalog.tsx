@@ -6,6 +6,7 @@ export type NativeEntry = { nativeId: string; sessionId: string; machineId: stri
 export type WorkspaceRow = { workspaceId: string; path: string; title: string; sessionIds: readonly string[]; createdAt: string; updatedAt: string }
 type WorkspaceSnapshot = { items: readonly WorkspaceRow[]; archivedSessionIds: readonly string[] }
 type Source<T> = { getSnapshot(): T; subscribe(listener: () => void): () => void }
+export type WorkspaceHook = <T>(selector: (snapshot: WorkspaceSnapshot) => T) => T
 type Workspaces = { list: Source<WorkspaceSnapshot>; rename(id: string, title: string): Promise<unknown>; delete(id: string): Promise<void>; insertSessionBefore(id: string, session: string, before?: string): Promise<unknown> }
 export type CatalogSessions = { list: Source<{ current?: string }>; clear(): void; refresh(): Promise<void> }
 export const DELETE_SESSION_EVENT = 'agent-control:delete-session'
@@ -19,15 +20,16 @@ export function mergeWorkspaces(rows: readonly WorkspaceRow[], catalog: readonly
   const result: WorkspaceRow[] = []
   for (const row of rows) {
     const members = row.sessionIds.map(id => entries.get(id))
-    const first = members.find(Boolean)
+    const known = members.filter((entry): entry is NativeEntry => entry !== undefined)
+    const first = known[0]
     const groupKey = (entry: NativeEntry) => entry.projectIdentity
       ? 'repository\0' + entry.projectIdentity
       : 'location\0' + entry.machineId + '\0' + entry.workspace
     const key = first ? groupKey(first) : ''
-    // Older presentation directories may also contain a blank native DSH session,
-    // archived ids, or a deleted remote id. They must not veto known siblings.
-    const presentation = /[\\/]\.dsh[\\/]agent-bridge[\\/]workspaces[\\/]/.test(row.path)
-    if (!first || members.some(entry => entry ? groupKey(entry) !== key : !presentation)) { result.push(row); continue }
+    // Native sessions, archived ids, and deleted remote ids have no Bridge catalog
+    // entry. Keep them in their Host workspace, but let the known Bridge members'
+    // unanimous repository identity decide whether that workspace can merge.
+    if (!first || known.some(entry => groupKey(entry) !== key)) { result.push(row); continue }
     const previous = groups.get(key)
     if (previous) {
       previous.sessionIds = [...new Set([...previous.sessionIds, ...row.sessionIds])]
@@ -54,9 +56,15 @@ export function mergeWorkspaces(rows: readonly WorkspaceRow[], catalog: readonly
 export class NativeCatalog {
   private entries: NativeEntry[] = []
   private readonly listeners = new Set<() => void>()
+  private workspaceSource: Source<WorkspaceSnapshot> | undefined
   constructor(readonly rpc: Rpc, readonly sessions: CatalogSessions) {}
   snapshot = () => this.entries
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener) } }
+  useWorkspaces: WorkspaceHook = <T,>(selector: (snapshot: WorkspaceSnapshot) => T): T => {
+    if (!this.workspaceSource) throw new Error('工作区目录尚未安装')
+    const snapshot = useSyncExternalStore(this.workspaceSource.subscribe, this.workspaceSource.getSnapshot, this.workspaceSource.getSnapshot)
+    return selector(snapshot)
+  }
   private emit() { for (const listener of this.listeners) listener() }
   async refresh(): Promise<void> {
     const data = await this.rpc('native_catalog') as { sessions: NativeEntry[] }
@@ -83,8 +91,10 @@ export class NativeCatalog {
       }
       return cached
     }
+    const projectedSubscribe = (listener: () => void) => { const a = subscribe.call(source, listener); const b = this.subscribe(listener); return () => { a(); b() } }
+    this.workspaceSource = { getSnapshot: projected, subscribe: projectedSubscribe }
     source.getSnapshot = projected
-    source.subscribe = listener => { const a = subscribe.call(source, listener); const b = this.subscribe(listener); return () => { a(); b() } }
+    source.subscribe = projectedSubscribe
     const rename = workspaces.rename, remove = workspaces.delete, move = workspaces.insertSessionBefore
     const originals = (id: string) => {
       const merged = projected().items.find(row => row.workspaceId === id)
@@ -100,7 +110,7 @@ export class NativeCatalog {
     let timer: ReturnType<typeof setTimeout>
     const tick = async () => { try { await this.refresh() } catch { /* retry transient Host startup/transport failures */ } finally { if (!disposed) timer = setTimeout(() => { void tick() }, 5000) } }
     void tick()
-    return () => { disposed = true; clearTimeout(timer); source.getSnapshot = original; source.subscribe = subscribe; workspaces.rename = rename; workspaces.delete = remove; workspaces.insertSessionBefore = move }
+    return () => { disposed = true; clearTimeout(timer); this.workspaceSource = undefined; source.getSnapshot = original; source.subscribe = subscribe; workspaces.rename = rename; workspaces.delete = remove; workspaces.insertSessionBefore = move }
   }
 }
 

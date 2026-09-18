@@ -1,6 +1,7 @@
 import { IconTrashOutline16 } from '@deepseek-ai/dsh-client-ui-primitives'
 import { Children, cloneElement, isValidElement, type ReactElement, type ReactNode, type ComponentType } from 'react'
 import { DELETE_SESSION_EVENT } from './native-catalog.js'
+import type { WorkspaceHook } from './native-catalog.js'
 
 type Props = Record<string, any>
 type Entry = { component: unknown }
@@ -9,7 +10,7 @@ export interface MenuSlots { entries(name: string): readonly Entry[]; subscribe(
 /** DSH 0.1.3 compatibility seam: retain the original sidebar, locale, store and
  * slot identity. Only extend the three-item session menu; project menus and
  * all original callbacks remain owned by DSH. No DOM/title-to-id matching. */
-export function extendSessionMenu(Component: ComponentType<any>): ComponentType<any> {
+export function extendSessionMenu(Component: ComponentType<any>, useWorkspaces?: WorkspaceHook): ComponentType<any> {
   const wrappers = new WeakMap<object, ComponentType<any>>()
   const visit = (value: ReactNode, session?: { id: string; title: string }): ReactNode => {
     if (Array.isArray(value)) return Children.map(value, child => visit(child, session))
@@ -45,16 +46,16 @@ export function extendSessionMenu(Component: ComponentType<any>): ComponentType<
     for (const key of ['children', 'anchor']) if (props[key] !== undefined) update[key] = visit(props[key], session)
     return cloneElement(value, update)
   }
-  return (props: Props) => visit((Component as (props: Props) => ReactNode)(props))
+  return (props: Props) => visit((Component as (props: Props) => ReactNode)(useWorkspaces ? { ...props, useWorkspaces } : props))
 }
 
-export function installSessionMenu(slots: MenuSlots): () => void {
+export function installSessionMenu(slots: MenuSlots, useWorkspaces?: WorkspaceHook): () => void {
   const originals = new Map<Entry, { original: unknown; patched: unknown }>()
   const patch = () => {
     for (const entry of slots.entries('sidebar.workspaces')) {
       if (originals.has(entry) || typeof entry.component !== 'function') continue
       const original = entry.component
-      const patched = extendSessionMenu(original as ComponentType<any>)
+      const patched = extendSessionMenu(original as ComponentType<any>, useWorkspaces)
       originals.set(entry, { original, patched }); entry.component = patched
     }
   }

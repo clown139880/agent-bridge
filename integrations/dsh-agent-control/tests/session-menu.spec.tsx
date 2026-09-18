@@ -40,4 +40,28 @@ it('restores the native component on unload', () => {
   expect(entry.component).not.toBe(original); dispose(); expect(entry.component).toBe(original); expect(stop).toHaveBeenCalled()
 })
 
-
+it('overrides the sidebar workspace hook and refreshes an existing subscriber', async () => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
+  const rows = ['codex', 'claude'].map(id => ({ workspaceId: id, path: '/presentation/' + id, title: `agent-bridge · ${id}`, sessionIds: [id], createdAt: '2026-01-01', updatedAt: '2026-01-01' }))
+  const snapshot = { items: rows, archivedSessionIds: [] }
+  const rawListeners = new Set<() => void>()
+  const source = { getSnapshot: () => snapshot, subscribe: (listener: () => void) => { rawListeners.add(listener); return () => rawListeners.delete(listener) } }
+  const sessions = (identity: string) => rows.map(row => ({ nativeId: row.workspaceId, sessionId: row.workspaceId, machineId: row.workspaceId, workspace: '/work/agent-bridge', projectIdentity: identity, title: row.title, status: 'idle', worker: row.workspaceId }))
+  let catalogRows = sessions('github.com/example/agent-bridge')
+  const catalog = new NativeCatalog(async () => ({ sessions: catalogRows }), { list: { getSnapshot: () => ({}), subscribe: () => () => {} }, clear: vi.fn(), refresh: vi.fn(async () => {}) })
+  await catalog.refresh()
+  const disposeCatalog = catalog.install({ list: source, rename: vi.fn(), delete: vi.fn(), insertSessionBefore: vi.fn() })
+  const Browser = ({ useWorkspaces }: { useWorkspaces: any }) => <div>{useWorkspaces((value: typeof snapshot) => value.items).map((row: any) => row.title).join('|')}</div>
+  const entry = { component: Browser as any }
+  const disposeMenu = installSessionMenu({ entries: () => [entry], subscribe: () => () => {} }, catalog.useWorkspaces)
+  const div = document.createElement('div'); document.body.append(div); const root = createRoot(div)
+  try {
+    await act(async () => root.render(createElement(entry.component as any, { useWorkspaces: (selector: any) => selector(snapshot) })))
+    expect(div.textContent).toBe('agent-bridge')
+    catalogRows = [catalogRows[0]!, { ...catalogRows[1]!, projectIdentity: 'github.com/example/other' }]
+    await act(async () => { await catalog.refresh() })
+    expect(div.textContent).toBe('agent-bridge|agent-bridge')
+  } finally {
+    await act(async () => root.unmount()); div.remove(); disposeMenu(); disposeCatalog()
+  }
+})

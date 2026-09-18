@@ -25,8 +25,9 @@ projection; there is no second session browser or composer. Initial history
 hydration is eager and bounded to four concurrent jobs. The native model choice
 currently follows the remote session. Images use native attachment storage and
 Bridge uploads. Directory creation offers local DSH and machine-specific Bridge
-sources. Presentation workspaces for the same machine and remote path are merged
-in the native catalog without rewriting stored session identities or bindings.
+sources. Workspaces with the same normalized repository identity are merged in
+the native catalog across workers and machines without rewriting stored session
+identities or execution bindings.
 
 See [the session-provider design](docs/bridge-conversation-provider.md) for the
 data path, runtime contracts, deployment checks and current limits.

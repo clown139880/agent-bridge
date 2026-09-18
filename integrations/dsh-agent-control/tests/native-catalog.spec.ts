@@ -36,6 +36,26 @@ describe('native catalog', () => {
     expect(merged[0]?.title).toBe('agent-bridge')
     expect(merged.map(row => row.workspaceId)).toEqual(['wsl', 'other-repository', 'unknown'])
   })
+  it('merges a real local workspace with native sessions when known identities agree', () => {
+    const local = { ...workspace('local'), path: 'C:\\Users\\test\\Workspace\\agent-bridge', title: 'agent-bridge', sessionIds: ['session-native', 'local-bridge'] }
+    const remote = { ...workspace('remote'), sessionIds: ['remote-bridge'] }
+    const merged = mergeWorkspaces([local, remote], [
+      entry('local-bridge', 'windows', local.path, 100, 'github.com/example/agent-bridge'),
+      entry('remote-bridge', 'hal.local', '/work/agent-bridge', 200, 'github.com/example/agent-bridge'),
+    ])
+    expect(merged).toHaveLength(1)
+    expect(merged[0]?.sessionIds).toEqual(['session-native', 'local-bridge', 'remote-bridge'])
+    expect(merged[0]?.title).toBe('agent-bridge')
+  })
+  it('does not merge a workspace whose known members have conflicting identities', () => {
+    const mixed = { ...workspace('mixed'), sessionIds: ['one', 'two', 'session-native'] }
+    const sibling = { ...workspace('sibling'), sessionIds: ['three'] }
+    expect(mergeWorkspaces([mixed, sibling], [
+      entry('one', 'windows', '/work/shared', 100, 'github.com/example/one'),
+      entry('two', 'windows', '/work/shared', 100, 'github.com/example/two'),
+      entry('three', 'hal.local', '/work/shared', 100, 'github.com/example/one'),
+    ])).toHaveLength(2)
+  })
   it('preserves custom group titles', () => {
     expect(mergeWorkspaces([{ ...workspace('a'), title: '我的项目' }], [entry('a')])[0]?.title).toBe('我的项目')
   })

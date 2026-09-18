@@ -73,12 +73,13 @@ The Host revalidates the selected source, creates the remote session, materializ
 it, and the client refreshes its native list before returning the new identity.
 Cancel creates nothing. Offline sources remain visible but cannot be selected.
 
-The client catalog now merges multiple presentation workspaces that resolve to
-the same `(machineId, remote workspace)` for display. It preserves every native
-session id, original cwd and Bridge binding, and does not merge equal paths from
-different machines. This is display reconciliation, not a logical project or
-shared-memory abstraction: cross-machine project association is still not
-inferred from a matching basename.
+The client catalog merges workspaces whose known Bridge members unanimously
+resolve to the same normalized repository identity, including local, worker and
+cross-machine representations. Native DSH sessions and stale ids remain in their
+Host workspace but do not veto that identity; conflicting known identities do.
+When repository identity is unavailable, merging remains limited to the exact
+`(machineId, remote workspace)` pair and never guesses from a matching basename.
+Every native session id, original cwd and execution binding is preserved.
 
 Presentation agents use the empty agent-bridge preset. The provider installs
 that preset into the configured writable preset root, refuses to overwrite a
