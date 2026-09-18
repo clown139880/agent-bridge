@@ -465,7 +465,7 @@ export class AgentBridgeImportTarget {
       const cwd = identity
         ? join(this.dataRoot, 'projects', hash(new URL(this.origin).origin + '\0project\0' + identity))
         : join(this.dataRoot, 'workspaces', hash(new URL(this.origin).origin + '\0' + machineId + '\0' + str(rows[0]?.['workspace'])))
-      let keep = identity ? members.find(workspace => workspace.path && !inside(this.dataRoot, workspace.path)) : undefined
+      let keep = members.find(workspace => workspace.path && !inside(this.dataRoot, workspace.path))
       keep ??= members.find(workspace => workspace.path === cwd)
       if (!keep) {
         await mkdir(cwd, { recursive: true })

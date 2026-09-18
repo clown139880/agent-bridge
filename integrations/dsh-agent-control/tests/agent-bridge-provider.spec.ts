@@ -246,13 +246,16 @@ describe('native session catalog', () => {
     const summaries: JsonObject[] = [
       { sessionId: 'remote-1', workerId: 'codex', workspace: '/remote/repo', title: 'Codex conversation', status: 'idle', createdAt: 1, updatedAt: 10 },
       { sessionId: 'remote-2', workerId: 'claude', workspace: '/remote/repo', title: 'Claude conversation', status: 'idle', createdAt: 1, updatedAt: 10 },
+      { sessionId: 'remote-3', workerId: 'local', workspace: '/remote/repo', title: 'Local conversation', status: 'idle', createdAt: 1, updatedAt: 10 },
     ]
     const ids = summaries.map(item => nativeSessionId('http://bridge.test', String(item['sessionId'])))
     const paths = [join(roots[0]!, 'workspaces', 'old-codex'), join(roots[0]!, 'workspaces', 'old-claude')]
+    const realPath = await mkdtemp(join(tmpdir(), 'bridge-real-workspace-')); roots.push(realPath)
     await Promise.all(paths.map(path => mkdir(path, { recursive: true })))
-    const registered = paths.map((path, index) => ({ id: 'old-' + index, path, title: 'repo · provider', sessionIds: [ids[index]!], setTitle: vi.fn(async (_next: string) => {}), attachSession: vi.fn(async (_id: string) => {}) }))
+    const registered = [...paths.map((path, index) => ({ id: 'old-' + index, path, title: 'repo · provider', sessionIds: [ids[index]!], setTitle: vi.fn(async (_next: string) => {}), attachSession: vi.fn(async (_id: string) => {}) })),
+      { id: 'real', path: realPath, title: 'My repo', sessionIds: [ids[2]!], setTitle: vi.fn(async (_next: string) => {}), attachSession: vi.fn(async (_id: string) => {}) }]
     for (let index = 0; index < ids.length; index++) {
-      const session = Session.create(SessionId(ids[index]!), [], { version: SESSION_FORMAT_VERSION, id: ids[index]!, cwd: paths[index]!, createdAt: 1, isSeeded: false } as never)
+      const session = Session.create(SessionId(ids[index]!), [], { version: SESSION_FORMAT_VERSION, id: ids[index]!, cwd: paths[index] ?? realPath, createdAt: 1, isSeeded: false } as never)
       f.stored.set(ids[index]!, { header: session.header, events: [] })
     }
     const createWorkspace = vi.fn(async (path: string, title?: string) => {
@@ -266,14 +269,14 @@ describe('native session catalog', () => {
     f.host.workspaceRegistry.delete = vi.fn(async id => { const index = registered.findIndex(workspace => workspace.id === id); if (index < 0) return false; registered.splice(index, 1); return true })
     f.host.workspaceRegistry.archiveSession = vi.fn(async () => {})
     f.bridge.call.mockImplementation(async request => {
-      if (request.operation === 'workers') return { workers: [{ id: 'codex', machineId: 'dev-wsl', hostname: 'remote', name: 'Codex' }, { id: 'claude', machineId: 'dev-wsl', hostname: 'remote', name: 'Claude' }] }
+      if (request.operation === 'workers') return { workers: [{ id: 'codex', machineId: 'dev-wsl', hostname: 'remote', name: 'Codex' }, { id: 'claude', machineId: 'dev-wsl', hostname: 'remote', name: 'Claude' }, { id: 'local', machineId: 'dev-wsl', hostname: 'remote', name: 'Local' }] }
       if (request.operation === 'sessions') return page(summaries)
       if (request.operation === 'session_events') return page([])
       return page([])
     })
     await f.target.refresh()
-    expect(registered.map(workspace => workspace.id)).toEqual(['location'])
-    expect(createWorkspace).toHaveBeenCalledWith(expect.stringContaining('workspaces'), 'repo @ dev-wsl')
+    expect(registered.map(workspace => workspace.id)).toEqual(['real'])
+    expect(createWorkspace).not.toHaveBeenCalled()
     expect(new Set((f.target.catalog()['sessions'] as JsonObject[]).map(item => item['presentationPath'])).size).toBe(1)
     await f.target.dispose()
   })
