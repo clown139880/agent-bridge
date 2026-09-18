@@ -153,6 +153,32 @@ test("history hydration preserves each Codex turn time", async () => {
   assert.deepEqual(history.map((message) => message.timestamp), [150_000, 150_000]);
 });
 
+test("history hydration reuses the live canonical item event ids", async () => {
+  const emitted: BridgeToControlMessage[] = [];
+  const adapter = new CodexAppServerAdapter({
+    command: "codex", url: "ws://127.0.0.1:4500", allowedRoots: [process.cwd()],
+    manageServer: false, reconnectMs: 3_000,
+  }, (message) => emitted.push(message));
+  const internals = adapter as unknown as {
+    hydrateThreadHistory(thread: { id: string; cwd: string; createdAt: number; updatedAt: number }): Promise<void>;
+    request(method: string, params: Record<string, unknown>): Promise<unknown>;
+  };
+  internals.request = async () => ({ thread: { turns: [{ id: "turn-1", status: "completed", items: [
+    { id: "message-1", type: "agentMessage", text: "answer" },
+    { id: "command-1", type: "commandExecution", command: "pwd", status: "completed", exitCode: 0 },
+    { id: "files-1", type: "fileChange", changes: [{ path: "a.ts" }] },
+  ] }] } });
+
+  await internals.hydrateThreadHistory({ id: "thread-1", cwd: process.cwd(), createdAt: 100, updatedAt: 200 });
+
+  assert.deepEqual(emitted.filter((message) => message.type === "session.event").map((message) => message.eventId), [
+    "app-server:thread-1:message-1:message",
+    "app-server:thread-1:command-1:command",
+    "app-server:thread-1:files-1:file-change",
+    "app-server:thread-1:turn-1:terminal:structured",
+  ]);
+});
+
 test("restoration only hydrates unique threads inside the allowed roots", async () => {
   const root = join(tmpdir(), `agent-bridge-inventory-${randomUUID()}`);
   const allowed = join(root, "allowed");

@@ -13,7 +13,7 @@ import { uploadPromptImages } from './attachments.js'
 
 export const AGENT_BRIDGE_PROVIDER = PROVIDER
 export class AgentBridgeLlmAdapter extends LlmAdapter {
-  readonly pendingAcks = new Map<string, JsonObject[]>()
+  readonly pendingAcks = new Map<string, JsonObject[][]>()
   constructor(private readonly service: AgentControlService, private readonly target: AgentBridgeImportTarget, private readonly pollMs = 600) { super() }
   providerInfo(provider: string): LlmProviderInfo { return { id: provider, name: 'Agent Bridge' } }
   override async listModels(): Promise<readonly LlmModelInfo[]> {
@@ -24,8 +24,10 @@ export class AgentBridgeLlmAdapter extends LlmAdapter {
   attachAgent(_agent: Agent): void {}
   detachAgent(id: unknown): void { this.pendingAcks.delete(String(id)) }
   commitAcks(id: string): void {
-    const rows = this.pendingAcks.get(id)
-    if (rows) { this.target.acknowledge(id, rows); this.pendingAcks.delete(id) }
+    const batches = this.pendingAcks.get(id)
+    const rows = batches?.shift()
+    if (rows) this.target.acknowledge(id, rows)
+    if (!batches?.length) this.pendingAcks.delete(id)
   }
 
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
@@ -63,7 +65,10 @@ export class AgentBridgeLlmAdapter extends LlmAdapter {
       let opened = false
       let finished = false
       const buffered: JsonObject[] = []
-      this.pendingAcks.set(nativeId, [])
+      const ackRows: JsonObject[] = []
+      const ackBatches = this.pendingAcks.get(nativeId) ?? []
+      ackBatches.push(ackRows)
+      this.pendingAcks.set(nativeId, ackBatches)
       while (!finished) {
         signal.throwIfAborted()
         if (receipt['status'] === 'accepted') receipt = record(await this.service.bridge.call({ operation: 'action', args: { actionId: str(receipt['actionId']) } }, signal))
@@ -78,7 +83,7 @@ export class AgentBridgeLlmAdapter extends LlmAdapter {
             if (row['turnId'] !== turnId) continue
             const payload = record(row['payload'])
             if (row['type'] === 'message.completed') {
-              if (payload['role'] === 'user' && payload['text'] === input) this.pendingAcks.get(nativeId)!.push(row)
+              if (payload['role'] === 'user' && payload['text'] === input) ackRows.push(row)
             }
             // A single text block works with native renderers that show only the first
             // block while streaming. Remote commands are display text, never local calls.
@@ -90,7 +95,7 @@ export class AgentBridgeLlmAdapter extends LlmAdapter {
               const delta = (text ? '\n\n' : '') + rendered
               text += delta
               yield { type: 'text-delta', index: 0, text: delta }
-              this.pendingAcks.get(nativeId)!.push(row)
+              ackRows.push(row)
             }
             if (row['type'] === 'turn.failed' || (row['type'] === 'turn.completed' && payload['status'] === 'failed')) throw new Error('Bridge turn failed: ' + JSON.stringify(payload))
             if (row['type'] === 'turn.completed' || row['type'] === 'turn.interrupted') finished = true

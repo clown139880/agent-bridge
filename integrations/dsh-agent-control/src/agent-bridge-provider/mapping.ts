@@ -29,7 +29,10 @@ export function projectStreamChunks(event: JsonObject, index = 0): StreamChunk[]
 
 /** Balanced presentation transactions; never put remote tool calls in the local execution queue. */
 export function projectNativeEvents(rows: readonly JsonObject[], existing: readonly NativeEvent[], model = 'remote'): NativeEvent[] {
-  const seen = new Set(existing.filter(e => e.type === ACK_EVENT).map(e => str(e.data['eventId'])))
+  const acknowledgements = existing.filter(e => e.type === ACK_EVENT)
+  const seen = new Set(acknowledgements.map(e => str(e.data['eventId'])))
+  const seenItems = new Set([...seen].map(presentationItemKey).filter((key): key is string => !!key))
+  const submittedUserTurns = new Set(acknowledgements.filter(e => /^action:[^:]+:user$/.test(str(e.data['eventId']))).map(e => str(e.data['turnId'])))
   let turn = existing.reduce((n, e) => Math.max(n, Number(e.data['turn']) || 0), 0)
   const output: NativeEvent[] = []
   const add = (type: string, data: JsonObject, time: number, surface = false) => {
@@ -39,10 +42,13 @@ export function projectNativeEvents(rows: readonly JsonObject[], existing: reado
   const ordered = existing.some(e => e.type === 'user/message' || e.type === 'assistant/message') ? rows : [...rows].sort((a, b) => Number(a['timestamp']) - Number(b['timestamp']))
   for (const row of ordered) {
     const id = str(row['eventId'])
-    if (!id || seen.has(id)) continue
+    const itemKey = presentationItemKey(id)
+    if (!id || seen.has(id) || (itemKey ? seenItems.has(itemKey) : false)) continue
     seen.add(id)
+    if (itemKey) seenItems.add(itemKey)
     const payload = record(row['payload'])
     const type = str(row['type'])
+    if (type === 'message.completed' && payload['role'] === 'user' && submittedUserTurns.has(str(row['turnId']))) continue
     const time = typeof row['timestamp'] === 'number' ? row['timestamp'] : Date.now()
     const isMessage = type === 'message.completed' && ['user', 'assistant'].includes(str(payload['role']))
     const isTool = ['command.completed', 'file_change.completed', 'tool.completed'].includes(type)
@@ -71,4 +77,10 @@ export function projectNativeEvents(rows: readonly JsonObject[], existing: reado
     add(ACK_EVENT, { eventId: id, turnId: str(row['turnId']) }, time)
   }
   return output
+}
+
+/** Treat pre-canonical history ids as the same App Server item as their live ids. */
+function presentationItemKey(eventId: string): string | undefined {
+  const match = /^app-server:[^:]+:(?:[^:]+:)?([^:]+):(history-)?(message|command|file-change)$/.exec(eventId)
+  return match ? `${match[3]}:${match[1]}` : undefined
 }

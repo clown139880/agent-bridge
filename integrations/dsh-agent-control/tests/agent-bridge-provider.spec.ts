@@ -89,6 +89,20 @@ describe('native history projection', () => {
     expect(session.snapshotEvents().filter(e => e.type === 'assistant/message')).toHaveLength(4)
     expect(projectStreamChunks(rows[2]!)).toEqual([])
   })
+  it('deduplicates legacy history ids against canonical live App Server item ids', () => {
+    const liveId = 'app-server:thread-1:exec-1:command'
+    const legacyId = 'app-server:thread-1:turn-1:exec-1:history-command'
+    const existing: NativeEvent[] = [{ type: ACK_EVENT, data: { eventId: liveId, turnId: 'turn-1' }, seq: 0, time: 10 }]
+    expect(projectNativeEvents([{ ...row(legacyId, 'command.completed', { command: 'pwd' }), itemId: 'exec-1' }], existing)).toEqual([])
+    const legacyExisting: NativeEvent[] = [{ type: ACK_EVENT, data: { eventId: legacyId, turnId: 'turn-1' }, seq: 0, time: 10 }]
+    expect(projectNativeEvents([{ ...row(liveId, 'command.completed', { command: 'pwd' }), itemId: 'exec-1' }], legacyExisting)).toEqual([])
+  })
+  it('does not re-import user items already submitted by the native turn', () => {
+    const existing: NativeEvent[] = [{ type: ACK_EVENT, data: { eventId: 'action:a1:user', turnId: 'turn-1' }, seq: 0, time: 10 }]
+    const historical = { ...row('app-server:thread-1:user-1:message', 'message.completed', { role: 'user', text: 'hello' }), turnId: 'turn-1' }
+    expect(projectNativeEvents([historical], existing)).toEqual([])
+    expect(projectNativeEvents([{ ...historical, turnId: 'external-turn' }], existing).some(event => event.type === 'user/message')).toBe(true)
+  })
   it('keeps stable identity across origins and never collides with a native id', () => {
     expect(nativeSessionId('http://a/', 'same')).toBe(nativeSessionId('http://a', 'same'))
     expect(nativeSessionId('http://a', 'same')).not.toBe(nativeSessionId('http://b', 'same'))
@@ -177,6 +191,15 @@ describe('native session catalog', () => {
 })
 
 describe('Bridge native turn', () => {
+  it('commits pending acknowledgement batches in turn order', () => {
+    const acknowledge = vi.fn()
+    const adapter = new AgentBridgeLlmAdapter({} as AgentControlService, { acknowledge } as unknown as AgentBridgeImportTarget)
+    adapter.pendingAcks.set('native', [[row('first')], [row('second')]])
+    adapter.commitAcks('native')
+    adapter.commitAcks('native')
+    expect(acknowledge.mock.calls.map(call => call[1][0]['eventId'])).toEqual(['first', 'second'])
+    expect(adapter.pendingAcks.has('native')).toBe(false)
+  })
   it('uploads only current-message images through the native store and preserves repeated occurrences', async () => {
     const ref = {attachmentId:'sha256:fixture',mediaType:'image/png',name:'test.png'}
     const readImage = vi.fn(async () => ({ref,data:Buffer.from('image bytes')}))

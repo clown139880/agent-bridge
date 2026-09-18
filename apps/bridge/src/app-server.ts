@@ -704,7 +704,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
         for(const item of turn.items??[])this.emitHistoricalItem(threadId,turn.id,item,timestamp);
         if(turn.status!=="inProgress"){
           const type=turn.status==="failed"?"turn.failed":turn.status==="interrupted"?"turn.interrupted":"turn.completed";
-          this.emitSessionEvent(type,threadId,`app-server:${threadId}:${turn.id}:history-terminal`,{
+          this.emitSessionEvent(type,threadId,`app-server:${threadId}:${turn.id}:terminal:structured`,{
             status:turn.status==="interrupted"?"interrupted":turn.status,summary:finalAgentText(turn.items??[]),
             error:turn.error?.message,durationMs:turn.durationMs??undefined,
             ...(turn.model?{model:turn.model}:{})},turn.id,undefined,timestamp);
@@ -718,12 +718,12 @@ export class CodexAppServerAdapter implements AgentAdapter {
     const itemId=item.id??createHash("sha256").update(JSON.stringify(item)).digest("hex").slice(0,24);
     const text=item.text??item.content?.map(part=>part.text??"").join("\n").trim();
     if((item.type==="agentMessage"||item.type==="userMessage")&&text)this.emitSessionEvent("message.completed",threadId,
-      `app-server:${threadId}:${turnId}:${itemId}:history-message`,{role:item.type==="userMessage"?"user":"assistant",text:truncateEventText(text)},turnId,itemId,timestamp);
+      `app-server:${threadId}:${itemId}:message`,{role:item.type==="userMessage"?"user":"assistant",text:truncateEventText(text)},turnId,itemId,timestamp);
     else if(item.type==="commandExecution")this.emitSessionEvent("command.completed",threadId,
-      `app-server:${threadId}:${turnId}:${itemId}:history-command`,{command:item.command??"command",cwd:item.cwd,
+      `app-server:${threadId}:${itemId}:command`,{command:item.command??"command",cwd:item.cwd,
         status:item.status??"unknown",exitCode:item.exitCode??null,output:truncateEventText(item.aggregatedOutput??"")},turnId,itemId,timestamp);
     else if(item.type==="fileChange")this.emitSessionEvent("file_change.completed",threadId,
-      `app-server:${threadId}:${turnId}:${itemId}:history-file-change`,{changes:(item.changes??[]).slice(0,200),
+      `app-server:${threadId}:${itemId}:file-change`,{changes:(item.changes??[]).slice(0,200),
         truncated:(item.changes?.length??0)>200},turnId,itemId,timestamp);
   }
 
