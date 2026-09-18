@@ -509,6 +509,19 @@ export class AgentControlStore {
       this.db.prepare("DELETE FROM events WHERE session_id=?").run(id);
       this.db.prepare("DELETE FROM worker_runs WHERE session_id=?").run(id);
       this.db.prepare("DELETE FROM stream_events WHERE session_id=?").run(id);
+      // FTS5 content tables are maintained explicitly rather than by triggers,
+      // so deleting their source rows does not remove the indexed documents.
+      // Delete every memory relation explicitly as well: foreign_keys is a
+      // per-connection pragma and maintenance clients may not have enabled it.
+      this.db.prepare(`DELETE FROM conversation_messages_fts WHERE rowid IN
+        (SELECT sequence FROM conversation_messages WHERE session_id=?)`).run(id);
+      this.db.prepare(`DELETE FROM conversation_messages_fts_trigram WHERE rowid IN
+        (SELECT sequence FROM conversation_messages WHERE session_id=?)`).run(id);
+      this.db.prepare(`DELETE FROM conversation_source_aliases WHERE message_id IN
+        (SELECT message_id FROM conversation_messages WHERE session_id=?)`).run(id);
+      this.db.prepare("DELETE FROM conversation_messages WHERE session_id=?").run(id);
+      this.db.prepare("DELETE FROM conversation_summaries WHERE session_id=?").run(id);
+      this.db.prepare("DELETE FROM conversation_archive_chunks WHERE session_id=?").run(id);
       this.db.prepare("DELETE FROM sessions WHERE id=?").run(id);
       this.appendStream("session.deleted", "session", id, id, { sessionId: id, deletedAt: now });
       return true;

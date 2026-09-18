@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
-import { Store } from "../packages/database/src/index.js";
+import { AgentControlStore, Store } from "../packages/database/src/index.js";
 
 test("sessions can be resolved by machine and native Codex thread", () => {
   const path = join(tmpdir(), `agent-bridge-${randomUUID()}.sqlite`);
@@ -39,6 +39,52 @@ test("upstream event IDs are persisted idempotently", () => {
   };
   assert.equal(store.addEvent(event), true);
   assert.equal(store.addEvent(event), false);
+  store.db.close();
+  rmSync(path, { force: true });
+});
+
+test("official session deletion removes conversation memory and FTS rows without relying on foreign keys", () => {
+  const path = join(tmpdir(), `agent-bridge-delete-${randomUUID()}.sqlite`);
+  const store = new Store(path);
+  store.upsertMachine({ id: "dev", name: "dev", platform: "linux", hostname: "dev", capabilities: [] });
+  store.createSession({
+    id: "thread-1", machineId: "dev", agentType: "codex-cli", projectName: "project",
+    projectPath: "/tmp/project", matrixRoomId: "", matrixThreadId: null,
+    nativeSessionId: "thread-1", status: "completed", createdAt: 1, updatedAt: 1,
+  });
+  store.db.prepare(`INSERT INTO conversation_messages
+    (message_id,session_id,source_instance,source_session_id,source_event_id,role,content,content_sha256,
+     content_chars,occurred_at,collected_at,storage_state,completeness)
+    VALUES ('message-1','thread-1','dev','thread-1','event-1','user','remember me','hash',11,1,1,'hot','complete')`).run();
+  const sequence = Number((store.db.prepare("SELECT sequence FROM conversation_messages WHERE message_id='message-1'")
+    .get() as { sequence: number }).sequence);
+  store.db.prepare("INSERT INTO conversation_messages_fts(rowid,content) VALUES (?,?)").run(sequence, "remember me");
+  store.db.prepare("INSERT INTO conversation_messages_fts_trigram(rowid,content) VALUES (?,?)").run(sequence, "remember me");
+  store.db.prepare(`INSERT INTO conversation_source_aliases
+    (source_instance,source_session_id,source_event_id,message_id) VALUES ('dev','thread-1','alias-1','message-1')`).run();
+  store.db.prepare(`INSERT INTO conversation_archive_chunks
+    (id,session_id,relative_path,first_sequence,last_sequence,message_count,uncompressed_bytes,
+     compressed_bytes,sha256,created_at) VALUES ('chunk-1','thread-1','chunk.gz',?,?,1,1,1,'hash',1)`)
+    .run(sequence, sequence);
+  store.db.prepare(`INSERT INTO conversation_summaries
+    (session_id,through_sequence,source_version,generator_version,summary_json,generated_at)
+    VALUES ('thread-1',?,'source','generator','{}',1)`).run(sequence);
+  store.db.exec("PRAGMA foreign_keys=OFF");
+
+  const control = new AgentControlStore(store.db, {
+    sessionEventsMs: 1_000, streamEventsMs: 1_000, actionsMs: 1_000, attachmentsMs: 1_000,
+  });
+  assert.equal(control.deleteSession("thread-1"), true);
+  for (const table of ["sessions", "conversation_messages", "conversation_source_aliases",
+    "conversation_archive_chunks", "conversation_summaries"]) {
+    assert.equal((store.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n, 0, table);
+  }
+  assert.equal((store.db.prepare("SELECT COUNT(*) AS n FROM conversation_messages_fts").get() as { n: number }).n, 0);
+  assert.equal((store.db.prepare("SELECT COUNT(*) AS n FROM conversation_messages_fts_trigram").get() as { n: number }).n, 0);
+  assert.equal((store.db.prepare("SELECT COUNT(*) AS n FROM deleted_sessions WHERE session_id='thread-1'")
+    .get() as { n: number }).n, 1);
+  assert.equal((store.db.prepare("SELECT COUNT(*) AS n FROM stream_events WHERE type='session.deleted'")
+    .get() as { n: number }).n, 1);
   store.db.close();
   rmSync(path, { force: true });
 });
