@@ -2,7 +2,7 @@ import { useEffect, useState, useSyncExternalStore } from 'react'
 import { useDialog } from './dialog.js'
 import css from './workspace.module.css'
 
-export type NativeEntry = { nativeId: string; sessionId: string; machineId: string; workspace: string; projectIdentity?: string; title: string; status: string; worker: string; lastUsedAt?: number }
+export type NativeEntry = { nativeId: string; sessionId: string; machineId: string; workspace: string; projectIdentity?: string; presentationPath?: string; title: string; status: string; worker: string; updatedAt: number; lastUsedAt?: number }
 export type WorkspaceRow = { workspaceId: string; path: string; title: string; sessionIds: readonly string[]; createdAt: string; updatedAt: string }
 type WorkspaceSnapshot = { items: readonly WorkspaceRow[]; archivedSessionIds: readonly string[] }
 type Source<T> = { getSnapshot(): T; subscribe(listener: () => void): () => void }
@@ -26,23 +26,29 @@ export function mergeWorkspaces(rows: readonly WorkspaceRow[], catalog: readonly
   const groups = new Map<string, WorkspaceRow>()
   const activity = new Map<WorkspaceRow, number>()
   const result: WorkspaceRow[] = []
+  const groupKey = (entry: NativeEntry) => entry.projectIdentity
+    ? 'repository\0' + entry.projectIdentity
+    : 'location\0' + entry.machineId + '\0' + entry.workspace
+  const presentationEntries = new Map<string, NativeEntry[]>()
+  for (const entry of catalog) if (entry.presentationPath) {
+    const matches = presentationEntries.get(entry.presentationPath)
+    if (matches) matches.push(entry); else presentationEntries.set(entry.presentationPath, [entry])
+  }
   for (const row of rows) {
     const members = row.sessionIds.map(id => entries.get(id))
     const known = members.filter((entry): entry is NativeEntry => entry !== undefined)
-    const first = known[0]
-    const groupKey = (entry: NativeEntry) => entry.projectIdentity
-      ? 'repository\0' + entry.projectIdentity
-      : 'location\0' + entry.machineId + '\0' + entry.workspace
+    const presented = known.length ? known : presentationEntries.get(row.path) ?? []
+    const first = presented[0]
     const key = first ? groupKey(first) : ''
     // Native sessions, archived ids, and deleted remote ids have no Bridge catalog
     // entry. Keep them in their Host workspace, but let the known Bridge members'
     // unanimous repository identity decide whether that workspace can merge.
-    if (!first || known.some(entry => groupKey(entry) !== key)) { result.push(row); continue }
+    if (!first || presented.some(entry => groupKey(entry) !== key)) { result.push(row); continue }
     const previous = groups.get(key)
     if (previous) {
       previous.sessionIds = [...new Set([...previous.sessionIds, ...row.sessionIds])]
       previous.updatedAt = previous.updatedAt > row.updatedAt ? previous.updatedAt : row.updatedAt
-      const latest = Math.max(...members.map(entry => entry?.lastUsedAt ?? -Infinity))
+      const latest = Math.max(...known.map(entry => entry.updatedAt || entry.lastUsedAt || -Infinity))
       if (Number.isFinite(latest)) activity.set(previous, Math.max(activity.get(previous) ?? latest, latest))
     } else {
       const basename = first.workspace.replace(/\\/g, '/').split('/').filter(Boolean).at(-1) ?? first.workspace
@@ -50,9 +56,23 @@ export function mergeWorkspaces(rows: readonly WorkspaceRow[], catalog: readonly
       const title = generated ? first.projectIdentity ? basename : basename + ' @ ' + first.machineId : row.title
       const merged = { ...row, title, sessionIds: [...row.sessionIds] }
       groups.set(key, merged); result.push(merged)
-      const latest = Math.max(...members.map(entry => entry?.lastUsedAt ?? -Infinity))
+      const latest = Math.max(...known.map(entry => entry.updatedAt || entry.lastUsedAt || -Infinity))
       if (Number.isFinite(latest)) activity.set(merged, latest)
     }
+  }
+  const placed = new Set(result.flatMap(row => row.sessionIds))
+  for (const entry of catalog) if (!placed.has(entry.nativeId)) {
+    const group = groups.get(groupKey(entry))
+    if (!group) continue
+    group.sessionIds = [...group.sessionIds, entry.nativeId]
+    placed.add(entry.nativeId)
+    const latest = entry.updatedAt || entry.lastUsedAt
+    if (latest) activity.set(group, Math.max(activity.get(group) ?? latest, latest))
+  }
+  for (const row of result) {
+    const sorted = row.sessionIds.filter(id => entries.has(id)).sort((a, b) => entries.get(b)!.updatedAt - entries.get(a)!.updatedAt)
+    let index = 0
+    row.sessionIds = row.sessionIds.map(id => entries.has(id) ? sorted[index++]! : id)
   }
   return result.sort((a, b) => {
     const left = activity.get(a), right = activity.get(b)
@@ -98,7 +118,8 @@ export class NativeCatalog {
       const next = original.call(source)
       if (next !== raw || catalog !== this.entries) {
         raw = next; catalog = this.entries
-        cached = { ...next, items: mergeWorkspaces(next.items, this.entries, this.loaded) }
+        const current = new Set(this.entries.map(entry => entry.nativeId))
+        cached = { ...next, items: mergeWorkspaces(next.items, this.entries, this.loaded), archivedSessionIds: next.archivedSessionIds.filter(id => !current.has(id)) }
       }
       return cached
     }
@@ -135,7 +156,7 @@ export function DeleteNativeSession({ catalog }: { catalog: NativeCatalog }) {
     const request = (event: Event) => {
       const detail = (event as CustomEvent<{ nativeId: string; title: string }>).detail
       if (!detail || typeof detail.nativeId !== 'string' || busy) return
-      setError(''); setPending(entries.find(row => row.nativeId === detail.nativeId) ?? { nativeId: detail.nativeId, sessionId: detail.nativeId.startsWith('agent-bridge-') ? '?' : '', machineId: '', workspace: '', title: detail.title || 'DSH 对话', status: '', worker: 'DSH' })
+      setError(''); setPending(entries.find(row => row.nativeId === detail.nativeId) ?? { nativeId: detail.nativeId, sessionId: detail.nativeId.startsWith('agent-bridge-') ? '?' : '', machineId: '', workspace: '', title: detail.title || 'DSH 对话', status: '', worker: 'DSH', updatedAt: 0 })
     }
     window.addEventListener(DELETE_SESSION_EVENT, request)
     return () => window.removeEventListener(DELETE_SESSION_EVENT, request)

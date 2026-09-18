@@ -23,6 +23,8 @@ export interface NativeHost {
   sessionPersistence: { stat(id: string): Promise<unknown> }
   workspaceRegistry: {
     archiveSession?(id: string): Promise<void>
+    list?(): NativeWorkspace[]
+    delete?(id: string): Promise<boolean>
     resolveByPath(path: string): Promise<NativeWorkspace | undefined>
     create(path: string, title?: string): Promise<NativeWorkspace>
   }
@@ -30,7 +32,7 @@ export interface NativeHost {
   emit(event: string, ...args: unknown[]): void
   logger: { warn(message: string): void }
 }
-export interface NativeWorkspace { title?: string; setTitle?(title: string): Promise<void>; attachSession(id: string): Promise<void> }
+export interface NativeWorkspace { id?: string; path?: string; title?: string; sessionIds?: readonly string[]; setTitle?(title: string): Promise<void>; attachSession(id: string): Promise<void> }
 export function nativeHost(ctx: Context): NativeHost { return ctx as unknown as NativeHost }
 export function nativeSession(agent: Agent): NativeSession { return agent.session as unknown as NativeSession }
 export function sessionEvents(session: NativeSession): readonly NativeEvent[] {

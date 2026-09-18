@@ -12,7 +12,7 @@ import type { AgentControlService } from '../src/service.js'
 import type { BridgeClient } from '../src/bridge-client.js'
 import { bridgeUserInputToQuestions, userInputAnswerToBridge, relayPendingInteractions } from '../src/agent-bridge-provider/approval-bridge.js'
 import type { Context } from '@deepseek-ai/cordis'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -185,7 +185,7 @@ describe('native session catalog', () => {
     expect([...f.agents.keys()]).toEqual(['local-session', id])
     expect(f.target.binding(id)?.['workspace']).toBe('/remote/repo')
     expect((f.target.catalog()['sessions'] as JsonObject[])[0]).toMatchObject({ lastUsedAt: 123, projectIdentity: 'github.com/example/repo' })
-    expect(f.host.workspaceRegistry.create).toHaveBeenCalledWith(expect.stringContaining('workspaces'), 'repo @ w')
+    expect(f.host.workspaceRegistry.create).toHaveBeenCalledWith(expect.stringContaining('projects'), 'repo')
     expect(f.stored.has(id)).toBe(true)
     await f.target.refresh()
     expect(f.create).toHaveBeenCalledTimes(1)
@@ -201,6 +201,44 @@ describe('native session catalog', () => {
     await f.target.ensure(summary)
     expect(f.resume).toHaveBeenCalledTimes(1)
     expect(sessionEvents(nativeSession(f.agents.get(String(a.id))!)).filter(e => e.type === 'assistant/message')).toHaveLength(1)
+    await f.target.dispose()
+  })
+  it('replaces legacy per-location presentation workspaces with one durable project workspace', async () => {
+    const f = await fixture([])
+    const summaries = [summary, { ...summary, sessionId: 'remote-2', workerId: 'w2', workspace: 'D:\\repo' }]
+    const ids = summaries.map(item => nativeSessionId('http://bridge.test', String(item['sessionId'])))
+    const legacyPaths = [join(roots[0]!, 'workspaces', 'one'), join(roots[0]!, 'workspaces', 'two')]
+    await Promise.all(legacyPaths.map(path => mkdir(path, { recursive: true })))
+    for (let index = 0; index < ids.length; index++) {
+      const session = Session.create(SessionId(ids[index]!), [], { version: SESSION_FORMAT_VERSION, id: ids[index]!, cwd: legacyPaths[index]!, createdAt: 1, isSeeded: false } as never)
+      f.stored.set(ids[index]!, { header: session.header, events: [] })
+    }
+    const legacy = legacyPaths.map((path, index) => ({ id: 'legacy-' + index, path, title: 'repo @ machine-' + index, sessionIds: [ids[index]!], setTitle: vi.fn(async (_next: string) => {}), attachSession: vi.fn(async (_id: string) => {}) }))
+    const registered = [...legacy, { id: 'stale', path: join(roots[0]!, 'workspaces', 'stale'), title: 'stale', sessionIds: [] as string[], setTitle: vi.fn(async (_next: string) => {}), attachSession: vi.fn(async (_id: string) => {}) }]
+    const createWorkspace = vi.fn(async (path: string, title?: string) => {
+      const workspace = { id: 'project', path, title: title ?? 'project', sessionIds: [] as string[], setTitle: vi.fn(async (next: string) => { workspace.title = next }), attachSession: vi.fn(async (id: string) => { workspace.sessionIds.unshift(id) }) }
+      registered.unshift(workspace)
+      return workspace
+    })
+    f.host.workspaceRegistry.list = () => registered
+    f.host.workspaceRegistry.resolveByPath = async path => registered.find(workspace => workspace.path === path)
+    f.host.workspaceRegistry.create = createWorkspace
+    f.host.workspaceRegistry.delete = vi.fn(async id => { const index = registered.findIndex(workspace => workspace.id === id); if (index < 0) return false; registered.splice(index, 1); return true })
+    f.host.workspaceRegistry.archiveSession = vi.fn(async () => {})
+    f.bridge.call.mockImplementation(async request => {
+      if (request.operation === 'workers') return { workers: [{ id: 'w', machineId: 'one', hostname: 'remote', name: 'one' }, { id: 'w2', machineId: 'two', hostname: 'remote', name: 'two' }] }
+      if (request.operation === 'sessions') return page(summaries)
+      if (request.operation === 'session_events') return page([])
+      return page([])
+    })
+    await f.target.refresh()
+    expect(registered.map(workspace => workspace.id)).toEqual(['project'])
+    expect(createWorkspace).toHaveBeenCalledWith(expect.stringContaining('projects'), 'repo')
+    expect(f.host.workspaceRegistry.delete).toHaveBeenCalledTimes(3)
+    expect(f.host.workspaceRegistry.archiveSession).toHaveBeenCalledTimes(2)
+    expect((f.target.catalog()['sessions'] as JsonObject[]).every(item => String(item['presentationPath']).includes('projects'))).toBe(true)
+    await f.target.refresh()
+    expect(createWorkspace).toHaveBeenCalledTimes(1)
     await f.target.dispose()
   })
   it('keeps syncing without retrying workspace attachment after a retained checkout disappears', async () => {

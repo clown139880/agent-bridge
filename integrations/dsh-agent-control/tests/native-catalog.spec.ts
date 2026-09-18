@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { mergeWorkspaces, type NativeEntry, type WorkspaceRow } from '../src/client/native-catalog.js'
+import { mergeWorkspaces, NativeCatalog, type NativeEntry, type WorkspaceRow } from '../src/client/native-catalog.js'
 import { promptTitle } from '../src/agent-bridge-provider/import-target.js'
 import type { NativeEvent } from '../src/agent-bridge-provider/dsh-compat.js'
 
-const entry = (nativeId: string, machineId = 'dev-wsl', workspace = '/work/agent-bridge', lastUsedAt?: number, projectIdentity?: string): NativeEntry => ({ nativeId, machineId, workspace, sessionId: nativeId, title: 'test', status: 'idle', worker: 'worker', ...(lastUsedAt === undefined ? {} : { lastUsedAt }), ...(projectIdentity ? { projectIdentity } : {}) })
+const entry = (nativeId: string, machineId = 'dev-wsl', workspace = '/work/agent-bridge', lastUsedAt?: number, projectIdentity?: string, updatedAt = 0): NativeEntry => ({ nativeId, machineId, workspace, sessionId: nativeId, title: 'test', status: 'idle', worker: 'worker', updatedAt, ...(lastUsedAt === undefined ? {} : { lastUsedAt }), ...(projectIdentity ? { projectIdentity } : {}) })
 const workspace = (id: string): WorkspaceRow => ({ workspaceId: id, path: '/presentation/' + id, title: 'agent-bridge · Codex @ dev-wsl', sessionIds: [id], createdAt: '2026-01-01', updatedAt: '2026-01-01' })
 describe('native catalog', () => {
   it('does not flash ungrouped Bridge workspaces before the first catalog fetch', () => {
@@ -81,6 +81,40 @@ describe('native catalog', () => {
     const merged = mergeWorkspaces(rows, [entry('first', 'dev-wsl', '/work/shared', 10), entry('second', 'dev-wsl', '/work/shared', 500), entry('other', 'dev-wsl', '/work/other', 100)])
     expect(merged.map(row => row.workspaceId)).toEqual(['first', 'other'])
     expect(merged[0]?.sessionIds).toEqual(['first', 'second'])
+  })
+  it('orders merged Bridge sessions globally by their own update time', () => {
+    const local = { ...workspace('local'), sessionIds: ['native-a', 'older', 'native-b', 'newest'] }
+    const remote = { ...workspace('remote'), sessionIds: ['middle'] }
+    const merged = mergeWorkspaces([local, remote], [
+      entry('older', 'windows', 'C:\\repo', 10, 'repo', 100),
+      entry('newest', 'windows', 'C:\\repo', 10, 'repo', 300),
+      entry('middle', 'hal', '/repo', 10, 'repo', 200),
+    ])
+    expect(merged[0]?.sessionIds).toEqual(['native-a', 'newest', 'native-b', 'middle', 'older'])
+  })
+  it('fills an empty unified presentation workspace with catalog sessions', () => {
+    const row = { ...workspace('project'), path: 'C:\\data\\projects\\repo', title: 'repo', sessionIds: [] }
+    const catalog = [
+      { ...entry('old', 'hal', '/repo', 10, 'repo', 100), presentationPath: row.path },
+      { ...entry('new', 'windows', 'D:\\repo', 10, 'repo', 200), presentationPath: row.path },
+    ]
+    expect(mergeWorkspaces([row], catalog)[0]?.sessionIds).toEqual(['new', 'old'])
+  })
+  it('projects current catalog sessions out of the durable archive set', async () => {
+    const row = { ...workspace('project'), path: 'C:\\data\\projects\\repo', sessionIds: [] }
+    const current = { ...entry('agent-bridge-current', 'hal', '/repo', 10, 'repo', 200), presentationPath: row.path }
+    const source = {
+      getSnapshot: () => ({ items: [row], archivedSessionIds: [current.nativeId, 'agent-bridge-deleted', 'native-archived'] }),
+      subscribe: () => () => {},
+    }
+    const catalog = new NativeCatalog(async () => ({ sessions: [current] }), { list: { getSnapshot: () => ({}), subscribe: () => () => {} }, clear() {}, async refresh() {} })
+    await catalog.refresh()
+    const dispose = catalog.install({ list: source, async rename() {}, async delete() {}, async insertSessionBefore() {} })
+    expect(source.getSnapshot()).toMatchObject({
+      items: [{ sessionIds: [current.nativeId] }],
+      archivedSessionIds: ['agent-bridge-deleted', 'native-archived'],
+    })
+    dispose()
   })
   it('uses the first real user prompt, recovers backfilled prompts and preserves useful titles', () => {
     const user = (text: string): NativeEvent => ({ type: 'user/message', seq: 0, time: 1, data: { source: { kind: 'user' }, content: [{ type: 'text', text }] } })
