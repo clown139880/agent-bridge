@@ -13,7 +13,15 @@ export const DELETE_SESSION_EVENT = 'agent-control:delete-session'
 type Rpc = (operation: string, args?: Record<string, string>) => Promise<unknown>
 
 /** Merge presentation accounts, keeping every original session/cwd and execution binding intact. */
-export function mergeWorkspaces(rows: readonly WorkspaceRow[], catalog: readonly NativeEntry[]): WorkspaceRow[] {
+export function mergeWorkspaces(rows: readonly WorkspaceRow[], catalog: readonly NativeEntry[], catalogReady = true): WorkspaceRow[] {
+  // The Host workspace snapshot arrives before this client plugin can fetch the
+  // Bridge catalog. Do not briefly expose every physical presentation workspace
+  // while repository identities are still unknown. Native DSH sessions remain
+  // visible; Bridge sessions appear once and already grouped after the first fetch.
+  if (!catalogReady) return rows.flatMap(row => {
+    const sessionIds = row.sessionIds.filter(id => !id.startsWith('agent-bridge-'))
+    return sessionIds.length ? [{ ...row, sessionIds }] : []
+  })
   const entries = new Map(catalog.map(row => [row.nativeId, row]))
   const groups = new Map<string, WorkspaceRow>()
   const activity = new Map<WorkspaceRow, number>()
@@ -55,6 +63,7 @@ export function mergeWorkspaces(rows: readonly WorkspaceRow[], catalog: readonly
 
 export class NativeCatalog {
   private entries: NativeEntry[] = []
+  private loaded = false
   private readonly listeners = new Set<() => void>()
   private workspaceSource: Source<WorkspaceSnapshot> | undefined
   constructor(readonly rpc: Rpc, readonly sessions: CatalogSessions) {}
@@ -69,7 +78,9 @@ export class NativeCatalog {
   async refresh(): Promise<void> {
     const data = await this.rpc('native_catalog') as { sessions: NativeEntry[] }
     if (!Array.isArray(data.sessions)) throw new Error('会话目录不可用')
-    if (JSON.stringify(this.entries) !== JSON.stringify(data.sessions)) { this.entries = data.sessions; this.emit() }
+    if (!this.loaded || JSON.stringify(this.entries) !== JSON.stringify(data.sessions)) {
+      this.loaded = true; this.entries = data.sessions; this.emit()
+    }
   }
   async remove(entry: Pick<NativeEntry, 'nativeId'>): Promise<void> {
     const result = await this.rpc('delete_native', { nativeId: entry.nativeId }) as { deleted?: boolean }
@@ -87,7 +98,7 @@ export class NativeCatalog {
       const next = original.call(source)
       if (next !== raw || catalog !== this.entries) {
         raw = next; catalog = this.entries
-        cached = { ...next, items: mergeWorkspaces(next.items, this.entries) }
+        cached = { ...next, items: mergeWorkspaces(next.items, this.entries, this.loaded) }
       }
       return cached
     }

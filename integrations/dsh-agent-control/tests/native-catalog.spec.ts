@@ -6,6 +6,13 @@ import type { NativeEvent } from '../src/agent-bridge-provider/dsh-compat.js'
 const entry = (nativeId: string, machineId = 'dev-wsl', workspace = '/work/agent-bridge', lastUsedAt?: number, projectIdentity?: string): NativeEntry => ({ nativeId, machineId, workspace, sessionId: nativeId, title: 'test', status: 'idle', worker: 'worker', ...(lastUsedAt === undefined ? {} : { lastUsedAt }), ...(projectIdentity ? { projectIdentity } : {}) })
 const workspace = (id: string): WorkspaceRow => ({ workspaceId: id, path: '/presentation/' + id, title: 'agent-bridge · Codex @ dev-wsl', sessionIds: [id], createdAt: '2026-01-01', updatedAt: '2026-01-01' })
 describe('native catalog', () => {
+  it('does not flash ungrouped Bridge workspaces before the first catalog fetch', () => {
+    const bridgeOnly = { ...workspace('bridge'), sessionIds: ['agent-bridge-one', 'agent-bridge-two'] }
+    const mixed = { ...workspace('mixed'), sessionIds: ['session-native', 'agent-bridge-three'] }
+    expect(mergeWorkspaces([bridgeOnly, mixed], [], false)).toEqual([
+      { ...mixed, sessionIds: ['session-native'] },
+    ])
+  })
   it('merges legacy presentation groups containing native blank sessions and stale ids', () => {
     const rows = ['codex','claude'].map(id => ({...workspace(id),path:'C:\\Users\\test\\.dsh\\agent-bridge\\workspaces\\'+id,sessionIds:['native-blank-'+id,id,'stale-'+id]}))
     const merged = mergeWorkspaces(rows,[entry('codex'),entry('claude')])

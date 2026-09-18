@@ -46,6 +46,7 @@ export class BridgeSelfUpdater {
   private awaitingRestart = false;
   private state: "idle" | "draining_for_update" | "updating" | "ready" = "idle";
   private wasBusy = true;
+  private staged?: { version: string; releasePath: string };
 
   constructor(private readonly options: SelfUpdaterOptions) {}
 
@@ -98,6 +99,10 @@ export class BridgeSelfUpdater {
       this.state = "ready";
       return;
     }
+    if (this.staged && this.staged.version !== announcement.latestVersion) {
+      await rm(this.staged.releasePath, { recursive: true, force: true }).catch(() => undefined);
+      this.staged = undefined;
+    }
     // This synchronous transition is the local admission mutex: once an
     // update is known, no start_agent can slip in while isBusy() is awaited.
     this.state = "draining_for_update";
@@ -124,43 +129,48 @@ export class BridgeSelfUpdater {
 
   private async tryUpdate(): Promise<void> {
     const announcement = this.announcement!;
-    if (await this.options.isBusy()) {
-      this.report("deferred", announcement.latestVersion, false, "active Codex run/session");
-      return;
-    }
     this.state = "updating";
     this.running = true;
-    let fetched = false;
+    let fetched = this.staged?.version === announcement.latestVersion;
     let activated = false;
     let previousTarget: string | undefined;
     const safeVersion = announcement.latestVersion.replace(/[^0-9A-Za-z._-]/g, "_");
-    const releasePath = join(this.options.installRoot, "releases", `${safeVersion}-${Date.now()}-${randomUUID()}`);
+    const releasePath = fetched
+      ? this.staged!.releasePath
+      : join(this.options.installRoot, "releases", `${safeVersion}-${Date.now()}-${randomUUID()}`);
     try {
-      await mkdir(dirname(releasePath), { recursive: true });
-      this.report("fetching", announcement.latestVersion, false);
-      if (this.options.sourceCheckout) {
-        await this.command("git", ["-C", this.options.sourceCheckout, "fetch", "origin", this.options.sourceRef]);
-        await this.command("git", ["-C", this.options.sourceCheckout, "merge", "--ff-only", `origin/${this.options.sourceRef}`]);
-      } else {
-        await this.command("git", [
-          "clone", "--depth", "1", "--branch", this.options.sourceRef, "--", this.options.source!, releasePath,
-        ]);
+      if (!fetched) {
+        await mkdir(dirname(releasePath), { recursive: true });
+        this.report("fetching", announcement.latestVersion, false);
+        if (this.options.sourceCheckout) {
+          await this.command("git", ["-C", this.options.sourceCheckout, "fetch", "origin", this.options.sourceRef]);
+          await this.command("git", ["-C", this.options.sourceCheckout, "merge", "--ff-only", `origin/${this.options.sourceRef}`]);
+        } else {
+          await this.command("git", [
+            "clone", "--depth", "1", "--branch", this.options.sourceRef, "--", this.options.source!, releasePath,
+          ]);
+        }
+        fetched = true;
+        this.report("fetched", announcement.latestVersion, true);
+        this.report("validating", announcement.latestVersion, true);
+        const sourceRoot = this.options.sourceCheckout ?? releasePath;
+        const packageVersion = await readPackageVersion(join(sourceRoot, "package.json"));
+        if (compareVersions(packageVersion, announcement.latestVersion) !== 0) {
+          throw new Error(`fetched package version ${packageVersion} does not match ${announcement.latestVersion}`);
+        }
+        const installArgs = ["install", "--frozen-lockfile"];
+        if (this.options.storeDir) installArgs.push("--store-dir", this.options.storeDir);
+        await this.command(this.options.packageManager, installArgs, sourceRoot);
+        await assertWorkspaceDependencyInstalled(sourceRoot, "apps/bridge", "@agent-bridge/protocol");
+        await this.command(this.options.packageManager, ["check"], sourceRoot);
+        await this.command(this.options.packageManager, ["build"], sourceRoot);
+        if (this.options.sourceCheckout) await stageCompiledArtifact(sourceRoot, releasePath);
       }
-      fetched = true;
-      this.report("fetched", announcement.latestVersion, true);
-      this.report("validating", announcement.latestVersion, true);
-      const sourceRoot = this.options.sourceCheckout ?? releasePath;
-      const packageVersion = await readPackageVersion(join(sourceRoot, "package.json"));
-      if (compareVersions(packageVersion, announcement.latestVersion) !== 0) {
-        throw new Error(`fetched package version ${packageVersion} does not match ${announcement.latestVersion}`);
+      if (await this.options.isBusy()) {
+        this.staged = { version: announcement.latestVersion, releasePath };
+        this.report("deferred", announcement.latestVersion, true, "release staged; active Codex run/session delays restart");
+        return;
       }
-      const installArgs = ["install", "--frozen-lockfile"];
-      if (this.options.storeDir) installArgs.push("--store-dir", this.options.storeDir);
-      await this.command(this.options.packageManager, installArgs, sourceRoot);
-      await assertWorkspaceDependencyInstalled(sourceRoot, "apps/bridge", "@agent-bridge/protocol");
-      await this.command(this.options.packageManager, ["check"], sourceRoot);
-      await this.command(this.options.packageManager, ["build"], sourceRoot);
-      if (this.options.sourceCheckout) await stageCompiledArtifact(sourceRoot, releasePath);
       previousTarget = await currentSymlinkTarget(this.options.currentLink);
       if (!previousTarget) throw new Error(`${this.options.currentLink} must point to the current stable release`);
       await replaceSymlink(this.options.currentLink, releasePath);
@@ -172,6 +182,7 @@ export class BridgeSelfUpdater {
         releasePath,
         phase: "restarting",
       } satisfies PendingUpdateState);
+      this.staged = undefined;
       this.report("restarting", announcement.latestVersion, true);
       this.awaitingRestart = true;
       await (this.options.restart ?? this.command.bind(this))(
@@ -193,6 +204,7 @@ export class BridgeSelfUpdater {
           updatable: true, fetched, reason,
         });
       } else {
+        this.staged = undefined;
         await rm(releasePath, { recursive: true, force: true }).catch(() => undefined);
         this.options.report({
           type: "bridge_update.status", phase: "failed",

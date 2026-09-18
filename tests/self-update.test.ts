@@ -49,7 +49,7 @@ test("a v-prefixed registry version accepts the equivalent package version", asy
   }
 });
 
-test("bridge stages, validates, activates, restarts itself, then reports completion after boot", async () => {
+test("bridge stages while busy, activates when idle, then reports completion after boot", async () => {
   const root = mkdtempSync(join(tmpdir(), "agent-bridge-update-"));
   const oldRelease = join(root, "releases", "0.3.0");
   const currentLink = join(root, "current");
@@ -90,14 +90,20 @@ test("bridge stages, validates, activates, restarts itself, then reports complet
     await updater.consider(announcement);
     assert.equal(updater.admissionState(), "draining_for_update");
     assert.equal(updater.admitStart(), false, "draining must close admission before the busy check resolves");
-    assert.deepEqual(statuses.map(({ phase }) => phase), ["discovered", "deferred"]);
+    assert.deepEqual(statuses.map(({ phase }) => phase), [
+      "discovered", "fetching", "fetched", "validating", "deferred",
+    ]);
+    assert.equal(statuses.at(-1)?.fetched, true);
+    assert.match(statuses.at(-1)?.reason ?? "", /release staged/);
     assert.equal(restartCount, 0, "an active Codex turn must prevent restart");
+    const commandsAfterStaging = commands.length;
 
     busy = false;
     await updater.activityChanged();
     assert.deepEqual(statuses.map(({ phase }) => phase), [
-      "discovered", "deferred", "discovered", "fetching", "fetched", "validating", "restarting",
+      "discovered", "fetching", "fetched", "validating", "deferred", "discovered", "restarting",
     ]);
+    assert.equal(commands.length, commandsAfterStaging, "idle activation must reuse the validated release");
     assert.equal(restartCount, 1);
     assert.equal(updater.admissionState(), "updating");
     assert.match(commands[0]!, /^git clone /);
