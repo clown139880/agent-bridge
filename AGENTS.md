@@ -23,6 +23,9 @@
 
 ## HAL deployment
 
+- A Codex running behind the HAL Bridge must never activate a HAL release or restart the HAL Bridge or Control Plane that hosts it. Its delivery boundary is: finish the requested changes, run the appropriate checks, bump the root version when required, commit, and push the exact target commit.
+- Hand HAL activation to Hermes after the target commit is pushed. Report a deployment handoff containing the branch, full commit SHA, release version, checks run, and affected components. Hermes owns the clean HAL fetch/fast-forward, staging, activation, service restarts, verification, and rollback. Do not report the HAL deployment complete until Hermes reports those checks succeeded.
+- Do not route the deployment back to another worker behind the HAL Bridge. The deployment operator must be outside the HAL Bridge failure domain.
 - HAL updates are agent-triggered, never Bridge auto-updates. Fetch and fast-forward the clean HAL checkout from the pushed remote commit, validate in a staged immutable release, and atomically switch the release link.
 - Never continue from a dirty HAL checkout. Do not create source-copy `.deploy-backup-*` directories and do not stash local edits. Stop and investigate unexpected changes.
 - Stage and validate while sessions are active. Use the deployment script to drain admission and activate the release; active turns, approvals, or user input do not prohibit deployment, and the script may interrupt sessions after its configured timeout.
