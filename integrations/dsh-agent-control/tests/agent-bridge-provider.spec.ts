@@ -47,7 +47,7 @@ async function fixture(rows = [row('u', 'message.completed', { role: 'user', tex
     emit: vi.fn(), logger: { warn: vi.fn() },
   }
   const bridge = { call: vi.fn<BridgeClient['call']>(async request => {
-    if (request.operation === 'workers') return { workers: [{ id: 'w', hostname: 'remote-host', name: 'Remote worker' }] }
+    if (request.operation === 'workers') return { workers: [{ id: 'w', hostname: 'remote-host', name: 'Remote worker', recentWorkspaces: [{ path: '/remote/repo', lastUsedAt: 123 }] }] }
     if (request.operation === 'sessions') return page([summary])
     if (request.operation === 'session') return summary
     if (request.operation === 'session_events') return page(request.args?.['after'] ? [] : rows)
@@ -160,6 +160,7 @@ describe('native session catalog', () => {
     const id = nativeSessionId('http://bridge.test', 'remote-1')
     expect([...f.agents.keys()]).toEqual(['local-session', id])
     expect(f.target.binding(id)?.['workspace']).toBe('/remote/repo')
+    expect((f.target.catalog()['sessions'] as JsonObject[])[0]?.['lastUsedAt']).toBe(123)
     expect(f.host.workspaceRegistry.create).toHaveBeenCalledWith(expect.stringContaining('workspaces'), 'repo @ w')
     expect(f.stored.has(id)).toBe(true)
     await f.target.refresh()

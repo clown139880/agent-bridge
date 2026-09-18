@@ -3,7 +3,7 @@ import { mergeWorkspaces, type NativeEntry, type WorkspaceRow } from '../src/cli
 import { promptTitle } from '../src/agent-bridge-provider/import-target.js'
 import type { NativeEvent } from '../src/agent-bridge-provider/dsh-compat.js'
 
-const entry = (nativeId: string, machineId = 'dev-wsl', workspace = '/work/agent-bridge'): NativeEntry => ({ nativeId, machineId, workspace, sessionId: nativeId, title: 'test', status: 'idle', worker: 'worker' })
+const entry = (nativeId: string, machineId = 'dev-wsl', workspace = '/work/agent-bridge', lastUsedAt?: number): NativeEntry => ({ nativeId, machineId, workspace, sessionId: nativeId, title: 'test', status: 'idle', worker: 'worker', ...(lastUsedAt === undefined ? {} : { lastUsedAt }) })
 const workspace = (id: string): WorkspaceRow => ({ workspaceId: id, path: '/presentation/' + id, title: 'agent-bridge · Codex @ dev-wsl', sessionIds: [id], createdAt: '2026-01-01', updatedAt: '2026-01-01' })
 describe('native catalog', () => {
   it('merges legacy presentation groups containing native blank sessions and stale ids', () => {
@@ -25,6 +25,22 @@ describe('native catalog', () => {
   })
   it('preserves custom group titles', () => {
     expect(mergeWorkspaces([{ ...workspace('a'), title: '我的项目' }], [entry('a')])[0]?.title).toBe('我的项目')
+  })
+  it('orders workspaces by recent worker activity and leaves unknown activity last', () => {
+    const rows = ['unknown-a', 'older', 'newer', 'unknown-b'].map(workspace)
+    const merged = mergeWorkspaces(rows, [
+      entry('unknown-a', 'dev-wsl', '/work/unknown-a'),
+      entry('older', 'dev-wsl', '/work/older', 100),
+      entry('newer', 'dev-wsl', '/work/newer', 300),
+      entry('unknown-b', 'dev-wsl', '/work/unknown-b'),
+    ])
+    expect(merged.map(row => row.workspaceId)).toEqual(['newer', 'older', 'unknown-a', 'unknown-b'])
+  })
+  it('uses the newest activity when presentation workspaces merge', () => {
+    const rows = ['first', 'second', 'other'].map(workspace)
+    const merged = mergeWorkspaces(rows, [entry('first', 'dev-wsl', '/work/shared', 10), entry('second', 'dev-wsl', '/work/shared', 500), entry('other', 'dev-wsl', '/work/other', 100)])
+    expect(merged.map(row => row.workspaceId)).toEqual(['first', 'other'])
+    expect(merged[0]?.sessionIds).toEqual(['first', 'second'])
   })
   it('uses the first real user prompt, recovers backfilled prompts and preserves useful titles', () => {
     const user = (text: string): NativeEvent => ({ type: 'user/message', seq: 0, time: 1, data: { source: { kind: 'user' }, content: [{ type: 'text', text }] } })

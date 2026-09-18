@@ -2,7 +2,7 @@ import { useEffect, useState, useSyncExternalStore } from 'react'
 import { useDialog } from './dialog.js'
 import css from './workspace.module.css'
 
-export type NativeEntry = { nativeId: string; sessionId: string; machineId: string; workspace: string; title: string; status: string; worker: string }
+export type NativeEntry = { nativeId: string; sessionId: string; machineId: string; workspace: string; title: string; status: string; worker: string; lastUsedAt?: number }
 export type WorkspaceRow = { workspaceId: string; path: string; title: string; sessionIds: readonly string[]; createdAt: string; updatedAt: string }
 type WorkspaceSnapshot = { items: readonly WorkspaceRow[]; archivedSessionIds: readonly string[] }
 type Source<T> = { getSnapshot(): T; subscribe(listener: () => void): () => void }
@@ -15,6 +15,7 @@ type Rpc = (operation: string, args?: Record<string, string>) => Promise<unknown
 export function mergeWorkspaces(rows: readonly WorkspaceRow[], catalog: readonly NativeEntry[]): WorkspaceRow[] {
   const entries = new Map(catalog.map(row => [row.nativeId, row]))
   const groups = new Map<string, WorkspaceRow>()
+  const activity = new Map<WorkspaceRow, number>()
   const result: WorkspaceRow[] = []
   for (const row of rows) {
     const members = row.sessionIds.map(id => entries.get(id))
@@ -28,15 +29,23 @@ export function mergeWorkspaces(rows: readonly WorkspaceRow[], catalog: readonly
     if (previous) {
       previous.sessionIds = [...new Set([...previous.sessionIds, ...row.sessionIds])]
       previous.updatedAt = previous.updatedAt > row.updatedAt ? previous.updatedAt : row.updatedAt
+      const latest = Math.max(...members.map(entry => entry?.lastUsedAt ?? -Infinity))
+      if (Number.isFinite(latest)) activity.set(previous, Math.max(activity.get(previous) ?? latest, latest))
     } else {
       const basename = first.workspace.replace(/\\/g, '/').split('/').filter(Boolean).at(-1) ?? first.workspace
       const generated = row.title === basename || row.title.startsWith(basename + ' · ') || row.title === basename + ' @ ' + first.machineId
       const title = generated ? basename + ' @ ' + first.machineId : row.title
       const merged = { ...row, title, sessionIds: [...row.sessionIds] }
       groups.set(key, merged); result.push(merged)
+      const latest = Math.max(...members.map(entry => entry?.lastUsedAt ?? -Infinity))
+      if (Number.isFinite(latest)) activity.set(merged, latest)
     }
   }
-  return result
+  return result.sort((a, b) => {
+    const left = activity.get(a), right = activity.get(b)
+    if (left === undefined) return right === undefined ? 0 : 1
+    return right === undefined ? -1 : right - left
+  })
 }
 
 export class NativeCatalog {

@@ -89,10 +89,15 @@ export class AgentBridgeImportTarget {
     return { sessions: [...this.bindings].filter(([id]) => !this.deleted.has(id)).map(([nativeId, binding]) => {
       const worker = this.workers.get(str(binding['workerId']))
       const machineId = str(worker?.['machineId'], str(binding['workerId']))
+      const workspace = str(binding['workspace'])
+      const recent = Array.isArray(worker?.['recentWorkspaces'])
+        ? worker['recentWorkspaces'].map(record).find(item => str(item['path']) === workspace)
+        : undefined
+      const lastUsedAt = typeof recent?.['lastUsedAt'] === 'number' && Number.isFinite(recent['lastUsedAt']) ? recent['lastUsedAt'] : undefined
       const agent = this.host.agents.get(nativeId)
-      return { nativeId, sessionId: str(binding['sessionId']), machineId, workspace: str(binding['workspace']),
+      return { nativeId, sessionId: str(binding['sessionId']), machineId, workspace,
         title: agent ? promptTitle(binding, sessionEvents(nativeSession(agent))) : str(binding['title']),
-        status: str(binding['status']), worker: str(worker?.['name'], str(binding['workerId'])) }
+        status: str(binding['status']), worker: str(worker?.['name'], str(binding['workerId'])), ...(lastUsedAt === undefined ? {} : { lastUsedAt }) }
     }) }
   }
   async deleteNative(nativeId: string, signal?: AbortSignal): Promise<JsonObject> {
