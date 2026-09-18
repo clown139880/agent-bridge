@@ -12,8 +12,12 @@ import { relayPendingInteractions } from './approval-bridge.js'
 import { uploadPromptImages } from './attachments.js'
 
 export const AGENT_BRIDGE_PROVIDER = PROVIDER
+interface PendingTurn {
+  acknowledgements: JsonObject[]
+  presentations: JsonObject[]
+}
 export class AgentBridgeLlmAdapter extends LlmAdapter {
-  readonly pendingAcks = new Map<string, JsonObject[][]>()
+  readonly pendingAcks = new Map<string, PendingTurn[]>()
   constructor(private readonly service: AgentControlService, private readonly target: AgentBridgeImportTarget, private readonly pollMs = 600) { super() }
   providerInfo(provider: string): LlmProviderInfo { return { id: provider, name: 'Agent Bridge' } }
   override async listModels(): Promise<readonly LlmModelInfo[]> {
@@ -25,8 +29,8 @@ export class AgentBridgeLlmAdapter extends LlmAdapter {
   detachAgent(id: unknown): void { this.pendingAcks.delete(String(id)) }
   commitAcks(id: string): void {
     const batches = this.pendingAcks.get(id)
-    const rows = batches?.shift()
-    if (rows) this.target.acknowledge(id, rows)
+    const batch = batches?.shift()
+    if (batch) this.target.finalizeNativeTurn(id, batch.acknowledgements, batch.presentations)
     if (!batches?.length) this.pendingAcks.delete(id)
   }
 
@@ -66,8 +70,9 @@ export class AgentBridgeLlmAdapter extends LlmAdapter {
       let finished = false
       const buffered: JsonObject[] = []
       const ackRows: JsonObject[] = []
+      const presentationRows: JsonObject[] = []
       const ackBatches = this.pendingAcks.get(nativeId) ?? []
-      ackBatches.push(ackRows)
+      ackBatches.push({ acknowledgements: ackRows, presentations: presentationRows })
       this.pendingAcks.set(nativeId, ackBatches)
       while (!finished) {
         signal.throwIfAborted()
@@ -85,11 +90,11 @@ export class AgentBridgeLlmAdapter extends LlmAdapter {
             if (row['type'] === 'message.completed') {
               if (payload['role'] === 'user' && payload['text'] === input) ackRows.push(row)
             }
-            // A single text block works with native renderers that show only the first
-            // block while streaming. Remote commands are display text, never local calls.
+            // Only assistant text goes through the native LLM stream. Remote tools have
+            // already executed, so finalizeNativeTurn appends display-only tool events
+            // after the local turn closes instead of returning executable tool chunks.
             const rendered = row['type'] === 'message.completed' && payload['role'] === 'assistant' ? str(payload['text'])
-              : row['type'] === 'command.completed' ? '远端命令：' + str(payload['command']) + '\n\n' + str(payload['output'])
-              : row['type'] === 'tool.completed' ? '远端工具：' + str(payload['toolName'], 'tool') + '\n\n' + str(payload['output'], JSON.stringify(payload)) : ''
+              : ''
             if (rendered) {
               if (!opened) { yield { type: 'block-start', index: 0, blockType: 'text' }; opened = true }
               const delta = (text ? '\n\n' : '') + rendered
@@ -97,6 +102,7 @@ export class AgentBridgeLlmAdapter extends LlmAdapter {
               yield { type: 'text-delta', index: 0, text: delta }
               ackRows.push(row)
             }
+            if (['command.completed', 'file_change.completed', 'tool.completed'].includes(str(row['type']))) presentationRows.push(row)
             if (row['type'] === 'turn.failed' || (row['type'] === 'turn.completed' && payload['status'] === 'failed')) throw new Error('Bridge turn failed: ' + JSON.stringify(payload))
             if (row['type'] === 'turn.completed' || row['type'] === 'turn.interrupted') finished = true
           }

@@ -33,7 +33,7 @@ export function registerAgentBridgeProvider(ctx: Context, service: AgentControlS
     scoped.on('agent/created', ({ agent }: { agent: Agent }) => attach(agent), { global: true })
     scoped.on('agent/disposed', ({ agent }: { agent: Agent }) => adapter.detachAgent(agent.id), { global: true })
     scoped.on('session/event', ((session: NativeSession, event: NativeEvent) => {
-      if (event.type === 'turn/end') queueMicrotask(() => {
+      if (event.type === 'turn/end' && !target.isPresenting(session.id)) queueMicrotask(() => {
         try { adapter.commitAcks(session.id) }
         catch (error) { scoped.logger.warn('Bridge event acknowledgement: ' + String(error)) }
       })

@@ -57,6 +57,7 @@ export class AgentBridgeImportTarget {
   private readonly workers = new Map<string, JsonObject>()
   private readonly cursors = new Map<string, string>()
   private readonly busy = new Set<string>()
+  private readonly presenting = new Set<string>()
   private readonly interactions = new Map<string, Map<string, Promise<void>>>()
   private readonly abort = new AbortController()
   private timer: ReturnType<typeof setTimeout> | undefined
@@ -210,6 +211,7 @@ export class AgentBridgeImportTarget {
     return str(worker['hostname']).toLowerCase() === hostname().toLowerCase() && (!worker['platform'] || worker['platform'] === process.platform)
   }
   isBusy(nativeId: string): boolean { return this.busy.has(nativeId) || this.host.agents.get(nativeId)?.status === 'running' }
+  isPresenting(nativeId: string): boolean { return this.presenting.has(nativeId) }
   setBusy(nativeId: string, value: boolean): void { if (value) this.busy.add(nativeId); else this.busy.delete(nativeId) }
   acknowledge(nativeId: string, rows: readonly JsonObject[]): void {
     const agent = this.host.agents.get(nativeId)
@@ -220,6 +222,16 @@ export class AgentBridgeImportTarget {
       session.append(ACK_EVENT, { eventId: str(row['eventId']), turnId: str(row['turnId']) })
       seen.add(row['eventId'])
     }
+  }
+  finalizeNativeTurn(nativeId: string, acknowledgements: readonly JsonObject[], presentations: readonly JsonObject[]): void {
+    const agent = this.host.agents.get(nativeId)
+    if (!agent) throw new Error('Native Bridge agent disappeared')
+    const session = nativeSession(agent)
+    this.presenting.add(nativeId)
+    try {
+      for (const event of projectNativeEvents(presentations, sessionEvents(session), str(this.binding(nativeId)?.['model'], 'remote'))) appendSessionEvent(session, event)
+      this.acknowledge(nativeId, acknowledgements)
+    } finally { this.presenting.delete(nativeId) }
   }
   async ensurePreset(): Promise<void> {
     const presets = this.host.agentPresets

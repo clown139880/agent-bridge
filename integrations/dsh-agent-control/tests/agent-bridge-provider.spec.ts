@@ -217,12 +217,17 @@ describe('native session catalog', () => {
 
 describe('Bridge native turn', () => {
   it('commits pending acknowledgement batches in turn order', () => {
-    const acknowledge = vi.fn()
-    const adapter = new AgentBridgeLlmAdapter({} as AgentControlService, { acknowledge } as unknown as AgentBridgeImportTarget)
-    adapter.pendingAcks.set('native', [[row('first')], [row('second')]])
+    const finalizeNativeTurn = vi.fn()
+    const adapter = new AgentBridgeLlmAdapter({} as AgentControlService, { finalizeNativeTurn } as unknown as AgentBridgeImportTarget)
+    adapter.pendingAcks.set('native', [
+      { acknowledgements: [row('first')], presentations: [row('first-tool')] },
+      { acknowledgements: [row('second')], presentations: [row('second-tool')] },
+    ])
     adapter.commitAcks('native')
     adapter.commitAcks('native')
-    expect(acknowledge.mock.calls.map(call => call[1][0]['eventId'])).toEqual(['first', 'second'])
+    expect(finalizeNativeTurn.mock.calls.map(call => [call[1][0]['eventId'], call[2][0]['eventId']])).toEqual([
+      ['first', 'first-tool'], ['second', 'second-tool'],
+    ])
     expect(adapter.pendingAcks.has('native')).toBe(false)
   })
   it('uploads only current-message images through the native store and preserves repeated occurrences', async () => {
@@ -260,12 +265,19 @@ describe('Bridge native turn', () => {
     for await (const chunk of adapter.stream({ sessionId: agent.id, provider: 'agent-bridge', model: 'remote',
       messages: [{ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'go' }] }] } as GenerateOptions)) chunks.push(chunk)
     expect(chunks.at(-1)?.type).toBe('finish')
-    expect(chunks.filter(c => c.type === 'text-delta')).toEqual([{ type: 'text-delta', index: 0, text: 'foreign' }, { type: 'text-delta', index: 0, text: '\n\n远端命令：pwd\n\n/repo' }])
+    expect(chunks.filter(c => c.type === 'text-delta')).toEqual([{ type: 'text-delta', index: 0, text: 'foreign' }])
     expect(chunks.filter(c => c.type === 'block-start')).toHaveLength(1)
     expect(chunks.filter(c => c.type === 'block-end')).toHaveLength(1)
     expect(chunks.some(c => c.type === 'tool-call-delta')).toBe(false)
     adapter.commitAcks(String(agent.id))
     expect(sessionEvents(nativeSession(agent)).some(e => e.data['eventId'] === 'foreign')).toBe(true)
+    const events = sessionEvents(nativeSession(agent))
+    expect(events.filter(e => e.type === 'tool/call')).toHaveLength(1)
+    expect(events.filter(e => e.type === 'tool/result')).toHaveLength(1)
+    expect(events.find(e => e.type === 'tool/call')?.data).toMatchObject({ name: 'agent-bridge:command', arguments: JSON.stringify({ command: 'pwd' }) })
+    expect(events.find(e => e.type === 'tool/result')?.data['message']).toMatchObject({ content: [{ type: 'tool-result', content: [{ type: 'text', text: '/repo' }] }] })
+    expect(events.some(e => e.type === ACK_EVENT && e.data['eventId'] === 'cmd')).toBe(true)
+    expect(f.target.isPresenting(String(agent.id))).toBe(false)
     await f.target.dispose()
   })
   it('reports failed receipts rather than emitting a successful finish', async () => {
