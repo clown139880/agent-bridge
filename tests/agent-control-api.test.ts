@@ -58,6 +58,22 @@ test("orphaned archive replay records a gap and is acknowledged instead of retry
   } finally { await f.close(); }
 });
 
+test("live session deltas are relayed without entering retained history", async () => {
+  const f = await fixture();
+  try {
+    const baseline = await fetch(`${f.base}/sessions/thread-1/live-events?waitMs=0`, { headers: f.headers }).then(r => r.json()) as any;
+    const waiting = fetch(`${f.base}/sessions/thread-1/live-events?after=${encodeURIComponent(baseline.nextCursor)}&waitMs=1000`, { headers: f.headers })
+      .then(r => r.json()) as Promise<any>;
+    await f.internals.handleBridgeMessage("dev", { type: "session.delta", sessionId: "thread-1", turnId: "turn-live",
+      itemId: "answer", blockId: "text:answer", deltaType: "text", delta: "hello", timestamp: Date.now() });
+    const live = await waiting;
+    assert.equal(live.data.length, 1);
+    assert.equal(live.data[0].delta, "hello");
+    const retained = await fetch(`${f.base}/sessions/thread-1/events`, { headers: f.headers }).then(r => r.json()) as any;
+    assert.equal(retained.data.some((event:any) => event.type === "session.delta"), false);
+  } finally { await f.close(); }
+});
+
 test('offline worker deletion is scoped, durable, and rejects online workers',async()=>{
   const f=await fixture();try{
     const remove=()=>fetch(`${f.base}/workers/codex%40dev`,{method:'DELETE',headers:f.headers,body:'{}'});

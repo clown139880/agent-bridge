@@ -52,6 +52,7 @@ DSH Host 插件保存 Control token 并代理请求/事件；浏览器 Client �
 | 新增 | `DELETE` | `/sessions/{sessionId}` | 通过 owning Bridge adapter 删除/遗忘 session |
 | 新增 | `GET` | `/sessions/{sessionId}/runs` | session 关联的 Worker runs |
 | 新增 | `GET` | `/sessions/{sessionId}/events` | session 全量结构化事件/对话 |
+| 新增 | `GET` | `/sessions/{sessionId}/live-events` | 活动 turn 的瞬态 text/reasoning 增量长轮询 |
 | 新增 | `POST` | `/sessions/{sessionId}/turns` | 自动或显式 steer/start-new-turn |
 | 新增 | `POST` | `/sessions/{sessionId}/interrupt` | interrupt 当前 turn |
 | 新增 | `GET` | `/actions/{actionId}` | 查询异步写操作结果 |
@@ -490,6 +491,14 @@ action receipt 和 idempotency key 按正常保留期保留，因此删除成功
 这是 session 的跨 run 对话真相，必须包括 user/assistant 完整消息、turn 边界、工具摘要、approval 和 user
 input；不得只返回当前 `AgentEvent` 的生命周期摘要。文本 delta 可用于 SSE 的临时体验，但持久 REST 默认只
 提供 completed item，避免回放重复文本。secret user-input 的答案在任何事件和响应中都返回 `"[REDACTED]"`。
+
+#### `GET /sessions/{sessionId}/live-events`（新增）
+
+返回当前进程内的有界瞬态增量：`{data,nextCursor}`。首次不带 `after` 时只取得
+当前 `l:<sequence>` 水位；后续带 `after` 与 `waitMs=0..30000` 长轮询。事件包含
+`sessionId`、`turnId`、`itemId`、`blockId`、`deltaType=text|reasoning`、`delta` 和
+`timestamp`。该通道不写 SQLite、不参与历史回放；游标过期返回 `cursor_expired`，
+客户端应重新取水位并依靠 `/events` 的完成态补齐。
 
 #### `POST /sessions/{sessionId}/turns`（新增）
 

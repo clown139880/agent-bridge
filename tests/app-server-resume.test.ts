@@ -388,6 +388,31 @@ test("turn events retain the rerouted model through completion", async () => {
   assert.equal(events.find(event=>event.eventType==="model.rerouted")?.turnId,"turn-1");
 });
 
+test("App Server deltas are forwarded live and turn completion replays final items with an explicit turn", async () => {
+  const emitted: BridgeToControlMessage[] = [];
+  const adapter = new CodexAppServerAdapter({ command: "codex", url: "ws://127.0.0.1:4500",
+    allowedRoots: [process.cwd()], manageServer: false, reconnectMs: 3_000 }, message => emitted.push(message));
+  const internals = adapter as unknown as { handleNotification(method: string, params: Record<string, unknown>): Promise<void> };
+  await internals.handleNotification("turn/started", { threadId: "thread", turn: { id: "turn-live", status: "inProgress" } });
+  await internals.handleNotification("item/agentMessage/delta", {
+    threadId: "thread", turnId: "turn-live", itemId: "answer", delta: "Hel",
+  });
+  await internals.handleNotification("item/reasoning/summaryTextDelta", {
+    threadId: "thread", turnId: "turn-live", itemId: "thought", summaryIndex: 0, delta: "Checking",
+  });
+  await internals.handleNotification("turn/completed", { threadId: "thread", turn: { id: "turn-live", status: "completed",
+    items: [{ id: "answer", type: "agentMessage", text: "Hello" }] } });
+  const deltas = emitted.filter((message): message is Extract<BridgeToControlMessage, { type: "session.delta" }> => message.type === "session.delta");
+  assert.deepEqual(deltas.map(delta => ({ type: delta.deltaType, blockId: delta.blockId, delta: delta.delta })), [
+    { type: "text", blockId: "text:answer", delta: "Hel" },
+    { type: "reasoning", blockId: "reasoning:thought:summary:0", delta: "Checking" },
+  ]);
+  const final = emitted.find((message): message is Extract<BridgeToControlMessage, { type: "session.event" }> =>
+    message.type === "session.event" && message.eventType === "message.completed");
+  assert.equal(final?.turnId, "turn-live");
+  assert.equal(final?.payload.text, "Hello");
+});
+
 test("thread updates merge cached metadata and rediscover the session", async () => {
   const emitted: BridgeToControlMessage[] = [];
   const adapter = new CodexAppServerAdapter({ command: "codex", url: "ws://127.0.0.1:4500",

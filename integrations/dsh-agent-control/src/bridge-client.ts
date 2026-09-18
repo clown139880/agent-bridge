@@ -58,6 +58,10 @@ export class BridgeClient {
         const id = this.segment(textArg(args, 'sessionId')!)
         return this.request('GET', `/sessions/${id}/events?${query(args, ['after', 'before', 'tail', 'limit', 'type'])}`, undefined, undefined, signal)
       }
+      case 'live_events': {
+        const id = this.segment(textArg(args, 'sessionId')!)
+        return this.request('GET', `/sessions/${id}/live-events?${query(args, ['after', 'waitMs'])}`, undefined, undefined, signal)
+      }
       case 'create_session': return this.write('/sessions', this.pick(args, ['workerId', 'workspace', 'input', 'model', 'attachments']), signal)
       case 'submit_turn': {
         const id = this.segment(textArg(args, 'sessionId')!)
@@ -213,6 +217,7 @@ export class BridgeClient {
         return { actionId: `mock-${randomUUID()}`, kind: 'delete_session', status: 'succeeded', sessionId }
       }
       case 'session_events': return page([...mockSessionEvents, ...this.mockSubmittedEvents].filter(item => item['sessionId'] === args['sessionId']), true)
+      case 'live_events': return { data: [], nextCursor: 'l:0' }
       case 'submit_turn': {
         const sessionId = textArg(args, 'sessionId')!
         const input = textArg(args, 'input')!

@@ -1,6 +1,6 @@
 # Bridge conversations in the native DSH session tree
 
-Date: 2026-09-11; fact update: 2026-09-13 (`e9f80d7`).
+Date: 2026-09-11; fact update: 2026-09-18 (live native stream projection).
 Target: TokensCowork DSH 0.1.3-alpha.1; development dependencies 0.1.2-rc.1.
 
 ## Product contract
@@ -35,7 +35,7 @@ Bridge workers + paginated sessions
 Native composer
   -> agent-scoped route selection
   -> AgentBridgeLlmAdapter
-  -> submit_turn + opaque event cursors + action/turn settlement
+  -> submit_turn + ephemeral live deltas + retained event cursors + action/turn settlement
   -> DSH stream chunks / native session history
 
 The implementation materializes presentation agents with no remote subprocess
@@ -119,6 +119,14 @@ pauses while it runs. Message acknowledgements are committed after the native
 turn closes, outside Session's non-reentrant append publication. Remaining remote
 activity is reconciled after the loop returns idle.
 
+Codex App Server agent-message, reasoning-summary, and plan deltas travel through
+a bounded in-memory Control Plane relay and become native DSH text/reasoning
+blocks. The relay is intentionally non-durable: authoritative completed items
+still use retained session events, close live blocks with final content, and
+recover a missed or late item from `turn/completed`. Remote commands are never
+emitted as executable DSH tool-call chunks; completed commands remain display-only
+tool cards.
+
 The compatibility module isolates the session/store/persistence interfaces.
 Both preview lines are checked using real Session replay. The deployed build
 uses logical Session format 2; the pinned development build uses format 0.
@@ -187,8 +195,9 @@ reconstruct events the control plane no longer has.
 
 Native catalog discovery and retained-history reconciliation currently poll at
 five-second intervals. An active native turn separately follows its reliable
-action receipt and opaque history cursor; the removed Client `SessionStore` SSE
-surface is not the current provider synchronization path.
+action receipt, consumes the bounded live-delta relay, and checks its opaque
+retained-history cursor for authoritative completion. The removed Client
+`SessionStore` SSE surface is not the current provider synchronization path.
 
 The old ExternalSessionBrowser/ExternalConversationSurface/ExternalComposer
 layer and its master switch are removed. Restoring a parallel session UI is not

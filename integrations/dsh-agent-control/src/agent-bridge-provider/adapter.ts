@@ -10,6 +10,7 @@ import { readHistory } from './import-target.js'
 import { lastUserText, PROVIDER, record, str } from './mapping.js'
 import { relayPendingInteractions } from './approval-bridge.js'
 import { uploadPromptImages } from './attachments.js'
+import { ControlError } from '../errors.js'
 
 export const AGENT_BRIDGE_PROVIDER = PROVIDER
 interface PendingTurn {
@@ -57,6 +58,15 @@ export class AgentBridgeLlmAdapter extends LlmAdapter {
       const baseline = await readHistory(this.service.bridge, remoteId, undefined, signal)
       let cursor = baseline.cursor
       const seen = new Set(baseline.rows.map(row => str(row['eventId'])))
+      let liveCursor: string | undefined
+      let liveEnabled = true
+      try {
+        const liveBaseline = record(await this.service.bridge.call({ operation: 'live_events', args: { sessionId: remoteId, waitMs: 0 } }, signal))
+        liveCursor = str(liveBaseline['nextCursor'])
+      } catch (error) {
+        if (error instanceof ControlError && error.code === 'not_found') liveEnabled = false
+        else throw error
+      }
       const session = record(await this.service.bridge.call({ operation: 'session', args: { sessionId: remoteId } }, signal))
       const expectedTurnId = ['active', 'waiting_for_approval', 'waiting_for_input'].includes(str(session['status'])) ? str(session['activeTurnId']) : ''
       const args: JsonObject = { sessionId: remoteId, input, delivery: 'auto', ...(expectedTurnId ? { expectedTurnId } : {}) }
@@ -65,12 +75,12 @@ export class AgentBridgeLlmAdapter extends LlmAdapter {
       if (!expectedTurnId && options.provider === PROVIDER && options.model !== 'remote') args['model'] = options.model
       if (!expectedTurnId && options.reasoningEffort) args['reasoningEffort'] = options.reasoningEffort
       receipt = record(await this.service.bridge.call({ operation: 'submit_turn', args }, signal))
-      let text = ''
-      let opened = false
       let finished = false
-      const buffered: JsonObject[] = []
+      let buffered: JsonObject[] = []
       const ackRows: JsonObject[] = []
       const presentationRows: JsonObject[] = []
+      const blocks = new Map<string, { index: number; type: 'text' | 'reasoning'; text: string; closed: boolean }>()
+      let nextBlockIndex = 0
       const ackBatches = this.pendingAcks.get(nativeId) ?? []
       ackBatches.push({ acknowledgements: ackRows, presentations: presentationRows })
       this.pendingAcks.set(nativeId, ackBatches)
@@ -84,8 +94,9 @@ export class AgentBridgeLlmAdapter extends LlmAdapter {
         cursor = page.cursor
         for (const row of page.rows) if (!seen.has(str(row['eventId']))) { seen.add(str(row['eventId'])); buffered.push(row) }
         if (turnId) {
-          for (const row of buffered.splice(0)) {
-            if (row['turnId'] !== turnId) continue
+          const ready = buffered.filter(row => row['turnId'] === turnId)
+          buffered = buffered.filter(row => row['turnId'] !== turnId)
+          for (const row of ready) {
             const payload = record(row['payload'])
             if (row['type'] === 'message.completed') {
               if (payload['role'] === 'user' && payload['text'] === input) ackRows.push(row)
@@ -93,13 +104,21 @@ export class AgentBridgeLlmAdapter extends LlmAdapter {
             // Only assistant text goes through the native LLM stream. Remote tools have
             // already executed, so finalizeNativeTurn appends display-only tool events
             // after the local turn closes instead of returning executable tool chunks.
-            const rendered = row['type'] === 'message.completed' && payload['role'] === 'assistant' ? str(payload['text'])
-              : ''
+            const rendered = row['type'] === 'message.completed' && payload['role'] === 'assistant' ? str(payload['text']) : ''
             if (rendered) {
-              if (!opened) { yield { type: 'block-start', index: 0, blockType: 'text' }; opened = true }
-              const delta = (text ? '\n\n' : '') + rendered
-              text += delta
-              yield { type: 'text-delta', index: 0, text: delta }
+              const key = `text:${str(row['itemId'], str(row['eventId']))}`
+              let block = blocks.get(key)
+              if (!block) {
+                block = { index: nextBlockIndex++, type: 'text', text: '', closed: false }
+                blocks.set(key, block)
+                yield { type: 'block-start', index: block.index, blockType: 'text' }
+                yield { type: 'text-delta', index: block.index, text: rendered }
+              }
+              if (!block.closed) {
+                block.text = rendered
+                block.closed = true
+                yield { type: 'block-end', index: block.index, block: { type: 'text', text: rendered } }
+              }
               ackRows.push(row)
             }
             if (['command.completed', 'file_change.completed', 'tool.completed'].includes(str(row['type']))) presentationRows.push(row)
@@ -119,10 +138,45 @@ export class AgentBridgeLlmAdapter extends LlmAdapter {
               if (!newRows.length) finished = true
             }
           }
+          if (!finished && liveEnabled) {
+            try {
+              const live = record(await this.service.bridge.call({ operation: 'live_events', args: {
+                sessionId: remoteId, ...(liveCursor ? { after: liveCursor } : {}), waitMs: this.pollMs,
+              } }, signal))
+              liveCursor = str(live['nextCursor'], liveCursor)
+              for (const value of Array.isArray(live['data']) ? live['data'] : []) {
+                const row = record(value)
+                if (row['turnId'] !== turnId) continue
+                const type = row['deltaType'] === 'reasoning' ? 'reasoning' : 'text'
+                const key = str(row['blockId'])
+                const delta = str(row['delta'])
+                if (!key || !delta) continue
+                let block = blocks.get(key)
+                if (!block) {
+                  block = { index: nextBlockIndex++, type, text: '', closed: false }
+                  blocks.set(key, block)
+                  yield { type: 'block-start', index: block.index, blockType: type }
+                }
+                if (block.closed) continue
+                block.text += delta
+                if (type === 'reasoning') yield { type: 'reasoning-delta', index: block.index, text: delta }
+                else yield { type: 'text-delta', index: block.index, text: delta }
+              }
+            } catch (error) {
+              if (error instanceof ControlError && ['invalid_cursor', 'cursor_expired'].includes(error.code)) {
+                const reset = record(await this.service.bridge.call({ operation: 'live_events', args: { sessionId: remoteId, waitMs: 0 } }, signal))
+                liveCursor = str(reset['nextCursor'])
+              } else if (error instanceof ControlError && error.code === 'not_found') liveEnabled = false
+              else throw error
+            }
+          }
         }
-        if (!finished) await delay(this.pollMs, undefined, { signal })
+        if (!finished && !liveEnabled) await delay(this.pollMs, undefined, { signal })
       }
-      if (opened) yield { type: 'block-end', index: 0, block: { type: 'text', text } }
+      for (const block of blocks.values()) if (!block.closed) {
+        block.closed = true
+        yield { type: 'block-end', index: block.index, block: { type: block.type, text: block.text } }
+      }
       yield { type: 'finish', reason: { kind: 'stop' }, replayState: { response: { actionId: str(receipt['actionId']), turnId } } }
     } finally {
       interactionAbort.abort()

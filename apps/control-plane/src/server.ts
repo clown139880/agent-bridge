@@ -725,6 +725,12 @@ export class ControlPlane {
       }
       return;
     }
+    if (message.type === "session.delta") {
+      const canonical = this.store.getSession(message.sessionId) ?? this.store.getSessionByNative(machineId, message.sessionId);
+      if (!canonical || canonical.machineId !== machineId) return;
+      this.controlApi.publishLive(canonical.id === message.sessionId ? message : { ...message, sessionId: canonical.id });
+      return;
+    }
     if (message.type === "session.event") {
       const sourceSessionId = message.sessionId;
       // Claude inventory is keyed by its native transcript id, while sessions

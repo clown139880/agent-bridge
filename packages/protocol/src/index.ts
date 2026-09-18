@@ -324,6 +324,19 @@ export interface StructuredSessionEventMessage {
   payload: Record<string, unknown>;
 }
 
+/** Ephemeral in-flight output. These deltas are forwarded to live clients only
+ * and are deliberately excluded from retained conversation history. */
+export interface SessionDeltaMessage {
+  type: "session.delta";
+  sessionId: string;
+  turnId: string;
+  itemId: string;
+  blockId: string;
+  deltaType: "text" | "reasoning";
+  delta: string;
+  timestamp: number;
+}
+
 export interface CreateSessionActionMessage {
   type: "action.create_session";
   actionId: string;
@@ -452,6 +465,7 @@ export type BridgeToControlMessage =
   | UserInputResolvedMessage
   | StateSnapshotMessage
   | StructuredSessionEventMessage
+  | SessionDeltaMessage
   | SessionDeletedMessage
   | ActionProgressMessage
   | ActionResultMessage

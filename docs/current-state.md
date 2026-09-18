@@ -1,10 +1,10 @@
 # Agent Bridge 当前事实基线
 
-更新日期：2026-09-14
+更新日期：2026-09-18
 
-代码基线：`e9f80d7`（`agent-bridge-external-session-source`）
+代码基线：Agent Bridge `0.6.46` 实时原生消息投影
 
-版本：Agent Bridge `0.6.40`；DSH Agent Control plugin `0.1.27`
+版本：Agent Bridge `0.6.46`；DSH Agent Control plugin `0.1.34`
 
 本文只描述当前代码定义的生产路径。较早的 UI 复用轮次、重构提案和方案评估保留为历史材料，不能作为当前架构说明。
 
@@ -34,10 +34,11 @@ DSH 原生 Composer
   -> AgentBridgeLlmAdapter
   -> Bridge submit_turn / interrupt / approval / user input
   -> 远端 Codex 或 Claude
-  -> Bridge events 投影回 DSH 原生 session history
+  -> 瞬态 text/reasoning deltas + 完成态 Bridge events
+  -> DSH 原生 stream chunks 与 session history
 ```
 
-首次发现会话时，Host 以最多四个并发任务读取 Control Plane 保留的分页历史；之后依据 session 元数据和事件 cursor 增量补齐。原生 turn 运行时，后台历史同步暂停，避免与 DSH Session 的非重入 append 生命周期竞争。当前原生投影使用定时 reconciliation 和 turn 内 action/history 轮询，不使用旧 Client `SessionStore` 的 snapshot + SSE 展示路径。
+首次发现会话时，Host 以最多四个并发任务读取 Control Plane 保留的分页历史；之后依据 session 元数据和事件 cursor 增量补齐。原生 turn 运行时，后台历史同步暂停，避免与 DSH Session 的非重入 append 生命周期竞争。活动 Codex turn 的 assistant/reasoning 增量通过 Control Plane 有界内存 relay 映射为 DSH 原生 stream chunks，不写入 SQLite；完成消息、命令、文件活动和终止状态仍走可恢复的 retained history。目录 reconciliation 仍为定时执行，且不使用旧 Client `SessionStore` 的 snapshot + SSE 展示路径。
 
 ## 已落地能力
 

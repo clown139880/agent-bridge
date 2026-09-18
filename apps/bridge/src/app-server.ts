@@ -923,9 +923,23 @@ export class CodexAppServerAdapter implements AgentAdapter {
           inputTokens:usage.total.inputTokens??0,outputTokens:usage.total.outputTokens??0,reasoningTokens:usage.total.reasoningOutputTokens??0},this.activeTurns.get(threadId));
       return;
     }
+    if (method === "item/agentMessage/delta") {
+      this.emitLiveDelta(threadId, params, "text", `text:${String(params.itemId ?? "")}`);
+      return;
+    }
+    if (method === "item/reasoning/summaryTextDelta") {
+      this.emitLiveDelta(threadId, params, "reasoning",
+        `reasoning:${String(params.itemId ?? "")}:summary:${String(params.summaryIndex ?? 0)}`);
+      return;
+    }
+    if (method === "item/plan/delta") {
+      this.emitLiveDelta(threadId, params, "reasoning", `reasoning:${String(params.itemId ?? "")}:plan`);
+      return;
+    }
     if (method === "item/completed") {
       const item = params.item as ThreadItem | undefined;
-      if (item) this.handleCompletedItem(threadId, item);
+      if (item) this.handleCompletedItem(threadId, item,
+        typeof params.turnId === "string" ? params.turnId : this.activeTurns.get(threadId));
       return;
     }
     if (method === "turn/completed") {
@@ -934,6 +948,10 @@ export class CodexAppServerAdapter implements AgentAdapter {
       this.activeThreads.delete(threadId);
       if (!turn?.id || this.reportedTurns.has(turn.id)) return;
       this.reportedTurns.add(turn.id);
+      // Re-emit the authoritative final items with the explicit turn identity.
+      // Event ids are stable, so the retained store deduplicates normal item/completed
+      // notifications while recovering any that arrived late or were missed.
+      for (const item of turn.items ?? []) this.handleCompletedItem(threadId, item, turn.id);
       this.emitTerminalTurn(threadId, turn);
     }
   }
@@ -953,7 +971,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
       const turn = turns.at(-1);
       if (!turn || turn.status === "inProgress" || this.reportedTurns.has(turn.id)) return;
       this.reportedTurns.add(turn.id);
-      for (const item of turn.items ?? []) this.handleCompletedItem(threadId, item);
+      for (const item of turn.items ?? []) this.handleCompletedItem(threadId, item, turn.id);
       this.emitTerminalTurn(threadId, turn);
     } catch (error) {
       log.warn({ error, threadId }, "Unable to read completed Codex turn");
@@ -1022,8 +1040,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
     return true;
   }
 
-  private handleCompletedItem(threadId: string, item: ThreadItem): void {
-    const turnId=this.activeTurns.get(threadId);
+  private handleCompletedItem(threadId: string, item: ThreadItem, turnId=this.activeTurns.get(threadId)): void {
     const itemId=item.id??createHash("sha256").update(JSON.stringify(item)).digest("hex").slice(0,24);
     if (item.type === "agentMessage" && item.text) {
       this.appendLog(threadId, item.text);
@@ -1096,6 +1113,14 @@ export class CodexAppServerAdapter implements AgentAdapter {
     this.activeThreads.clear();
     this.readyPromise = undefined;
     if (!this.rotating) this.scheduleReconnect();
+  }
+
+  private emitLiveDelta(threadId:string,params:Record<string,unknown>,deltaType:"text"|"reasoning",blockId:string):void{
+    const turnId=typeof params.turnId==="string"?params.turnId:this.activeTurns.get(threadId);
+    const itemId=typeof params.itemId==="string"?params.itemId:"";
+    const delta=typeof params.delta==="string"?params.delta:"";
+    if(!turnId||!itemId||!delta)return;
+    this.emit({type:"session.delta",sessionId:threadId,turnId,itemId,blockId,deltaType,delta,timestamp:Date.now()});
   }
 
   private scheduleReconnect(): void {

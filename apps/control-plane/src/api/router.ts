@@ -1,10 +1,11 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Store, AgentControlStore, PendingRow, ActionRow } from "@agent-bridge/database";
-import { parseWorkerId, workerId as buildWorkerId, type AgentType, type ActionKind, type ControlToBridgeMessage } from "@agent-bridge/protocol";
+import { parseWorkerId, workerId as buildWorkerId, type AgentType, type ActionKind, type ControlToBridgeMessage, type SessionDeltaMessage } from "@agent-bridge/protocol";
 import { BridgeRegistry } from "../bridge-registry.js";
 import { AgentControlSse, SseCursorError } from "./sse.js";
 import { ActionServiceError, SessionActionService } from "./session-actions.js";
+import { LiveCursorError, LiveSessionEvents } from "./live-events.js";
 import { ApiProblem, integerParam as integer, jsonBody, stringField as string, attachmentsField, uploadRequest } from "./validation.js";
 
 /** Map a worker-id prefix to an agent type, or undefined for an unknown prefix. */
@@ -56,6 +57,7 @@ function readPageCursor(value:string,scope:string):[number,string]{try{const row
 export class AgentControlApi {
   private readonly sse:AgentControlSse;
   private readonly actions:SessionActionService;
+  private readonly live = new LiveSessionEvents();
   constructor(private readonly legacy: Store, private readonly store: AgentControlStore,
     private readonly bridges: BridgeRegistry, private readonly options: ApiOptions) {
     this.sse=new AgentControlSse(store,{keepaliveMs:options.sseKeepaliveMs,pollMs:options.ssePollMs,
@@ -64,6 +66,7 @@ export class AgentControlApi {
   }
 
   actionsForBridge():SessionActionService{return this.actions;}
+  publishLive(message:SessionDeltaMessage):void{this.live.publish(message);}
 
   async handle(request: IncomingMessage,response: ServerResponse): Promise<boolean> {
     const url=new URL(request.url??"/","http://localhost");
@@ -103,7 +106,7 @@ export class AgentControlApi {
       const action=url.pathname.match(/^\/api\/v1\/actions\/([^/]+)$/);
       if(request.method==="GET"&&action){const row=this.store.action(decodeURIComponent(action[1]!));
         if(!row)throw new ApiProblem(404,"action_not_found","action not found");this.ok(response,actionJson(row));return true;}
-      const session=url.pathname.match(/^\/api\/v1\/sessions\/([^/]+)(?:\/(runs|events|turns|interrupt))?$/);
+      const session=url.pathname.match(/^\/api\/v1\/sessions\/([^/]+)(?:\/(runs|events|live-events|turns|interrupt))?$/);
       if(session){await this.sessionRoute(request,response,url,principal,decodeURIComponent(session[1]!),session[2]);return true;}
       const approval=url.pathname.match(/^\/api\/v1\/approvals\/([^/]+)(?:\/(decision))?$/);
       if(approval){await this.pendingRoute("approval",request,response,principal,decodeURIComponent(approval[1]!),approval[2]);return true;}
@@ -250,6 +253,14 @@ export class AgentControlApi {
         :this.store.sessionEvents(sessionId,url.searchParams.get("after")??undefined,
           integer(url.searchParams.get("limit"),"limit",100,1,500),url.searchParams.getAll("type"));
         this.ok(response,{...page,streamCursor:this.store.streamCursor()});}catch(error){this.cursorError(error);}return;
+    }
+    if(request.method==="GET"&&action==="live-events"){
+      const abort=new AbortController(),cancel=()=>abort.abort();
+      request.once("aborted",cancel);response.once("close",cancel);
+      try{this.ok(response,await this.live.read(sessionId,url.searchParams.get("after")??undefined,
+        integer(url.searchParams.get("waitMs"),"waitMs",25_000,0,30_000),abort.signal));}
+      catch(error){if(error instanceof LiveCursorError)throw new ApiProblem(409,error.code,error.code);throw error;}
+      finally{request.removeListener("aborted",cancel);response.removeListener("close",cancel);}return;
     }
     if(request.method==="POST"&&action==="turns"){await this.submitTurn(request,response,principal,session);return;}
     if(request.method==="POST"&&action==="interrupt"){await this.interrupt(request,response,principal,session);return;}
