@@ -3,7 +3,7 @@ import { mergeWorkspaces, type NativeEntry, type WorkspaceRow } from '../src/cli
 import { promptTitle } from '../src/agent-bridge-provider/import-target.js'
 import type { NativeEvent } from '../src/agent-bridge-provider/dsh-compat.js'
 
-const entry = (nativeId: string, machineId = 'dev-wsl', workspace = '/work/agent-bridge', lastUsedAt?: number): NativeEntry => ({ nativeId, machineId, workspace, sessionId: nativeId, title: 'test', status: 'idle', worker: 'worker', ...(lastUsedAt === undefined ? {} : { lastUsedAt }) })
+const entry = (nativeId: string, machineId = 'dev-wsl', workspace = '/work/agent-bridge', lastUsedAt?: number, projectIdentity?: string): NativeEntry => ({ nativeId, machineId, workspace, sessionId: nativeId, title: 'test', status: 'idle', worker: 'worker', ...(lastUsedAt === undefined ? {} : { lastUsedAt }), ...(projectIdentity ? { projectIdentity } : {}) })
 const workspace = (id: string): WorkspaceRow => ({ workspaceId: id, path: '/presentation/' + id, title: 'agent-bridge · Codex @ dev-wsl', sessionIds: [id], createdAt: '2026-01-01', updatedAt: '2026-01-01' })
 describe('native catalog', () => {
   it('merges legacy presentation groups containing native blank sessions and stale ids', () => {
@@ -22,6 +22,19 @@ describe('native catalog', () => {
     expect(merged[0]?.title).toBe('agent-bridge @ dev-wsl')
     expect(rows[0]?.sessionIds).toEqual(['codex'])
     expect(merged.at(-1)).toBe(rows.at(-1))
+  })
+  it('merges the same repository across machines without guessing missing or different identities', () => {
+    const rows = ['wsl', 'windows', 'other-repository', 'unknown'].map(workspace)
+    const merged = mergeWorkspaces(rows, [
+      entry('wsl', 'dev-wsl', '/work/agent-bridge', 100, 'github.com/example/agent-bridge'),
+      entry('windows', 'windows', 'D:\\Workspace\\agent-bridge', 500, 'github.com/example/agent-bridge'),
+      entry('other-repository', 'windows', 'D:\\Other\\agent-bridge', 300, 'github.com/example/other'),
+      entry('unknown', 'windows', 'D:\\Unknown\\agent-bridge', 200),
+    ])
+    expect(merged).toHaveLength(3)
+    expect(merged[0]?.sessionIds).toEqual(['wsl', 'windows'])
+    expect(merged[0]?.title).toBe('agent-bridge')
+    expect(merged.map(row => row.workspaceId)).toEqual(['wsl', 'other-repository', 'unknown'])
   })
   it('preserves custom group titles', () => {
     expect(mergeWorkspaces([{ ...workspace('a'), title: '我的项目' }], [entry('a')])[0]?.title).toBe('我的项目')

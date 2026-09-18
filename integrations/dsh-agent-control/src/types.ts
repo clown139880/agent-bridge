@@ -26,6 +26,7 @@ export interface SessionSummary {
   title?: string
   status: SessionStatus
   workspace: string
+  projectIdentity?: string
   activeTurnId?: string | null
   updatedAt: number
   createdAt?: number

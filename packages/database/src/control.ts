@@ -598,6 +598,7 @@ export class AgentControlStore {
       workerId:buildWorkerId(String(row.agent_type) as AgentType,String(row.machine_id)),machineId:String(row.machine_id),agent:String(row.agent_type),
       title:row.title?String(row.title):null,promptSummary,
       projectName:String(row.project_name),workspace:String(row.project_path),status:String(row.activity_status??"unknown"),
+      ...(row.project_identity?{projectIdentity:String(row.project_identity)}:{}),
       activeTurnId:row.active_turn_id?String(row.active_turn_id):null,lastTurnStatus:row.last_turn_status?String(row.last_turn_status):null,
       pendingApprovalCount:count("approval"),pendingUserInputCount:count("user_input"),latestRun:run,
       createdAt:Number(row.created_at),updatedAt:Number(row.updated_at??row.created_at),

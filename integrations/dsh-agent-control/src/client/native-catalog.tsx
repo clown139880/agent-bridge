@@ -2,7 +2,7 @@ import { useEffect, useState, useSyncExternalStore } from 'react'
 import { useDialog } from './dialog.js'
 import css from './workspace.module.css'
 
-export type NativeEntry = { nativeId: string; sessionId: string; machineId: string; workspace: string; title: string; status: string; worker: string; lastUsedAt?: number }
+export type NativeEntry = { nativeId: string; sessionId: string; machineId: string; workspace: string; projectIdentity?: string; title: string; status: string; worker: string; lastUsedAt?: number }
 export type WorkspaceRow = { workspaceId: string; path: string; title: string; sessionIds: readonly string[]; createdAt: string; updatedAt: string }
 type WorkspaceSnapshot = { items: readonly WorkspaceRow[]; archivedSessionIds: readonly string[] }
 type Source<T> = { getSnapshot(): T; subscribe(listener: () => void): () => void }
@@ -20,11 +20,14 @@ export function mergeWorkspaces(rows: readonly WorkspaceRow[], catalog: readonly
   for (const row of rows) {
     const members = row.sessionIds.map(id => entries.get(id))
     const first = members.find(Boolean)
-    const key = first ? first.machineId + '\0' + first.workspace : ''
+    const groupKey = (entry: NativeEntry) => entry.projectIdentity
+      ? 'repository\0' + entry.projectIdentity
+      : 'location\0' + entry.machineId + '\0' + entry.workspace
+    const key = first ? groupKey(first) : ''
     // Older presentation directories may also contain a blank native DSH session,
     // archived ids, or a deleted remote id. They must not veto known siblings.
     const presentation = /[\\/]\.dsh[\\/]agent-bridge[\\/]workspaces[\\/]/.test(row.path)
-    if (!first || members.some(entry => entry ? entry.machineId + '\0' + entry.workspace !== key : !presentation)) { result.push(row); continue }
+    if (!first || members.some(entry => entry ? groupKey(entry) !== key : !presentation)) { result.push(row); continue }
     const previous = groups.get(key)
     if (previous) {
       previous.sessionIds = [...new Set([...previous.sessionIds, ...row.sessionIds])]
@@ -34,7 +37,7 @@ export function mergeWorkspaces(rows: readonly WorkspaceRow[], catalog: readonly
     } else {
       const basename = first.workspace.replace(/\\/g, '/').split('/').filter(Boolean).at(-1) ?? first.workspace
       const generated = row.title === basename || row.title.startsWith(basename + ' · ') || row.title === basename + ' @ ' + first.machineId
-      const title = generated ? basename + ' @ ' + first.machineId : row.title
+      const title = generated ? first.projectIdentity ? basename : basename + ' @ ' + first.machineId : row.title
       const merged = { ...row, title, sessionIds: [...row.sessionIds] }
       groups.set(key, merged); result.push(merged)
       const latest = Math.max(...members.map(entry => entry?.lastUsedAt ?? -Infinity))

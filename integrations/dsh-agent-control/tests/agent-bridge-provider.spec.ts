@@ -21,7 +21,7 @@ import { join } from 'node:path'
 const row = (id: string, type = 'message.completed', payload: JsonObject = { role: 'assistant', text: 'answer' }): JsonObject => ({
   eventId: id, sessionId: 'remote-1', turnId: 't1', itemId: id, timestamp: 10, type, payload,
 })
-const summary: JsonObject = { sessionId: 'remote-1', workerId: 'w', workspace: '/remote/repo', title: 'Remote conversation', status: 'idle', createdAt: 1, updatedAt: 10 }
+const summary: JsonObject = { sessionId: 'remote-1', workerId: 'w', workspace: '/remote/repo', projectIdentity: 'github.com/example/repo', title: 'Remote conversation', status: 'idle', createdAt: 1, updatedAt: 10 }
 const page = (data: JsonObject[], nextCursor = 'end', hasMore = false): JsonValue => ({ data, nextCursor, hasMore })
 const roots: string[] = []
 afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }) })
@@ -153,6 +153,30 @@ describe('native session catalog', () => {
     expect(f.bridge.call.mock.calls.some(([request]) => request.operation === 'create_session')).toBe(false)
     await f.target.dispose()
   })
+  it('offers worker-at-machine locations from every checkout of the same repository identity', async () => {
+    const f = await fixture()
+    const summaries: JsonObject[] = [summary,
+      { ...summary, sessionId: 'remote-2', workerId: 'windows', workspace: 'D:\\Workspace\\repo' },
+      { ...summary, sessionId: 'remote-3', workerId: 'other', workspace: '/srv/repo', projectIdentity: 'github.com/example/other' }]
+    f.bridge.call.mockImplementation(async request => {
+      if (request.operation === 'workers') return { workers: [
+        { id: 'w', machineId: 'dev-wsl', hostname: 'remote-wsl', name: 'Codex', status: 'online' },
+        { id: 'windows', machineId: 'windows', hostname: 'remote-windows', name: 'Claude @ Windows PC', status: 'online' },
+        { id: 'other', machineId: 'hal', hostname: 'remote-hal', name: 'Codex', status: 'online' },
+      ] }
+      if (request.operation === 'sessions') return page(summaries)
+      if (request.operation === 'session_events') return page([])
+      return page([])
+    })
+    await f.target.refresh()
+    const cwd = nativeSession(f.agents.get(nativeSessionId('http://bridge.test', 'remote-1'))!).header.cwd!
+    const sources = (await f.target.creationSources(cwd))['sources'] as JsonObject[]
+    expect(sources.map(source => ({ name: source['name'], machineId: source['machineId'], workspace: source['workspace'] }))).toEqual([
+      { name: 'Codex @ dev-wsl', machineId: 'dev-wsl', workspace: '/remote/repo' },
+      { name: 'Claude @ Windows PC', machineId: 'windows', workspace: 'D:\\Workspace\\repo' },
+    ])
+    await f.target.dispose()
+  })
   it('automatically merges remote sessions into the native registry without touching native sessions', async () => {
     const f = await fixture()
     f.agents.set('local-session', { id: 'local-session' } as Agent)
@@ -160,7 +184,7 @@ describe('native session catalog', () => {
     const id = nativeSessionId('http://bridge.test', 'remote-1')
     expect([...f.agents.keys()]).toEqual(['local-session', id])
     expect(f.target.binding(id)?.['workspace']).toBe('/remote/repo')
-    expect((f.target.catalog()['sessions'] as JsonObject[])[0]?.['lastUsedAt']).toBe(123)
+    expect((f.target.catalog()['sessions'] as JsonObject[])[0]).toMatchObject({ lastUsedAt: 123, projectIdentity: 'github.com/example/repo' })
     expect(f.host.workspaceRegistry.create).toHaveBeenCalledWith(expect.stringContaining('workspaces'), 'repo @ w')
     expect(f.stored.has(id)).toBe(true)
     await f.target.refresh()

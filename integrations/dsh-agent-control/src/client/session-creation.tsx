@@ -63,8 +63,8 @@ export function SessionSourcePicker({ controller }: { controller: SessionCreatio
   const choice = pending.sources.find(source => source.id === selected && source.available)
   return <div className={css.sourceOverlay} onMouseDown={event => { if (event.target === event.currentTarget) controller.cancel() }}>
     <div ref={ref} tabIndex={-1} role="dialog" aria-modal="true" aria-labelledby="bridge-source-title" aria-describedby="bridge-source-help" className={css.sourceDialog}>
-      <header className={css.dialogHeader}><div><span className={css.eyebrow}>新建对话</span><h2 id="bridge-source-title">选择运行此对话的 Agent</h2></div><button type="button" className={css.iconButton} aria-label="关闭来源选择" onClick={controller.cancel}>×</button></header>
-      <p id="bridge-source-help" className={css.help}>对话将在所选机器的目录中运行。</p>
+      <header className={css.dialogHeader}><div><span className={css.eyebrow}>新建对话</span><h2 id="bridge-source-title">选择 Worker @ 机器</h2></div><button type="button" className={css.iconButton} aria-label="关闭来源选择" onClick={controller.cancel}>×</button></header>
+      <p id="bridge-source-help" className={css.help}>执行位置独立于项目分组；对话将在所选机器的远程目录中运行。</p>
       <fieldset className={css.sourceList}><legend className={css.srOnly}>可用 Agent</legend>{pending.sources.map(source => <label key={source.id} className={`${css.sourceCard} ${selected === source.id ? css.sourceSelected : ''} ${!source.available ? css.sourceOffline : ''}`}>
         <input type="radio" name="bridge-source" value={source.id} checked={selected === source.id} disabled={!source.available} onChange={() => setSelected(source.id)} />
         <span className={css.sourceIcon} aria-hidden="true">{source.name.startsWith('Claude') ? 'Cl' : source.id === 'dsh' ? 'DS' : 'Cx'}</span>

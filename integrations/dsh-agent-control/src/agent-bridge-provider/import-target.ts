@@ -12,6 +12,7 @@ import { ACK_EVENT, BINDING_EVENT, PROVIDER, projectNativeEvents, record, str } 
 import { relayPendingInteractions } from './approval-bridge.js'
 
 const hash = (value: string) => createHash('sha256').update(value).digest('hex').slice(0, 32)
+const workerAtMachine = (name: string, machineId: string) => /\s@\s/.test(name) ? name : name + ' @ ' + machineId
 export function usefulTitle(title: unknown): boolean {
   return typeof title === 'string' && !!title.trim() && !/^(?:Bridge\s*[·:]\s*\S+|.+\s·\s[\da-f]{8}(?:-[\da-f-]+)?|(?:new|untitled)(?:\s+(?:session|conversation|chat))?|新(?:建)?(?:会话|对话)|[\da-f]{8}(?:-[\da-f-]+)?)$/i.test(title.trim())
 }
@@ -96,6 +97,7 @@ export class AgentBridgeImportTarget {
       const lastUsedAt = typeof recent?.['lastUsedAt'] === 'number' && Number.isFinite(recent['lastUsedAt']) ? recent['lastUsedAt'] : undefined
       const agent = this.host.agents.get(nativeId)
       return { nativeId, sessionId: str(binding['sessionId']), machineId, workspace,
+        ...(str(binding['projectIdentity']) ? { projectIdentity: str(binding['projectIdentity']) } : {}),
         title: agent ? promptTitle(binding, sessionEvents(nativeSession(agent))) : str(binding['title']),
         status: str(binding['status']), worker: str(worker?.['name'], str(binding['workerId'])), ...(lastUsedAt === undefined ? {} : { lastUsedAt }) }
     }) }
@@ -141,7 +143,7 @@ export class AgentBridgeImportTarget {
       return { deleted: true, nativeId }
     } finally { this.deleting.delete(nativeId) }
   }
-  /** An execution location is machine + remote directory, separate from a future logical project. */
+  /** An execution location remains machine + remote directory even when repository presentation is merged. */
   async creationSources(cwd: string): Promise<JsonObject> {
     const workerPage = record(await this.bridge.call({ operation: 'workers' }, this.abort.signal))
     if (!Array.isArray(workerPage['workers'])) throw new Error('Invalid Bridge worker page')
@@ -149,6 +151,7 @@ export class AgentBridgeImportTarget {
     for (const item of workerPage['workers']) { const worker = record(item); this.workers.set(str(worker['id']), worker) }
     const canonical = await realpath(cwd)
     const locations = new Map<string, { machineId: string; workspace: string }>()
+    const direct: Array<{ binding: JsonObject; machineId: string; workspace: string }> = []
     const relativePath = relative(this.dataRoot, canonical)
     let local = relativePath === '..' || relativePath.startsWith('../') || relativePath.startsWith('..\\') || isAbsolute(relativePath)
     // A presentation folder must never be offered as a real DSH execution directory.
@@ -159,20 +162,32 @@ export class AgentBridgeImportTarget {
       const worker = this.workers.get(str(binding['workerId']))
       const machineId = str(worker?.['machineId'], str(binding['workerId']))
       const workspace = str(binding['workspace'])
-      locations.set(machineId + '\0' + workspace, { machineId, workspace })
+      direct.push({ binding, machineId, workspace })
       if (worker && this.isLocalWorker(worker) && await realpath(workspace).catch(() => '') === canonical) local = true
+    }
+    const identities = new Set(direct.map(item => str(item.binding['projectIdentity'])).filter(Boolean))
+    if (identities.size === 1) {
+      const [identity] = identities
+      for (const binding of this.bindings.values()) if (str(binding['projectIdentity']) === identity) {
+        const worker = this.workers.get(str(binding['workerId']))
+        const machineId = str(worker?.['machineId'], str(binding['workerId']))
+        const workspace = str(binding['workspace'])
+        locations.set(machineId + '\0' + workspace, { machineId, workspace })
+      }
+    } else for (const location of direct) {
+      locations.set(location.machineId + '\0' + location.workspace, location)
     }
     if (local) for (const worker of this.workers.values()) if (this.isLocalWorker(worker)) {
       // Existing directories on this Host are a valid local source; the Bridge still enforces allowed roots.
       const machineId = str(worker['machineId'], str(worker['id']))
       locations.set(machineId + '\0' + canonical, { machineId, workspace: canonical })
     }
-    const sources: JsonObject[] = local ? [{ id: 'dsh', name: 'DSH · ' + hostname(), machineId: 'local-dsh', workspace: canonical, available: true }] : []
+    const sources: JsonObject[] = local ? [{ id: 'dsh', name: 'DSH @ ' + hostname(), machineId: 'local-dsh', workspace: canonical, available: true }] : []
     for (const location of locations.values()) for (const worker of this.workers.values()) {
       if (str(worker['machineId'], str(worker['id'])) !== location.machineId) continue
       const id = str(worker['id']) + '\0' + location.workspace
       if (sources.some(source => source['id'] === id)) continue
-      sources.push({ id, workerId: str(worker['id']), name: str(worker['name'], str(worker['id'])), ...location, available: worker['status'] === 'online' })
+      sources.push({ id, workerId: str(worker['id']), name: workerAtMachine(str(worker['name'], str(worker['id'])), location.machineId), ...location, available: worker['status'] === 'online' })
     }
     return { cwd: canonical, sources }
   }

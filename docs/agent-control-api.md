@@ -145,6 +145,7 @@ export interface SessionSummary {
   promptSummary: string | null;
   projectName: string;
   workspace: string;
+  projectIdentity?: string;  // canonical repository identity; omitted when unavailable
   status: SessionStatus;
   activeTurnId: string | null;
   lastTurnStatus: TurnStatus | null;

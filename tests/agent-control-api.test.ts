@@ -33,6 +33,7 @@ async function fixture() {
   const base=`http://127.0.0.1:${address.port}/api/v1`,headers={authorization:"Bearer write","content-type":"application/json"};
   await internals.handleBridgeMessage("dev",{type:"state.snapshot",generation:"one",complete:true,approvals:[],userInputs:[],sessions:[{
     sessionId:"thread-1",nativeSessionId:"thread-1",agentType:"codex-cli",projectPath:"/work/repo",projectName:"repo",
+    projectIdentity:"git@github.com:Example/Repo.git",
     title:"Control me",activityStatus:"idle",lastTurnStatus:"completed",createdAt:1000,updatedAt:2000,
     source:"app-server",historyCompleteness:"full"},{sessionId:"thread-older",nativeSessionId:"thread-older",agentType:"codex-cli",
     projectPath:"/work/old",projectName:"old",activityStatus:"idle",createdAt:500,updatedAt:1500,
@@ -87,6 +88,7 @@ test("Agent Control REST exposes snapshot, pagination, actions, idempotency and 
     assert.equal(snapshot.sessions[0].sessionId,"thread-1");assert.match(snapshot.streamCursor,/^g:\d+$/);
     const first=await fetch(`${f.base}/sessions?limit=1`,{headers:f.headers}).then(r=>r.json()) as any;
     assert.equal(first.data.length,1);assert.equal(first.hasMore,true);assert.ok(first.nextCursor);
+    assert.equal(first.data[0].projectIdentity,"github.com/example/repo");
     const second=await fetch(`${f.base}/sessions?limit=1&cursor=${encodeURIComponent(first.nextCursor)}`,{headers:f.headers}).then(r=>r.json()) as any;
     assert.equal(second.data[0].sessionId,"thread-older");
     const recent=await fetch(`${f.base}/sessions?segment=recent&dayStart=1750&limit=10`,{headers:f.headers}).then(r=>r.json()) as any;
