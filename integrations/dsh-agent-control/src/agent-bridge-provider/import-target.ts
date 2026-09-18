@@ -408,14 +408,14 @@ export class AgentBridgeImportTarget {
     const previousBindingTitle = previousBinding ? promptTitle(previousBinding.data, sessionEvents(session)) : ''
     // Preserve explicit DSH renames, while allowing older importer-owned titles to improve.
     if (previous?.data['title'] !== title && (!usefulTitle(previous?.data['title']) || previous?.data['title'] === previousBindingTitle)) session.append('session/title', { title, messageSeqs: [], source: { kind: 'user' } })
-    let cwd = session.header.cwd ?? placement.cwd
-    if (cwd !== placement.cwd && !await realpath(cwd).then(() => true, () => false)) {
-      // A local checkout can disappear while its imported DSH presentation is
-      // retained. Rehome that presentation instead of failing every sync tick.
-      cwd = placement.cwd
-      this.placementOverrides.set(id, cwd)
-    }
+    const cwd = session.header.cwd ?? placement.cwd
+    const missingRetainedCheckout = cwd !== placement.cwd && !await realpath(cwd).then(() => true, () => false)
     if (!await this.host.sessions.flush(agent.session)) throw new Error('Native session has no persistence writer')
+    // DSH intentionally freezes the persisted Session header and validates it
+    // when attaching to a workspace. If that checkout was deleted, keep the
+    // conversation synchronized but do not retry an impossible attachment on
+    // every refresh tick; the native registry already filters its old entry.
+    if (missingRetainedCheckout) return agent
     const workspace = await this.host.workspaceRegistry.resolveByPath(cwd) ?? await this.host.workspaceRegistry.create(cwd, placement.title)
     await workspace.attachSession(id)
     return agent
