@@ -308,6 +308,7 @@ export class AgentBridgeImportTarget {
       cursors.add(next); cursor = next
     } while (true)
     this.presentationPlacements.clear()
+    this.preparePresentationPlacements(summaries)
     // The complete control-plane catalog is authoritative. Retry local cleanup after
     // a confirmed remote deletion even if the previous Host exited before archiving.
     const retained = new Set(summaries.map(row => str(row['sessionId'])))
@@ -376,12 +377,16 @@ export class AgentBridgeImportTarget {
     }
     const projectIdentity = str(row['projectIdentity'])
     if (projectIdentity) {
+      const planned = this.presentationPlacements.get('project\0' + projectIdentity)
+      if (planned) return { cwd: planned, title: projectName(row) }
       const cwd = join(this.dataRoot, 'projects', hash(new URL(this.origin).origin + '\0project\0' + projectIdentity))
       await mkdir(cwd, { recursive: true })
       this.presentationPlacements.set('project\0' + projectIdentity, cwd)
       return { cwd, title: projectName(row) }
     }
     const machineId = str(worker?.['machineId'], str(row['workerId']))
+    const planned = this.presentationPlacements.get('location\0' + machineId + '\0' + path)
+    if (planned) return { cwd: planned, title: projectName(row) + ' @ ' + machineId }
     const cwd = join(this.dataRoot, 'workspaces', hash(new URL(this.origin).origin + '\0' + machineId + '\0' + path))
     await mkdir(cwd, { recursive: true })
     this.presentationPlacements.set('location\0' + machineId + '\0' + path, cwd)
@@ -436,10 +441,33 @@ export class AgentBridgeImportTarget {
     // when attaching to a workspace. If that checkout was deleted, keep the
     // conversation synchronized but do not retry an impossible attachment on
     // every refresh tick; the native registry already filters its old entry.
-    if (missingRetainedCheckout || (str(row['projectIdentity']) && cwd !== placement.cwd)) return agent
+    if (missingRetainedCheckout || cwd !== placement.cwd) return agent
     const workspace = await this.host.workspaceRegistry.resolveByPath(cwd) ?? await this.host.workspaceRegistry.create(cwd, placement.title)
     await workspace.attachSession(id)
     return agent
+  }
+  private preparePresentationPlacements(summaries: readonly JsonObject[]): void {
+    const workspaces = this.host.workspaceRegistry.list?.()
+    if (!workspaces) return
+    const grouped = new Map<string, { rows: JsonObject[]; machineId: string; identity: string }>()
+    for (const row of summaries) {
+      const identity = str(row['projectIdentity'])
+      const worker = this.workers.get(str(row['workerId']))
+      const machineId = str(worker?.['machineId'], str(row['workerId']))
+      const key = identity ? 'project\0' + identity : 'location\0' + machineId + '\0' + str(row['workspace'])
+      const value = grouped.get(key)
+      if (value) value.rows.push(row); else grouped.set(key, { rows: [row], machineId, identity })
+    }
+    for (const [key, group] of grouped) {
+      const ids = new Set(group.rows.map(row => nativeSessionId(this.origin, str(row['sessionId']))))
+      const members = workspaces.filter(workspace => workspace.sessionIds?.some(id => ids.has(id)))
+      const expected = group.identity
+        ? join(this.dataRoot, 'projects', hash(new URL(this.origin).origin + '\0project\0' + group.identity))
+        : join(this.dataRoot, 'workspaces', hash(new URL(this.origin).origin + '\0' + group.machineId + '\0' + str(group.rows[0]?.['workspace'])))
+      const keep = members.find(workspace => workspace.path && !inside(this.dataRoot, workspace.path))
+        ?? members.find(workspace => workspace.path === expected)
+      if (keep?.path) this.presentationPlacements.set(key, keep.path)
+    }
   }
   private async reconcileProjectWorkspaces(summaries: readonly JsonObject[]): Promise<void> {
     const registry = this.host.workspaceRegistry
