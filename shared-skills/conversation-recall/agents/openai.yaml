@@ -1,0 +1,3 @@
+interface:
+  display_name: "Conversation Recall"
+  short_description: "Find and verify earlier agent discussions"

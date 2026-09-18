@@ -1,9 +1,7 @@
-import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { homedir } from "node:os";
-import { promisify } from "node:util";
 import pino from "pino";
 import type {
   ApprovalChoice,
@@ -16,6 +14,7 @@ import type {
 import type { AgentAdapter, AdapterEmit } from "../agent-adapter.js";
 import type { AttachmentFetcher, FetchedAttachment } from "../attachments.js";
 import { resolveProjectPath, summarizePrompt } from "../app-server.js";
+import { deriveProjectIdentity } from "../path-utils.js";
 import { PushableAsyncIterable, query, type Query } from "./sdk/index.js";
 import type {
   PermissionResult,
@@ -27,7 +26,6 @@ import type {
 } from "./sdk/types.js";
 
 const log = pino({ name: "claude-adapter" });
-const execFileAsync = promisify(execFile);
 
 const FILE_CHANGE_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
 const LOG_LIMIT = 2_000;
@@ -811,26 +809,6 @@ function mapFreeTextAnswer(questions: UserInputQuestion[], text: string): Record
 
 function domainError(code: string, message: string): Error & { code: string; retryable: boolean } {
   return Object.assign(new Error(message), { code, retryable: false });
-}
-
-async function deriveProjectIdentity(cwd: string): Promise<string | undefined> {
-  try {
-    const { stdout } = await execFileAsync("git", ["-C", cwd, "config", "--get", "remote.origin.url"], { encoding: "utf8" });
-    const url = stdout.trim();
-    return url ? normalizeGitRemote(url) : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-/** Normalize a git remote to a stable cross-machine key, e.g. github.com/org/repo. */
-function normalizeGitRemote(url: string): string {
-  return url
-    .replace(/^git@([^:]+):/, "$1/")
-    .replace(/^https?:\/\//, "")
-    .replace(/^ssh:\/\//, "")
-    .replace(/\.git$/, "")
-    .replace(/\/+$/, "");
 }
 
 interface SessionMeta {

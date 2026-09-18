@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "skills": [
+    {
+      "name": "conversation-recall",
+      "version": "1.0.0",
+      "files": {
+        "SKILL.md": "942030d1ad9479e900714df8822aab7695ba388c15362553b4a637905c8588cf",
+        "agents/openai.yaml": "16998bc4d92069b653939bbe4b9a1740968af772ff8d8ed2f614450110ac898e"
+      },
+      "dependencies": ["conversation-mcp"]
+    }
+  ]
+}

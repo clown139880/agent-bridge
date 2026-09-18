@@ -1,6 +1,6 @@
 {
   "name": "agent-bridge",
-  "version": "0.6.40",
+  "version": "0.6.41",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@11.3.0",
@@ -16,6 +16,7 @@
     "start:bridge": "node apps/bridge/dist/index.js",
     "dev:bridge:source": "node --import tsx apps/bridge/src/index.ts",
     "test": "node --import tsx --test tests/**/*.test.ts && pnpm --filter dsh-agent-control-plugin test",
+    "memory:audit": "node --import tsx scripts/conversation-memory-audit.ts",
     "plugin:lint": "pnpm --filter dsh-agent-control-plugin lint"
   },
   "dependencies": {

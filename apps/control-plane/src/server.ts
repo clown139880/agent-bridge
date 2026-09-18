@@ -4,7 +4,7 @@ import { basename } from "node:path";
 import type { Duplex } from "node:stream";
 import pino from "pino";
 import { WebSocket, WebSocketServer } from "ws";
-import { AgentControlStore, Store, type SessionRecord, type WorkerRunRecord } from "@agent-bridge/database";
+import { AgentControlStore, ConversationMemoryStore, Store, type SessionRecord, type WorkerRunRecord } from "@agent-bridge/database";
 import {
   parseMessage,
   parseWorkerId,
@@ -27,6 +27,7 @@ import { AgentControlApi } from "./api/router.js";
 import { MAX_JSON_BODY_BYTES } from "./api/validation.js";
 import { BridgeRegistry, type BridgeConnection } from "./bridge-registry.js";
 import { WebhookNotifier, type WebhookOptions } from "./webhook.js";
+import { ConversationMcpServer } from "./memory-mcp.js";
 
 const log = pino({ name: "control-plane" });
 
@@ -99,6 +100,8 @@ export class ControlPlane {
   private readonly controlStore: AgentControlStore;
   private readonly controlApi: AgentControlApi;
   private readonly webhook: WebhookNotifier;
+  private readonly memory: ConversationMemoryStore;
+  private readonly memoryMcp?: ConversationMcpServer;
   private readonly approvalsByEvent = new Map<string, PendingApproval>();
   private readonly approvalsById = new Map<string, PendingApproval>();
   private readonly resolvedApprovalIds = new Set<string>();
@@ -111,6 +114,7 @@ export class ControlPlane {
   private readonly pendingRunLaunches = new Map<string, PendingRunLaunch>();
   private roomId = "";
   private cleanupTimer?: NodeJS.Timeout;
+  private archiveTimer?: NodeJS.Timeout;
 
   constructor(
     private readonly store: Store,
@@ -124,6 +128,8 @@ export class ControlPlane {
       workerApiToken?: string;
       controlApiReadToken?: string;
       controlApiWriteToken?: string;
+      conversationMemory?: { mcpReadToken?: string; objectDir: string; hotRetentionMs: number;
+        archiveChunkBytes: number; maxCapacityBytes?: number; maxMessageBytes?: number };
       retention?: { sessionEventsMs: number; streamEventsMs: number; actionsMs: number; attachmentsMs: number };
       sse?: { keepaliveMs: number; pollMs: number; maxBackpressure: number; actionTimeoutMs?: number };
       bridgeUpdate?: {
@@ -136,6 +142,16 @@ export class ControlPlane {
     },
   ) {
     this.webhook = new WebhookNotifier(options.webhook);
+    this.memory = new ConversationMemoryStore(store.db,
+      options.conversationMemory?.objectDir ?? "./data/conversation-objects", {
+        maxCapacityBytes: options.conversationMemory?.maxCapacityBytes,
+        maxMessageBytes: options.conversationMemory?.maxMessageBytes,
+      });
+    const backfill = this.memory.backfillStoredEvents();
+    if (backfill.scanned) log.info(backfill, "Backfilled retained session events into conversation memory");
+    if (options.conversationMemory?.mcpReadToken) {
+      this.memoryMcp = new ConversationMcpServer(this.memory, options.conversationMemory.mcpReadToken);
+    }
     this.controlStore = new AgentControlStore(store.db, options.retention ?? {
       sessionEventsMs: 30 * 86_400_000, streamEventsMs: 7 * 86_400_000, actionsMs: 86_400_000,
       attachmentsMs: 7 * 86_400_000,
@@ -151,6 +167,15 @@ export class ControlPlane {
       if (request.url === "/health") {
         response.writeHead(200, { "content-type": "application/json" });
         response.end(JSON.stringify({ ok: true, bridges: this.bridges.size, roomId: this.roomId }));
+        return;
+      }
+      if (new URL(request.url ?? "/", "http://localhost").pathname === "/mcp") {
+        if (!this.memoryMcp) { response.writeHead(404).end(); return; }
+        void this.memoryMcp.handle(request, response).catch((error) => {
+          log.error({ error }, "Conversation MCP request failed");
+          if (!response.headersSent) this.json(response, 500, { error: "internal_error" });
+          else response.end();
+        });
         return;
       }
       if (request.url?.startsWith("/api/v1/")) {
@@ -185,8 +210,11 @@ export class ControlPlane {
     await new Promise<void>((resolve) => this.http.listen(this.options.port, this.options.host, resolve));
     setInterval(() => this.store.markStaleMachinesOffline(Date.now() - 45_000), 15_000).unref();
     this.controlStore.cleanup();
+    this.archiveConversationMemory();
     this.cleanupTimer = setInterval(() => this.controlStore.cleanup(), 60 * 60_000);
     this.cleanupTimer.unref();
+    this.archiveTimer = setInterval(() => this.archiveConversationMemory(), 60 * 60_000);
+    this.archiveTimer.unref();
     log.info({ host: this.options.host, port: this.options.port, roomId: this.roomId }, "Control plane listening");
     // Announce the control-plane restart and the version it is advertising to the fleet.
     // This is the operator's "control-plane upgraded / broadcasting version" signal.
@@ -202,9 +230,27 @@ export class ControlPlane {
   async stop(): Promise<void> {
     this.matrix.stop();
     clearInterval(this.cleanupTimer);
+    clearInterval(this.archiveTimer);
     for (const bridge of this.bridges.values()) bridge.socket.close(1001, "server shutdown");
     for (const launch of this.pendingRunLaunches.values()) clearTimeout(launch.timeout);
     await new Promise<void>((resolve) => this.http.close(() => resolve()));
+  }
+
+  private archiveConversationMemory(): void {
+    const policy = this.options.conversationMemory;
+    if (!policy) return;
+    try {
+      const result = this.memory.archiveEligible(Date.now() - policy.hotRetentionMs, policy.archiveChunkBytes);
+      if (result.messages) log.info({ ...result }, "Archived cold conversation messages");
+    } catch (error) {
+      // Archival is a derived storage transition. Originals stay hot on failure.
+      log.error({ error }, "Conversation archival failed; hot originals were retained");
+    }
+  }
+
+  private deleteSessionRecord(sessionId: string): void {
+    const objects = this.memory.archiveObjectPaths(sessionId);
+    if (this.controlStore.deleteSession(sessionId)) this.memory.removeOrphanedArchiveObjects(objects, sessionId);
   }
 
   async onRoomMessage(body: string, sender = "", eventId = ""): Promise<void> {
@@ -603,7 +649,7 @@ export class ControlPlane {
           hostname: message.hostname, capabilities: message.capabilities,
         });
         this.controlStore.updateMachineConnection(registeredId, message.bridgeVersion,
-          message.protocolVersion, message.features);
+          message.protocolVersion, message.features, message.sharedSkills);
         this.send(socket, { type: "registered", machineId: registeredId });
         this.sendUpdateAnnouncement(socket);
         this.releasePendingRuns(registeredId);
@@ -644,8 +690,16 @@ export class ControlPlane {
   }
 
   private async handleBridgeMessage(machineId: string, message: BridgeToControlMessage): Promise<void> {
+    if (message.type === "archive.gap") {
+      this.memory.recordGap(message.gapId, machineId, message.firstEventId, message.lastEventId,
+        message.droppedCount, message.reason);
+      const bridge = this.bridges.get(machineId);
+      if (bridge) this.send(bridge.socket, { type: "archive.gap_ack", gapId: message.gapId });
+      return;
+    }
     if (message.type === "state.snapshot") {
       for (const session of message.sessions) this.controlStore.upsertSession(machineId, session);
+      for (const session of message.sessions) this.memory.upsertSessionProject(session.sessionId, session.projectIdentity);
       for (const approval of message.approvals) await this.handleApprovalRequest(machineId,
         { type: "approval_request", ...approval });
       for (const input of message.userInputs) this.controlStore.upsertUserInput(machineId, input);
@@ -672,6 +726,7 @@ export class ControlPlane {
       return;
     }
     if (message.type === "session.event") {
+      const sourceSessionId = message.sessionId;
       // Claude inventory is keyed by its native transcript id, while sessions
       // launched through Bridge retain their original public identity.
       const canonical = this.store.getSession(message.sessionId) ?? this.store.getSessionByNative(machineId, message.sessionId);
@@ -680,7 +735,10 @@ export class ControlPlane {
         message = { ...message, sessionId: canonical.id,
           eventId: message.eventId === `claude:${oldId}:first:user` ? `claude:${canonical.id}:first:user` : message.eventId };
       }
+      this.memory.ingestEvent(machineId, message, sourceSessionId);
       this.controlStore.appendSessionEvent(machineId, message);
+      const bridge = this.bridges.get(machineId);
+      if (bridge) this.send(bridge.socket, { type: "archive.ack", eventId: message.eventId });
       const status = activityForStructuredEvent(message.eventType);
       if (status) this.controlStore.updateSessionActivity(message.sessionId, status.activity,
         status.active ? message.turnId : undefined, status.lastTurn);
@@ -705,11 +763,11 @@ export class ControlPlane {
     if (message.type === "action.result") {
       this.controlApi.actionsForBridge().complete(message);
       if (message.kind === "delete_session" && message.status === "succeeded" && message.sessionId)
-        this.controlStore.deleteSession(message.sessionId);
+        this.deleteSessionRecord(message.sessionId);
       return;
     }
     if (message.type === "session.deleted") {
-      this.controlStore.deleteSession(message.sessionId);
+      this.deleteSessionRecord(message.sessionId);
       return;
     }
     if (message.type === "heartbeat") {
@@ -738,6 +796,7 @@ export class ControlPlane {
     }
     if (message.type === "session.discovered") {
       await this.handleSessionDiscovered(machineId, message);
+      this.memory.upsertSessionProject(message.sessionId, message.projectIdentity);
       return;
     }
     if (message.type === "log_response") {

@@ -94,6 +94,12 @@ Control Plane 主要变量：
 | `WORKER_API_ENABLED` | 默认 `false`；设为 `true` 才开放 Hermes worker API |
 | `WORKER_API_TOKEN` | 启用 worker API 时必填的独立 bearer token |
 | `CONTROL_API_READ_TOKEN` / `CONTROL_API_WRITE_TOKEN` | Agent Control Host 的只读/读写 token；浏览器不得持有 |
+| `CONVERSATION_MCP_READ_TOKEN` | `/mcp` 的独立只读 bearer token；不得复用 Bridge 或 Control API 写密钥 |
+| `CONVERSATION_OBJECT_DIR` | 冷归档对象目录；生产环境必须位于 Git checkout 外 |
+| `CONVERSATION_HOT_RETENTION_MS` | 正文转入分块压缩冷归档前的热存储时间，默认 30 天 |
+| `CONVERSATION_ARCHIVE_CHUNK_BYTES` | 冷归档分块目标上限，默认 1 MiB |
+| `CONVERSATION_TOTAL_CAPACITY_BYTES` | SQLite 与冷归档对象的硬上限，默认 5 GiB；达到后停止确认新正文 |
+| `CONVERSATION_MAX_MESSAGE_BYTES` | 单条归档正文上限，默认 1 MiB；超限时保留待传并报告错误 |
 | `CONTROL_SESSION_EVENT_RETENTION_MS` | 结构化 session event 保留期，默认 30 天 |
 | `CONTROL_STREAM_RETENTION_MS` | SSE outbox 补读窗口，默认 7 天 |
 | `CONTROL_ACTION_RETENTION_MS` | action/idempotency 保留期，默认 24 小时 |
@@ -113,6 +119,8 @@ Bridge 主要变量：
 | `BRIDGE_ALLOWED_ROOTS` | Bridge 可访问的项目根目录，使用 `:` 分隔 |
 | `CODEX_APP_SERVER_URL` | 本机 App Server URL，默认 `ws://127.0.0.1:4500` |
 | `CODEX_APP_SERVER_MANAGED` | 是否由 Bridge 启停 App Server |
+| `BRIDGE_ARCHIVE_OUTBOX_PATH` | 等待中心 ACK 的会话事件持久 outbox；必须位于 Git checkout 外 |
+| `BRIDGE_ARCHIVE_OUTBOX_LIMIT` | outbox 消息上限，默认 10000；溢出会向中心报告采集缺口 |
 | `CODEX_DESKTOP_HOME` | 可选；官方 Codex Desktop 的 `.codex` 目录，设置后监控新完成的 turn |
 | `CODEX_DESKTOP_SCAN_INTERVAL_MS` | Desktop rollout 扫描间隔，默认 3000ms |
 | `CODEX_DESKTOP_REPLAY_EXISTING` | 首次启动是否同步既有完成记录，默认关闭以避免刷屏 |

@@ -1,7 +1,8 @@
 import pino from "pino";
 import WebSocket from "ws";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import {
   BRIDGE_PROTOCOL_VERSION,
   parseMessage,
@@ -9,6 +10,7 @@ import {
   type AgentType,
   type BridgeToControlMessage,
   type ControlToBridgeMessage,
+  type ArchiveGapMessage,
   type RegisterMessage,
   type SessionState,
 } from "@agent-bridge/protocol";
@@ -47,6 +49,8 @@ export class BridgeClient {
   private readonly actionResults = new Map<string, ActionResultMessage>();
   private readonly inFlightActions = new Set<string>();
   private readonly queuedStateMessages: BridgeToControlMessage[] = [];
+  private readonly archiveOutbox = new Map<string, Extract<BridgeToControlMessage, { type: "session.event" }>>();
+  private archiveGap?: ArchiveGapMessage;
   private registered = false;
 
   constructor(private readonly options: {
@@ -77,12 +81,17 @@ export class BridgeClient {
     updateStatePath: string;
     actionCachePath: string;
     actionCacheTtlMs: number;
+    archiveOutboxPath: string;
+    archiveOutboxLimit: number;
+    sharedSkillsManifest?: string;
+    conversationMcpConfigured: boolean;
     drainFile?: string;
     updatePackageManager: string;
     updateRestartExecutable: string;
     updateRestartArgs: string[];
   }) {
     this.loadActionResults();
+    this.loadArchiveOutbox();
 
     const providers = options.providers?.length ? options.providers : ["codex"];
     if (providers.includes("codex")) {
@@ -135,7 +144,8 @@ export class BridgeClient {
       if (message.type === "session.discovered" && "sessionId" in message) {
         this.sessionOwner.set(message.sessionId, agentType);
       }
-      if (["session.discovered", "session.event", "approval_request", "approval_resolved",
+      if (message.type === "session.event") this.sendArchiveDurable(message);
+      else if (["session.discovered", "approval_request", "approval_resolved",
         "user_input_request", "user_input_resolved"].includes(message.type)) this.sendDurable(message);
       else this.send(message);
       if (message.type === "agent.completed" || message.type === "agent.failed"
@@ -248,6 +258,7 @@ export class BridgeClient {
         features: ["session-inventory", "session-events", "session-actions", "turn-steer",
           "turn-interrupt", "approvals", "user-input", "desktop-terminal-history"],
         bridgeVersion: this.options.version,
+        sharedSkills: this.sharedSkillsStatus(),
         token: this.options.token,
       };
       this.send(registration);
@@ -277,6 +288,12 @@ export class BridgeClient {
             log.error({ error }, "Unable to recover self-update state");
           });
           this.sendStateSnapshot();
+          break;
+        case "archive.ack":
+          if (this.archiveOutbox.delete(message.eventId)) this.saveArchiveOutbox();
+          break;
+        case "archive.gap_ack":
+          if (this.archiveGap?.gapId === message.gapId) { this.archiveGap = undefined; this.saveArchiveOutbox(); }
           break;
         case "bridge_update.available":
           void this.updater.consider(message).catch((error) => {
@@ -349,6 +366,8 @@ export class BridgeClient {
     }
     this.send({type:"state.snapshot",generation:`${Date.now()}`,sessions,approvals,userInputs,complete:true} as BridgeToControlMessage);
     while(this.queuedStateMessages.length)this.send(this.queuedStateMessages.shift()!);
+    if(this.archiveGap)this.send(this.archiveGap);
+    for(const message of this.archiveOutbox.values())this.send(message);
   }
 
   private sendDurable(message:BridgeToControlMessage):void {
@@ -356,8 +375,58 @@ export class BridgeClient {
     this.queuedStateMessages.push(message);
     if(this.queuedStateMessages.length>10_000){
       this.queuedStateMessages.shift();
-      log.error("Bridge state queue overflow; oldest event will be recovered from App Server history");
+      log.error("Bridge state queue overflow; oldest transient state projection was dropped");
     }
+  }
+
+  private sendArchiveDurable(message:Extract<BridgeToControlMessage,{type:"session.event"}>):void {
+    if(!this.archiveOutbox.has(message.eventId))this.archiveOutbox.set(message.eventId,message);
+    while(this.archiveOutbox.size>this.options.archiveOutboxLimit){
+      const oldest=this.archiveOutbox.entries().next().value as [string,Extract<BridgeToControlMessage,{type:"session.event"}>];
+      this.archiveOutbox.delete(oldest[0]);
+      if(!this.archiveGap)this.archiveGap={type:"archive.gap",gapId:`gap:${this.options.machineId}:${Date.now()}`,
+        firstEventId:oldest[0],lastEventId:oldest[0],droppedCount:1,reason:"outbox-capacity",reportedAt:Date.now()};
+      else{this.archiveGap.lastEventId=oldest[0];this.archiveGap.droppedCount++;}
+      log.error({eventId:oldest[0]},"Conversation archive outbox exceeded capacity; reporting a collection gap");
+    }
+    this.saveArchiveOutbox();
+    if(this.registered&&this.socket?.readyState===WebSocket.OPEN)this.send(message);
+  }
+
+  private loadArchiveOutbox():void {
+    try{
+      const value=JSON.parse(readFileSync(this.options.archiveOutboxPath,"utf8")) as
+        {messages?:Array<Extract<BridgeToControlMessage,{type:"session.event"}>>;gap?:ArchiveGapMessage};
+      for(const message of value.messages??[])if(message?.type==="session.event"&&message.eventId)this.archiveOutbox.set(message.eventId,message);
+      if(value.gap?.type==="archive.gap")this.archiveGap=value.gap;
+    }catch{/* first boot or invalid file */}
+  }
+
+  private saveArchiveOutbox():void {
+    try{mkdirSync(dirname(this.options.archiveOutboxPath),{recursive:true});const temp=`${this.options.archiveOutboxPath}.tmp`;
+      writeFileSync(temp,JSON.stringify({messages:[...this.archiveOutbox.values()],gap:this.archiveGap}),{mode:0o600});
+      renameSync(temp,this.options.archiveOutboxPath);
+    }catch(error){log.error({error},"Unable to persist conversation archive outbox");}
+  }
+
+  private sharedSkillsStatus(): NonNullable<RegisterMessage["sharedSkills"]> {
+    if(!this.options.sharedSkillsManifest)return [];
+    try{
+      const manifest=JSON.parse(readFileSync(this.options.sharedSkillsManifest,"utf8")) as
+        {skills?:Array<{name:string;version:string;files:Record<string,string>;dependencies?:string[]}>};
+      const root=dirname(this.options.sharedSkillsManifest);
+      return (manifest.skills??[]).map(skill=>{
+        let status:"installed"|"modified"|"missing"="installed";
+        for(const[file,expected]of Object.entries(skill.files)){
+          const path=join(root,skill.name,file);
+          if(!existsSync(path)){status="missing";break;}
+          if(createHash("sha256").update(readFileSync(path)).digest("hex")!==expected)status="modified";
+        }
+        return{name:skill.name,version:skill.version,status,dependencies:Object.fromEntries(
+          (skill.dependencies??[]).map(name=>[name,name==="conversation-mcp"
+            ?this.options.conversationMcpConfigured?"configured":"missing":"unknown"]))};
+      });
+    }catch(error){log.warn({error},"Unable to read shared skill status manifest");return [];}
   }
 
   private async handleAction(message: Extract<ControlToBridgeMessage,{type:`action.${string}`}>): Promise<void> {

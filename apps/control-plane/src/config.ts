@@ -1,5 +1,6 @@
 import "dotenv/config";
 import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // The fleet version lives in the repo-root package.json (same value BRIDGE_LATEST_VERSION
@@ -23,9 +24,15 @@ const matrixEnabled = process.env.MATRIX_ENABLED !== "false";
 const workerApiEnabled = process.env.WORKER_API_ENABLED === "true";
 const controlApiReadToken = process.env.CONTROL_API_READ_TOKEN;
 const controlApiWriteToken = process.env.CONTROL_API_WRITE_TOKEN;
+const databasePath = process.env.DATABASE_PATH ?? "./data/control-plane.sqlite";
 const duration = (name: string, fallback: number): number => {
   const value = Number(process.env[name] ?? fallback);
   if (!Number.isFinite(value) || value <= 0) throw new Error(`${name} must be a positive number of milliseconds`);
+  return value;
+};
+const bytes = (name: string, fallback: number, minimum: number): number => {
+  const value = Number(process.env[name] ?? fallback);
+  if (!Number.isSafeInteger(value) || value < minimum) throw new Error(`${name} must be an integer >= ${minimum}`);
   return value;
 };
 const bridgeLatestVersion = process.env.BRIDGE_LATEST_VERSION;
@@ -52,7 +59,7 @@ export const config = {
   matrixRoomId: process.env.MATRIX_ROOM_ID,
   matrixRoomName: process.env.MATRIX_ROOM_NAME ?? "Agent Control",
   matrixAllowedUserId: process.env.MATRIX_ALLOWED_USER_ID,
-  databasePath: process.env.DATABASE_PATH ?? "./data/control-plane.sqlite",
+  databasePath,
   host: process.env.CONTROL_HOST ?? "0.0.0.0",
   port: Number(process.env.CONTROL_PORT ?? "8787"),
   publicWsUrl: process.env.CONTROL_PUBLIC_WS_URL,
@@ -61,6 +68,14 @@ export const config = {
   workerApiToken: workerApiEnabled ? required("WORKER_API_TOKEN") : undefined,
   controlApiReadToken,
   controlApiWriteToken,
+  conversationMemory: {
+    mcpReadToken: process.env.CONVERSATION_MCP_READ_TOKEN,
+    objectDir: process.env.CONVERSATION_OBJECT_DIR ?? join(dirname(databasePath), "conversation-objects"),
+    hotRetentionMs: duration("CONVERSATION_HOT_RETENTION_MS", 30 * 86_400_000),
+    archiveChunkBytes: bytes("CONVERSATION_ARCHIVE_CHUNK_BYTES", 1_048_576, 65_536),
+    maxCapacityBytes: bytes("CONVERSATION_TOTAL_CAPACITY_BYTES", 5 * 1024 ** 3, 1_048_576),
+    maxMessageBytes: bytes("CONVERSATION_MAX_MESSAGE_BYTES", 1_048_576, 65_536),
+  },
   retention: {
     sessionEventsMs: duration("CONTROL_SESSION_EVENT_RETENTION_MS", 30 * 86_400_000),
     streamEventsMs: duration("CONTROL_STREAM_RETENTION_MS", 7 * 86_400_000),

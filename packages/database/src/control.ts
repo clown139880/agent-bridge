@@ -166,11 +166,12 @@ export class AgentControlStore {
   }
 
   updateMachineConnection(machineId: string, bridgeVersion: string | undefined, protocolVersion: number | undefined,
-    features: string[] | undefined): void {
+    features: string[] | undefined, sharedSkills?: unknown[]): void {
     const now = Date.now();
     this.transaction(() => {
-      this.db.prepare(`UPDATE machines SET bridge_version=?,protocol_version=?,features_json=?,connected_at=? WHERE id=?`)
-        .run(bridgeVersion ?? null, protocolVersion ?? 1, JSON.stringify(features ?? []), now, machineId);
+      this.db.prepare(`UPDATE machines SET bridge_version=?,protocol_version=?,features_json=?,shared_skills_json=?,connected_at=? WHERE id=?`)
+        .run(bridgeVersion ?? null, protocolVersion ?? 1, JSON.stringify(features ?? []),
+          JSON.stringify(sharedSkills ?? []), now, machineId);
       const machine = this.db.prepare("SELECT * FROM machines WHERE id=?").get(machineId) as Record<string,unknown>;
       for (const { agentType, label } of this.machineAgents(parseJson<string[]>(machine.capabilities, []))) {
         const wire = this.workerWire(machine, agentType, label);
@@ -645,6 +646,7 @@ export class AgentControlStore {
     return{id:buildWorkerId(agentType,machineId),machineId,name:`${label} @ ${String(row.name)}`,status:String(row.status),
       platform:String(row.platform),hostname:String(row.hostname),capabilities:[...new Set([...capabilities,...features])],
       workspaces:[],recentWorkspaces:[],lastSeenAt:Number(row.last_seen_at),bridgeVersion:row.bridge_version?String(row.bridge_version):null,
+      sharedSkills:parseJson<unknown[]>(row.shared_skills_json,[]),
       activeSessionCount:0};
   }
 

@@ -191,4 +191,99 @@ export function migrateDatabase(db: DatabaseSync): void {
     } catch (error) { try { db.exec('ROLLBACK'); } catch {} throw error; }
   }
 
+  const applied7 = db.prepare("SELECT 1 FROM schema_migrations WHERE version=7").get();
+  if (!applied7) {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      addColumn(db, "sessions", "project_identity", "TEXT");
+      addColumn(db, "machines", "shared_skills_json", "TEXT");
+      db.exec(`
+        CREATE INDEX sessions_project_identity_idx ON sessions(project_identity, updated_at);
+        CREATE INDEX sessions_machine_path_idx ON sessions(machine_id, project_path, updated_at);
+
+        CREATE TABLE conversation_messages (
+          sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+          message_id TEXT NOT NULL UNIQUE,
+          session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+          source_instance TEXT NOT NULL,
+          source_session_id TEXT NOT NULL,
+          source_event_id TEXT NOT NULL,
+          role TEXT NOT NULL,
+          content TEXT,
+          content_sha256 TEXT NOT NULL,
+          content_chars INTEGER NOT NULL,
+          occurred_at INTEGER NOT NULL,
+          collected_at INTEGER NOT NULL,
+          turn_id TEXT,
+          item_id TEXT,
+          storage_state TEXT NOT NULL DEFAULT 'hot',
+          archive_chunk_id TEXT,
+          completeness TEXT NOT NULL DEFAULT 'complete',
+          UNIQUE(source_instance, source_session_id, source_event_id)
+        );
+        CREATE INDEX conversation_messages_session_idx ON conversation_messages(session_id, sequence);
+        CREATE INDEX conversation_messages_time_idx ON conversation_messages(occurred_at, sequence);
+        CREATE INDEX conversation_messages_storage_idx ON conversation_messages(storage_state, occurred_at);
+
+        CREATE TABLE conversation_source_aliases (
+          source_instance TEXT NOT NULL,
+          source_session_id TEXT NOT NULL,
+          source_event_id TEXT NOT NULL,
+          message_id TEXT NOT NULL REFERENCES conversation_messages(message_id) ON DELETE CASCADE,
+          PRIMARY KEY(source_instance, source_session_id, source_event_id)
+        );
+
+        CREATE TABLE conversation_archive_chunks (
+          id TEXT PRIMARY KEY,
+          session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+          relative_path TEXT NOT NULL UNIQUE,
+          first_sequence INTEGER NOT NULL,
+          last_sequence INTEGER NOT NULL,
+          message_count INTEGER NOT NULL,
+          uncompressed_bytes INTEGER NOT NULL,
+          compressed_bytes INTEGER NOT NULL,
+          sha256 TEXT NOT NULL,
+          created_at INTEGER NOT NULL
+        );
+
+        CREATE TABLE conversation_summaries (
+          session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+          through_sequence INTEGER NOT NULL,
+          source_version TEXT NOT NULL,
+          generator_version TEXT NOT NULL,
+          summary_json TEXT NOT NULL,
+          generated_at INTEGER NOT NULL,
+          stale INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE TABLE conversation_collection_gaps (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          gap_id TEXT NOT NULL UNIQUE,
+          source_instance TEXT NOT NULL,
+          first_event_id TEXT,
+          last_event_id TEXT,
+          dropped_count INTEGER NOT NULL,
+          reason TEXT NOT NULL,
+          reported_at INTEGER NOT NULL
+        );
+
+        CREATE TABLE conversation_cleanup_audit (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          action TEXT NOT NULL,
+          detail_json TEXT NOT NULL,
+          created_at INTEGER NOT NULL
+        );
+
+        CREATE VIRTUAL TABLE conversation_messages_fts USING fts5(
+          content, tokenize='unicode61 remove_diacritics 2'
+        );
+        CREATE VIRTUAL TABLE conversation_messages_fts_trigram USING fts5(
+          content, tokenize='trigram'
+        );
+      `);
+      db.prepare("INSERT INTO schema_migrations(version,applied_at) VALUES (7,?)").run(Date.now());
+      db.exec("COMMIT");
+    } catch (error) { try { db.exec("ROLLBACK"); } catch {} throw error; }
+  }
+
 }

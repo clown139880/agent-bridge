@@ -5,6 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import { workerId, type AgentEvent, type AgentStatus, type AgentType } from "@agent-bridge/protocol";
 import { migrateDatabase } from "./migrations.js";
 export * from "./control.js";
+export * from "./memory.js";
 
 export interface MachineRecord {
   id: string;

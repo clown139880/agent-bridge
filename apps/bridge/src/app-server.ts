@@ -16,7 +16,7 @@ import type {
   UserInputQuestion,
 } from "@agent-bridge/protocol";
 import { CodexDesktopSessionScanner } from "./desktop-sessions.js";
-import { isPathWithinRoots } from "./path-utils.js";
+import { deriveProjectIdentity, isPathWithinRoots } from "./path-utils.js";
 import type { AgentAdapter } from "./agent-adapter.js";
 import type { AttachmentFetcher } from "./attachments.js";
 import { CodexRuntimeResolver, type CodexRuntime } from "./codex-runtime.js";
@@ -55,6 +55,7 @@ interface CodexThread {
   parentThreadId?: string | null;
   status?: { type?: string; activeFlags?: string[] };
   model?: string;
+  projectIdentity?: string;
 }
 
 interface CodexTurn {
@@ -367,6 +368,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
       lastTurnStatus:undefined,createdAt:(thread.createdAt??Math.floor(now/1000))*1000,
       updatedAt:(thread.updatedAt??thread.createdAt??Math.floor(now/1000))*1000,
       promptSummary:summarizePrompt(thread.preview),
+      projectIdentity:thread.projectIdentity,
       source:"app-server" as const,historyCompleteness:this.inventoryComplete ? "full" as const : "loaded-only" as const}));
     const approvals=[...this.pendingApprovals.values()].filter(item=>!item.answered).map(item=>({approvalId:item.approvalId,
       sessionId:item.sessionId,turnId:item.turnId,kind:item.kind,summary:item.summary,choices:item.choices,requestedAt:item.requestedAt}));
@@ -999,6 +1001,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
       return false;
     }
     this.threadsById.set(thread.id, thread);
+    thread.projectIdentity = await deriveProjectIdentity(projectPath);
     const message: SessionDiscoveredMessage = {
       type: "session.discovered",
       requestId,
@@ -1013,6 +1016,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
       createdAt: (thread.createdAt ?? Math.floor(Date.now() / 1000)) * 1000,
       updatedAt: (thread.updatedAt ?? thread.createdAt ?? Math.floor(Date.now() / 1000)) * 1000,
       model: thread.model,
+      projectIdentity: thread.projectIdentity,
     };
     this.emit(message);
     return true;

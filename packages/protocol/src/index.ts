@@ -103,6 +103,12 @@ export interface RegisterMessage {
   protocolVersion?: number;
   features?: string[];
   token?: string;
+  sharedSkills?: Array<{
+    name: string;
+    version: string;
+    status: "installed" | "modified" | "missing";
+    dependencies: Record<string, "configured" | "missing" | "unknown">;
+  }>;
 }
 
 export interface RegisteredMessage {
@@ -412,6 +418,26 @@ export interface ErrorMessage {
   code?: "update_required" | "update_failed";
 }
 
+export interface ArchiveAckMessage {
+  type: "archive.ack";
+  eventId: string;
+}
+
+export interface ArchiveGapMessage {
+  type: "archive.gap";
+  gapId: string;
+  firstEventId?: string;
+  lastEventId?: string;
+  droppedCount: number;
+  reason: "outbox-capacity";
+  reportedAt: number;
+}
+
+export interface ArchiveGapAckMessage {
+  type: "archive.gap_ack";
+  gapId: string;
+}
+
 export type BridgeToControlMessage =
   | RegisterMessage
   | BridgeUpdateCheckMessage
@@ -431,6 +457,7 @@ export type BridgeToControlMessage =
   | ActionResultMessage
   | LogResponseMessage
   | ModelCatalogResponseMessage
+  | ArchiveGapMessage
   | ErrorMessage;
 
 export type ControlToBridgeMessage =
@@ -448,6 +475,8 @@ export type ControlToBridgeMessage =
   | StopAgentMessage
   | LogRequestMessage
   | ModelCatalogRequestMessage
+  | ArchiveAckMessage
+  | ArchiveGapAckMessage
   | ErrorMessage;
 
 export function parseMessage(raw: string): { type: string; [key: string]: unknown } | undefined {
