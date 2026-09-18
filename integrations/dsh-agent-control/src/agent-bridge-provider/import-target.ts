@@ -69,7 +69,7 @@ export class AgentBridgeImportTarget {
   private refreshJob: Promise<void> | undefined
   private readonly versions = new Map<string, number>()
   private readonly placementOverrides = new Map<string, string>()
-  private readonly projectPlacements = new Map<string, string>()
+  private readonly presentationPlacements = new Map<string, string>()
   error = ''
   lastSyncAt = 0
   private readonly deleting = new Set<string>()
@@ -98,6 +98,9 @@ export class AgentBridgeImportTarget {
       const worker = this.workers.get(str(binding['workerId']))
       const machineId = str(worker?.['machineId'], str(binding['workerId']))
       const workspace = str(binding['workspace'])
+      const placementKey = str(binding['projectIdentity'])
+        ? 'project\0' + str(binding['projectIdentity'])
+        : 'location\0' + machineId + '\0' + workspace
       const recent = Array.isArray(worker?.['recentWorkspaces'])
         ? worker['recentWorkspaces'].map(record).find(item => str(item['path']) === workspace)
         : undefined
@@ -105,8 +108,7 @@ export class AgentBridgeImportTarget {
       const agent = this.host.agents.get(nativeId)
       return { nativeId, sessionId: str(binding['sessionId']), machineId, workspace,
         ...(str(binding['projectIdentity']) ? { projectIdentity: str(binding['projectIdentity']) } : {}),
-        ...(str(binding['projectIdentity']) && this.projectPlacements.get(str(binding['projectIdentity']))
-          ? { presentationPath: this.projectPlacements.get(str(binding['projectIdentity']))! } : {}),
+        ...(this.presentationPlacements.get(placementKey) ? { presentationPath: this.presentationPlacements.get(placementKey)! } : {}),
         title: agent ? promptTitle(binding, sessionEvents(nativeSession(agent))) : str(binding['title']),
         status: str(binding['status']), worker: str(worker?.['name'], str(binding['workerId'])),
         updatedAt: Number(binding['updatedAt']) || 0, ...(lastUsedAt === undefined ? {} : { lastUsedAt }) }
@@ -305,7 +307,7 @@ export class AgentBridgeImportTarget {
       if (!next || cursors.has(next)) throw new Error('Bridge session cursor did not advance')
       cursors.add(next); cursor = next
     } while (true)
-    this.projectPlacements.clear()
+    this.presentationPlacements.clear()
     // The complete control-plane catalog is authoritative. Retry local cleanup after
     // a confirmed remote deletion even if the previous Host exited before archiving.
     const retained = new Set(summaries.map(row => str(row['sessionId'])))
@@ -376,12 +378,13 @@ export class AgentBridgeImportTarget {
     if (projectIdentity) {
       const cwd = join(this.dataRoot, 'projects', hash(new URL(this.origin).origin + '\0project\0' + projectIdentity))
       await mkdir(cwd, { recursive: true })
-      this.projectPlacements.set(projectIdentity, cwd)
+      this.presentationPlacements.set('project\0' + projectIdentity, cwd)
       return { cwd, title: projectName(row) }
     }
     const machineId = str(worker?.['machineId'], str(row['workerId']))
     const cwd = join(this.dataRoot, 'workspaces', hash(new URL(this.origin).origin + '\0' + machineId + '\0' + path))
     await mkdir(cwd, { recursive: true })
+    this.presentationPlacements.set('location\0' + machineId + '\0' + path, cwd)
     return { cwd, title: path.replace(/\\/g, '/').split('/').filter(Boolean).at(-1) + ' @ ' + machineId }
   }
   private async materialize(id: string, row: JsonObject): Promise<Agent> {
@@ -443,44 +446,48 @@ export class AgentBridgeImportTarget {
     if (!registry.list || !registry.delete) return
     const legacyRoot = await realpath(join(this.dataRoot, 'workspaces')).catch(() => join(this.dataRoot, 'workspaces'))
     const projectRoot = await realpath(join(this.dataRoot, 'projects')).catch(() => join(this.dataRoot, 'projects'))
-    const byIdentity = new Map<string, JsonObject[]>()
-    const retainedLegacySessions = new Set<string>()
+    const groups = new Map<string, JsonObject[]>()
     for (const row of summaries) {
       const identity = str(row['projectIdentity'])
-      if (!identity) {
-        retainedLegacySessions.add(nativeSessionId(this.origin, str(row['sessionId'])))
-        continue
-      }
-      const group = byIdentity.get(identity)
-      if (group) group.push(row); else byIdentity.set(identity, [row])
+      const worker = this.workers.get(str(row['workerId']))
+      const machineId = str(worker?.['machineId'], str(row['workerId']))
+      const key = identity ? 'project\0' + identity : 'location\0' + machineId + '\0' + str(row['workspace'])
+      const group = groups.get(key)
+      if (group) group.push(row); else groups.set(key, [row])
     }
-    for (const [identity, rows] of byIdentity) {
+    for (const [key, rows] of groups) {
+      const identity = str(rows[0]?.['projectIdentity'])
+      const worker = this.workers.get(str(rows[0]?.['workerId']))
+      const machineId = str(worker?.['machineId'], str(rows[0]?.['workerId']))
       const ids = new Set(rows.map(row => nativeSessionId(this.origin, str(row['sessionId']))))
       let workspaces = registry.list()
       const members = workspaces.filter(workspace => workspace.sessionIds?.some(id => ids.has(id)))
-      let keep = members.find(workspace => workspace.path && !inside(this.dataRoot, workspace.path))
-        ?? members.find(workspace => workspace.path && inside(projectRoot, workspace.path))
+      const cwd = identity
+        ? join(this.dataRoot, 'projects', hash(new URL(this.origin).origin + '\0project\0' + identity))
+        : join(this.dataRoot, 'workspaces', hash(new URL(this.origin).origin + '\0' + machineId + '\0' + str(rows[0]?.['workspace'])))
+      let keep = identity ? members.find(workspace => workspace.path && !inside(this.dataRoot, workspace.path)) : undefined
+      keep ??= members.find(workspace => workspace.path === cwd)
       if (!keep) {
-        const cwd = join(this.dataRoot, 'projects', hash(new URL(this.origin).origin + '\0project\0' + identity))
         await mkdir(cwd, { recursive: true })
-        keep = await registry.resolveByPath(cwd) ?? await registry.create(cwd, projectName(rows[0]!))
+        const title = identity ? projectName(rows[0]!) : projectName(rows[0]!) + ' @ ' + machineId
+        keep = await registry.resolveByPath(cwd) ?? await registry.create(cwd, title)
       }
       if (!keep.path) continue
-      this.projectPlacements.set(identity, keep.path)
-      if (inside(projectRoot, keep.path)) await keep.setTitle?.(projectName(rows[0]!))
+      this.presentationPlacements.set(key, keep.path)
+      if (inside(this.dataRoot, keep.path)) await keep.setTitle?.(identity ? projectName(rows[0]!) : projectName(rows[0]!) + ' @ ' + machineId)
       for (const workspace of members) {
-        if (workspace === keep || !workspace.id || !workspace.path || !inside(legacyRoot, workspace.path)) continue
+        if (workspace === keep || !workspace.id || !workspace.path || !inside(this.dataRoot, workspace.path)) continue
         await registry.delete(workspace.id)
       }
       workspaces = registry.list()
       const accounted = new Set(workspaces.flatMap(workspace => workspace.sessionIds ?? []))
       for (const id of ids) if (!accounted.has(id)) await registry.archiveSession?.(id)
     }
-    const activeProjectPaths = new Set(this.projectPlacements.values())
+    const activePresentationPaths = new Set(this.presentationPlacements.values())
     for (const workspace of registry.list()) {
       if (!workspace.id || !workspace.path) continue
-      const obsoleteLegacy = inside(legacyRoot, workspace.path) && !workspace.sessionIds?.some(id => retainedLegacySessions.has(id))
-      const obsoleteProject = inside(projectRoot, workspace.path) && !activeProjectPaths.has(workspace.path)
+      const obsoleteLegacy = inside(legacyRoot, workspace.path) && !activePresentationPaths.has(workspace.path)
+      const obsoleteProject = inside(projectRoot, workspace.path) && !activePresentationPaths.has(workspace.path)
       if (obsoleteLegacy || obsoleteProject) await registry.delete(workspace.id)
     }
   }

@@ -241,6 +241,42 @@ describe('native session catalog', () => {
     expect(createWorkspace).toHaveBeenCalledTimes(1)
     await f.target.dispose()
   })
+  it('converges providers sharing one machine and path even without a project identity', async () => {
+    const f = await fixture([])
+    const summaries: JsonObject[] = [
+      { sessionId: 'remote-1', workerId: 'codex', workspace: '/remote/repo', title: 'Codex conversation', status: 'idle', createdAt: 1, updatedAt: 10 },
+      { sessionId: 'remote-2', workerId: 'claude', workspace: '/remote/repo', title: 'Claude conversation', status: 'idle', createdAt: 1, updatedAt: 10 },
+    ]
+    const ids = summaries.map(item => nativeSessionId('http://bridge.test', String(item['sessionId'])))
+    const paths = [join(roots[0]!, 'workspaces', 'old-codex'), join(roots[0]!, 'workspaces', 'old-claude')]
+    await Promise.all(paths.map(path => mkdir(path, { recursive: true })))
+    const registered = paths.map((path, index) => ({ id: 'old-' + index, path, title: 'repo · provider', sessionIds: [ids[index]!], setTitle: vi.fn(async (_next: string) => {}), attachSession: vi.fn(async (_id: string) => {}) }))
+    for (let index = 0; index < ids.length; index++) {
+      const session = Session.create(SessionId(ids[index]!), [], { version: SESSION_FORMAT_VERSION, id: ids[index]!, cwd: paths[index]!, createdAt: 1, isSeeded: false } as never)
+      f.stored.set(ids[index]!, { header: session.header, events: [] })
+    }
+    const createWorkspace = vi.fn(async (path: string, title?: string) => {
+      const workspace = { id: 'location', path, title: title ?? 'repo', sessionIds: [] as string[], setTitle: vi.fn(async (next: string) => { workspace.title = next }), attachSession: vi.fn(async (id: string) => { workspace.sessionIds.unshift(id) }) }
+      registered.unshift(workspace)
+      return workspace
+    })
+    f.host.workspaceRegistry.list = () => registered
+    f.host.workspaceRegistry.resolveByPath = async path => registered.find(workspace => workspace.path === path)
+    f.host.workspaceRegistry.create = createWorkspace
+    f.host.workspaceRegistry.delete = vi.fn(async id => { const index = registered.findIndex(workspace => workspace.id === id); if (index < 0) return false; registered.splice(index, 1); return true })
+    f.host.workspaceRegistry.archiveSession = vi.fn(async () => {})
+    f.bridge.call.mockImplementation(async request => {
+      if (request.operation === 'workers') return { workers: [{ id: 'codex', machineId: 'dev-wsl', hostname: 'remote', name: 'Codex' }, { id: 'claude', machineId: 'dev-wsl', hostname: 'remote', name: 'Claude' }] }
+      if (request.operation === 'sessions') return page(summaries)
+      if (request.operation === 'session_events') return page([])
+      return page([])
+    })
+    await f.target.refresh()
+    expect(registered.map(workspace => workspace.id)).toEqual(['location'])
+    expect(createWorkspace).toHaveBeenCalledWith(expect.stringContaining('workspaces'), 'repo @ dev-wsl')
+    expect(new Set((f.target.catalog()['sessions'] as JsonObject[]).map(item => item['presentationPath'])).size).toBe(1)
+    await f.target.dispose()
+  })
   it('keeps syncing without retrying workspace attachment after a retained checkout disappears', async () => {
     const f = await fixture()
     const agent = await f.target.ensure(summary)
