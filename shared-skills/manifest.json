@@ -9,6 +9,19 @@
         "agents/openai.yaml": "16998bc4d92069b653939bbe4b9a1740968af772ff8d8ed2f614450110ac898e"
       },
       "dependencies": ["conversation-mcp"]
+    },
+    {
+      "name": "tokensapi-aigc",
+      "version": "1.0.0",
+      "files": {
+        "SKILL.md": "d18db7826d782d6cbefdf4715f85ebe5c32533ef6f4294f1eeba1b6179d8befe",
+        "agents/openai.yaml": "41a1cdd176e45db65a9c0e19717110537667067a0219d9f02c5b5bf3c684c323",
+        "references/aspect-ratio-matching-2026-09-05.md": "7a5a7aba08cdcb563048cf4b7e5602afea82fb7e6ba3e27e2f69c5fa8c4799e5",
+        "references/hermes-integration.md": "9bcb1bda848bff6ee4cd0fc870fada4df1eb46892d2809e756ec149106627f9e",
+        "references/model-capability-comparison-2026-09-05.md": "98cf1a3c3c955b9917b3e25f235531e793a2be0cda71548d3e3ca30a4d15af08",
+        "references/multi-segment-video-chaining.md": "013d397948aef8302cb197bc9bceb555d655ae324c39a1d8c235756f58fb9410"
+      },
+      "dependencies": []
     }
   ]
 }
