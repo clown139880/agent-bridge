@@ -78,6 +78,11 @@ export interface SessionListQuery {
   cursor?: string;
 }
 
+export interface SessionGroupListQuery {
+  limit: number;
+  cursor?: string;
+}
+
 function parseJson<T>(value: unknown, fallback: T): T {
   try { return value == null ? fallback : JSON.parse(String(value)) as T; } catch { return fallback; }
 }
@@ -434,7 +439,21 @@ export class AgentControlStore {
 
   session(id: string): Record<string, unknown> | undefined {
     const row = this.db.prepare("SELECT * FROM sessions WHERE id=?").get(id) as Record<string, unknown> | undefined;
-    return row ? this.mapSession(row, true) : undefined;
+    if(!row)return undefined;
+    const result=this.mapSession(row,true);
+    // Detail reads carry the same authoritative placement identity as catalog pages,
+    // so opening a deep link never forces a client to derive a group locally.
+    const identity=typeof result.projectIdentity==="string"?result.projectIdentity:undefined;
+    const inferred=`WITH inferred AS (SELECT s.*,COALESCE(NULLIF(TRIM(s.project_identity),''),(
+      SELECT CASE WHEN COUNT(DISTINCT NULLIF(TRIM(p.project_identity),''))=1 THEN MIN(NULLIF(TRIM(p.project_identity),'')) END
+      FROM sessions p WHERE p.machine_id=s.machine_id AND p.project_path=s.project_path)) AS resolved_identity FROM sessions s)`;
+    const rows=this.db.prepare(`${inferred} SELECT * FROM inferred WHERE ${identity?"resolved_identity=?":"resolved_identity IS NULL AND machine_id=? AND project_path=?"}
+      ORDER BY updated_at DESC,id ASC`).all(...(identity?[identity]:[String(row.machine_id),String(row.project_path)])) as Record<string,unknown>[];
+    const key=identity?`repository\u001f${identity}`:`location\u001f${String(row.machine_id)}\u001f${String(row.project_path)}`;
+    const group=this.mapPresentationGroup(key,Math.max(...rows.map(value=>Number(value.updated_at))),rows);
+    return{...result,groupId:group.groupId,groupTitle:group.title,groupUpdatedAt:group.updatedAt,
+      executionLocations:group.executionLocations,presentationGroup:{groupId:group.groupId,kind:group.kind,title:group.title,
+        updatedAt:group.updatedAt,executionLocations:group.executionLocations,...(group.projectIdentity?{projectIdentity:group.projectIdentity}:{})}};
   }
 
   listSessions(input: SessionListQuery): { data: Record<string, unknown>[]; nextCursor: string | null; hasMore: boolean } {
@@ -471,6 +490,52 @@ export class AgentControlStore {
     const hasMore=rows.length>input.limit; if(hasMore) rows.pop();
     const data=rows.map(row=>this.mapSession(row,false)); const lastRow=rows.at(-1);
     return { data,hasMore,nextCursor:hasMore&&lastRow?encodeCursor(scope,[Number(lastRow[column]),String(lastRow.id)]):null };
+  }
+
+  /** Page presentation groups, never individual sessions, so a page boundary cannot split a group. */
+  listSessionGroups(input: SessionGroupListQuery): { data: Record<string, unknown>[]; nextCursor: string | null; hasMore: boolean } {
+    const scope=scopeFor("session-groups",{});
+    const inferred=`WITH inferred AS (
+      SELECT s.*,COALESCE(NULLIF(TRIM(s.project_identity),''),(
+        SELECT CASE WHEN COUNT(DISTINCT NULLIF(TRIM(p.project_identity),''))=1
+          THEN MIN(NULLIF(TRIM(p.project_identity),'')) END
+        FROM sessions p WHERE p.machine_id=s.machine_id AND p.project_path=s.project_path
+      )) AS resolved_identity FROM sessions s
+    ), catalog AS (
+      SELECT *,CASE WHEN resolved_identity IS NOT NULL THEN 'repository'||char(31)||resolved_identity
+        ELSE 'location'||char(31)||machine_id||char(31)||project_path END AS group_key FROM inferred
+    )`;
+    const where:string[]=[];const params:any[]=[];
+    if(input.cursor){const [updatedAt,key]=decodeCursor(input.cursor,scope);where.push("(updated_at<? OR (updated_at=? AND group_key>?))");params.push(updatedAt,updatedAt,key);}
+    const groupRows=this.db.prepare(`${inferred}, grouped AS (
+      SELECT group_key,MAX(updated_at) AS updated_at FROM catalog GROUP BY group_key
+    ) SELECT group_key,updated_at FROM grouped ${where.length?`WHERE ${where.join(" AND ")}`:""}
+      ORDER BY updated_at DESC,group_key ASC LIMIT ?`).all(...params,input.limit+1) as Array<{group_key:string;updated_at:number}>;
+    const hasMore=groupRows.length>input.limit;if(hasMore)groupRows.pop();
+    if(!groupRows.length)return{data:[],hasMore:false,nextCursor:null};
+    const keys=groupRows.map(row=>row.group_key);
+    const sessionRows=this.db.prepare(`${inferred} SELECT *,CASE WHEN resolved_identity IS NOT NULL THEN 'repository'||char(31)||resolved_identity
+      ELSE 'location'||char(31)||machine_id||char(31)||project_path END AS group_key FROM inferred
+      WHERE (CASE WHEN resolved_identity IS NOT NULL THEN 'repository'||char(31)||resolved_identity
+        ELSE 'location'||char(31)||machine_id||char(31)||project_path END) IN (${keys.map(()=>"?").join(",")})
+      ORDER BY updated_at DESC,id ASC`).all(...keys) as Record<string,unknown>[];
+    const byKey=new Map<string,Record<string,unknown>[]>();
+    for(const row of sessionRows){const key=String(row.group_key);const values=byKey.get(key);if(values)values.push(row);else byKey.set(key,[row]);}
+    const data=groupRows.map(group=>this.mapPresentationGroup(group.group_key,Number(group.updated_at),byKey.get(group.group_key)??[]));
+    const last=groupRows.at(-1);
+    return{data,hasMore,nextCursor:hasMore&&last?encodeCursor(scope,[Number(last.updated_at),last.group_key]):null};
+  }
+
+  private mapPresentationGroup(groupKey:string,updatedAt:number,rows:Record<string,unknown>[]):Record<string,unknown>{
+    const first=rows[0]!;const repository=groupKey.startsWith("repository\u001f");
+    const projectIdentity=repository?groupKey.slice("repository\u001f".length):undefined;
+    const groupId=(repository?"repo:":"loc:")+createHash("sha256").update(groupKey).digest("base64url").slice(0,22);
+    const locations=new Map<string,Record<string,unknown>>();
+    for(const row of rows){const workerId=buildWorkerId(String(row.agent_type) as AgentType,String(row.machine_id));const key=workerId+"\0"+String(row.project_path);
+      locations.set(key,{workerId,agent:String(row.agent_type),machineId:String(row.machine_id),workspace:String(row.project_path)});}
+    const title=String(first.project_name)||(String(first.project_path).replace(/\\/g,"/").split("/").filter(Boolean).at(-1)??"Sessions");
+    return{groupId,kind:repository?"repository":"location",title:repository?title:`${title} @ ${String(first.machine_id)}`,
+      ...(projectIdentity?{projectIdentity}:{}),updatedAt,executionLocations:[...locations.values()],sessions:rows.map(row=>this.mapSession(row,false))};
   }
 
   sessionEvents(sessionId: string, after: string | undefined, limit: number, types: string[]):

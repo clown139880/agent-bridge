@@ -94,6 +94,7 @@ export class AgentControlApi {
       if(request.method==="GET"&&workerModels){const workerId=decodeURIComponent(workerModels[1]!);const machineId=parseWorkerId(workerId)?.machineId??workerId;
         try{this.ok(response,await this.bridges.requestModels(machineId));}catch(error){throw new ApiProblem(503,'model_catalog_unavailable',error instanceof Error?error.message:String(error));}return true;}
       if(request.method==="GET"&&url.pathname==="/api/v1/snapshot"){this.snapshot(url,response);return true;}
+      if(request.method==="GET"&&url.pathname==="/api/v1/session-groups"){this.sessionGroups(url,response);return true;}
       if(request.method==="GET"&&url.pathname==="/api/v1/sessions"){this.sessions(url,response);return true;}
       if(request.method==="POST"&&url.pathname==="/api/v1/sessions"){await this.createSession(request,response,principal);return true;}
       if(request.method==="GET"&&url.pathname==="/api/v1/runs"){this.runs(url,response);return true;}
@@ -174,6 +175,23 @@ export class AgentControlApi {
       q:url.searchParams.get("q")??undefined,sort:sort as "updatedAt"|"createdAt",order:order as "asc"|"desc",
       limit:integer(url.searchParams.get("limit"),"limit",50,1,200),cursor:url.searchParams.get("cursor")??undefined});
       this.ok(response,{...page,streamCursor:this.store.streamCursor()});}catch(error){this.cursorError(error);}
+  }
+
+  private sessionGroups(url:URL,response:ServerResponse):void{
+    const limit=integer(url.searchParams.get("limit"),"limit",50,1,200);
+    try{
+      const page=this.store.listSessionGroups({limit,cursor:url.searchParams.get("cursor")??undefined});
+      const workers=this.legacy.listMachines().flatMap(machine=>this.machineWorkers(machine));
+      const byId=new Map(workers.map(worker=>[String(worker.id),worker]));
+      const data=page.data.map(group=>({...group,executionLocations:(group.executionLocations as Record<string,unknown>[]).map(location=>{
+        const worker=byId.get(String(location.workerId));
+        const machine=this.legacy.listMachines().find(value=>value.id===location.machineId);
+        const online=worker?.status==="online";
+        return{...location,workerName:String(worker?.name??location.workerId),machineName:machine?.name??String(location.machineId),
+          online,available:online&&Array.isArray(worker?.capabilities)&&worker.capabilities.includes("session-actions")};
+      })}));
+      this.ok(response,{...page,data,streamCursor:this.store.streamCursor()});
+    }catch(error){this.cursorError(error);}
   }
 
   private requireKey(request:IncomingMessage):string {

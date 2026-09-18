@@ -46,7 +46,7 @@ it('overrides the sidebar workspace hook and refreshes an existing subscriber', 
   const snapshot = { items: rows, archivedSessionIds: [] }
   const rawListeners = new Set<() => void>()
   const source = { getSnapshot: () => snapshot, subscribe: (listener: () => void) => { rawListeners.add(listener); return () => rawListeners.delete(listener) } }
-  const sessions = (identity: string) => rows.map(row => ({ nativeId: row.workspaceId, sessionId: row.workspaceId, machineId: row.workspaceId, workspace: '/work/agent-bridge', projectIdentity: identity, title: row.title, status: 'idle', worker: row.workspaceId }))
+  const sessions = (identity: string) => rows.map(row => ({ nativeId: row.workspaceId, sessionId: row.workspaceId, groupId: `repo:${identity}`, groupTitle: 'agent-bridge', groupUpdatedAt: 1, executionLocations: [], machineId: row.workspaceId, workspace: '/work/agent-bridge', projectIdentity: identity, title: row.title, status: 'idle', worker: row.workspaceId, updatedAt: 1 }))
   let catalogRows = sessions('github.com/example/agent-bridge')
   const catalog = new NativeCatalog(async () => ({ sessions: catalogRows }), { list: { getSnapshot: () => ({}), subscribe: () => () => {} }, clear: vi.fn(), refresh: vi.fn(async () => {}) })
   await catalog.refresh()
@@ -58,7 +58,7 @@ it('overrides the sidebar workspace hook and refreshes an existing subscriber', 
   try {
     await act(async () => root.render(createElement(entry.component as any, { useWorkspaces: (selector: any) => selector(snapshot) })))
     expect(div.textContent).toBe('agent-bridge')
-    catalogRows = [catalogRows[0]!, { ...catalogRows[1]!, projectIdentity: 'github.com/example/other' }]
+    catalogRows = [catalogRows[0]!, { ...catalogRows[1]!, groupId: 'repo:github.com/example/other', projectIdentity: 'github.com/example/other' }]
     await act(async () => { await catalog.refresh() })
     expect(div.textContent).toBe('agent-bridge|agent-bridge')
   } finally {

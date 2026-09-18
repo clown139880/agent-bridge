@@ -298,6 +298,29 @@ export interface SessionState {
   projectIdentity?: string;
 }
 
+/** A physical place where a presentation group can execute. */
+export interface SessionExecutionLocation {
+  workerId: string;
+  workerName: string;
+  agent: AgentType;
+  machineId: string;
+  machineName: string;
+  workspace: string;
+  online: boolean;
+  available: boolean;
+}
+
+/** Server-owned grouping and ordering for session catalog presentation. */
+export interface SessionPresentationGroup {
+  groupId: string;
+  kind: "repository" | "location";
+  title: string;
+  projectIdentity?: string;
+  updatedAt: number;
+  executionLocations: SessionExecutionLocation[];
+  sessions: Array<Record<string, unknown>>;
+}
+
 export interface StateSnapshotMessage {
   type: "state.snapshot";
   generation: string;

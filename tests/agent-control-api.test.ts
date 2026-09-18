@@ -107,6 +107,17 @@ test("Agent Control REST exposes snapshot, pagination, actions, idempotency and 
     assert.equal(first.data[0].projectIdentity,"github.com/example/repo");
     const second=await fetch(`${f.base}/sessions?limit=1&cursor=${encodeURIComponent(first.nextCursor)}`,{headers:f.headers}).then(r=>r.json()) as any;
     assert.equal(second.data[0].sessionId,"thread-older");
+    const groups=await fetch(`${f.base}/session-groups?limit=1`,{headers:f.headers}).then(r=>r.json()) as any;
+    assert.equal(groups.data.length,1);assert.equal(groups.hasMore,true);assert.ok(groups.nextCursor);
+    assert.equal(groups.data[0].kind,"repository");assert.equal(groups.data[0].projectIdentity,"github.com/example/repo");
+    assert.deepEqual(groups.data[0].sessions.map((row:any)=>row.sessionId),["thread-1"]);
+    assert.deepEqual(groups.data[0].executionLocations[0],{workerId:"codex@dev",agent:"codex-cli",machineId:"dev",workspace:"/work/repo",
+      workerName:"Codex @ Workstation",machineName:"Workstation",online:true,available:true});
+    const groupNext=await fetch(`${f.base}/session-groups?limit=1&cursor=${encodeURIComponent(groups.nextCursor)}`,{headers:f.headers}).then(r=>r.json()) as any;
+    assert.deepEqual(groupNext.data[0].sessions.map((row:any)=>row.sessionId),["thread-older"]);
+    const detail=await fetch(`${f.base}/sessions/thread-1`,{headers:f.headers}).then(r=>r.json()) as any;
+    assert.equal(detail.workerId,"codex@dev");assert.equal(detail.machineId,"dev");assert.equal(detail.workspace,"/work/repo");
+    assert.equal(detail.groupId,groups.data[0].groupId);
     const recent=await fetch(`${f.base}/sessions?segment=recent&dayStart=1750&limit=10`,{headers:f.headers}).then(r=>r.json()) as any;
     assert.deepEqual(recent.data.map((row:any)=>row.sessionId),["thread-1"]);
     const history=await fetch(`${f.base}/sessions?segment=history&dayStart=1750&limit=10`,{headers:f.headers}).then(r=>r.json()) as any;

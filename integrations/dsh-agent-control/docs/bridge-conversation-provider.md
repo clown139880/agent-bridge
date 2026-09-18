@@ -26,8 +26,8 @@ materialization is an implementation detail, not another user entry point.
 
 ## Data path
 
-Bridge workers + paginated sessions
-  -> AgentBridgeImportTarget reconciliation
+Bridge workers + server-paginated presentation groups
+  -> AgentBridgeImportTarget materialization
   -> stable native ID / history projection / workspace attachment
   -> DSH AgentRegistry + Session persistence
   -> DSH sessionQuery / original Sessions tree
@@ -56,14 +56,13 @@ and acknowledged Bridge event IDs live in the native session log, so restart and
 repeat reconciliation do not copy the same transcript again.
 
 A directory on a worker whose hostname and platform match the Host can share the existing
-native workspace when the directory exists locally. Remote or missing directories
-use an isolated presentation directory under ~/.dsh/agent-bridge/workspaces,
-keyed by control plane, machine identity and original directory. Those directories contain
-no copied project source. The original worker/path remain in the durable binding.
-Workers on the same machine can share that location; equal paths on different
-machines remain distinct. Existing persisted presentation directories retain
-their identity; this release does not rewrite old session headers to merge them.
-Windows and WSL remain separate execution locations even when their hostnames match.
+native workspace when the directory exists locally. Otherwise DSH's workspace contract is
+satisfied by an isolated adapter directory under `~/.dsh/agent-bridge/groups`, keyed only by
+the Control Plane's stable `groupId`. It contains no copied project source and is not a second
+grouping state source. The authoritative group title, aggregate activity, session order and
+all physical execution locations come from `GET /session-groups`. The original worker/path
+remain in every durable binding. The one-time cleanup removes obsolete 0.1.41
+`projects`/`workspaces` presentation containers after their sessions converge.
 
 The original directory New Session action now opens a source picker through a
 narrow, disposable wrapper around the client Sessions.create method. The Host
@@ -73,12 +72,11 @@ The Host revalidates the selected source, creates the remote session, materializ
 it, and the client refreshes its native list before returning the new identity.
 Cancel creates nothing. Offline sources remain visible but cannot be selected.
 
-The client catalog merges workspaces whose known Bridge members unanimously
-resolve to the same normalized repository identity, including local, worker and
-cross-machine representations. Native DSH sessions and stale ids remain in their
-Host workspace but do not veto that identity; conflicting known identities do.
-When repository identity is unavailable, merging remains limited to the exact
-`(machineId, remote workspace)` pair and never guesses from a matching basename.
+The client catalog does not infer Bridge groups or sort Bridge sessions. It projects the
+server's `groupId` and order, and only fuses native DSH sessions from a real local workspace
+whose canonical path matches a server-declared local execution location. Unmatched native
+sessions remain in their original DSH groups. Rename, delete and drag operations are mapped
+back to their original Host workspaces.
 Every native session id, original cwd and execution binding is preserved.
 
 Presentation agents use the empty agent-bridge preset. The provider installs

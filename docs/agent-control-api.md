@@ -46,6 +46,7 @@ DSH Host 插件保存 Control token 并代理请求/事件；浏览器 Client �
 | 新增 | `DELETE` | `/workers/{workerId}` | 永久移除离线 worker 及其投影 |
 | 新增 | `GET` | `/workers/{workerId}/models` | 向目标 Bridge 请求诊断用模型目录 |
 | 新增 | `GET` | `/snapshot` | Workers/Sessions/待办的无竞态 UI 初始快照 |
+| 新增 | `GET` | `/session-groups` | Server-authoritative 的会话展示分组与稳定分页 |
 | 新增 | `GET` | `/sessions` | 查询所有近期或活动 Agent sessions |
 | 新增 | `POST` | `/sessions` | 创建 Agent session，可同时启动首个 turn |
 | 新增 | `GET` | `/sessions/{sessionId}` | session 详情和关联关系 |
@@ -163,6 +164,27 @@ export interface Session extends SessionSummary {
   matrixRoomId: string | null;   // compatibility metadata, not a UI control channel
   matrixThreadId: string | null;
   error: ApiErrorBody | null;
+}
+
+export interface SessionExecutionLocation {
+  workerId: string;
+  workerName: string;
+  agent: AgentType;
+  machineId: string;
+  machineName: string;
+  workspace: string;          // physical execution cwd, never a presentation adapter path
+  online: boolean;
+  available: boolean;         // currently routable for session actions
+}
+
+export interface SessionPresentationGroup {
+  groupId: string;            // stable opaque identity
+  kind: "repository" | "location";
+  title: string;
+  projectIdentity?: string;
+  updatedAt: EpochMs;         // max session updatedAt
+  executionLocations: SessionExecutionLocation[];
+  sessions: SessionSummary[]; // updatedAt DESC, sessionId ASC
 }
 
 // Existing names and values must remain valid for Hermes.
@@ -438,6 +460,14 @@ lastSeenAt}`，其中 `workspaces` 是路径字符串数组。当前工作树已
 此接口，不并行拼装多个可能不一致的列表。
 
 ### 6.2 Sessions
+
+#### `GET /session-groups`（新增）
+
+会话目录的权威展示接口。仅接受 `limit`（默认 50，最大 200）和 opaque `cursor`，返回
+`Page<SessionPresentationGroup>`。repository identity 优先；没有 identity 时以 `machineId + physical workspace`
+分组。group 按 `updatedAt DESC, groupId ASC`，组内 session 按 `updatedAt DESC, sessionId ASC`。cursor 位于组
+边界并编码 aggregate `updatedAt` 与稳定 group key，因此一页不会拆开一个组。客户端不得再从 `/sessions`
+全量拉取后自行重新分组或排序；physical execution location 只用于创建、恢复和路由。
 
 #### `GET /sessions`（新增）
 

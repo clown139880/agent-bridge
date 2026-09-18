@@ -21,8 +21,13 @@ import { join } from 'node:path'
 const row = (id: string, type = 'message.completed', payload: JsonObject = { role: 'assistant', text: 'answer' }): JsonObject => ({
   eventId: id, sessionId: 'remote-1', turnId: 't1', itemId: id, timestamp: 10, type, payload,
 })
-const summary: JsonObject = { sessionId: 'remote-1', workerId: 'w', workspace: '/remote/repo', projectIdentity: 'github.com/example/repo', title: 'Remote conversation', status: 'idle', createdAt: 1, updatedAt: 10 }
+const summary: JsonObject = { sessionId: 'remote-1', workerId: 'w', machineId: 'dev-wsl', workspace: '/remote/repo', projectIdentity: 'github.com/example/repo', groupId: 'repo:test', groupTitle: 'repo', groupUpdatedAt: 10, executionLocations: [{ workerId: 'w', machineId: 'dev-wsl', workspace: '/remote/repo' }], title: 'Remote conversation', status: 'idle', createdAt: 1, updatedAt: 10 }
 const page = (data: JsonObject[], nextCursor = 'end', hasMore = false): JsonValue => ({ data, nextCursor, hasMore })
+const testGroupId = (row: JsonObject) => String(row['projectIdentity'] ? 'repo:' + row['projectIdentity'] : 'loc:' + (row['machineId'] ?? row['workerId']) + ':' + row['workspace'])
+const groupPage = (sessions: JsonObject[]): JsonValue => page([...new Map(sessions.map(row => [testGroupId(row), row])).entries()].map(([groupId, first]) => {
+  const members = sessions.filter(row => testGroupId(row) === groupId)
+  return { groupId, title: String(first['groupTitle'] ?? 'repo'), updatedAt: Math.max(...members.map(row => Number(row['updatedAt']))), executionLocations: members.map(row => ({ workerId: String(row['workerId']), machineId: String(row['machineId'] ?? row['workerId']), workspace: String(row['workspace']) })), sessions: members }
+}))
 const roots: string[] = []
 afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }) })
 async function fixture(rows = [row('u', 'message.completed', { role: 'user', text: 'hello' }), row('a')]) {
@@ -48,7 +53,7 @@ async function fixture(rows = [row('u', 'message.completed', { role: 'user', tex
   }
   const bridge = { call: vi.fn<BridgeClient['call']>(async request => {
     if (request.operation === 'workers') return { workers: [{ id: 'w', hostname: 'remote-host', name: 'Remote worker', recentWorkspaces: [{ path: '/remote/repo', lastUsedAt: 123 }] }] }
-    if (request.operation === 'sessions') return page([summary])
+    if (request.operation === 'session_groups') return groupPage([summary])
     if (request.operation === 'session') return summary
     if (request.operation === 'session_events') return page(request.args?.['after'] ? [] : rows)
     return page([])
@@ -164,7 +169,7 @@ describe('native session catalog', () => {
         { id: 'windows', machineId: 'windows', hostname: 'remote-windows', name: 'Claude @ Windows PC', status: 'online' },
         { id: 'other', machineId: 'hal', hostname: 'remote-hal', name: 'Codex', status: 'online' },
       ] }
-      if (request.operation === 'sessions') return page(summaries)
+      if (request.operation === 'session_groups') return groupPage(summaries)
       if (request.operation === 'session_events') return page([])
       return page([])
     })
@@ -185,7 +190,7 @@ describe('native session catalog', () => {
     expect([...f.agents.keys()]).toEqual(['local-session', id])
     expect(f.target.binding(id)?.['workspace']).toBe('/remote/repo')
     expect((f.target.catalog()['sessions'] as JsonObject[])[0]).toMatchObject({ lastUsedAt: 123, projectIdentity: 'github.com/example/repo' })
-    expect(f.host.workspaceRegistry.create).toHaveBeenCalledWith(expect.stringContaining('projects'), 'repo')
+    expect(f.host.workspaceRegistry.create).toHaveBeenCalledWith(expect.stringContaining('groups'), 'repo')
     expect(f.stored.has(id)).toBe(true)
     await f.target.refresh()
     expect(f.create).toHaveBeenCalledTimes(1)
@@ -227,16 +232,16 @@ describe('native session catalog', () => {
     f.host.workspaceRegistry.archiveSession = vi.fn(async () => {})
     f.bridge.call.mockImplementation(async request => {
       if (request.operation === 'workers') return { workers: [{ id: 'w', machineId: 'one', hostname: 'remote', name: 'one' }, { id: 'w2', machineId: 'two', hostname: 'remote', name: 'two' }] }
-      if (request.operation === 'sessions') return page(summaries)
+      if (request.operation === 'session_groups') return groupPage(summaries)
       if (request.operation === 'session_events') return page([])
       return page([])
     })
     await f.target.refresh()
     expect(registered.map(workspace => workspace.id)).toEqual(['project'])
-    expect(createWorkspace).toHaveBeenCalledWith(expect.stringContaining('projects'), 'repo')
+    expect(createWorkspace).toHaveBeenCalledWith(expect.stringContaining('groups'), 'repo')
     expect(f.host.workspaceRegistry.delete).toHaveBeenCalledTimes(3)
     expect(f.host.workspaceRegistry.archiveSession).toHaveBeenCalledTimes(2)
-    expect((f.target.catalog()['sessions'] as JsonObject[]).every(item => String(item['presentationPath']).includes('projects'))).toBe(true)
+    expect((f.target.catalog()['sessions'] as JsonObject[]).every(item => String(item['presentationPath']).includes('groups'))).toBe(true)
     await f.target.refresh()
     expect(createWorkspace).toHaveBeenCalledTimes(1)
     await f.target.dispose()
@@ -244,9 +249,9 @@ describe('native session catalog', () => {
   it('converges providers sharing one machine and path even without a project identity', async () => {
     const f = await fixture([])
     const summaries: JsonObject[] = [
-      { sessionId: 'remote-1', workerId: 'codex', workspace: '/remote/repo', title: 'Codex conversation', status: 'idle', createdAt: 1, updatedAt: 10 },
-      { sessionId: 'remote-2', workerId: 'claude', workspace: '/remote/repo', title: 'Claude conversation', status: 'idle', createdAt: 1, updatedAt: 10 },
-      { sessionId: 'remote-3', workerId: 'local', workspace: '/remote/repo', title: 'Local conversation', status: 'idle', createdAt: 1, updatedAt: 10 },
+      { sessionId: 'remote-1', workerId: 'codex', machineId: 'dev-wsl', workspace: '/remote/repo', title: 'Codex conversation', status: 'idle', createdAt: 1, updatedAt: 10 },
+      { sessionId: 'remote-2', workerId: 'claude', machineId: 'dev-wsl', workspace: '/remote/repo', title: 'Claude conversation', status: 'idle', createdAt: 1, updatedAt: 10 },
+      { sessionId: 'remote-3', workerId: 'local', machineId: 'dev-wsl', workspace: '/remote/repo', title: 'Local conversation', status: 'idle', createdAt: 1, updatedAt: 10 },
     ]
     const ids = summaries.map(item => nativeSessionId('http://bridge.test', String(item['sessionId'])))
     const paths = [join(roots[0]!, 'workspaces', 'old-codex'), join(roots[0]!, 'workspaces', 'old-claude')]
@@ -270,7 +275,7 @@ describe('native session catalog', () => {
     f.host.workspaceRegistry.archiveSession = vi.fn(async () => {})
     f.bridge.call.mockImplementation(async request => {
       if (request.operation === 'workers') return { workers: [{ id: 'codex', machineId: 'dev-wsl', hostname: 'remote', name: 'Codex' }, { id: 'claude', machineId: 'dev-wsl', hostname: 'remote', name: 'Claude' }, { id: 'local', machineId: 'dev-wsl', hostname: 'remote', name: 'Local' }] }
-      if (request.operation === 'sessions') return page(summaries)
+      if (request.operation === 'session_groups') return groupPage(summaries)
       if (request.operation === 'session_events') return page([])
       return page([])
     })

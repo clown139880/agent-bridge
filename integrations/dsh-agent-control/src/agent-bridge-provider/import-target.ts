@@ -70,6 +70,7 @@ export class AgentBridgeImportTarget {
   private readonly versions = new Map<string, number>()
   private readonly placementOverrides = new Map<string, string>()
   private readonly presentationPlacements = new Map<string, string>()
+  private readonly presentationGroups = new Map<string, JsonObject>()
   error = ''
   lastSyncAt = 0
   private readonly deleting = new Set<string>()
@@ -94,19 +95,26 @@ export class AgentBridgeImportTarget {
     return { sourceSelection: true, imageForwarding: true, nativeSessions: Object.values(counts).reduce((a, b) => a + b, 0), workers: Object.entries(counts).map(([workerId, sessions]) => ({ workerId, name: str(this.workers.get(workerId)?.['name'], workerId), sessions })), error: this.error, lastSyncAt: this.lastSyncAt }
   }
   catalog(): JsonObject {
-    return { sessions: [...this.bindings].filter(([id]) => !this.deleted.has(id)).map(([nativeId, binding]) => {
+    const groups = [...this.presentationGroups.values()].map(group => ({ ...group, executionLocations: Array.isArray(group['executionLocations'])
+      ? group['executionLocations'].map(record).map(location => ({ ...location, local: this.isLocalWorker(this.workers.get(str(location['workerId'])) ?? {}) })) : [] }))
+    return { groups, sessions: [...this.bindings].filter(([id]) => !this.deleted.has(id))
+      .sort(([, left], [, right]) => Number(left['presentationOrder']) - Number(right['presentationOrder']))
+      .map(([nativeId, binding]) => {
       const worker = this.workers.get(str(binding['workerId']))
       const machineId = str(worker?.['machineId'], str(binding['workerId']))
       const workspace = str(binding['workspace'])
-      const placementKey = str(binding['projectIdentity'])
-        ? 'project\0' + str(binding['projectIdentity'])
-        : 'location\0' + machineId + '\0' + workspace
+      const placementKey = 'group\0' + str(binding['groupId'])
       const recent = Array.isArray(worker?.['recentWorkspaces'])
         ? worker['recentWorkspaces'].map(record).find(item => str(item['path']) === workspace)
         : undefined
       const lastUsedAt = typeof recent?.['lastUsedAt'] === 'number' && Number.isFinite(recent['lastUsedAt']) ? recent['lastUsedAt'] : undefined
       const agent = this.host.agents.get(nativeId)
+      const executionLocations = Array.isArray(binding['executionLocations']) ? binding['executionLocations'].map(record).map(location => ({
+        ...location, local: this.isLocalWorker(this.workers.get(str(location['workerId'])) ?? {}),
+      })) : []
       return { nativeId, sessionId: str(binding['sessionId']), machineId, workspace,
+        groupId: str(binding['groupId']), groupTitle: str(binding['groupTitle']), groupUpdatedAt: Number(binding['groupUpdatedAt']) || Number(binding['updatedAt']) || 0,
+        executionLocations,
         ...(str(binding['projectIdentity']) ? { projectIdentity: str(binding['projectIdentity']) } : {}),
         ...(this.presentationPlacements.get(placementKey) ? { presentationPath: this.presentationPlacements.get(placementKey)! } : {}),
         title: agent ? promptTitle(binding, sessionEvents(nativeSession(agent))) : str(binding['title']),
@@ -296,19 +304,29 @@ export class AgentBridgeImportTarget {
     if (!Array.isArray(workerPage['workers'])) throw new Error('Invalid Bridge worker page')
     for (const worker of workerPage['workers']) { const row = record(worker); this.workers.set(str(row['id']), row) }
     const summaries: JsonObject[] = []
+    const groups: JsonObject[] = []
     const cursors = new Set<string>()
     let cursor = ''
     do {
-      const page = record(await this.bridge.call({ operation: 'sessions', args: { limit: 200, ...(cursor ? { cursor } : {}) } }, this.abort.signal))
-      if (!Array.isArray(page['data'])) throw new Error('Invalid Bridge sessions page')
-      summaries.push(...page['data'].map(record))
+      const page = record(await this.bridge.call({ operation: 'session_groups', args: { limit: 200, ...(cursor ? { cursor } : {}) } }, this.abort.signal))
+      if (!Array.isArray(page['data'])) throw new Error('Invalid Bridge presentation-group page')
+      for (const value of page['data']) {
+        const group = record(value)
+        if (!str(group['groupId']) || !Array.isArray(group['sessions'])) throw new Error('Invalid Bridge presentation group')
+        groups.push(group)
+        for (const value of group['sessions']) summaries.push({ ...record(value), groupId: str(group['groupId']), groupTitle: str(group['title']),
+          groupUpdatedAt: Number(group['updatedAt']) || 0, presentationOrder: summaries.length,
+          executionLocations: Array.isArray(group['executionLocations']) ? group['executionLocations'] : [] })
+      }
       if (!page['hasMore']) break
       const next = str(page['nextCursor'])
       if (!next || cursors.has(next)) throw new Error('Bridge session cursor did not advance')
       cursors.add(next); cursor = next
     } while (true)
     this.presentationPlacements.clear()
-    this.preparePresentationPlacements(summaries)
+    this.presentationGroups.clear()
+    for (const group of groups) this.presentationGroups.set(str(group['groupId']), group)
+    this.preparePresentationPlacements(groups)
     // The complete control-plane catalog is authoritative. Retry local cleanup after
     // a confirmed remote deletion even if the previous Host exited before archiving.
     const retained = new Set(summaries.map(row => str(row['sessionId'])))
@@ -349,7 +367,7 @@ export class AgentBridgeImportTarget {
         } catch (error) { failures.push(remoteId + ': ' + String(error)) }
       }
     }))
-    await this.reconcileProjectWorkspaces(summaries)
+    await this.reconcilePresentationWorkspaces(groups)
     this.error = failures.join('\n')
     this.lastSyncAt = Date.now()
     if (failures.length) this.host.logger.warn('Agent Bridge: ' + failures.length + ' session(s) failed to sync: ' + failures.slice(0, 3).join('; '))
@@ -375,22 +393,15 @@ export class AgentBridgeImportTarget {
     if (worker && this.isLocalWorker(worker) && isAbsolute(path)) {
       try { return { cwd: await realpath(path), title: basename(path) } } catch { /* remote/missing paths use an isolated presentation directory */ }
     }
-    const projectIdentity = str(row['projectIdentity'])
-    if (projectIdentity) {
-      const planned = this.presentationPlacements.get('project\0' + projectIdentity)
-      if (planned) return { cwd: planned, title: projectName(row) }
-      const cwd = join(this.dataRoot, 'projects', hash(new URL(this.origin).origin + '\0project\0' + projectIdentity))
-      await mkdir(cwd, { recursive: true })
-      this.presentationPlacements.set('project\0' + projectIdentity, cwd)
-      return { cwd, title: projectName(row) }
-    }
-    const machineId = str(worker?.['machineId'], str(row['workerId']))
-    const planned = this.presentationPlacements.get('location\0' + machineId + '\0' + path)
-    if (planned) return { cwd: planned, title: projectName(row) + ' @ ' + machineId }
-    const cwd = join(this.dataRoot, 'workspaces', hash(new URL(this.origin).origin + '\0' + machineId + '\0' + path))
+    const groupId = str(row['groupId'])
+    if (!groupId) throw new Error('Bridge session has no authoritative presentation group')
+    const key = 'group\0' + groupId
+    const planned = this.presentationPlacements.get(key)
+    if (planned) return { cwd: planned, title: str(row['groupTitle'], projectName(row)) }
+    const cwd = join(this.dataRoot, 'groups', hash(new URL(this.origin).origin + '\0' + groupId))
     await mkdir(cwd, { recursive: true })
-    this.presentationPlacements.set('location\0' + machineId + '\0' + path, cwd)
-    return { cwd, title: path.replace(/\\/g, '/').split('/').filter(Boolean).at(-1) + ' @ ' + machineId }
+    this.presentationPlacements.set(key, cwd)
+    return { cwd, title: str(row['groupTitle'], projectName(row)) }
   }
   private async materialize(id: string, row: JsonObject): Promise<Agent> {
     this.abort.signal.throwIfAborted()
@@ -446,63 +457,42 @@ export class AgentBridgeImportTarget {
     await workspace.attachSession(id)
     return agent
   }
-  private preparePresentationPlacements(summaries: readonly JsonObject[]): void {
+  private preparePresentationPlacements(groups: readonly JsonObject[]): void {
     const workspaces = this.host.workspaceRegistry.list?.()
     if (!workspaces) return
-    const grouped = new Map<string, { rows: JsonObject[]; machineId: string; identity: string }>()
-    for (const row of summaries) {
-      const identity = str(row['projectIdentity'])
-      const worker = this.workers.get(str(row['workerId']))
-      const machineId = str(worker?.['machineId'], str(row['workerId']))
-      const key = identity ? 'project\0' + identity : 'location\0' + machineId + '\0' + str(row['workspace'])
-      const value = grouped.get(key)
-      if (value) value.rows.push(row); else grouped.set(key, { rows: [row], machineId, identity })
-    }
-    for (const [key, group] of grouped) {
-      const ids = new Set(group.rows.map(row => nativeSessionId(this.origin, str(row['sessionId']))))
+    for (const group of groups) {
+      const groupId = str(group['groupId']); const key = 'group\0' + groupId
+      const rows = Array.isArray(group['sessions']) ? group['sessions'].map(record) : []
+      const ids = new Set(rows.map(row => nativeSessionId(this.origin, str(row['sessionId']))))
       const members = workspaces.filter(workspace => workspace.sessionIds?.some(id => ids.has(id)))
-      const expected = group.identity
-        ? join(this.dataRoot, 'projects', hash(new URL(this.origin).origin + '\0project\0' + group.identity))
-        : join(this.dataRoot, 'workspaces', hash(new URL(this.origin).origin + '\0' + group.machineId + '\0' + str(group.rows[0]?.['workspace'])))
+      const expected = join(this.dataRoot, 'groups', hash(new URL(this.origin).origin + '\0' + groupId))
       const keep = members.find(workspace => workspace.path && !inside(this.dataRoot, workspace.path))
         ?? members.find(workspace => workspace.path === expected)
       if (keep?.path) this.presentationPlacements.set(key, keep.path)
     }
   }
-  private async reconcileProjectWorkspaces(summaries: readonly JsonObject[]): Promise<void> {
+  private async reconcilePresentationWorkspaces(groups: readonly JsonObject[]): Promise<void> {
     const registry = this.host.workspaceRegistry
     if (!registry.list || !registry.delete) return
     const legacyRoot = await realpath(join(this.dataRoot, 'workspaces')).catch(() => join(this.dataRoot, 'workspaces'))
     const projectRoot = await realpath(join(this.dataRoot, 'projects')).catch(() => join(this.dataRoot, 'projects'))
-    const groups = new Map<string, JsonObject[]>()
-    for (const row of summaries) {
-      const identity = str(row['projectIdentity'])
-      const worker = this.workers.get(str(row['workerId']))
-      const machineId = str(worker?.['machineId'], str(row['workerId']))
-      const key = identity ? 'project\0' + identity : 'location\0' + machineId + '\0' + str(row['workspace'])
-      const group = groups.get(key)
-      if (group) group.push(row); else groups.set(key, [row])
-    }
-    for (const [key, rows] of groups) {
-      const identity = str(rows[0]?.['projectIdentity'])
-      const worker = this.workers.get(str(rows[0]?.['workerId']))
-      const machineId = str(worker?.['machineId'], str(rows[0]?.['workerId']))
+    const groupRoot = await realpath(join(this.dataRoot, 'groups')).catch(() => join(this.dataRoot, 'groups'))
+    for (const group of groups) {
+      const groupId = str(group['groupId']); const key = 'group\0' + groupId
+      const rows = Array.isArray(group['sessions']) ? group['sessions'].map(record) : []
       const ids = new Set(rows.map(row => nativeSessionId(this.origin, str(row['sessionId']))))
       let workspaces = registry.list()
       const members = workspaces.filter(workspace => workspace.sessionIds?.some(id => ids.has(id)))
-      const cwd = identity
-        ? join(this.dataRoot, 'projects', hash(new URL(this.origin).origin + '\0project\0' + identity))
-        : join(this.dataRoot, 'workspaces', hash(new URL(this.origin).origin + '\0' + machineId + '\0' + str(rows[0]?.['workspace'])))
+      const cwd = join(this.dataRoot, 'groups', hash(new URL(this.origin).origin + '\0' + groupId))
       let keep = members.find(workspace => workspace.path && !inside(this.dataRoot, workspace.path))
       keep ??= members.find(workspace => workspace.path === cwd)
       if (!keep) {
         await mkdir(cwd, { recursive: true })
-        const title = identity ? projectName(rows[0]!) : projectName(rows[0]!) + ' @ ' + machineId
-        keep = await registry.resolveByPath(cwd) ?? await registry.create(cwd, title)
+        keep = await registry.resolveByPath(cwd) ?? await registry.create(cwd, str(group['title'], projectName(rows[0]!)))
       }
       if (!keep.path) continue
       this.presentationPlacements.set(key, keep.path)
-      if (inside(this.dataRoot, keep.path)) await keep.setTitle?.(identity ? projectName(rows[0]!) : projectName(rows[0]!) + ' @ ' + machineId)
+      if (inside(this.dataRoot, keep.path)) await keep.setTitle?.(str(group['title'], projectName(rows[0]!)))
       for (const workspace of members) {
         if (workspace === keep || !workspace.id || !workspace.path || !inside(this.dataRoot, workspace.path)) continue
         await registry.delete(workspace.id)
@@ -516,7 +506,8 @@ export class AgentBridgeImportTarget {
       if (!workspace.id || !workspace.path) continue
       const obsoleteLegacy = inside(legacyRoot, workspace.path) && !activePresentationPaths.has(workspace.path)
       const obsoleteProject = inside(projectRoot, workspace.path) && !activePresentationPaths.has(workspace.path)
-      if (obsoleteLegacy || obsoleteProject) await registry.delete(workspace.id)
+      const obsoleteGroup = inside(groupRoot, workspace.path) && !activePresentationPaths.has(workspace.path)
+      if (obsoleteLegacy || obsoleteProject || obsoleteGroup) await registry.delete(workspace.id)
     }
   }
   async syncHistory(id: string, agent = this.host.agents.get(id)): Promise<void> {

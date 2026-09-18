@@ -68,6 +68,36 @@ test("legacy sessions inherit only a unanimous repository identity from the same
   rmSync(path, { force: true });
 });
 
+test("presentation groups are server-owned, stably ordered, and paged without splitting sessions", () => {
+  const path = join(tmpdir(), `agent-bridge-presentation-${randomUUID()}.sqlite`);
+  const store = new Store(path);
+  for (const id of ["dev", "win"]) store.upsertMachine({ id, name: id, platform: "linux", hostname: id, capabilities: [] });
+  const create = (id:string,machineId:string,projectPath:string,updatedAt:number,identity?:string) => {
+    store.createSession({id,machineId,agentType:"codex-cli",projectName:projectPath.split(/[\\/]/).at(-1)!,projectPath,
+      matrixRoomId:"",matrixThreadId:null,nativeSessionId:id,status:"completed",createdAt:1,updatedAt});
+    if(identity)store.db.prepare("UPDATE sessions SET project_identity=? WHERE id=?").run(identity,id);
+  };
+  create("repo-old","dev","/work/repo",400,"github.com/example/repo");
+  create("repo-new","win","D:\\repo",500,"github.com/example/repo");
+  create("plain-b","dev","/work/plain",300);
+  create("plain-a","dev","/work/plain",300);
+  create("other","win","D:\\other",100);
+  const control=new AgentControlStore(store.db,{sessionEventsMs:1_000,streamEventsMs:1_000,actionsMs:1_000,attachmentsMs:1_000});
+  const first=control.listSessionGroups({limit:1});
+  assert.equal(first.hasMore,true);assert.ok(first.nextCursor);
+  assert.equal(first.data[0]!.kind,"repository");
+  assert.equal(first.data[0]!.projectIdentity,"github.com/example/repo");
+  assert.deepEqual((first.data[0]!.sessions as any[]).map(row=>row.sessionId),["repo-new","repo-old"]);
+  assert.equal((first.data[0]!.executionLocations as any[]).length,2);
+  const stableId=first.data[0]!.groupId;
+  assert.equal(control.listSessionGroups({limit:1}).data[0]!.groupId,stableId);
+  const second=control.listSessionGroups({limit:1,cursor:first.nextCursor!});
+  assert.deepEqual((second.data[0]!.sessions as any[]).map(row=>row.sessionId),["plain-a","plain-b"]);
+  assert.equal(second.data[0]!.kind,"location");
+  assert.equal(control.session("repo-old")?.groupId,stableId);
+  store.db.close();rmSync(path,{force:true});
+});
+
 test("official session deletion removes conversation memory and FTS rows without relying on foreign keys", () => {
   const path = join(tmpdir(), `agent-bridge-delete-${randomUUID()}.sqlite`);
   const store = new Store(path);
