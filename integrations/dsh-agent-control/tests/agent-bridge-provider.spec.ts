@@ -203,6 +203,18 @@ describe('native session catalog', () => {
     expect(sessionEvents(nativeSession(f.agents.get(String(a.id))!)).filter(e => e.type === 'assistant/message')).toHaveLength(1)
     await f.target.dispose()
   })
+  it('reattaches a persisted presentation after its original local checkout disappears', async () => {
+    const f = await fixture()
+    const agent = await f.target.ensure(summary)
+    const id = String(agent.id)
+    const stored = f.stored.get(id)!
+    const missing = join(roots[0]!, 'removed-checkout')
+    stored.header = { ...(stored.header as object), cwd: missing }
+    f.agents.delete(id)
+    await f.target.ensure(summary)
+    expect(f.host.workspaceRegistry.create).toHaveBeenLastCalledWith(expect.stringContaining('workspaces'), 'repo @ w')
+    await f.target.dispose()
+  })
   it('does not append imported turns while the native loop is running', async () => {
     const f = await fixture()
     const agent = await f.target.ensure(summary)

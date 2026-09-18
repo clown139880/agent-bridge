@@ -43,6 +43,31 @@ test("upstream event IDs are persisted idempotently", () => {
   rmSync(path, { force: true });
 });
 
+test("legacy sessions inherit only a unanimous repository identity from the same machine and workspace", () => {
+  const path = join(tmpdir(), `agent-bridge-project-identity-${randomUUID()}.sqlite`);
+  const store = new Store(path);
+  store.upsertMachine({ id: "dev", name: "dev", platform: "linux", hostname: "dev", capabilities: [] });
+  const create = (id: string, projectPath: string) => store.createSession({
+    id, machineId: "dev", agentType: "codex-cli", projectName: "project", projectPath,
+    matrixRoomId: "", matrixThreadId: null, nativeSessionId: id, status: "completed", createdAt: 1, updatedAt: 1,
+  });
+  create("known", "/work/repo");
+  create("legacy", "/work/repo");
+  create("conflict-a", "/work/conflict");
+  create("conflict-b", "/work/conflict");
+  create("conflict-legacy", "/work/conflict");
+  store.db.prepare("UPDATE sessions SET project_identity=? WHERE id=?").run("github.com/example/repo", "known");
+  store.db.prepare("UPDATE sessions SET project_identity=? WHERE id=?").run("github.com/example/first", "conflict-a");
+  store.db.prepare("UPDATE sessions SET project_identity=? WHERE id=?").run("github.com/example/second", "conflict-b");
+  const control = new AgentControlStore(store.db, {
+    sessionEventsMs: 1_000, streamEventsMs: 1_000, actionsMs: 1_000, attachmentsMs: 1_000,
+  });
+  assert.equal(control.session("legacy")?.projectIdentity, "github.com/example/repo");
+  assert.equal(control.session("conflict-legacy")?.projectIdentity, undefined);
+  store.db.close();
+  rmSync(path, { force: true });
+});
+
 test("official session deletion removes conversation memory and FTS rows without relying on foreign keys", () => {
   const path = join(tmpdir(), `agent-bridge-delete-${randomUUID()}.sqlite`);
   const store = new Store(path);

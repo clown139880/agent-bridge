@@ -607,11 +607,17 @@ export class AgentControlStore {
         }
       }
     }
+    const directProjectIdentity=row.project_identity?String(row.project_identity):undefined;
+    const inheritedProjectIdentities=directProjectIdentity?[]:this.db.prepare(`SELECT DISTINCT project_identity FROM sessions
+      WHERE machine_id=? AND project_path=? AND project_identity IS NOT NULL AND TRIM(project_identity)<>'' LIMIT 2`)
+      .all(String(row.machine_id),String(row.project_path)) as Array<{project_identity:string}>;
+    const projectIdentity=directProjectIdentity??(inheritedProjectIdentities.length===1
+      ?String(inheritedProjectIdentities[0]!.project_identity):undefined);
     const result:Record<string,unknown>={sessionId:String(row.id),nativeSessionId:row.native_session_id?String(row.native_session_id):String(row.id),
       workerId:buildWorkerId(String(row.agent_type) as AgentType,String(row.machine_id)),machineId:String(row.machine_id),agent:String(row.agent_type),
       title:row.title?String(row.title):null,promptSummary,
       projectName:String(row.project_name),workspace:String(row.project_path),status:String(row.activity_status??"unknown"),
-      ...(row.project_identity?{projectIdentity:String(row.project_identity)}:{}),
+      ...(projectIdentity?{projectIdentity}:{}),
       activeTurnId:row.active_turn_id?String(row.active_turn_id):null,lastTurnStatus:row.last_turn_status?String(row.last_turn_status):null,
       pendingApprovalCount:count("approval"),pendingUserInputCount:count("user_input"),latestRun:run,
       createdAt:Number(row.created_at),updatedAt:Number(row.updated_at??row.created_at),

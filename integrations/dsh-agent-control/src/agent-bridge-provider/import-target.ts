@@ -159,7 +159,7 @@ export class AgentBridgeImportTarget {
     if (relative(this.dataRoot, canonical) === '') local = false
     for (const [id, binding] of this.bindings) {
       const agent = this.host.agents.get(id)
-      if (!agent || nativeSession(agent).header.cwd !== canonical) continue
+      if (!agent || (this.placementOverrides.get(id) ?? nativeSession(agent).header.cwd) !== canonical) continue
       const worker = this.workers.get(str(binding['workerId']))
       const machineId = str(worker?.['machineId'], str(binding['workerId']))
       const workspace = str(binding['workspace'])
@@ -408,8 +408,14 @@ export class AgentBridgeImportTarget {
     const previousBindingTitle = previousBinding ? promptTitle(previousBinding.data, sessionEvents(session)) : ''
     // Preserve explicit DSH renames, while allowing older importer-owned titles to improve.
     if (previous?.data['title'] !== title && (!usefulTitle(previous?.data['title']) || previous?.data['title'] === previousBindingTitle)) session.append('session/title', { title, messageSeqs: [], source: { kind: 'user' } })
+    let cwd = session.header.cwd ?? placement.cwd
+    if (cwd !== placement.cwd && !await realpath(cwd).then(() => true, () => false)) {
+      // A local checkout can disappear while its imported DSH presentation is
+      // retained. Rehome that presentation instead of failing every sync tick.
+      cwd = placement.cwd
+      this.placementOverrides.set(id, cwd)
+    }
     if (!await this.host.sessions.flush(agent.session)) throw new Error('Native session has no persistence writer')
-    const cwd = session.header.cwd ?? placement.cwd
     const workspace = await this.host.workspaceRegistry.resolveByPath(cwd) ?? await this.host.workspaceRegistry.create(cwd, placement.title)
     await workspace.attachSession(id)
     return agent
