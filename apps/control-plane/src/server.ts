@@ -730,6 +730,19 @@ export class ControlPlane {
       // Claude inventory is keyed by its native transcript id, while sessions
       // launched through Bridge retain their original public identity.
       const canonical = this.store.getSession(message.sessionId) ?? this.store.getSessionByNative(machineId, message.sessionId);
+      if (!canonical) {
+        // A persisted outbox can outlive local session metadata (for example,
+        // after the source deleted a session while offline). Do not retry the
+        // impossible FK forever: retain an explicit collection gap unless the
+        // central tombstone already confirms intentional deletion, then ACK.
+        if (!this.controlStore.isSessionDeleted(message.sessionId)) {
+          this.memory.recordGap(`missing-session:${machineId}:${message.eventId}`, machineId,
+            message.eventId, message.eventId, 1, "session-metadata-missing");
+        }
+        const bridge = this.bridges.get(machineId);
+        if (bridge) this.send(bridge.socket, { type: "archive.ack", eventId: message.eventId });
+        return;
+      }
       if (canonical && canonical.machineId === machineId && canonical.id !== message.sessionId) {
         const oldId = message.sessionId;
         message = { ...message, sessionId: canonical.id,

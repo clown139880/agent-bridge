@@ -43,6 +43,20 @@ async function fixture() {
   return {path,store,control,internals,sent,base,headers,async close(){await control.stop();store.db.close();rmSync(path,{force:true});}};
 }
 
+test("orphaned archive replay records a gap and is acknowledged instead of retrying forever", async () => {
+  const f = await fixture();
+  try {
+    await f.internals.handleBridgeMessage("dev", { type: "session.event", eventId: "orphan-event",
+      eventType: "message.completed", sessionId: "missing-session", timestamp: Date.now(),
+      payload: { role: "assistant", text: "orphaned original" } });
+    assert.deepEqual(f.sent.at(-1), { type: "archive.ack", eventId: "orphan-event" });
+    const gap = f.store.db.prepare(`SELECT source_instance,first_event_id,last_event_id,dropped_count,reason
+      FROM conversation_collection_gaps WHERE gap_id=?`).get("missing-session:dev:orphan-event") as Record<string, unknown>;
+    assert.deepEqual({ ...gap }, { source_instance: "dev", first_event_id: "orphan-event", last_event_id: "orphan-event",
+      dropped_count: 1, reason: "session-metadata-missing" });
+  } finally { await f.close(); }
+});
+
 test('offline worker deletion is scoped, durable, and rejects online workers',async()=>{
   const f=await fixture();try{
     const remove=()=>fetch(`${f.base}/workers/codex%40dev`,{method:'DELETE',headers:f.headers,body:'{}'});
