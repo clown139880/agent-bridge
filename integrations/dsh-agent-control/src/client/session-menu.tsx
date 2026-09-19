@@ -5,6 +5,7 @@ import type { WorkspaceHook } from './native-catalog.js'
 
 type Props = Record<string, any>
 type Entry = { component: unknown }
+type ViewState = { orderBy?: string; sessionOrderByAccount?: Record<string, string[]> }
 export interface MenuSlots { entries(name: string): readonly Entry[]; subscribe(name: string, listener: () => void): () => void }
 
 /** DSH 0.1.3 compatibility seam: retain the original sidebar, locale, store and
@@ -46,7 +47,16 @@ export function extendSessionMenu(Component: ComponentType<any>, useWorkspaces?:
     for (const key of ['children', 'anchor']) if (props[key] !== undefined) update[key] = visit(props[key], session)
     return cloneElement(value, update)
   }
-  return (props: Props) => visit((Component as (props: Props) => ReactNode)(useWorkspaces ? { ...props, useWorkspaces } : props))
+  return (props: Props) => {
+    const workspaces = useWorkspaces?.(snapshot => snapshot.items)
+    const useStore = props['useStore'] as ((selector: (state: ViewState) => unknown) => unknown) | undefined
+    const projectedUseStore = workspaces && useStore ? (selector: (state: ViewState) => unknown) => useStore(state => {
+      if (state.orderBy !== 'updated') return selector(state)
+      const projected = Object.fromEntries(workspaces.map(workspace => [workspace.workspaceId, [...workspace.sessionIds]]))
+      return selector({ ...state, sessionOrderByAccount: { ...state.sessionOrderByAccount, ...projected } })
+    }) : useStore
+    return visit((Component as (props: Props) => ReactNode)(useWorkspaces ? { ...props, useWorkspaces, ...(projectedUseStore ? { useStore: projectedUseStore } : {}) } : props))
+  }
 }
 
 export function installSessionMenu(slots: MenuSlots, useWorkspaces?: WorkspaceHook): () => void {

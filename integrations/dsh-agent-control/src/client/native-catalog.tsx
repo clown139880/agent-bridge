@@ -61,9 +61,10 @@ export function mergeWorkspaces(rows: readonly WorkspaceRow[], catalog: readonly
     activity.set(merged, Math.max(members[0]!.groupUpdatedAt, ...nativeIds.map(updatedAt)))
   }
   for (const row of rows.filter(row => !consumed.has(row) && !row.sessionIds.some(id => entries.has(id)))) {
-    result.push(row)
+    const ordered = sessions.byId ? { ...row, sessionIds: [...row.sessionIds].sort((left, right) => updatedAt(right) - updatedAt(left)) } : row
+    result.push(ordered)
     const latest = Math.max(...row.sessionIds.map(updatedAt))
-    if (Number.isFinite(latest)) activity.set(row, latest)
+    if (Number.isFinite(latest)) activity.set(ordered, latest)
   }
   // Server groups arrive newest-first. A stable activity sort preserves that
   // authority while allowing native-only or locally-fused directories to take

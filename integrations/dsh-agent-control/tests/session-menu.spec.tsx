@@ -40,6 +40,18 @@ it('restores the native component on unload', () => {
   expect(entry.component).not.toBe(original); dispose(); expect(entry.component).toBe(original); expect(stop).toHaveBeenCalled()
 })
 
+it('uses projected recency for updated mode without overriding manual order', () => {
+  const snapshot = { items: [{ workspaceId: 'repo', path: '/repo', title: 'repo', sessionIds: ['new', 'old'], createdAt: '', updatedAt: '' }], archivedSessionIds: [] }
+  const useWorkspaces = (selector: any) => selector(snapshot)
+  const state = { orderBy: 'updated', sessionOrderByAccount: { repo: ['old', 'new'] } }
+  const Browser = ({ useStore }: any) => <>{useStore((value: any) => value.sessionOrderByAccount.repo.join(','))}</>
+  const Wrapped = extendSessionMenu(Browser, useWorkspaces)
+  const render = Wrapped as (props: any) => any
+  expect(render({ useStore: (selector: any) => selector(state) }).props.children).toBe('new,old')
+  state.orderBy = 'manual'
+  expect(render({ useStore: (selector: any) => selector(state) }).props.children).toBe('old,new')
+})
+
 it('overrides the sidebar workspace hook and refreshes an existing subscriber', async () => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
   const rows = ['codex', 'claude'].map(id => ({ workspaceId: id, path: '/presentation/' + id, title: `agent-bridge · ${id}`, sessionIds: [id], createdAt: '2026-01-01', updatedAt: '2026-01-01' }))

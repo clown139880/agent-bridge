@@ -76,7 +76,9 @@ The client catalog does not infer Bridge groups or independently reorder Bridge 
 server's `groupId` and order, and only fuses native DSH sessions from a real local workspace
 whose canonical path matches a server-declared local execution location. Unmatched native
 sessions remain in their original DSH groups. Native activity is merged into the server order
-so local sessions and native-only directories retain recency ordering. Rename, delete and drag operations are mapped
+so local sessions and native-only directories retain recency ordering. In DSH's `updated` view,
+that live merged order supersedes stale persisted drag order; the `manual` view remains user-owned.
+Rename, delete and drag operations are mapped
 back to their original Host workspaces.
 Every native session id, original cwd and execution binding is preserved.
 
