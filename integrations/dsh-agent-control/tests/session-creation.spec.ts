@@ -9,9 +9,10 @@ describe('native directory creation', () => {
     const original = vi.fn(async (_options?: {workspaceId?:string}) => 'native-local')
     const sessions = {create:original,refresh:vi.fn(async () => {})}
     const reuseBlank = vi.fn(async (_workspaceId: string) => 'wrong-dsh-blank')
-    const navigation = {connectWorkspace:reuseBlank}
+    let result: Promise<string> | undefined
+    const navigation = {connectWorkspace:reuseBlank,startSession(workspaceId?:string){result=this.connectWorkspace(workspaceId ?? 'workspace')}}
     const dispose = controller.install(sessions,{list:{getSnapshot:() => ({items:[{workspaceId:'workspace',path:'/presentation'}]})}},navigation)
-    const result = navigation.connectWorkspace('workspace')
+    navigation.startSession('workspace')
     await vi.waitFor(() => expect(controller.snapshot()).toBeDefined())
     controller.select(source)
     await expect(result).resolves.toBe('native-remote')
@@ -22,6 +23,26 @@ describe('native directory creation', () => {
     dispose()
     expect(sessions.create).toBe(original)
     expect(navigation.connectWorkspace).toBe(reuseBlank)
+  })
+  it('restores a workspace without asking for a worker and still prompts on explicit new session', async () => {
+    const remote = {id:'remote',name:'Codex',workerId:'codex@machine',machineId:'machine',workspace:'/repo',available:true}
+    const rpc = vi.fn(async (op: string) => op === 'creation_sources' ? {sources:[remote]} : {nativeSessionId:'native-remote'})
+    const controller = new SessionCreationController(rpc)
+    const original = vi.fn(async (_options?: {workspaceId?:string}) => 'native-local')
+    const sessions = {create:original,refresh:vi.fn(async () => {})}
+    const navigation = {
+      async connectWorkspace(workspaceId:string){return sessions.create({workspaceId})},
+      startSession(workspaceId?:string){void this.connectWorkspace(workspaceId ?? 'workspace')},
+    }
+    const dispose = controller.install(sessions,{list:{getSnapshot:() => ({items:[{workspaceId:'workspace',path:'/repo'}]})}},navigation)
+    await expect(navigation.connectWorkspace('workspace')).resolves.toBe('native-local')
+    expect(controller.snapshot()).toBeUndefined()
+    expect(rpc).not.toHaveBeenCalled()
+    navigation.startSession('workspace')
+    await vi.waitFor(() => expect(controller.snapshot()).toBeDefined())
+    controller.select(remote)
+    await vi.waitFor(() => expect(rpc).toHaveBeenCalledWith('create_native',{cwd:'/repo',sourceId:'remote'}))
+    dispose()
   })
   it('preserves native DSH creation and cancels without creating a remote session', async () => {
     const local = {id:'dsh',name:'DSH',machineId:'local',workspace:'/local',available:true}

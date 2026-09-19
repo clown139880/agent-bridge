@@ -72,10 +72,11 @@ The Host revalidates the selected source, creates the remote session, materializ
 it, and the client refreshes its native list before returning the new identity.
 Cancel creates nothing. Offline sources remain visible but cannot be selected.
 
-The client catalog does not infer Bridge groups or sort Bridge sessions. It projects the
+The client catalog does not infer Bridge groups or independently reorder Bridge sessions. It projects the
 server's `groupId` and order, and only fuses native DSH sessions from a real local workspace
 whose canonical path matches a server-declared local execution location. Unmatched native
-sessions remain in their original DSH groups. Rename, delete and drag operations are mapped
+sessions remain in their original DSH groups. Native activity is merged into the server order
+so local sessions and native-only directories retain recency ordering. Rename, delete and drag operations are mapped
 back to their original Host workspaces.
 Every native session id, original cwd and execution binding is preserved.
 

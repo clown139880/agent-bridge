@@ -6,7 +6,7 @@ type Source = { id: string; name: string; workerId?: string; machineId: string; 
 type Options = { workspaceId?: string; cwd?: string; sessionId?: string }
 export interface CreationSessions { create(options?: Options): Promise<string>; refresh(): Promise<void> }
 export interface CreationWorkspaces { list: { getSnapshot(): { items: { workspaceId: string; path: string }[] } } }
-export interface CreationNavigation { connectWorkspace(workspaceId: string): Promise<string> }
+export interface CreationNavigation { connectWorkspace(workspaceId: string): Promise<string>; startSession(workspaceId?: string): void }
 type Rpc = (operation: string, args: Record<string, string>) => Promise<unknown>
 type Pending = { sources: Source[]; resolve(source: Source): void; reject(error: Error): void }
 
@@ -23,8 +23,10 @@ export class SessionCreationController {
   install(sessions: CreationSessions, workspaces: CreationWorkspaces, navigation?: CreationNavigation): () => void {
     const original = sessions.create
     const controller = this
+    let restoringWorkspace = false
     async function create(this: CreationSessions, options?: Options): Promise<string> {
       if (options?.sessionId) return original.call(this, options)
+      if (restoringWorkspace) return original.call(this, options)
       const cwd = options?.cwd ?? workspaces.list.getSnapshot().items.find(item => item.workspaceId === options?.workspaceId)?.path
       if (options?.workspaceId && !cwd) throw new Error('目录尚未加载，请刷新后重试')
       if (!cwd) return original.call(this, options)
@@ -43,13 +45,28 @@ export class SessionCreationController {
     }
     sessions.create = create
     const connect = navigation?.connectWorkspace
-    // Native navigation otherwise reuses a blank DSH session without calling create.
-    const createInDirectory = (workspaceId: string) => sessions.create({ workspaceId })
-    if (navigation) navigation.connectWorkspace = createInDirectory
+    const start = navigation?.startSession
+    let explicitStart = false
+    // Startup restoration and ordinary directory navigation share the same DSH
+    // method as explicit creation. Preserve the native path for the former, and
+    // only force source selection while startSession is handling a user action.
+    const connectDirectory = (workspaceId: string) => {
+      if (explicitStart) return sessions.create({ workspaceId })
+      restoringWorkspace = true
+      try { return connect!.call(navigation, workspaceId) }
+      finally { restoringWorkspace = false }
+    }
+    const startSession = (workspaceId?: string) => {
+      explicitStart = true
+      try { start!.call(navigation, workspaceId) }
+      finally { explicitStart = false }
+    }
+    if (navigation && connect && start) { navigation.connectWorkspace = connectDirectory; navigation.startSession = startSession }
     return () => {
       controller.cancel()
       if (sessions.create === create) sessions.create = original
-      if (navigation && connect && navigation.connectWorkspace === createInDirectory) navigation.connectWorkspace = connect
+      if (navigation && connect && navigation.connectWorkspace === connectDirectory) navigation.connectWorkspace = connect
+      if (navigation && start && navigation.startSession === startSession) navigation.startSession = start
     }
   }
 }

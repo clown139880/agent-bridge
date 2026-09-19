@@ -9,14 +9,15 @@ type WorkspaceSnapshot = { items: readonly WorkspaceRow[]; archivedSessionIds: r
 type Source<T> = { getSnapshot(): T; subscribe(listener: () => void): () => void }
 export type WorkspaceHook = <T>(selector: (snapshot: WorkspaceSnapshot) => T) => T
 type Workspaces = { list: Source<WorkspaceSnapshot>; rename(id: string, title: string): Promise<unknown>; delete(id: string): Promise<void>; insertSessionBefore(id: string, session: string, before?: string): Promise<unknown> }
-export type CatalogSessions = { list: Source<{ current?: string }>; clear(): void; refresh(): Promise<void> }
+type SessionSnapshot = { current?: string; byId?: Record<string, { updatedAt?: number }> }
+export type CatalogSessions = { list: Source<SessionSnapshot>; clear(): void; refresh(): Promise<void> }
 export const DELETE_SESSION_EVENT = 'agent-control:delete-session'
 type Rpc = (operation: string, args?: Record<string, string>) => Promise<unknown>
 
 const canonicalPath = (value: string) => value.replace(/\\/g, '/').replace(/\/$/, '').toLocaleLowerCase()
 
 /** Adapt server-owned groups to DSH workspaces and only fuse path-matching local DSH sessions. */
-export function mergeWorkspaces(rows: readonly WorkspaceRow[], catalog: readonly NativeEntry[], catalogReady = true): WorkspaceRow[] {
+export function mergeWorkspaces(rows: readonly WorkspaceRow[], catalog: readonly NativeEntry[], catalogReady = true, sessions: SessionSnapshot = {}): WorkspaceRow[] {
   // The Host workspace snapshot arrives before this client plugin can fetch the
   // Bridge catalog. Do not briefly expose every physical presentation workspace
   // while repository identities are still unknown. Native DSH sessions remain
@@ -30,6 +31,8 @@ export function mergeWorkspaces(rows: readonly WorkspaceRow[], catalog: readonly
   for (const entry of catalog) { const values = groups.get(entry.groupId); if (values) values.push(entry); else groups.set(entry.groupId, [entry]) }
   const consumed = new Set<WorkspaceRow>()
   const result: WorkspaceRow[] = []
+  const activity = new Map<WorkspaceRow, number>()
+  const updatedAt = (id: string) => entries.get(id)?.updatedAt ?? sessions.byId?.[id]?.updatedAt ?? Number.NEGATIVE_INFINITY
   for (const members of groups.values()) {
     const ids = new Set(members.map(entry => entry.nativeId))
     const localPaths = new Set(members.flatMap(entry => entry.executionLocations).filter(location => location.local).map(location => canonicalPath(location.workspace)))
@@ -40,12 +43,32 @@ export function mergeWorkspaces(rows: readonly WorkspaceRow[], catalog: readonly
     const owner = localRows[0] ?? bridgeRows[0]
     if (!owner) continue
     for (const row of related) consumed.add(row)
-    const nativeIds = localRows.flatMap(row => row.sessionIds).filter(id => !entries.has(id))
-    result.push({ ...owner, title: members[0]!.groupTitle, sessionIds: [...members.map(entry => entry.nativeId), ...nativeIds],
-      updatedAt: new Date(members[0]!.groupUpdatedAt).toISOString() })
+    const bridgeIds = members.map(entry => entry.nativeId)
+    const nativeIds = [...new Set(localRows.flatMap(row => row.sessionIds).filter(id => !entries.has(id)))]
+      .sort((left, right) => updatedAt(right) - updatedAt(left))
+    // The server already owns Bridge ordering. Merge local DSH rows into that
+    // order by activity without independently re-sorting Bridge members.
+    const sessionIds: string[] = []
+    let bridgeIndex = 0, nativeIndex = 0
+    while (bridgeIndex < bridgeIds.length || nativeIndex < nativeIds.length) {
+      const bridge = bridgeIds[bridgeIndex], native = nativeIds[nativeIndex]
+      if (native !== undefined && (bridge === undefined || updatedAt(native) > updatedAt(bridge))) { sessionIds.push(native); nativeIndex++ }
+      else if (bridge !== undefined) { sessionIds.push(bridge); bridgeIndex++ }
+    }
+    const merged = { ...owner, title: members[0]!.groupTitle, sessionIds,
+      updatedAt: new Date(Math.max(members[0]!.groupUpdatedAt, ...nativeIds.map(updatedAt))).toISOString() }
+    result.push(merged)
+    activity.set(merged, Math.max(members[0]!.groupUpdatedAt, ...nativeIds.map(updatedAt)))
   }
-  result.push(...rows.filter(row => !consumed.has(row) && !row.sessionIds.some(id => entries.has(id))))
-  return result
+  for (const row of rows.filter(row => !consumed.has(row) && !row.sessionIds.some(id => entries.has(id)))) {
+    result.push(row)
+    const latest = Math.max(...row.sessionIds.map(updatedAt))
+    if (Number.isFinite(latest)) activity.set(row, latest)
+  }
+  // Server groups arrive newest-first. A stable activity sort preserves that
+  // authority while allowing native-only or locally-fused directories to take
+  // their correct place in the combined DSH list.
+  return result.sort((left, right) => (activity.get(right) ?? Number.NEGATIVE_INFINITY) - (activity.get(left) ?? Number.NEGATIVE_INFINITY))
 }
 
 export class NativeCatalog {
@@ -89,17 +112,18 @@ export class NativeCatalog {
     const source = workspaces.list
     const original = source.getSnapshot
     const subscribe = source.subscribe
-    let raw: WorkspaceSnapshot | undefined, catalog: NativeEntry[] | undefined, cached: WorkspaceSnapshot
+    let raw: WorkspaceSnapshot | undefined, catalog: NativeEntry[] | undefined, sessionById: SessionSnapshot['byId'], cached: WorkspaceSnapshot
     const projected = () => {
       const next = original.call(source)
-      if (next !== raw || catalog !== this.entries) {
-        raw = next; catalog = this.entries
+      const nextSessions = this.sessions.list.getSnapshot()
+      if (next !== raw || catalog !== this.entries || sessionById !== nextSessions.byId) {
+        raw = next; catalog = this.entries; sessionById = nextSessions.byId
         const current = new Set(this.entries.map(entry => entry.nativeId))
-        cached = { ...next, items: mergeWorkspaces(next.items, this.entries, this.loaded), archivedSessionIds: next.archivedSessionIds.filter(id => !current.has(id)) }
+        cached = { ...next, items: mergeWorkspaces(next.items, this.entries, this.loaded, nextSessions), archivedSessionIds: next.archivedSessionIds.filter(id => !current.has(id)) }
       }
       return cached
     }
-    const projectedSubscribe = (listener: () => void) => { const a = subscribe.call(source, listener); const b = this.subscribe(listener); return () => { a(); b() } }
+    const projectedSubscribe = (listener: () => void) => { const a = subscribe.call(source, listener); const b = this.subscribe(listener); const c = this.sessions.list.subscribe(listener); return () => { a(); b(); c() } }
     this.workspaceSource = { getSnapshot: projected, subscribe: projectedSubscribe }
     source.getSnapshot = projected
     source.subscribe = projectedSubscribe

@@ -56,6 +56,19 @@ describe('native catalog', () => {
     expect(merged[0]?.sessionIds).toEqual(['local-bridge', 'remote-bridge', 'session-native'])
     expect(merged[0]?.title).toBe('agent-bridge')
   })
+  it('places local sessions and directories by activity when fusing the server catalog', () => {
+    const local = { ...workspace('local'), path: 'C:\\repo', sessionIds: ['native-new', 'bridge-old'] }
+    const nativeOnly = { ...workspace('native-only'), sessionIds: ['native-middle'] }
+    const bridgeOld = entry('bridge-old', 'windows', local.path, 0, 'repo', 100)
+    bridgeOld.groupUpdatedAt = 100; bridgeOld.executionLocations[0]!.local = true
+    const bridgeNew = entry('bridge-new', 'hal', '/other', 0, 'other', 400)
+    bridgeNew.groupUpdatedAt = 400
+    const sessions = { byId: { 'native-new': { updatedAt: 500 }, 'native-middle': { updatedAt: 300 } } }
+    const merged = mergeWorkspaces([local, nativeOnly, workspace('bridge-new')], [bridgeOld, bridgeNew], true, sessions)
+    expect(merged.map(row => row.workspaceId)).toEqual(['local', 'bridge-new', 'native-only'])
+    expect(merged[0]?.sessionIds).toEqual(['native-new', 'bridge-old'])
+    expect(merged[0]?.updatedAt).toBe(new Date(500).toISOString())
+  })
   it('does not merge a workspace whose known members have conflicting identities', () => {
     const mixed = { ...workspace('mixed'), sessionIds: ['one', 'two', 'session-native'] }
     const sibling = { ...workspace('sibling'), sessionIds: ['three'] }
