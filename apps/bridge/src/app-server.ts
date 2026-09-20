@@ -322,8 +322,6 @@ export class CodexAppServerAdapter implements AgentAdapter {
           const actualModel=result.turn.model??model;if(actualModel)this.turnModels.set(result.turn.id,actualModel);
         }
       }
-      this.emitSessionEvent("message.completed", sessionId, `action:${actionId}:user`,
-        { role: "user", text, ...(attachments?.length ? { attachments } : {}) }, this.activeTurns.get(sessionId));
       return { sessionId, turnId: this.activeTurns.get(sessionId), resolvedAction };
     });
   }
@@ -701,7 +699,9 @@ export class CodexAppServerAdapter implements AgentAdapter {
       const turns=(result.thread.turns??[]).slice(-50);
       for(const turn of turns){
         const timestamp=codexTimestamp(turn.completedAt??turn.startedAt)??historyTimestamp;
-        for(const item of turn.items??[])this.emitHistoricalItem(threadId,turn.id,item,timestamp);
+        const startedAt=codexTimestamp(turn.startedAt)??timestamp;
+        for(const item of turn.items??[])this.emitHistoricalItem(threadId,turn.id,item,
+          item.type==="userMessage"?startedAt:timestamp);
         if(turn.status!=="inProgress"){
           const type=turn.status==="failed"?"turn.failed":turn.status==="interrupted"?"turn.interrupted":"turn.completed";
           this.emitSessionEvent(type,threadId,`app-server:${threadId}:${turn.id}:terminal:structured`,{

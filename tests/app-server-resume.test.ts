@@ -144,13 +144,16 @@ test("history hydration preserves each Codex turn time", async () => {
   };
   internals.request = async () => ({ thread: { turns: [{ id: "old-turn", status: "completed",
     startedAt: 120, completedAt: 150,
-    items: [{ id: "old-message", type: "agentMessage", text: "Old answer" }] }] } });
+    items: [
+      { id: "old-prompt", type: "userMessage", content: [{ type: "text", text: "Old question" }] },
+      { id: "old-message", type: "agentMessage", text: "Old answer" },
+    ] }] } });
 
   await internals.hydrateThreadHistory({ id: "history-thread", cwd: process.cwd(), createdAt: 100, updatedAt: 200 });
 
   const history = emitted.filter((message) => message.type === "session.event");
-  assert.equal(history.length, 2);
-  assert.deepEqual(history.map((message) => message.timestamp), [150_000, 150_000]);
+  assert.equal(history.length, 3);
+  assert.deepEqual(history.map((message) => message.timestamp), [120_000, 150_000, 150_000]);
 });
 
 test("history hydration reuses the live canonical item event ids", async () => {
@@ -364,7 +367,7 @@ test("session action serializes steer and enforces expectedTurnId", async () => 
     (error:any)=>error.code==="turn_changed");
   const result=await adapter.submitTurnAction("a2","thread","continue","auto","turn-current");
   assert.equal(result.resolvedAction,"steer");assert.equal(calls[0]?.method,"turn/steer");
-  assert.ok(emitted.some(message=>message.type==="session.event"&&message.eventType==="message.completed"));
+  assert.equal(emitted.some(message=>message.type==="session.event"&&message.eventType==="message.completed"),false);
   await assert.rejects(adapter.submitTurnAction("a3","thread","switch","auto","turn-current","deepseek-chat"),
     (error:any)=>error.code==="model_not_applicable");
 });
