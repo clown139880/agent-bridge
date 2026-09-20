@@ -319,3 +319,55 @@ test("SSE watermark remains monotonic and expired cursors fail before streaming"
     assert.equal((await expired.json() as any).error.code,"cursor_expired");
   }finally{await f.close();}
 });
+
+test("a replayed turn.started does not resurrect a completed turn", async () => {
+  const f = await fixture();
+  try {
+    await f.internals.handleBridgeMessage("dev", { type: "session.event", eventId: "t1-start",
+      eventType: "turn.started", sessionId: "thread-1", turnId: "turn-1", timestamp: 3000, payload: { status: "in_progress" } });
+    let session = f.internals.controlStore.session("thread-1") as { status: string; activeTurnId: string | null };
+    assert.equal(session.status, "active");
+    assert.equal(session.activeTurnId, "turn-1");
+
+    await f.internals.handleBridgeMessage("dev", { type: "session.event", eventId: "t1-done",
+      eventType: "turn.completed", sessionId: "thread-1", turnId: "turn-1", timestamp: 3100, payload: { status: "completed" } });
+    session = f.internals.controlStore.session("thread-1") as { status: string; activeTurnId: string | null };
+    assert.equal(session.status, "idle");
+    assert.equal(session.activeTurnId, null);
+
+    // Durable archive replay of the same turn.started (missed ack / reconnect) must not reopen the turn.
+    await f.internals.handleBridgeMessage("dev", { type: "session.event", eventId: "t1-start",
+      eventType: "turn.started", sessionId: "thread-1", turnId: "turn-1", timestamp: 3000, payload: { status: "in_progress" } });
+    session = f.internals.controlStore.session("thread-1") as { status: string; activeTurnId: string | null };
+    assert.equal(session.status, "idle");
+    assert.equal(session.activeTurnId, null);
+  } finally { await f.close(); }
+});
+
+test("a durable approval.requested event alone never marks a session waiting", async () => {
+  const f = await fixture();
+  try {
+    await f.internals.handleBridgeMessage("dev", { type: "session.event", eventId: "appr-evt",
+      eventType: "approval.requested", sessionId: "thread-1", turnId: "turn-1", timestamp: 4000,
+      payload: { approvalId: "a-1", kind: "command", summary: "$ ls", choices: ["allow", "deny"] } });
+    const session = f.internals.controlStore.session("thread-1") as { status: string; pendingApprovalCount: number };
+    // Waiting states are owned by the pending-request lifecycle, so the durable
+    // event on its own leaves neither a "waiting" status nor a pending row.
+    assert.notEqual(session.status, "waiting_for_approval");
+    assert.equal(session.pendingApprovalCount, 0);
+  } finally { await f.close(); }
+});
+
+test("a phantom waiting session with no pending rows can be deleted", async () => {
+  const f = await fixture();
+  try {
+    f.internals.controlStore.updateSessionActivity("thread-1", "waiting_for_approval", "stale-turn");
+    const zombie = f.internals.controlStore.session("thread-1") as { status: string; pendingApprovalCount: number };
+    assert.equal(zombie.status, "waiting_for_approval");
+    assert.equal(zombie.pendingApprovalCount, 0);
+    const response = await fetch(`${f.base}/sessions/thread-1`, { method: "DELETE",
+      headers: { ...f.headers, "idempotency-key": "delete-zombie" }, body: "{}" });
+    assert.equal(response.status, 202);
+    assert.equal((await response.json() as any).kind, "delete_session");
+  } finally { await f.close(); }
+});

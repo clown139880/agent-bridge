@@ -28,6 +28,9 @@ import type {
 const log = pino({ name: "claude-adapter" });
 
 const FILE_CHANGE_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
+/** Non-mutating built-in tools cleared without a prompt when CLAUDE_AUTO_APPROVE=readonly.
+ *  Deliberately excludes Bash (can mutate) and Task (spawns an arbitrary subagent). */
+const READONLY_TOOLS = new Set(["Read", "Grep", "Glob", "LS", "NotebookRead", "WebSearch", "WebFetch", "TodoWrite"]);
 const LOG_LIMIT = 2_000;
 
 interface PendingApproval {
@@ -96,6 +99,10 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       allowedRoots: string[];
       scanExisting: boolean;
       fetchAttachment?: AttachmentFetcher;
+      // Auto-approval policy. "off" prompts for every tool (legacy behavior),
+      // "readonly" clears READONLY_TOOLS, "all" clears everything (scoped
+      // --dangerously-skip-permissions). `tools` always clears, on top of mode.
+      autoApprove?: { mode: "off" | "readonly" | "all"; tools: string[] };
     },
     private readonly emit: AdapterEmit,
   ) {}
@@ -470,7 +477,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     const activeTurnId = session.activeTurnId;
     if (!activeTurnId) throw domainError("no_active_turn", "session has no active turn");
     if (expectedTurnId && expectedTurnId !== activeTurnId) throw domainError("turn_changed", "active turn changed");
-    await session.query?.interrupt().catch(() => session.abort.abort());
+    this.interruptTurn(session);
     this.finishTurn(session, "interrupted");
     return { sessionId, turnId: activeTurnId };
   }
@@ -478,8 +485,50 @@ export class ClaudeCodeAdapter implements AgentAdapter {
   async stopSession(sessionId: string): Promise<void> {
     const session = this.require(sessionId);
     if (!session.activeTurnId) throw new Error(`Session ${sessionId} has no active turn`);
-    await session.query?.interrupt().catch(() => session.abort.abort());
+    this.interruptTurn(session);
     this.finishTurn(session, "interrupted");
+  }
+
+  /**
+   * Break a turn out of any wedged state without blocking the caller. Denying the
+   * pending approval/user-input unblocks Claude when it is parked in canCallTool;
+   * the graceful interrupt is fired best-effort and force-aborts after a bound.
+   *
+   * The previous `await session.query.interrupt()` could hang forever when the
+   * subprocess was stuck in the permission control-protocol, which stalled the
+   * interrupt action past the control-plane timeout (bridge_timeout) and left the
+   * turn permanently "active" — an unrecoverable session. The caller finishes the
+   * turn synchronously so the action always acknowledges quickly.
+   */
+  private interruptTurn(session: ClaudeSession): void {
+    this.denyPendingInteractions(session, "interrupted");
+    const query = session.query;
+    const abort = () => { try { session.abort.abort(); } catch { /* already aborted */ } };
+    if (!query) { abort(); return; }
+    let settled = false;
+    query.interrupt().then(() => { settled = true; }, () => { settled = true; abort(); });
+    // A subprocess wedged in the control-protocol may leave interrupt() neither
+    // resolved nor rejected; force the subprocess down once the bound elapses.
+    setTimeout(() => { if (!settled) { settled = true; abort(); } }, 5_000).unref();
+  }
+
+  /** Deny every pending approval / user-input for a session and notify upstream. */
+  private denyPendingInteractions(session: ClaudeSession, reason: string): void {
+    for (const [approvalId, approval] of session.pendingApprovals) {
+      if (approval.answered) continue;
+      approval.answered = true;
+      session.pendingApprovals.delete(approvalId);
+      approval.resolve({ behavior: "deny", message: reason });
+      this.emit({ type: "approval_resolved", sessionId: session.sessionId, approvalId, resolvedAt: Date.now() });
+      this.emitSessionEvent(session, "approval.resolved", `approval:${approvalId}:resolved`, { approvalId, choice: "deny" }, approval.turnId);
+    }
+    const pending = session.pendingUserInput;
+    if (pending) {
+      session.pendingUserInput = undefined;
+      pending.resolve({ behavior: "deny", message: reason });
+      this.emit({ type: "user_input_resolved", sessionId: session.sessionId, requestId: pending.publicId, resolvedAt: Date.now() });
+      this.emitSessionEvent(session, "user_input.resolved", `user-input:${pending.publicId}:resolved`, { requestId: pending.publicId }, pending.turnId);
+    }
   }
 
   async deleteSessionAction(sessionId: string): Promise<{ sessionId: string }> {
@@ -509,6 +558,19 @@ export class ClaudeCodeAdapter implements AgentAdapter {
 
   // ---- approvals ---------------------------------------------------------
 
+  /**
+   * Whether the configured auto-approval policy clears a tool without a prompt.
+   * High-risk tools (Bash, Write/Edit/MultiEdit/NotebookEdit) are only cleared by
+   * mode "all" or an explicit `tools` entry; the readonly set is non-mutating.
+   */
+  private isAutoApproved(toolName: string): boolean {
+    const policy = this.options.autoApprove;
+    if (!policy) return false;
+    if (policy.mode === "all") return true;
+    if (policy.tools.includes(toolName)) return true;
+    return policy.mode === "readonly" && READONLY_TOOLS.has(toolName);
+  }
+
   private handleToolPermission(
     session: ClaudeSession,
     toolName: string,
@@ -519,7 +581,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     if (toolName === "AskUserQuestion") {
       return this.handleAskUserQuestion(session, toolInput);
     }
-    if (session.sessionAllowedTools.has(toolName)) {
+    if (session.sessionAllowedTools.has(toolName) || this.isAutoApproved(toolName)) {
       return Promise.resolve({ behavior: "allow", updatedInput: toolInput });
     }
     const approvalId = randomUUID();

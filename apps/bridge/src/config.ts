@@ -17,6 +17,12 @@ function positiveNumber(name: string, fallback: number): number {
   const value=Number(process.env[name]??fallback);if(!Number.isFinite(value)||value<=0)throw new Error(`${name} must be positive`);return value;
 }
 
+function autoApproveMode(name: string, fallback: "off" | "readonly" | "all"): "off" | "readonly" | "all" {
+  const raw = (process.env[name] ?? fallback).trim().toLowerCase();
+  if (raw !== "off" && raw !== "readonly" && raw !== "all") throw new Error(`${name} must be one of off|readonly|all`);
+  return raw;
+}
+
 function jsonStringArray(name: string, fallback: string[]): string[] {
   const raw = process.env[name];
   if (!raw) return fallback;
@@ -47,6 +53,11 @@ export const config = {
   claudeCommand: process.env.CLAUDE_COMMAND ?? "claude",
   claudeHome: process.env.CLAUDE_HOME ?? `${process.env.HOME ?? ""}/.claude`,
   claudeScanExisting: process.env.CLAUDE_SCAN_EXISTING === "true",
+  // Auto-approval for Claude tool calls: off (prompt for everything), readonly
+  // (clear non-mutating built-ins), or all (clear everything). CLAUDE_AUTO_APPROVE_TOOLS
+  // is a JSON array of extra tool names to always clear, e.g. ["Bash"].
+  claudeAutoApprove: autoApproveMode("CLAUDE_AUTO_APPROVE", "off"),
+  claudeAutoApproveTools: jsonStringArray("CLAUDE_AUTO_APPROVE_TOOLS", []),
   allowedRoots: splitAllowedRoots(process.env.BRIDGE_ALLOWED_ROOTS, platform()).length
     ? splitAllowedRoots(process.env.BRIDGE_ALLOWED_ROOTS, platform()) : [process.cwd()],
   reconnectMs: Number(process.env.BRIDGE_RECONNECT_MS ?? "3000"),

@@ -18,6 +18,8 @@ const client = new BridgeClient({
   claudeCommand: config.claudeCommand,
   claudeHome: config.claudeHome,
   claudeScanExisting: config.claudeScanExisting,
+  claudeAutoApprove: config.claudeAutoApprove,
+  claudeAutoApproveTools: config.claudeAutoApproveTools,
   allowedRoots: config.allowedRoots,
   reconnectMs: config.reconnectMs,
   version: config.version,

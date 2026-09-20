@@ -755,12 +755,19 @@ export class ControlPlane {
           eventId: message.eventId === `claude:${oldId}:first:user` ? `claude:${canonical.id}:first:user` : message.eventId };
       }
       this.memory.ingestEvent(machineId, message, sourceSessionId);
-      this.controlStore.appendSessionEvent(machineId, message);
+      const inserted = this.controlStore.appendSessionEvent(machineId, message);
       const bridge = this.bridges.get(machineId);
       if (bridge) this.send(bridge.socket, { type: "archive.ack", eventId: message.eventId });
-      const status = activityForStructuredEvent(message.eventType);
-      if (status) this.controlStore.updateSessionActivity(message.sessionId, status.activity,
-        status.active ? message.turnId : undefined, status.lastTurn);
+      // Only a first-seen event may drive the live activity state machine. The
+      // durable archive stream replays events on a missed ack or reconnect, and
+      // a replayed turn.started would otherwise resurrect a finished turn (a
+      // stale active_turn_id + "active"/"waiting_*" status the client can never
+      // clear). Duplicates carry no new state.
+      if (inserted) {
+        const status = activityForStructuredEvent(message.eventType);
+        if (status) this.controlStore.updateSessionActivity(message.sessionId, status.activity,
+          status.active ? message.turnId : undefined, status.lastTurn);
+      }
       return;
     }
     if (message.type === "model_catalog_response") {
@@ -1447,8 +1454,12 @@ function stateForDiscovery(message: SessionDiscoveredMessage, previousUpdatedAt?
 function activityForStructuredEvent(type: string):
   { activity: SessionActivityStatus; active: boolean; lastTurn?: "completed"|"failed"|"interrupted" } | undefined {
   if (type === "turn.started") return { activity: "active", active: true };
-  if (type === "approval.requested") return { activity: "waiting_for_approval", active: true };
-  if (type === "user_input.requested") return { activity: "waiting_for_input", active: true };
+  // waiting_for_approval / waiting_for_input are owned by the pending-request
+  // lifecycle (upsertApproval / upsertUserInput / refreshPendingActivity) so the
+  // status stays in lockstep with pendingApprovalCount/pendingUserInputCount. The
+  // durable event stream must not set them independently: a dropped best-effort
+  // approval_request or a replayed approval.requested would otherwise leave a
+  // session "waiting" with zero pending rows — a state no client can resolve.
   if (type === "turn.completed") return { activity: "idle", active: false, lastTurn: "completed" };
   if (type === "turn.failed") return { activity: "idle", active: false, lastTurn: "failed" };
   if (type === "turn.interrupted") return { activity: "idle", active: false, lastTurn: "interrupted" };

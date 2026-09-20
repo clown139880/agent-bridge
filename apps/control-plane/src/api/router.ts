@@ -250,7 +250,14 @@ export class AgentControlApi {
       const key=this.requireKey(request),body=await jsonBody(request),path=`/api/v1/sessions/${sessionId}`;
       const prior=this.existingAction(principal,key,path,body,"DELETE");if(prior){this.ok(response,actionJson(prior),202);return;}
       const session=this.store.session(sessionId);if(!session)throw new ApiProblem(404,"session_not_found","session not found");
-      if(["creating","active","waiting_for_approval","waiting_for_input"].includes(String(session.status)))
+      // A session shown as waiting_for_approval/waiting_for_input with no pending
+      // rows is an inconsistent phantom (e.g. a lost best-effort approval_request):
+      // it can never be resolved through the normal approval/interrupt flow, so
+      // allow the delete to proceed as the escape hatch. A genuinely active turn,
+      // or a waiting state still backed by a pending row, must be resolved first.
+      const zombie=["waiting_for_approval","waiting_for_input"].includes(String(session.status))
+        && Number(session.pendingApprovalCount)===0 && Number(session.pendingUserInputCount)===0;
+      if(!zombie&&["creating","active","waiting_for_approval","waiting_for_input"].includes(String(session.status)))
         throw new ApiProblem(409,"session_active","interrupt or resolve the active session before deleting it");
       // Offline sessions (e.g. a Claude subprocess that died on a bridge restart) are
       // no longer owned by any adapter, so a bridge-routed delete fails with
