@@ -971,7 +971,8 @@ export class ControlPlane {
         requestId: decodeURIComponent(path.split("/").at(-2)!),
         answers: request.answers as Record<string, { answers: string[] }> });
       else if (action.kind === "delete_session" && action.sessionId) this.registry.send(machineId, {
-        type: "action.delete_session", actionId: action.actionId, sessionId: action.sessionId });
+        type: "action.delete_session", actionId: action.actionId, sessionId: action.sessionId,
+        agentType: this.resumeContext(action.sessionId)?.agentType });
     }
   }
 

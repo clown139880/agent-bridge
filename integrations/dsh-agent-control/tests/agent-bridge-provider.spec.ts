@@ -10,6 +10,7 @@ import { AgentBridgeLlmAdapter } from '../src/agent-bridge-provider/adapter.js'
 import { uploadPromptImages } from '../src/agent-bridge-provider/attachments.js'
 import type { AgentControlService } from '../src/service.js'
 import type { BridgeClient } from '../src/bridge-client.js'
+import { ControlError } from '../src/errors.js'
 import { bridgeUserInputToQuestions, userInputAnswerToBridge, relayPendingInteractions } from '../src/agent-bridge-provider/approval-bridge.js'
 import type { Context } from '@deepseek-ai/cordis'
 import { mkdir, mkdtemp, rm } from 'node:fs/promises'
@@ -132,7 +133,7 @@ describe('native session catalog', () => {
     f.target.setBusy(id, false)
     const original = f.bridge.call.getMockImplementation()!
     f.bridge.call.mockImplementation(async (request, signal) => request.operation === 'delete_session' ? { status: 'failed', error: { message: 'offline' } } : original(request, signal))
-    await expect(f.target.deleteNative(id)).rejects.toThrow('删除失败')
+    await expect(f.target.deleteNative(id)).rejects.toThrow('offline')
     expect(f.host.workspaceRegistry.archiveSession).not.toHaveBeenCalled()
     f.bridge.call.mockImplementation(async (request, signal) => request.operation === 'delete_session' ? { status: 'succeeded', sessionId: 'remote-1' } : original(request, signal))
     await f.target.deleteNative(id)
@@ -160,6 +161,31 @@ describe('native session catalog', () => {
     expect(await f.target.deleteNativeWorkspace(ids)).toEqual({ deleted: true, nativeIds: ids })
     expect(f.bridge.call.mock.calls.filter(([request]) => request.operation === 'delete_session').map(([request]) => request.args?.['sessionId'])).toEqual(['remote-1', 'remote-2'])
     expect(f.host.workspaceRegistry.archiveSession).toHaveBeenCalledTimes(2)
+  })
+  it('does not report remote deletion as failed when stale local cleanup rejects', async () => {
+    const f = await fixture()
+    await f.target.refresh()
+    const id = nativeSessionId('http://bridge.test', 'remote-1')
+    f.host.workspaceRegistry.archiveSession = vi.fn(async () => { throw new Error('workspace record is missing') })
+    const original = f.bridge.call.getMockImplementation()!
+    f.bridge.call.mockImplementation(async (request, signal) => request.operation === 'delete_session'
+      ? { status: 'succeeded', sessionId: 'remote-1' }
+      : original(request, signal))
+    await expect(f.target.deleteNative(id)).resolves.toMatchObject({ deleted: true, nativeId: id, localWarning: expect.stringContaining('workspace record is missing') })
+    expect((f.target.catalog()['sessions'] as JsonObject[]).some(item => item['nativeId'] === id)).toBe(false)
+    expect(f.host.logger.warn).toHaveBeenCalledWith(expect.stringContaining('incomplete after remote deletion'))
+  })
+  it('treats an already absent remote session as an idempotent delete', async () => {
+    const f = await fixture()
+    await f.target.refresh()
+    const id = nativeSessionId('http://bridge.test', 'remote-1')
+    f.host.workspaceRegistry.archiveSession = vi.fn(async () => {})
+    const original = f.bridge.call.getMockImplementation()!
+    f.bridge.call.mockImplementation(async (request, signal) => request.operation === 'delete_session'
+      ? Promise.reject(new ControlError('session_not_found', 'session not found', 404))
+      : original(request, signal))
+    await expect(f.target.deleteNative(id)).resolves.toMatchObject({ deleted: true, nativeId: id, alreadyDeleted: true })
+    expect(f.host.workspaceRegistry.archiveSession).toHaveBeenCalledWith(id)
   })
   it('offers only workers on the remote directory machine and never DSH on a presentation folder', async () => {
     const f = await fixture()

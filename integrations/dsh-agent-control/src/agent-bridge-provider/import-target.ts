@@ -6,6 +6,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { Context } from '@deepseek-ai/cordis'
 import type { BridgeClient } from '../bridge-client.js'
+import { ControlError } from '../errors.js'
 import type { JsonObject } from '../types.js'
 import { appendSessionEvent, guardImportedTurnNumbers, nativeSession, sessionEvents, type NativeHost, type NativeHandle, type NativeEvent } from './dsh-compat.js'
 import { ACK_EVENT, BINDING_EVENT, PROVIDER, projectNativeEvents, record, str } from './mapping.js'
@@ -149,19 +150,24 @@ export class AgentBridgeImportTarget {
     this.deleting.add(nativeId)
     try {
       const fused = AbortSignal.any([this.abort.signal, AbortSignal.timeout(60000), ...(signal ? [signal] : [])])
-      let receipt = record(await this.bridge.call({ operation: 'delete_session', args: { sessionId: str(binding['sessionId']) } }, fused))
+      let receipt: JsonObject
+      try { receipt = record(await this.bridge.call({ operation: 'delete_session', args: { sessionId: str(binding['sessionId']) } }, fused)) }
+      catch (error) {
+        if (!(error instanceof ControlError) || error.code !== 'session_not_found') throw error
+        const localWarning = await this.cleanupDeletedNative(nativeId)
+        return { deleted: true, nativeId, alreadyDeleted: true, ...(localWarning ? { localWarning } : {}) }
+      }
       while (receipt['status'] === 'accepted') {
         if (!str(receipt['actionId'])) throw new Error('删除操作缺少标识')
         await delay(300, undefined, { signal: fused })
         receipt = record(await this.bridge.call({ operation: 'action', args: { actionId: str(receipt['actionId']) } }, fused))
       }
-      if ((receipt['status'] !== 'succeeded' && receipt['deleted'] !== true) || receipt['sessionId'] !== binding['sessionId']) throw new Error('删除失败：' + JSON.stringify(receipt['error'] ?? receipt['status']))
-      await this.host.workspaceRegistry.archiveSession(nativeId)
-      this.deleted.add(nativeId)
-      await this.handles.get(nativeId)?.dispose()
-      this.handles.delete(nativeId)
-      this.versions.delete(nativeId)
-      return { deleted: true, nativeId }
+      if ((receipt['status'] !== 'succeeded' && receipt['deleted'] !== true) || receipt['sessionId'] !== binding['sessionId']) {
+        const failure = record(receipt['error'])
+        throw new ControlError(str(failure['code'], 'delete_failed'), str(failure['message'], 'Bridge 会话删除失败'), 409, failure['retryable'] === true)
+      }
+      const localWarning = await this.cleanupDeletedNative(nativeId)
+      return { deleted: true, nativeId, ...(localWarning ? { localWarning } : {}) }
     } finally { this.deleting.delete(nativeId) }
   }
   async deleteNativeWorkspace(nativeIds: readonly string[], signal?: AbortSignal): Promise<JsonObject> {
@@ -179,6 +185,20 @@ export class AgentBridgeImportTarget {
     }
     for (const id of ids) await this.deleteNative(id, signal)
     return { deleted: true, nativeIds: ids }
+  }
+  private async cleanupDeletedNative(nativeId: string): Promise<string> {
+    // A confirmed Bridge deletion cannot be rolled back. Stale DSH workspace
+    // references must not turn that success into a misleading retryable 500.
+    this.deleted.add(nativeId)
+    const warnings: string[] = []
+    try { await this.host.workspaceRegistry.archiveSession?.(nativeId) }
+    catch (error) { warnings.push('archive: ' + String(error)) }
+    try { await this.handles.get(nativeId)?.dispose() }
+    catch (error) { warnings.push('dispose: ' + String(error)) }
+    this.handles.delete(nativeId)
+    this.versions.delete(nativeId)
+    if (warnings.length) this.host.logger.warn(`Agent Bridge local cleanup for "${nativeId}" was incomplete after remote deletion: ${warnings.join('; ')}`)
+    return warnings.join('; ')
   }
   /** An execution location remains machine + remote directory even when repository presentation is merged. */
   async creationSources(cwd: string): Promise<JsonObject> {
@@ -349,12 +369,7 @@ export class AgentBridgeImportTarget {
     const retained = new Set(summaries.map(row => str(row['sessionId'])))
     for (const [id, binding] of this.bindings) {
       if (retained.has(str(binding['sessionId'])) || this.isBusy(id) || this.deleting.has(id) || this.deleted.has(id)) continue
-      if (this.host.workspaceRegistry.archiveSession) {
-        await this.host.workspaceRegistry.archiveSession(id)
-        this.deleted.add(id)
-        await this.handles.get(id)?.dispose()
-        this.handles.delete(id)
-      }
+      await this.cleanupDeletedNative(id)
     }
     const failures: string[] = []
     // Bounded concurrent hydration. A single broken/offline session cannot hide all other sessions.
@@ -516,7 +531,10 @@ export class AgentBridgeImportTarget {
       }
       workspaces = registry.list()
       const accounted = new Set(workspaces.flatMap(workspace => workspace.sessionIds ?? []))
-      for (const id of ids) if (!accounted.has(id)) await registry.archiveSession?.(id)
+      for (const id of ids) if (!accounted.has(id)) {
+        try { await registry.archiveSession?.(id) }
+        catch (error) { this.host.logger.warn(`Agent Bridge could not archive unaccounted session "${id}": ${String(error)}`) }
+      }
     }
     const activePresentationPaths = new Set(this.presentationPlacements.values())
     for (const workspace of registry.list()) {

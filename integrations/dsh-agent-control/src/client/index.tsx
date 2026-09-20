@@ -72,7 +72,15 @@ let connection: RpcConnection | undefined
 async function call(domain: 'overview' | 'bridge' | 'kanban', operation: string, args?: RecordValue): Promise<JsonValue> {
   if (!connection) throw new Error('Agent Control connection is not ready')
   const envelope = await connection.rpc.call(RPC_CHANNEL, 'dispatch', { domain, operation, ...(args ? { args } : {}) })
-  if (!envelope.ok) throw new Error(envelope.error?.message ?? envelope.error?.code ?? 'Agent Control request failed')
+  if (!envelope.ok) {
+    const raw = envelope.error?.message ?? envelope.error?.code ?? 'Agent Control request failed'
+    let message = raw
+    try {
+      const nested = JSON.parse(raw) as { error?: { message?: unknown } }
+      if (typeof nested.error?.message === 'string') message = nested.error.message
+    } catch { /* Connection may already provide a plain message. */ }
+    throw new Error(message)
+  }
   return envelope.value ?? null
 }
 

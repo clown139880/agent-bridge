@@ -265,7 +265,7 @@ export class AgentControlApi {
       if(String(session.status)==="offline"){this.store.deleteSession(sessionId);this.ok(response,{sessionId,deleted:true},200);return;}
       const machineId=String(session.machineId);this.requireActionBridge(machineId);
       const created=this.createAction(principal,key,path,body,"delete_session",machineId,sessionId,"DELETE");
-      if(!created.existing)this.dispatch(created.action,{type:"action.delete_session",actionId:created.action.actionId,sessionId});
+      if(!created.existing)this.dispatch(created.action,{type:"action.delete_session",actionId:created.action.actionId,sessionId,agentType:resumeContext(session)?.agentType});
       this.ok(response,actionJson(this.store.action(created.action.actionId)!),202);return;
     }
     const session=this.store.session(sessionId);if(!session)throw new ApiProblem(404,"session_not_found","session not found");

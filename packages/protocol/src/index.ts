@@ -412,6 +412,8 @@ export interface DeleteSessionActionMessage {
   type: "action.delete_session";
   actionId: string;
   sessionId: string;
+  /** Explicit owner for retained sessions absent from the adapter's live snapshot. */
+  agentType?: AgentType;
 }
 export interface ActionResultMessage {
   type: "action.result";

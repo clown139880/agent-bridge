@@ -480,7 +480,11 @@ export class BridgeClient {
         await this.adapterForSession(message.sessionId).respondUserInput(message.sessionId,message.requestId,message.answers);
         result={type:"action.result",actionId:message.actionId,kind,status:"succeeded",sessionId:message.sessionId,timestamp:Date.now()};
       }else{
-        const value=await this.adapterForSession(message.sessionId).deleteSessionAction(message.sessionId);
+        // Retained Control Plane sessions may no longer appear in an adapter's
+        // bounded live snapshot. The authoritative agent type still routes the
+        // delete to Codex/Claude without guessing from current in-memory state.
+        const adapter=message.agentType?this.adapters.get(message.agentType):undefined;
+        const value=await (adapter??this.adapterForSession(message.sessionId)).deleteSessionAction(message.sessionId);
         result={type:"action.result",actionId:message.actionId,kind,status:"succeeded",...value,timestamp:Date.now()};
       }
     }catch(error){const value=error as Error&{code?:string;retryable?:boolean};result={type:"action.result",actionId:message.actionId,

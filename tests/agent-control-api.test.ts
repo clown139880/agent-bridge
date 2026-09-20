@@ -278,6 +278,8 @@ test("deleting an idle session clears retained data and prevents inventory resur
     const receipt = await response.json() as any;
     assert.equal(receipt.kind, "delete_session");
     assert.equal(receipt.status, "accepted");
+    assert.deepEqual(f.sent.at(-1), { type:"action.delete_session", actionId:receipt.actionId,
+      sessionId:"thread-older", agentType:"codex-cli" });
     await f.internals.handleBridgeMessage("dev", { type:"action.result", actionId:receipt.actionId,
       kind:"delete_session", status:"succeeded", sessionId:"thread-older", timestamp:Date.now() });
     assert.equal(f.internals.controlStore.session("thread-older"), undefined);
