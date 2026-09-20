@@ -132,6 +132,27 @@ describe('native catalog', () => {
     })
     dispose()
   })
+  it('deletes every Bridge session in a projected workspace before its physical workspaces', async () => {
+    const rows = [workspace('first'), workspace('second')]
+    const source = { getSnapshot: () => ({ items: rows, archivedSessionIds: [] as string[] }), subscribe: () => () => {} }
+    const calls: string[] = []
+    const rpc = async (operation: string, args?: Record<string, string | string[]>) => {
+      if (operation === 'native_catalog') return { sessions: [entry('first'), entry('second')] }
+      calls.push(operation + ':' + JSON.stringify(args)); return { deleted: true }
+    }
+    const sessions = { list: { getSnapshot: () => ({ current: 'second' }), subscribe: () => () => {} }, clear: () => { calls.push('clear') }, refresh: async () => { calls.push('refresh') } }
+    const catalog = new NativeCatalog(rpc, sessions)
+    await catalog.refresh()
+    const workspaces = { list: source, async rename() {}, delete: async (id: string) => { calls.push('workspace:' + id) }, async insertSessionBefore() {} }
+    const dispose = catalog.install(workspaces)
+    await workspaces.delete('first')
+    expect(calls).toEqual([
+      'delete_native_workspace:' + JSON.stringify({ nativeIds: ['first', 'second'] }),
+      'clear', 'workspace:first', 'workspace:second', 'refresh',
+    ])
+    expect(catalog.snapshot()).toEqual([])
+    dispose()
+  })
   it('renders worker, machine, and physical workspace in compact source metadata', async () => {
     const remote = entry('remote', 'hal', '/srv/repo', 1, 'repo', 2)
     remote.worker = 'Codex @ HAL'; remote.executionLocations[0]!.machineName = 'HAL Server'

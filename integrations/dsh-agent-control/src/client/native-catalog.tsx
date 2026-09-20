@@ -12,7 +12,7 @@ type Workspaces = { list: Source<WorkspaceSnapshot>; rename(id: string, title: s
 type SessionSnapshot = { current?: string; byId?: Record<string, { updatedAt?: number }> }
 export type CatalogSessions = { list: Source<SessionSnapshot>; clear(): void; refresh(): Promise<void> }
 export const DELETE_SESSION_EVENT = 'agent-control:delete-session'
-type Rpc = (operation: string, args?: Record<string, string>) => Promise<unknown>
+type Rpc = (operation: string, args?: Record<string, string | string[]>) => Promise<unknown>
 
 const canonicalPath = (value: string) => value.replace(/\\/g, '/').replace(/\/$/, '').toLocaleLowerCase()
 
@@ -135,7 +135,20 @@ export class NativeCatalog {
       return original.call(source).items.filter(row => row.workspaceId === id || row.sessionIds.some(session => merged?.sessionIds.includes(session)))
     }
     workspaces.rename = async (id, title) => { let result: unknown; for (const row of originals(id)) result = await rename.call(workspaces, row.workspaceId, title); return result }
-    workspaces.delete = async id => { for (const row of originals(id)) await remove.call(workspaces, row.workspaceId) }
+    workspaces.delete = async id => {
+      const merged = projected().items.find(row => row.workspaceId === id)
+      const physicalRows = originals(id)
+      const nativeIds = merged?.sessionIds.filter(session => this.entries.some(entry => entry.nativeId === session)) ?? []
+      if (nativeIds.length) {
+        const result = await this.rpc('delete_native_workspace', { nativeIds }) as { deleted?: boolean }
+        if (!result.deleted) throw new Error('尚未确认工作区内的 Bridge 会话已删除')
+        if (nativeIds.includes(this.sessions.list.getSnapshot().current ?? '')) this.sessions.clear()
+        const removed = new Set(nativeIds)
+        this.entries = this.entries.filter(row => !removed.has(row.nativeId)); this.emit()
+      }
+      for (const row of physicalRows) await remove.call(workspaces, row.workspaceId)
+      if (nativeIds.length) await this.sessions.refresh()
+    }
     workspaces.insertSessionBefore = (id, session, before) => {
       const owner = originals(id).find(row => row.sessionIds.includes(session))
       return move.call(workspaces, owner?.workspaceId ?? id, session, before && owner?.sessionIds.includes(before) ? before : undefined)

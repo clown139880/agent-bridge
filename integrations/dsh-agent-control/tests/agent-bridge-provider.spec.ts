@@ -140,6 +140,27 @@ describe('native session catalog', () => {
     await f.target.refresh()
     expect(f.agents.has(id)).toBe(false)
   })
+  it('preflights and deletes every Bridge session in a workspace', async () => {
+    const f = await fixture()
+    const summaries = [summary, { ...summary, sessionId: 'remote-2', updatedAt: 11 }]
+    f.bridge.call.mockImplementation(async request => {
+      if (request.operation === 'workers') return { workers: [{ id: 'w', machineId: 'dev-wsl', name: 'Codex', status: 'online' }] }
+      if (request.operation === 'session_groups') return groupPage(summaries)
+      if (request.operation === 'session_events') return page([])
+      if (request.operation === 'delete_session') return { status: 'succeeded', sessionId: String(request.args?.['sessionId'] ?? '') }
+      return page([])
+    })
+    f.host.workspaceRegistry.archiveSession = vi.fn(async () => {})
+    await f.target.refresh()
+    const ids = summaries.map(item => nativeSessionId('http://bridge.test', String(item['sessionId'])))
+    f.target.setBusy(ids[1]!, true)
+    await expect(f.target.deleteNativeWorkspace(ids)).rejects.toThrow('所有当前回合')
+    expect(f.bridge.call.mock.calls.filter(([request]) => request.operation === 'delete_session')).toHaveLength(0)
+    f.target.setBusy(ids[1]!, false)
+    expect(await f.target.deleteNativeWorkspace(ids)).toEqual({ deleted: true, nativeIds: ids })
+    expect(f.bridge.call.mock.calls.filter(([request]) => request.operation === 'delete_session').map(([request]) => request.args?.['sessionId'])).toEqual(['remote-1', 'remote-2'])
+    expect(f.host.workspaceRegistry.archiveSession).toHaveBeenCalledTimes(2)
+  })
   it('offers only workers on the remote directory machine and never DSH on a presentation folder', async () => {
     const f = await fixture()
     const originalCall = f.bridge.call.getMockImplementation()!

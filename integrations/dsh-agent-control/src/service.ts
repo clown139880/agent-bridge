@@ -33,6 +33,12 @@ export class AgentControlService {
         if (!this.importTarget || typeof args['nativeId'] !== 'string') throw new ControlError('invalid_parameter', 'nativeId is required.', 400)
         return this.importTarget.deleteNative(args['nativeId'], signal)
       }
+      if (request.operation === 'delete_native_workspace') {
+        if (!this.importTarget || !Array.isArray(args['nativeIds']) || !args['nativeIds'].every(id => typeof id === 'string')) {
+          throw new ControlError('invalid_parameter', 'nativeIds is required.', 400)
+        }
+        return this.importTarget.deleteNativeWorkspace(args['nativeIds'], signal)
+      }
       if (request.operation === 'creation_sources' || request.operation === 'create_native') {
         if (!this.importTarget) throw new ControlError('invalid_operation', 'Bridge provider is not ready.', 400)
         if (typeof args['cwd'] !== 'string' || !args['cwd']) throw new ControlError('invalid_parameter', 'cwd is required.', 400)

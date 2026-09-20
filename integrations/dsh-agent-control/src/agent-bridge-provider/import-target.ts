@@ -164,6 +164,22 @@ export class AgentBridgeImportTarget {
       return { deleted: true, nativeId }
     } finally { this.deleting.delete(nativeId) }
   }
+  async deleteNativeWorkspace(nativeIds: readonly string[], signal?: AbortSignal): Promise<JsonObject> {
+    const ids = [...new Set(nativeIds)]
+    if (!ids.length) throw new Error('工作区中没有 Bridge 会话')
+    // Validate the entire workspace before the first remote mutation. This keeps
+    // one busy or stale child from turning a workspace deletion into a partial
+    // delete merely because it happened to appear later in the list.
+    for (const id of ids) {
+      const binding = this.binding(id)
+      if (!binding) throw new Error(id.startsWith('agent-bridge-') ? 'Bridge 会话尚未加载，请稍后重试' : '工作区包含非 Bridge 会话')
+      if (this.isBusy(id) || this.deleting.has(id) || ['active', 'waiting_for_approval', 'waiting_for_input'].includes(str(binding['status']))) {
+        throw new Error('请先结束工作区内所有当前回合并处理待确认事项，再删除工作区')
+      }
+    }
+    for (const id of ids) await this.deleteNative(id, signal)
+    return { deleted: true, nativeIds: ids }
+  }
   /** An execution location remains machine + remote directory even when repository presentation is merged. */
   async creationSources(cwd: string): Promise<JsonObject> {
     const workerPage = record(await this.bridge.call({ operation: 'workers' }, this.abort.signal))
