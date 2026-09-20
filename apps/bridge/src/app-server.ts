@@ -1042,11 +1042,14 @@ export class CodexAppServerAdapter implements AgentAdapter {
 
   private handleCompletedItem(threadId: string, item: ThreadItem, turnId=this.activeTurns.get(threadId)): void {
     const itemId=item.id??createHash("sha256").update(JSON.stringify(item)).digest("hex").slice(0,24);
-    if (item.type === "agentMessage" && item.text) {
-      this.appendLog(threadId, item.text);
-      this.emit({ type: "agent.output", sessionId: threadId, timestamp: Date.now(), text: item.text });
+    const text=item.text??item.content?.map(part=>part.text??"").join("\n").trim();
+    if ((item.type === "agentMessage" || item.type === "userMessage") && text) {
+      if (item.type === "agentMessage") {
+        this.appendLog(threadId, text);
+        this.emit({ type: "agent.output", sessionId: threadId, timestamp: Date.now(), text });
+      }
       this.emitSessionEvent("message.completed", threadId, `app-server:${threadId}:${itemId}:message`,
-        { role: "assistant", text: truncateEventText(item.text) }, turnId, itemId);
+        { role: item.type === "userMessage" ? "user" : "assistant", text: truncateEventText(text) }, turnId, itemId);
     } else if (item.type === "commandExecution") {
       const summary = `$ ${item.command ?? "command"}${item.exitCode !== null && item.exitCode !== undefined ? `\nExit: ${item.exitCode}` : ""}`;
       this.appendLog(threadId, `${summary}${item.aggregatedOutput ? `\n${item.aggregatedOutput}` : ""}`);
