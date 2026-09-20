@@ -142,12 +142,16 @@ export class NativeCatalog {
       if (nativeIds.length) {
         const result = await this.rpc('delete_native_workspace', { nativeIds }) as { deleted?: boolean }
         if (!result.deleted) throw new Error('尚未确认工作区内的 Bridge 会话已删除')
-        if (nativeIds.includes(this.sessions.list.getSnapshot().current ?? '')) this.sessions.clear()
-        const removed = new Set(nativeIds)
-        this.entries = this.entries.filter(row => !removed.has(row.nativeId)); this.emit()
       }
       for (const row of physicalRows) await remove.call(workspaces, row.workspaceId)
-      if (nativeIds.length) await this.sessions.refresh()
+      if (nativeIds.length) {
+        const removed = new Set(nativeIds)
+        this.entries = this.entries.filter(row => !removed.has(row.nativeId)); this.emit()
+        // Workspace deletion already removes the current row through the native
+        // Session/Workspace feeds. Calling sessions.clear() here would persist
+        // DSH's explicit "no session selected" mode and blank the whole sidebar.
+        await this.sessions.refresh()
+      }
     }
     workspaces.insertSessionBefore = (id, session, before) => {
       const owner = originals(id).find(row => row.sessionIds.includes(session))

@@ -133,8 +133,9 @@ describe('native catalog', () => {
     dispose()
   })
   it('deletes every Bridge session in a projected workspace before its physical workspaces', async () => {
-    const rows = [workspace('first'), workspace('second')]
-    const source = { getSnapshot: () => ({ items: rows, archivedSessionIds: [] as string[] }), subscribe: () => () => {} }
+    let snapshot = { items: [workspace('first'), workspace('second'), { ...workspace('local'), sessionIds: ['local'] }], archivedSessionIds: [] as string[] }
+    const listeners = new Set<() => void>()
+    const source = { getSnapshot: () => snapshot, subscribe: (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener) } } }
     const calls: string[] = []
     const rpc = async (operation: string, args?: Record<string, string | string[]>) => {
       if (operation === 'native_catalog') return { sessions: [entry('first'), entry('second')] }
@@ -143,15 +144,24 @@ describe('native catalog', () => {
     const sessions = { list: { getSnapshot: () => ({ current: 'second' }), subscribe: () => () => {} }, clear: () => { calls.push('clear') }, refresh: async () => { calls.push('refresh') } }
     const catalog = new NativeCatalog(rpc, sessions)
     await catalog.refresh()
-    const workspaces = { list: source, async rename() {}, delete: async (id: string) => { calls.push('workspace:' + id) }, async insertSessionBefore() {} }
+    const workspaces = { list: source, async rename() {}, delete: async (id: string) => {
+      calls.push('workspace:' + id)
+      snapshot = { ...snapshot, items: snapshot.items.filter(row => row.workspaceId !== id) }
+      for (const listener of listeners) listener()
+    }, async insertSessionBefore() {} }
     const dispose = catalog.install(workspaces)
+    const observed: string[][] = []
+    const unsubscribe = source.subscribe(() => { observed.push(source.getSnapshot().items.map(row => row.workspaceId)) })
     await workspaces.delete('first')
     expect(calls).toEqual([
       'delete_native_workspace:' + JSON.stringify({ nativeIds: ['first', 'second'] }),
-      'clear', 'workspace:first', 'workspace:second', 'refresh',
+      'workspace:first', 'workspace:second', 'refresh',
     ])
     expect(catalog.snapshot()).toEqual([])
-    dispose()
+    expect(source.getSnapshot().items.map(row => row.workspaceId)).toEqual(['local'])
+    expect(observed.at(-1)).toEqual(['local'])
+    expect(calls).not.toContain('clear')
+    unsubscribe(); dispose()
   })
   it('renders worker, machine, and physical workspace in compact source metadata', async () => {
     const remote = entry('remote', 'hal', '/srv/repo', 1, 'repo', 2)

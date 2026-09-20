@@ -31,7 +31,7 @@ export function registerAgentBridgeProvider(ctx: Context, service: AgentControlS
       return target.binding(String(options.sessionId)) ? adapter.stream(options) : next()
     }, { global: true, prepend: true })
     scoped.on('agent/created', ({ agent }: { agent: Agent }) => attach(agent), { global: true })
-    scoped.on('agent/disposed', ({ agent }: { agent: Agent }) => adapter.detachAgent(agent.id), { global: true })
+    scoped.on('agent/disposed', async ({ agent }: { agent: Agent }) => { adapter.detachAgent(agent.id) }, { global: true })
     scoped.on('session/event', ((session: NativeSession, event: NativeEvent) => {
       if (event.type === 'turn/end' && !target.isPresenting(session.id)) queueMicrotask(() => {
         try { adapter.commitAcks(session.id) }
