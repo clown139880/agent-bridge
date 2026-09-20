@@ -3,7 +3,7 @@ import { useDialog } from './dialog.js'
 import css from './workspace.module.css'
 
 export type ExecutionLocation = { workerId: string; workerName: string; machineId: string; machineName: string; workspace: string; online: boolean; available: boolean; local?: boolean }
-export type NativeEntry = { nativeId: string; sessionId: string; groupId: string; groupTitle: string; groupUpdatedAt: number; executionLocations: ExecutionLocation[]; machineId: string; workspace: string; projectIdentity?: string; presentationPath?: string; title: string; status: string; worker: string; updatedAt: number; lastUsedAt?: number }
+export type NativeEntry = { nativeId: string; sessionId: string; workerId: string; model?: string; groupId: string; groupTitle: string; groupUpdatedAt: number; executionLocations: ExecutionLocation[]; machineId: string; workspace: string; projectIdentity?: string; presentationPath?: string; title: string; status: string; worker: string; updatedAt: number; lastUsedAt?: number }
 export type WorkspaceRow = { workspaceId: string; path: string; title: string; sessionIds: readonly string[]; createdAt: string; updatedAt: string }
 type WorkspaceSnapshot = { items: readonly WorkspaceRow[]; archivedSessionIds: readonly string[] }
 type Source<T> = { getSnapshot(): T; subscribe(listener: () => void): () => void }
@@ -80,6 +80,7 @@ export class NativeCatalog {
   constructor(readonly rpc: Rpc, readonly sessions: CatalogSessions) {}
   snapshot = () => this.entries
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener) } }
+  entry(nativeId: string): NativeEntry | undefined { return this.entries.find(row => row.nativeId === nativeId) }
   useWorkspaces: WorkspaceHook = <T,>(selector: (snapshot: WorkspaceSnapshot) => T): T => {
     if (!this.workspaceSource) throw new Error('工作区目录尚未安装')
     const snapshot = useSyncExternalStore(this.workspaceSource.subscribe, this.workspaceSource.getSnapshot, this.workspaceSource.getSnapshot)
@@ -167,7 +168,7 @@ export function DeleteNativeSession({ catalog }: { catalog: NativeCatalog }) {
     const request = (event: Event) => {
       const detail = (event as CustomEvent<{ nativeId: string; title: string }>).detail
       if (!detail || typeof detail.nativeId !== 'string' || busy) return
-      setError(''); setPending(entries.find(row => row.nativeId === detail.nativeId) ?? { nativeId: detail.nativeId, sessionId: detail.nativeId.startsWith('agent-bridge-') ? '?' : '', groupId: '', groupTitle: '', groupUpdatedAt: 0, executionLocations: [], machineId: '', workspace: '', title: detail.title || 'DSH 对话', status: '', worker: 'DSH', updatedAt: 0 })
+      setError(''); setPending(entries.find(row => row.nativeId === detail.nativeId) ?? { nativeId: detail.nativeId, sessionId: detail.nativeId.startsWith('agent-bridge-') ? '?' : '', workerId: '', groupId: '', groupTitle: '', groupUpdatedAt: 0, executionLocations: [], machineId: '', workspace: '', title: detail.title || 'DSH 对话', status: '', worker: 'DSH', updatedAt: 0 })
     }
     window.addEventListener(DELETE_SESSION_EVENT, request)
     return () => window.removeEventListener(DELETE_SESSION_EVENT, request)

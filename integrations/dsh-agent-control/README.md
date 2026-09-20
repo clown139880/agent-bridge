@@ -22,8 +22,10 @@ not runtime compatibility proof; the installed-runtime verifier is required.
 
 Bridge remains authoritative for remote execution. DSH owns its presentation
 projection; there is no second session browser or composer. Initial history
-hydration is eager and bounded to four concurrent jobs. The native model choice
-currently follows the remote session. Images use native attachment storage and
+hydration is eager and bounded to four concurrent jobs. Bridge conversations
+reuse DSH's native model-control UI but load the catalog from their bound worker;
+the selected model and reasoning effort are sent explicitly on the next new turn.
+Native DSH conversations retain the ordinary shared-provider catalog. Images use native attachment storage and
 Bridge uploads. Directory creation offers local DSH and machine-specific Bridge
 sources. Workspaces with the same normalized repository identity are merged in
 the native catalog across workers and machines without rewriting stored session

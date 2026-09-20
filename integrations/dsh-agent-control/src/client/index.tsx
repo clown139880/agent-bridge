@@ -15,6 +15,7 @@ import { openBridgeStream } from './bridge-stream.js'
 
 import { SessionStore, type BridgeRpc } from './session-store.js'
 import { SessionCreationController, SessionSourcePicker, type CreationSessions, type CreationWorkspaces, type CreationNavigation } from './session-creation.js'
+import { installBridgeModelDirectories } from './bridge-model-directory.js'
 
 
 const RPC_CHANNEL = '/agent-control'
@@ -246,13 +247,19 @@ function WorkspaceOverlay({ controller }: Injected) {
   </div>
 }
 
-export const inject = ['slots', 'connection', 'layout', 'remote', 'remote.session', 'sessions', 'workspaces', 'uiWorkspace']
+export const inject = ['slots', 'connection', 'layout', 'remote', 'remote.session', 'sessions', 'workspaces', 'uiWorkspace', 'modelDirectories']
 export function apply(ctx: ClientContext): void {
   connection = (ctx as unknown as { connection: RpcConnection }).connection
-  const remote = (ctx as unknown as { remote: { session: { modelCatalog(): Promise<{ ok: true; value: JsonValue } | { ok: false; error: { code: string; message: string } }> }; $on(event: string, listener: () => void): () => void } }).remote
+  const remote = (ctx as unknown as { remote: { session: {
+    modelCatalog(): Promise<{ ok: true; value: JsonValue } | { ok: false; error: { code: string; message: string } }>
+    selectModel(request: { sessionId: string; provider: string; model: string; reasoningEffort?: string }): Promise<{ ok: boolean; error?: { code?: string; message?: string } }>
+  }; $on(event: string, listener: () => void): () => void } }).remote
   const nativeSessions = (ctx as unknown as { get(name: string): unknown }).get('sessions') as unknown as { open(id: string): void } | undefined
   const creation = new SessionCreationController((operation, args) => call('bridge', operation, args))
   const catalog = new NativeCatalog((operation, args) => call('bridge', operation, args), ctx.get('sessions') as unknown as CatalogSessions)
+  const modelDirectories = (ctx as unknown as { get(name: string): unknown }).get('modelDirectories') as Parameters<typeof installBridgeModelDirectories>[0] | undefined
+  if (modelDirectories) ctx.effect(() => installBridgeModelDirectories(modelDirectories, catalog,
+    (operation, args) => call('bridge', operation, args), request => remote.session.selectModel(request)))
   ctx.effect(() => catalog.install(ctx.get('workspaces') as unknown as Parameters<NativeCatalog['install']>[0]))
   // TokensCowork creates its root workspace hook before third-party plugins load.
   // Override that captured hook on the native slot while retaining its component.

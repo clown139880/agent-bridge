@@ -375,6 +375,24 @@ describe('Bridge native turn', () => {
     expect(f.target.isPresenting(String(agent.id))).toBe(false)
     await f.target.dispose()
   })
+  it('forwards a worker-scoped model selection on a new Bridge turn', async () => {
+    const f = await fixture([])
+    const agent = await f.target.ensure(summary)
+    let submitted = false
+    f.bridge.call.mockImplementation(async request => {
+      if (request.operation === 'session') return summary
+      if (request.operation === 'submit_turn') { submitted = true; return { status: 'succeeded', turnId: 't1' } }
+      if (request.operation === 'session_events') return page(submitted ? [row('done', 'turn.completed', { status: 'completed' })] : [])
+      return page([])
+    })
+    const adapter = new AgentBridgeLlmAdapter({ bridge: f.bridge } as unknown as AgentControlService, f.target, 1)
+    for await (const _chunk of adapter.stream({ sessionId: agent.id, provider: 'agent-bridge', model: 'gpt-5.6-sol', reasoningEffort: 'high',
+      messages: [{ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'go' }] }] } as GenerateOptions)) { /* drain */ }
+    expect(f.bridge.call).toHaveBeenCalledWith({ operation: 'submit_turn', args: {
+      sessionId: 'remote-1', input: 'go', delivery: 'auto', model: 'gpt-5.6-sol', reasoningEffort: 'high',
+    } }, expect.any(AbortSignal))
+    await f.target.dispose()
+  })
   it('maps live Bridge deltas to native text and reasoning blocks without replaying the completed text', async () => {
     const f = await fixture([])
     const agent = await f.target.ensure(summary)

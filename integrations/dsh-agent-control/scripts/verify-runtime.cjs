@@ -63,10 +63,10 @@ fs.writeFileSync(target, source);
     await mount('dsh-storage-domain', {backend: 'json'});
     await mount('dsh-workspace');
     await mount('dsh-attachment-local', {dshHome: path.join(folder,'attachment-home')});
-    const remote = {sessionId:'r', workerId:'w', workspace:'/remote/project', title:'Bridge runtime fixture', status:'idle', updatedAt:3};
+    const remote = {sessionId:'r', workerId:'w', machineId:'remote-machine', workspace:'/remote/project', groupId:'loc:remote-machine:/remote/project', groupTitle:'project @ remote-machine', groupUpdatedAt:3, executionLocations:[{workerId:'w',machineId:'remote-machine',workspace:'/remote/project'}], title:'Bridge runtime fixture', status:'idle', updatedAt:3};
     const bridge = {call: async ({operation,args}) => {
       if (operation === 'workers') return {workers:[{id:'w', machineId:'remote-machine',hostname:'remote.example', name:'Remote fixture',status:'online'}]};
-      if (operation === 'sessions') return {data:[remote],hasMore:false};
+      if (operation === 'session_groups') return {data:[{groupId:'loc:remote-machine:/remote/project',title:'project @ remote-machine',updatedAt:remote.updatedAt,executionLocations:[{workerId:'w',machineId:'remote-machine',workspace:remote.workspace}],sessions:[remote]}],hasMore:false};
       if (operation === 'session') return {...remote,sessionId:args.sessionId};
       if (operation === 'create_session') { assert.equal(args.workerId,'w'); assert.equal(args.workspace,remote.workspace); return {status:'succeeded',sessionId:'new-r'}; }
       if (operation === 'session_events') return {data:args.sessionId === 'new-r' ? [] : rows,hasMore:false};
@@ -113,6 +113,7 @@ fs.writeFileSync(target, source);
       let submittedAttachments;
       bridge.call = async ({operation,args}) => {
         if (operation === 'upload') { uploadedImage = args; return {id:'fixture-image',filename:'probe.png',mimeType:'image/png',size:Buffer.from(args.content,'base64').length}; }
+        if (operation === 'live_events') return {data:[],nextCursor:'l:0'};
         if (operation === 'session_events') return {data:submitted ? [...rows,...receiptRows] : rows,hasMore:false};
         if (operation === 'session') return remote;
         if (operation === 'submit_turn') { submitted = true; submittedAttachments = args.attachments; return {status:'succeeded',actionId:'fixture-action',turnId:'reply'}; }

@@ -112,9 +112,10 @@ export class AgentBridgeImportTarget {
       const executionLocations = Array.isArray(binding['executionLocations']) ? binding['executionLocations'].map(record).map(location => ({
         ...location, local: this.isLocalWorker(this.workers.get(str(location['workerId'])) ?? {}),
       })) : []
-      return { nativeId, sessionId: str(binding['sessionId']), machineId, workspace,
+      return { nativeId, sessionId: str(binding['sessionId']), workerId: str(binding['workerId']), machineId, workspace,
         groupId: str(binding['groupId']), groupTitle: str(binding['groupTitle']), groupUpdatedAt: Number(binding['groupUpdatedAt']) || Number(binding['updatedAt']) || 0,
         executionLocations,
+        ...(str(binding['model'], '') ? { model: str(binding['model']) } : {}),
         ...(str(binding['projectIdentity']) ? { projectIdentity: str(binding['projectIdentity']) } : {}),
         ...(this.presentationPlacements.get(placementKey) ? { presentationPath: this.presentationPlacements.get(placementKey)! } : {}),
         title: agent ? promptTitle(binding, sessionEvents(nativeSession(agent))) : str(binding['title']),

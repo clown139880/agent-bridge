@@ -180,9 +180,11 @@ to an already-running Desktop Host, or restart Desktop to hide this distinction.
 
 ## Current limits
 
-The native Bridge model choice follows the remote session through the provider's
-single `remote` model. Worker-specific
-model catalog selection remains follow-up work. Current-message images are read
+The native model-control seat is session-aware. For imported Bridge sessions it
+loads the bound worker's model catalog and persists the choice as an
+`agent-bridge` selection, so the adapter sends that model and reasoning effort
+on the next new remote turn. Ordinary DSH sessions continue to use the shared
+Host provider catalog. Current-message images are read
 through the native attachment store, uploaded to Bridge, and submitted as refs.
 Image-only prompts carry a neutral `[Image attached]` text marker for Bridge's
 nonempty input contract. Arbitrary file forwarding remains unsupported.
