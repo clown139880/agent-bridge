@@ -23,6 +23,14 @@ function autoApproveMode(name: string, fallback: "off" | "readonly" | "all"): "o
   return raw;
 }
 
+type ClaudePermissionMode = "default" | "acceptEdits" | "plan" | "bypassPermissions";
+const PERMISSION_MODES = new Set<ClaudePermissionMode>(["default", "acceptEdits", "plan", "bypassPermissions"]);
+function permissionMode(name: string, fallback: ClaudePermissionMode): ClaudePermissionMode {
+  const raw = (process.env[name] ?? fallback).trim() as ClaudePermissionMode;
+  if (!PERMISSION_MODES.has(raw)) throw new Error(`${name} must be one of ${[...PERMISSION_MODES].join("|")}`);
+  return raw;
+}
+
 function jsonStringArray(name: string, fallback: string[]): string[] {
   const raw = process.env[name];
   if (!raw) return fallback;
@@ -55,9 +63,26 @@ export const config = {
   claudeScanExisting: process.env.CLAUDE_SCAN_EXISTING === "true",
   // Auto-approval for Claude tool calls: off (prompt for everything), readonly
   // (clear non-mutating built-ins), or all (clear everything). CLAUDE_AUTO_APPROVE_TOOLS
-  // is a JSON array of extra tool names to always clear, e.g. ["Bash"].
+  // is a JSON array of extra tool names to always clear, e.g. ["Bash"]. This bridge-side
+  // gate only fires for tool calls that Claude's own permission engine leaves unresolved
+  // (i.e. it does not short-circuit the native allow/deny rules below).
   claudeAutoApprove: autoApproveMode("CLAUDE_AUTO_APPROVE", "off"),
   claudeAutoApproveTools: jsonStringArray("CLAUDE_AUTO_APPROVE_TOOLS", []),
+  // Claude Code native permissions, evaluated inside the claude process BEFORE the
+  // bridge auto-approve gate / operator prompt (order: deny → allow → mode → prompt).
+  //   CLAUDE_PERMISSION_MODE: default | acceptEdits | plan | bypassPermissions.
+  //     acceptEdits auto-accepts file edits inside the workspace (cwd + additional dirs)
+  //     while still prompting for edits elsewhere — this is the "workspace-write" ask.
+  //     bypassPermissions skips ALL checks (no bridge prompts); use sparingly.
+  //   CLAUDE_PERMISSION_ALLOW / _DENY: JSON arrays of tool+specifier rules, e.g.
+  //     ["Bash(git:*)","Edit(**)","Read(~/.ssh/**)","WebFetch(domain:example.com)"].
+  //     allow → auto-approved (no prompt); deny → blocked outright.
+  //   CLAUDE_ADDITIONAL_DIRECTORIES: JSON array of extra trusted dirs (--add-dir),
+  //     extending workspace trust beyond cwd for reads and acceptEdits writes.
+  claudePermissionMode: permissionMode("CLAUDE_PERMISSION_MODE", "default"),
+  claudePermissionAllow: jsonStringArray("CLAUDE_PERMISSION_ALLOW", []),
+  claudePermissionDeny: jsonStringArray("CLAUDE_PERMISSION_DENY", []),
+  claudeAdditionalDirectories: jsonStringArray("CLAUDE_ADDITIONAL_DIRECTORIES", []),
   allowedRoots: splitAllowedRoots(process.env.BRIDGE_ALLOWED_ROOTS, platform()).length
     ? splitAllowedRoots(process.env.BRIDGE_ALLOWED_ROOTS, platform()) : [process.cwd()],
   reconnectMs: Number(process.env.BRIDGE_RECONNECT_MS ?? "3000"),

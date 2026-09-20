@@ -10,6 +10,24 @@ function adapter(autoApprove: { mode: "off" | "readonly" | "all"; tools: string[
   return instance as unknown as { isAutoApproved(tool: string): boolean };
 }
 
+test("native permissions option is accepted and does not alter the bridge gate", () => {
+  // Native allow/deny/mode are enforced inside the claude subprocess (before the gate),
+  // so the bridge-side isAutoApproved must stay driven purely by autoApprove.
+  const instance = new ClaudeCodeAdapter(
+    {
+      command: "claude",
+      claudeHome: "/tmp",
+      allowedRoots: ["/tmp"],
+      scanExisting: false,
+      autoApprove: { mode: "off", tools: [] },
+      permissions: { mode: "acceptEdits", allow: ["Bash(git:*)"], deny: ["Read(~/.ssh/**)"], additionalDirectories: ["/srv"] },
+    },
+    () => {},
+  ) as unknown as { isAutoApproved(tool: string): boolean };
+  assert.equal(instance.isAutoApproved("Bash"), false);
+  assert.equal(instance.isAutoApproved("Edit"), false);
+});
+
 test("auto-approve off prompts for every tool", () => {
   const a = adapter({ mode: "off", tools: [] });
   assert.equal(a.isAutoApproved("Read"), false);

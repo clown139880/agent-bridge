@@ -72,6 +72,10 @@ export class BridgeClient {
     claudeScanExisting?: boolean;
     claudeAutoApprove?: "off" | "readonly" | "all";
     claudeAutoApproveTools?: string[];
+    claudePermissionMode?: "default" | "acceptEdits" | "plan" | "bypassPermissions";
+    claudePermissionAllow?: string[];
+    claudePermissionDeny?: string[];
+    claudeAdditionalDirectories?: string[];
     allowedRoots: string[];
     reconnectMs: number;
     version: string;
@@ -117,6 +121,12 @@ export class BridgeClient {
         scanExisting: options.claudeScanExisting ?? false,
         fetchAttachment: makeAttachmentFetcher(options.url, options.token),
         autoApprove: { mode: options.claudeAutoApprove ?? "off", tools: options.claudeAutoApproveTools ?? [] },
+        permissions: {
+          mode: options.claudePermissionMode ?? "default",
+          allow: options.claudePermissionAllow ?? [],
+          deny: options.claudePermissionDeny ?? [],
+          additionalDirectories: options.claudeAdditionalDirectories ?? [],
+        },
       }, this.adapterEmit("claude-code")));
     }
     if (!this.adapters.size) throw new Error(`No known agent providers enabled: ${providers.join(",")}`);

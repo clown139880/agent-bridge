@@ -17,6 +17,7 @@ import { resolveProjectPath, summarizePrompt } from "../app-server.js";
 import { deriveProjectIdentity } from "../path-utils.js";
 import { PushableAsyncIterable, query, type Query } from "./sdk/index.js";
 import type {
+  ClaudePermissionMode,
   PermissionResult,
   SDKAssistantMessage,
   SDKMessage,
@@ -102,7 +103,20 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       // Auto-approval policy. "off" prompts for every tool (legacy behavior),
       // "readonly" clears READONLY_TOOLS, "all" clears everything (scoped
       // --dangerously-skip-permissions). `tools` always clears, on top of mode.
+      // This bridge-side gate only sees tool calls that Claude's native permission
+      // engine leaves for the prompt tool (see `permissions` below).
       autoApprove?: { mode: "off" | "readonly" | "all"; tools: string[] };
+      // Claude Code native permissions, passed straight through to the subprocess and
+      // evaluated in-process BEFORE the auto-approve gate: deny → allow → mode → prompt.
+      // `allow`/`deny` are tool+specifier rules (e.g. "Bash(git:*)", "Edit(**)"); `mode`
+      // acceptEdits auto-accepts in-workspace edits; `additionalDirectories` extends the
+      // trusted workspace. Only unresolved calls reach handleToolPermission/canCallTool.
+      permissions?: {
+        mode: ClaudePermissionMode;
+        allow: string[];
+        deny: string[];
+        additionalDirectories: string[];
+      };
     },
     private readonly emit: AdapterEmit,
   ) {}
@@ -206,6 +220,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       session.resolveInit = resolve;
     });
 
+    const permissions = this.options.permissions;
     session.query = query({
       prompt: session.input,
       options: {
@@ -214,6 +229,12 @@ export class ClaudeCodeAdapter implements AgentAdapter {
         resume: resumeNativeId,
         model,
         abort: session.abort.signal,
+        // Native permission rules evaluated inside claude before canCallTool fires.
+        // Only defined when configured so an unset deployment keeps default behavior.
+        permissionMode: permissions?.mode,
+        allowedTools: permissions?.allow,
+        disallowedTools: permissions?.deny,
+        additionalDirectories: permissions?.additionalDirectories,
         canCallTool: (toolName, input, opts) => this.handleToolPermission(session, toolName, input, opts.signal),
       },
     });
