@@ -601,7 +601,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
     socket.on("close", (code, reason) => this.handleClose(socket, code, reason.toString()));
     socket.on("error", (error) => log.warn({ error }, "App Server WebSocket error"));
     await this.request("initialize", {
-      clientInfo: { name: "agent_bridge", title: "Agent Bridge", version: "0.6.0" },
+      clientInfo: { name: "codex_app_server", title: "Agent Bridge", version: "0.6.0" },
     });
     this.notify("initialized", {});
     log.info({ url: this.options.url }, "Connected to Codex App Server");
