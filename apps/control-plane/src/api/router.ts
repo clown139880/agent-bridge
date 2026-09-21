@@ -12,10 +12,13 @@ import { ApiProblem, integerParam as integer, jsonBody, stringField as string, a
 function agentTypeForWorkerPrefix(prefix: string): AgentType | undefined {
   if (prefix === "codex") return "codex-cli";
   if (prefix === "claude") return "claude-code";
+  if (prefix === "pi") return "pi";
   return undefined;
 }
 function capabilityForAgent(agentType: AgentType): string {
-  return agentType === "claude-code" ? "claude-code" : "codex-cli";
+  if (agentType === "claude-code") return "claude-code";
+  if (agentType === "pi") return "pi";
+  return "codex-cli";
 }
 
 interface Principal { id: string; read: boolean; write: boolean; }

@@ -33,12 +33,16 @@ const log = pino({ name: "control-plane" });
 
 /** Map a worker-id prefix (from `${prefix}@machine`) to an agent type. */
 function agentTypeForWorkerPrefix(prefix: string): AgentType {
-  return prefix === "claude" ? "claude-code" : "codex-cli";
+  if (prefix === "claude") return "claude-code";
+  if (prefix === "pi") return "pi";
+  return "codex-cli";
 }
 
 /** Registration capability a bridge must advertise to run the given agent type. */
 function capabilityForAgent(agentType: AgentType): string {
-  return agentType === "claude-code" ? "claude-code" : "codex-cli";
+  if (agentType === "claude-code") return "claude-code";
+  if (agentType === "pi") return "pi";
+  return "codex-cli";
 }
 
 interface PendingRunLaunch {
@@ -391,6 +395,7 @@ export class ControlPlane {
         // registered the claude-code capability.
         const agents: Array<{ agentType: AgentType; label: string }> = [{ agentType: "codex-cli", label: "Codex" }];
         if (machine.capabilities.includes("claude-code")) agents.push({ agentType: "claude-code", label: "Claude" });
+        if (machine.capabilities.includes("pi")) agents.push({ agentType: "pi", label: "Pi" });
         return agents
           .filter(({ agentType }) => agentType === "codex-cli" || machine.capabilities.includes(capabilityForAgent(agentType)))
           .map(({ agentType, label }) => ({

@@ -17,6 +17,7 @@ import {
 import { CodexAppServerAdapter } from "./app-server.js";
 import { config } from "./config.js";
 import { ClaudeCodeAdapter } from "./claude/claude-adapter.js";
+import { PiAdapter } from "./pi/pi-adapter.js";
 import { makeAttachmentFetcher } from "./attachments.js";
 import type { AgentAdapter } from "./agent-adapter.js";
 import { BridgeSelfUpdater } from "./self-updater.js";
@@ -27,12 +28,14 @@ const log = pino({ name: "bridge-client" });
 function providerToAgentType(provider: string): AgentType | undefined {
   if (provider === "codex") return "codex-cli";
   if (provider === "claude") return "claude-code";
+  if (provider === "pi") return "pi";
   return undefined;
 }
 
 /** Registration capabilities contributed by each agent type. */
 function capabilitiesFor(agentType: AgentType): string[] {
   if (agentType === "claude-code") return ["claude-code", "claude-cli"];
+  if (agentType === "pi") return ["pi", "pi-rpc"];
   return ["codex-cli", "codex-app-server"];
 }
 
@@ -76,6 +79,10 @@ export class BridgeClient {
     claudePermissionAllow?: string[];
     claudePermissionDeny?: string[];
     claudeAdditionalDirectories?: string[];
+    piCommand?: string;
+    piProvider?: string;
+    piModel?: string;
+    piSessionDir?: string;
     allowedRoots: string[];
     reconnectMs: number;
     version: string;
@@ -128,6 +135,16 @@ export class BridgeClient {
           additionalDirectories: options.claudeAdditionalDirectories ?? [],
         },
       }, this.adapterEmit("claude-code")));
+    }
+    if (providers.includes("pi")) {
+      this.adapters.set("pi", new PiAdapter({
+        command: options.piCommand ?? "pi",
+        provider: options.piProvider,
+        model: options.piModel,
+        sessionDir: options.piSessionDir,
+        allowedRoots: options.allowedRoots,
+        fetchAttachment: makeAttachmentFetcher(options.url, options.token),
+      }, this.adapterEmit("pi")));
     }
     if (!this.adapters.size) throw new Error(`No known agent providers enabled: ${providers.join(",")}`);
 

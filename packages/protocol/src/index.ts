@@ -13,7 +13,7 @@ export const AGENT_STATUSES = [
 ] as const;
 
 export type AgentStatus = (typeof AGENT_STATUSES)[number];
-export type AgentType = "codex-cli" | "codex-desktop" | "claude-code" | "opencode";
+export type AgentType = "codex-cli" | "codex-desktop" | "claude-code" | "opencode" | "pi";
 export const BRIDGE_PROTOCOL_VERSION = 3;
 
 /**
@@ -26,6 +26,8 @@ export function workerPrefix(agentType: AgentType): string {
       return "claude";
     case "opencode":
       return "opencode";
+    case "pi":
+      return "pi";
     default:
       return "codex";
   }
@@ -277,7 +279,7 @@ export interface UserInputResolvedMessage {
   resolvedAt: number;
 }
 
-export type SessionSource = "app-server" | "desktop-rollout" | "claude-cli";
+export type SessionSource = "app-server" | "desktop-rollout" | "claude-cli" | "pi-rpc";
 
 export interface SessionState {
   sessionId: string;

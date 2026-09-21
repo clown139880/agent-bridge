@@ -83,6 +83,13 @@ export const config = {
   claudePermissionAllow: jsonStringArray("CLAUDE_PERMISSION_ALLOW", []),
   claudePermissionDeny: jsonStringArray("CLAUDE_PERMISSION_DENY", []),
   claudeAdditionalDirectories: jsonStringArray("CLAUDE_ADDITIONAL_DIRECTORIES", []),
+  // Pi provider (enabled when BRIDGE_PROVIDERS includes "pi"). PI_PROVIDER /
+  // PI_MODEL are the provider and model in ~/.pi/agent/models.json (e.g. a
+  // tokensapi / OpenAI-compatible relay). PI_SESSION_DIR is optional.
+  piCommand: process.env.PI_COMMAND ?? "pi",
+  piProvider: process.env.PI_PROVIDER,
+  piModel: process.env.PI_MODEL,
+  piSessionDir: process.env.PI_SESSION_DIR,
   allowedRoots: splitAllowedRoots(process.env.BRIDGE_ALLOWED_ROOTS, platform()).length
     ? splitAllowedRoots(process.env.BRIDGE_ALLOWED_ROOTS, platform()) : [process.cwd()],
   reconnectMs: Number(process.env.BRIDGE_RECONNECT_MS ?? "3000"),
