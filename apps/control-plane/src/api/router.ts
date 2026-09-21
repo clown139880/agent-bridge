@@ -49,7 +49,7 @@ function pendingJson(row: PendingRow): Record<string,unknown> {
 // agent type and workspace are known.
 function resumeContext(session:Record<string,unknown>):{agentType:AgentType;workspace:string;nativeSessionId?:string}|undefined{
   const agent=session.agent,workspace=session.workspace;
-  if((agent!=="codex-cli"&&agent!=="claude-code")||typeof workspace!=="string"||!workspace)return undefined;
+  if((agent!=="codex-cli"&&agent!=="claude-code"&&agent!=="pi")||typeof workspace!=="string"||!workspace)return undefined;
   const nativeSessionId=typeof session.nativeSessionId==="string"?session.nativeSessionId:undefined;
   return {agentType:agent,workspace,nativeSessionId};
 }
@@ -142,9 +142,10 @@ export class AgentControlApi {
       workspaces,recentWorkspaces:recent,lastSeenAt:machine.lastSeenAt,bridgeVersion:bridge?.bridgeVersion??null,activeSessionCount:active};
   }
   private machineWorkers(machine:ReturnType<Store["listMachines"]>[number]):Record<string,unknown>[]{
-    // Codex is always listed for backward compatibility; Claude appears when the bridge advertises it.
+    // Codex is always listed for backward compatibility; Claude/Pi appear when the bridge advertises them.
     const rows=[this.workerJson(machine,"codex-cli","Codex")];
     if(machine.capabilities.includes(capabilityForAgent("claude-code")))rows.push(this.workerJson(machine,"claude-code","Claude"));
+    if(machine.capabilities.includes(capabilityForAgent("pi")))rows.push(this.workerJson(machine,"pi","Pi"));
     return rows.filter(row=>row.status==='online'||!this.store.workerRemoved(String(row.id)));
   }
   private workers(response:ServerResponse):void{this.ok(response,{workers:this.legacy.listMachines().flatMap(m=>this.machineWorkers(m)),streamCursor:this.store.streamCursor()});}
@@ -223,7 +224,7 @@ export class AgentControlApi {
     const key=this.requireKey(request),body=await jsonBody(request),workerId=string(body.workerId,"workerId",true)!;
     const prior=this.existingAction(principal,key,"/api/v1/sessions",body);if(prior){this.ok(response,actionJson(prior),202);return;}
     const parsed=parseWorkerId(workerId);const agentType=parsed?agentTypeForWorkerPrefix(parsed.prefix):undefined;
-    if(!parsed||!agentType)throw new ApiProblem(400,"invalid_worker_id","workerId must be <codex|claude>@machine");
+    if(!parsed||!agentType)throw new ApiProblem(400,"invalid_worker_id","workerId must be <codex|claude|pi>@machine");
     const machineId=parsed.machineId,workspace=string(body.workspace,"workspace",true)!,input=string(body.input,"input"),
       model=string(body.model,"model"),attachments=attachmentsField(body.attachments);
     this.requireActionBridge(machineId);
