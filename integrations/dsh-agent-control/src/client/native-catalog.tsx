@@ -2,7 +2,7 @@ import { useEffect, useState, useSyncExternalStore } from 'react'
 import { useDialog } from './dialog.js'
 import css from './workspace.module.css'
 
-export type ExecutionLocation = { workerId: string; workerName: string; machineId: string; machineName: string; workspace: string; online: boolean; available: boolean; local?: boolean }
+export type ExecutionLocation = { workerId: string; workerName: string; agent?: string; machineId: string; machineName: string; workspace: string; online: boolean; available: boolean; local?: boolean }
 export type NativeEntry = { nativeId: string; sessionId: string; workerId: string; model?: string; groupId: string; groupTitle: string; groupUpdatedAt: number; executionLocations: ExecutionLocation[]; machineId: string; workspace: string; projectIdentity?: string; presentationPath?: string; title: string; status: string; worker: string; updatedAt: number; lastUsedAt?: number }
 export type WorkspaceRow = { workspaceId: string; path: string; title: string; sessionIds: readonly string[]; createdAt: string; updatedAt: string }
 type WorkspaceSnapshot = { items: readonly WorkspaceRow[]; archivedSessionIds: readonly string[] }
@@ -169,9 +169,19 @@ export function sourceLabel(source: ReturnType<NativeCatalog['source']>): string
   return source ? `${source.worker} · ${source.machine} · ${source.workspace}` : ''
 }
 
+/** Compact session metadata used beside the conversation header. Keep the last
+ * known model visible even when the worker is temporarily offline. */
+export function sessionModelLabel(entry: Pick<NativeEntry, 'model'> | undefined): string {
+  const model = entry?.model?.trim()
+  return model ? `模型：${model}` : ''
+}
+
 export function SessionSourceMetadata({ catalog, sessionId }: { catalog: NativeCatalog; sessionId: string }) {
   useSyncExternalStore(catalog.subscribe, catalog.snapshot, catalog.snapshot)
-  const label = sourceLabel(catalog.source(sessionId))
+  const entry = catalog.entry(sessionId)
+  const source = sourceLabel(catalog.source(sessionId))
+  const model = sessionModelLabel(entry)
+  const label = [source, model].filter(Boolean).join(' · ')
   return label ? <span className={css.sessionSource} title={label} data-session-source>{label}</span> : null
 }
 

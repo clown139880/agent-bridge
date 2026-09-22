@@ -52,4 +52,14 @@ describe('BridgeModelDirectory', () => {
     await directory.load()
     await expect(directory.select({ provider: BRIDGE_PROVIDER, model: 'deepseek-v4' })).rejects.toThrow('不在当前 Bridge worker')
   })
+
+  it('hides GPT models from non-Codex workers while retaining other models', async () => {
+    const nonCodex: NativeEntry = { ...entry, worker: 'Claude @ HAL', executionLocations: [{ workerId: entry.workerId, workerName: 'Claude', agent: 'claude-code', machineId: 'hal', machineName: 'HAL', workspace: '/repo', online: true, available: true }] }
+    const directory = new BridgeModelDirectory(nativeId, catalog(nonCodex), vi.fn(async () => ({ models: [
+      { model: 'gpt-5.6-sol', displayName: 'GPT-5.6' },
+      { model: 'deepseek-v4', displayName: 'DeepSeek V4' },
+    ] })), vi.fn())
+    const state = await directory.load()
+    expect(state.groups[0]?.models.map(model => model.id)).toEqual(['deepseek-v4'])
+  })
 })

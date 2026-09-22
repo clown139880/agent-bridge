@@ -188,6 +188,16 @@ Host provider catalog. Current-message images are read
 through the native attachment store, uploaded to Bridge, and submitted as refs.
 Image-only prompts carry a neutral `[Image attached]` text marker for Bridge's
 nonempty input contract. Arbitrary file forwarding remains unsupported.
+
+The Bridge model directory is worker-scoped: it can only display models returned
+by that worker's adapter. Codex workers currently expose Codex App Server's
+`model/list` (primarily GPT models), while Claude and Pi adapters do not yet
+publish a model catalog. GPT-prefixed models are therefore filtered out for
+non-Codex workers, but other models remain eligible for every Agent. The
+`agent-bridge` adapter is also the execution provider for imported sessions;
+switching an imported session to a native DSH provider (for example a separate
+DeepSeek provider) is not supported by the current interception contract and
+must not be presented as a working UI option.
 Claude transcript discovery recovers original first-user text, including content
 block arrays, using a stable event id and canonical public session identity.
 For already-materialized conversations, recovered prompts are appended with a

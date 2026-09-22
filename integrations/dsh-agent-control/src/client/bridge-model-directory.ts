@@ -34,6 +34,13 @@ function errorText(error: unknown): string { return error instanceof Error ? err
 function record(value: JsonValue | undefined): Record<string, JsonValue> { return value && typeof value === 'object' && !Array.isArray(value) ? value : {} }
 
 function modelId(model: BridgeModel): string { return (model.model ?? model.id ?? '').trim() }
+function isGptModel(model: BridgeModel): boolean {
+  return /^gpt(?:[-_\.]|$)/i.test(modelId(model)) || /^gpt(?:[-_\.]|$)/i.test((model.displayName ?? '').trim())
+}
+function isCodexWorker(entry: NativeEntry): boolean {
+  const location = entry.executionLocations.find(value => value.workerId === entry.workerId)
+  return /codex/i.test(`${entry.worker} ${location?.agent ?? ''}`)
+}
 function directoryModel(model: BridgeModel): DirectoryModel | undefined {
   const id = modelId(model)
   if (!id) return undefined
@@ -93,11 +100,16 @@ export class BridgeModelDirectory implements Directory {
       const response = record(await this.rpc('models', { workerId: entry.workerId }))
       if (!Array.isArray(response['models'])) throw new Error('Bridge worker 返回了无效的模型列表。')
       const raw = response['models'].map(value => record(value) as BridgeModel)
-      const models = raw.flatMap(value => { const model = directoryModel(value); return model ? [model] : [] })
+      // GPT models are Codex-only. Other models are deliberately left available
+      // to every Agent; the worker catalog remains the source of truth for them.
+      const compatible = isCodexWorker(entry) ? raw : raw.filter(value => !isGptModel(value))
+      const models = compatible.flatMap(value => { const model = directoryModel(value); return model ? [model] : [] })
       if (!models.length) throw new Error('此 Bridge worker 没有可用模型。')
-      const fallback = raw.find(value => value.isDefault && modelId(value)) ?? raw.find(value => modelId(value))
-      const currentModel = this.state.current?.model || entry.model?.trim() || (fallback ? modelId(fallback) : '')
-      const selectedModel = raw.find(value => modelId(value) === currentModel)
+      const fallback = compatible.find(value => value.isDefault && modelId(value)) ?? compatible.find(value => modelId(value))
+      const currentModel = (compatible.some(value => modelId(value) === this.state.current?.model) ? this.state.current?.model
+        : compatible.some(value => modelId(value) === entry.model?.trim()) ? entry.model?.trim() : (fallback ? modelId(fallback) : '')
+      ) ?? ''
+      const selectedModel = compatible.find(value => modelId(value) === currentModel)
       const reasoningEffort = selectedModel?.defaultReasoningEffort?.trim()
       const current = { provider: BRIDGE_PROVIDER, model: currentModel, ...(reasoningEffort ? { reasoningEffort } : {}) }
       this.set({ current, routable: true, groups: [{ id: BRIDGE_PROVIDER, name: `Agent Bridge · ${entry.worker}`, models }], failures: [], status: 'ready', error: null })
