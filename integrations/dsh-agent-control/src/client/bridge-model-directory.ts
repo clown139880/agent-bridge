@@ -33,9 +33,12 @@ export const BRIDGE_PROVIDER = 'agent-bridge'
 function errorText(error: unknown): string { return error instanceof Error ? error.message : String(error) }
 function record(value: JsonValue | undefined): Record<string, JsonValue> { return value && typeof value === 'object' && !Array.isArray(value) ? value : {} }
 
-function modelId(model: BridgeModel): string { return (model.model ?? model.id ?? '').trim() }
+// `id` is the provider-qualified identity when an adapter exposes multiple
+// providers (Pi uses e.g. `deepseek/deepseek-chat`). Keep it intact so a
+// selection can carry the provider switch through the Bridge turn request.
+function modelId(model: BridgeModel): string { return (model.id ?? model.model ?? '').trim() }
 function isGptModel(model: BridgeModel): boolean {
-  return /^gpt(?:[-_\.]|$)/i.test(modelId(model)) || /^gpt(?:[-_\.]|$)/i.test((model.displayName ?? '').trim())
+  return /(?:^|[/#])gpt(?:[-_\.]|$)/i.test(modelId(model)) || /^gpt(?:[-_\.]|$)/i.test((model.displayName ?? '').trim())
 }
 function isCodexWorker(entry: NativeEntry): boolean {
   const location = entry.executionLocations.find(value => value.workerId === entry.workerId)
