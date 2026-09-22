@@ -18,11 +18,19 @@ const log = pino({ name: "pi-adapter" });
 const LOG_LIMIT = 2_000;
 const INIT_TIMEOUT_MS = 60_000;
 
+interface PiModelInfo {
+  provider: string;
+  id: string;
+  name?: string;
+  reasoning?: boolean;
+}
+
 interface PiSession {
   sessionId: string;        // stable bridge-assigned public id
   nativeSessionId?: string; // pi uuid (from get_state), used for resume
   sessionFile?: string;     // pi session .jsonl path, used for resume
   requestId?: string;
+  model?: string;           // current model id (bare, without provider prefix)
   cwd: string;
   projectPath: string;
   projectIdentity?: string;
@@ -53,6 +61,9 @@ interface PiSession {
 export class PiAdapter implements AgentAdapter {
   private readonly sessions = new Map<string, PiSession>();
   private ready = false;
+  /** Cached pi catalog (shared across sessions; one provider config per adapter). */
+  private availableModels: PiModelInfo[] = [];
+  private modelsFetched = false;
 
   constructor(
     private readonly options: {
@@ -119,6 +130,7 @@ export class PiAdapter implements AgentAdapter {
       sessionId,
       nativeSessionId: resumeNativeId,
       requestId,
+      model: bareModelId(effectiveModel),
       cwd,
       projectPath: cwd,
       projectIdentity: await deriveProjectIdentity(cwd),
@@ -135,17 +147,22 @@ export class PiAdapter implements AgentAdapter {
     };
     this.sessions.set(sessionId, session);
 
-    const initPromise = new Promise<void>((resolve) => { session.resolveInit = resolve; });
+    let resolveInit!: () => void;
+    let rejectInit!: (error: Error) => void;
+    const initPromise = new Promise<void>((resolve, reject) => { resolveInit = resolve; rejectInit = reject; });
+    session.resolveInit = resolveInit;
+    const initTimer = setTimeout(() => {
+      session.resolveInit = undefined;
+      rejectInit(new Error(`Timed out waiting for pi session init: ${sessionId}`));
+    }, INIT_TIMEOUT_MS);
     this.attachStreams(session);
 
     // Ask pi for its state so we capture the pi-controlled session id/file, which
     // lets us resume across a bridge restart. Do this immediately; it also proves
     // the RPC channel is live before the first turn.
     this.sendCommand(session, { type: "get_state" });
-    await Promise.race([
-      initPromise,
-      new Promise<void>((_, reject) => setTimeout(() => reject(new Error(`Timed out waiting for pi session init: ${sessionId}`)), INIT_TIMEOUT_MS)),
-    ]);
+    await initPromise;
+    clearTimeout(initTimer);
     session.resolveInit = undefined;
 
     if (prompt) {
@@ -236,8 +253,10 @@ export class PiAdapter implements AgentAdapter {
       const data = (event.data as Record<string, unknown>) ?? {};
       const sessionId = data.sessionId as string | undefined;
       const sessionFile = data.sessionFile as string | undefined;
+      const modelData = data.model as { id?: string } | undefined;
       if (sessionId) session.nativeSessionId = sessionId;
       if (sessionFile) session.sessionFile = sessionFile;
+      if (modelData?.id) session.model = modelData.id;
       this.emitDiscovered(session);
       if (session.pendingTurnStart && !session.activeTurnId) {
         session.pendingTurnStart = false;
@@ -245,6 +264,16 @@ export class PiAdapter implements AgentAdapter {
       }
       session.resolveInit?.();
       session.resolveInit = undefined;
+      return;
+    }
+    if (command === "set_model") {
+      if (success) {
+        const modelData = (event.data as { id?: string } | undefined);
+        if (modelData?.id) session.model = modelData.id;
+        this.appendLog(session, `Model switched to ${session.model ?? "?"}`);
+      } else {
+        this.appendLog(session, `pi set_model failed: ${event.error ?? ""}`);
+      }
       return;
     }
     if (command === "prompt" || command === "steer" || command === "follow_up") {
@@ -330,18 +359,44 @@ export class PiAdapter implements AgentAdapter {
 
   // ---- turn management ---------------------------------------------------
 
-  private beginTurn(session: PiSession, text: string): void {
+  private beginTurn(session: PiSession, text: string, model?: string): void {
     if (session.activeTurnId) {
-      // Active turn: steer instead of starting a parallel prompt.
+      // Active turn: steer instead of starting a parallel prompt. Model cannot
+      // change mid-turn, matching the control-plane model_not_applicable guard.
       this.sendCommand(session, { type: "steer", message: text });
       return;
     }
+    this.applyModel(session, model);
     if (!session.discovered) {
       // Session not yet announced (init may still be in flight). Queue so the
       // prompt still gets a turn id once get_state resolves.
       session.pendingTurnStart = true;
     }
     this.sendCommand(session, { type: "prompt", message: text });
+  }
+
+  /**
+   * Switch the pi subprocess to a different model before a new turn when the
+   * caller supplies one. pi exposes set_model over RPC; the bridge only sends a
+   * model on a fresh (idle) turn, so this is safe. Returns early when the model
+   * is unchanged, unknown, or a turn is active.
+   */
+  private applyModel(session: PiSession, model?: string): void {
+    if (!model) return;
+    const wantId = bareModelId(model);
+    if (!wantId || wantId === session.model) return;
+    if (session.activeTurnId) return; // cannot switch mid-turn
+    let provider = model.includes("/") ? model.slice(0, model.indexOf("/")) : this.options.provider;
+    if (!provider) {
+      provider = this.availableModels.find((m) => m.id === wantId)?.provider;
+    }
+    if (!provider) {
+      this.appendLog(session, `Cannot switch model to ${wantId}: provider unknown`);
+      return;
+    }
+    this.sendCommand(session, { type: "set_model", provider, modelId: wantId });
+    session.model = wantId; // optimistic; corrected by the set_model response
+    this.appendLog(session, `Switching model to ${wantId}`);
   }
 
   private startTurnEvents(session: PiSession): string {
@@ -396,8 +451,8 @@ export class PiAdapter implements AgentAdapter {
 
   // ---- AgentAdapter surface ----------------------------------------------
 
-  async input(sessionId: string, text: string, _model?: string, _attachments?: AttachmentRef[]): Promise<void> {
-    this.beginTurn(this.require(sessionId), text);
+  async input(sessionId: string, text: string, model?: string, _attachments?: AttachmentRef[]): Promise<void> {
+    this.beginTurn(this.require(sessionId), text, model);
   }
 
   async createSessionAction(actionId: string, projectPath: string, input?: string, model?: string, _attachments?: AttachmentRef[]): Promise<{ sessionId: string; turnId?: string }> {
@@ -411,7 +466,7 @@ export class PiAdapter implements AgentAdapter {
     text: string,
     delivery: "auto" | "steer" | "start_turn",
     expectedTurnId?: string,
-    _model?: string,
+    model?: string,
     _reasoningEffort?: string,
     _attachments?: AttachmentRef[],
   ): Promise<{ sessionId: string; turnId?: string; resolvedAction: "steer" | "start_turn" }> {
@@ -420,6 +475,9 @@ export class PiAdapter implements AgentAdapter {
     if (expectedTurnId && expectedTurnId !== activeTurnId) throw domainError("turn_changed", "active turn changed");
     if (delivery === "steer" && !activeTurnId) throw domainError("no_active_turn", "session has no active turn");
     if (delivery === "start_turn" && activeTurnId) throw domainError("turn_already_active", "session already has an active turn");
+    // Switch the model before marking the turn active (start_turn); applyModel
+    // refuses to change the model once a turn is active.
+    if (model) this.applyModel(session, model);
     if (!activeTurnId) this.startTurnEvents(session);
     const resolvedAction = activeTurnId ? "steer" : "start_turn";
     this.sendCommand(session, { type: activeTurnId ? "steer" : "prompt", message: text });
@@ -461,8 +519,82 @@ export class PiAdapter implements AgentAdapter {
     // Pi's base RPC protocol has no pending user-input surface.
   }
 
-  async models(): Promise<never[]> {
-    return [];
+  async models(): Promise<import('@agent-bridge/protocol').CodexModelInfo[]> {
+    if (!this.modelsFetched) {
+      this.availableModels = await this.queryAvailableModels();
+      this.modelsFetched = true;
+    }
+    return this.availableModels.map((m) => ({
+      id: `${m.provider}/${m.id}`,
+      model: m.id,
+      displayName: m.name ?? m.id,
+      isDefault: m.id === bareModelId(this.options.model),
+      defaultReasoningEffort: m.reasoning ? "medium" : undefined,
+      supportedReasoningEfforts: m.reasoning
+        ? [{ reasoningEffort: "off", description: "No extended thinking" }, { reasoningEffort: "low" }, { reasoningEffort: "medium" }, { reasoningEffort: "high" }]
+        : undefined,
+    }));
+  }
+
+  /**
+   * Query pi's available model catalog via a short-lived RPC subprocess. The
+   * catalog is provider-config-scoped, so it is cached once per adapter and
+   * shared across sessions (a throwaway process avoids needing a live session).
+   */
+  private queryAvailableModels(): Promise<PiModelInfo[]> {
+    return new Promise((resolve) => {
+      const args = ["--mode", "rpc"];
+      if (this.options.provider) { args.push("--provider", this.options.provider); }
+      if (this.options.model) { args.push("--model", this.options.model); }
+      if (this.options.sessionDir) { args.push("--session-dir", this.options.sessionDir); }
+      const decoder = new StringDecoder("utf8");
+      let buffer = "";
+      let settled = false;
+      let proc: ChildProcessWithoutNullStreams;
+      const finish = (models: PiModelInfo[]) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        try { proc.stdin.end(); } catch { /* already closed */ }
+        try { proc.kill("SIGTERM"); } catch { /* already dead */ }
+        resolve(models);
+      };
+      const timer = setTimeout(() => finish([]), 15_000);
+      try {
+        proc = spawn(this.options.command, args, { cwd: process.cwd(), stdio: ["pipe", "pipe", "pipe"], env: process.env });
+      } catch {
+        clearTimeout(timer);
+        resolve([]);
+        return;
+      }
+      proc.stdout.on("data", (chunk: Buffer) => {
+        buffer += decoder.write(chunk);
+        let newline = buffer.indexOf("\n");
+        while (newline !== -1) {
+          let line = buffer.slice(0, newline);
+          buffer = buffer.slice(newline + 1);
+          if (line.endsWith("\r")) line = line.slice(0, -1);
+          if (line) {
+            try {
+              const event = JSON.parse(line) as { type?: string; command?: string; success?: boolean; data?: { models?: Array<{ provider?: string; id?: string; name?: string; reasoning?: boolean }> } };
+              if (event.type === "response" && event.command === "get_available_models" && event.success) {
+                finish((event.data?.models ?? []).map((m) => ({
+                  provider: m.provider ?? "",
+                  id: m.id ?? "",
+                  name: m.name,
+                  reasoning: m.reasoning,
+                })).filter((m) => m.id));
+              }
+            } catch { /* ignore malformed lines */ }
+          }
+          newline = buffer.indexOf("\n");
+        }
+      });
+      proc.stderr.on("data", () => { /* ignored */ });
+      proc.on("error", () => finish([]));
+      proc.on("close", () => finish([]));
+      proc.stdin.write(JSON.stringify({ type: "get_available_models" }) + "\n");
+    });
   }
 
   async reconcileActivity(): Promise<void> {
@@ -566,4 +698,11 @@ function truncate(text: string, limit = 4_000): string {
 
 function domainError(code: string, message: string): Error & { code: string; retryable: boolean } {
   return Object.assign(new Error(message), { code, retryable: false });
+}
+
+/** Strip a `provider/id` prefix, leaving the bare pi model id used by set_model. */
+function bareModelId(model?: string): string | undefined {
+  if (!model) return undefined;
+  const slash = model.indexOf("/");
+  return slash === -1 ? model : model.slice(slash + 1);
 }
