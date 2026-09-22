@@ -194,10 +194,12 @@ by that worker's adapter. Codex workers currently expose Codex App Server's
 `model/list` (primarily GPT models), while Claude and Pi adapters do not yet
 publish a model catalog. GPT-prefixed models are therefore filtered out for
 non-Codex workers, but other models remain eligible for every Agent. The
-`agent-bridge` adapter is also the execution provider for imported sessions;
-switching an imported session to a native DSH provider (for example a separate
-DeepSeek provider) is not supported by the current interception contract and
-must not be presented as a working UI option.
+`agent-bridge` adapter is also the execution provider for imported sessions.
+Pi workers can now expose provider-qualified ids (for example
+`deepseek/deepseek-chat`) and switch them on a fresh turn; the selector must
+preserve that qualified id. Codex workers still accept the model id from Codex
+App Server and cannot switch an imported session to an unrelated native DSH
+provider through this interception contract.
 Claude transcript discovery recovers original first-user text, including content
 block arrays, using a stable event id and canonical public session identity.
 For already-materialized conversations, recovered prompts are appended with a
