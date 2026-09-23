@@ -32,7 +32,8 @@ export class AgentControlService {
       if (request.operation === 'provider_status') return { registered: !!this.importTarget, ...(this.importTarget?.status() ?? {}) }
       if (request.operation === 'provider_models') {
         if (args['refresh'] === true || args['refresh'] === 'true') this.providerModels.invalidate()
-        return { models: await this.providerModels.models(signal) }
+        const models = await this.providerModels.models(signal)
+        return { models: models.map(model => ({ id: model.id, name: model.name, endpoints: [...model.endpoints] })) }
       }
       if (request.operation === 'native_catalog') return this.importTarget?.catalog() ?? { sessions: [] }
       if (request.operation === 'delete_native') {
