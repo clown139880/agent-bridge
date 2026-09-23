@@ -15,7 +15,7 @@ import { openBridgeStream } from './bridge-stream.js'
 
 import { SessionStore, type BridgeRpc } from './session-store.js'
 import { SessionCreationController, SessionSourcePicker, type CreationSessions, type CreationWorkspaces, type CreationNavigation } from './session-creation.js'
-import { installBridgeModelDirectories } from './bridge-model-directory.js'
+import { NativeModels, installBridgeModelDirectories } from './bridge-model-directory.js'
 
 
 const RPC_CHANNEL = '/agent-control'
@@ -265,9 +265,15 @@ export function apply(ctx: ClientContext): void {
   const nativeSessions = (ctx as unknown as { get(name: string): unknown }).get('sessions') as unknown as { open(id: string): void } | undefined
   const creation = new SessionCreationController((operation, args) => call('bridge', operation, args))
   const catalog = new NativeCatalog((operation, args) => call('bridge', operation, args), ctx.get('sessions') as unknown as CatalogSessions)
+  const loadNativeModelCatalog = async (): Promise<JsonValue> => {
+    const response = await remote.session.modelCatalog()
+    if (!response.ok) throw new Error(`${response.error.code}: ${response.error.message}`)
+    return response.value
+  }
+  const nativeModels = new NativeModels(loadNativeModelCatalog)
   const modelDirectories = (ctx as unknown as { get(name: string): unknown }).get('modelDirectories') as Parameters<typeof installBridgeModelDirectories>[0] | undefined
   if (modelDirectories) ctx.effect(() => installBridgeModelDirectories(modelDirectories, catalog,
-    (operation, args) => call('bridge', operation, args), request => remote.session.selectModel(request)))
+    nativeModels, request => remote.session.selectModel(request)))
   ctx.effect(() => catalog.install(ctx.get('workspaces') as unknown as Parameters<NativeCatalog['install']>[0]))
   // TokensCowork creates its root workspace hook before third-party plugins load.
   // Override that captured hook on the native slot while retaining its component.
@@ -285,13 +291,9 @@ export function apply(ctx: ClientContext): void {
     return () => { disposed = true; uninstall?.() }
   })
   ctx.slots.inject('shell.overlay', () => ctx.slots.register({ name: 'shell.overlay', id: 'agent-control-session-source', order: 11, inject: () => ({ controller: creation }) }, SessionSourcePicker))
-  const controller = new WorkspaceController(undefined, async () => {
-    const response = await remote.session.modelCatalog()
-    if (!response.ok) throw new Error(`${response.error.code}: ${response.error.message}`)
-    return response.value
-  }, id => nativeSessions?.open(id))
+  const controller = new WorkspaceController(undefined, loadNativeModelCatalog, id => nativeSessions?.open(id))
   ctx.effect(() => {
-    const refresh = () => controller.sessions.invalidateModels()
+    const refresh = () => { nativeModels.invalidate(); controller.sessions.invalidateModels() }
     const disposers = [remote.$on('llm/adapters-updated', refresh), remote.$on('settings/document-updated', refresh), remote.$on('credentials/reference-updated', refresh)]
     return () => { for (const dispose of disposers) dispose(); controller.sessions.dispose() }
   })

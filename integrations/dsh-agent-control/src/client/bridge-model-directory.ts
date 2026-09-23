@@ -1,21 +1,12 @@
 import type { NativeCatalog, NativeEntry } from './native-catalog.js'
 
 type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue }
-type Rpc = (operation: string, args?: Record<string, string>) => Promise<JsonValue>
 type ModelSelection = { provider: string; model: string; reasoningEffort?: string }
 type SelectModel = (request: { sessionId: string; provider: string; model: string; reasoningEffort?: string }) => Promise<{
   ok: boolean
   error?: { code?: string; message?: string }
 }>
-type BridgeModel = {
-  id?: string
-  model?: string
-  displayName?: string
-  isDefault?: boolean
-  defaultReasoningEffort?: string
-  supportedReasoningEfforts?: Array<{ reasoningEffort?: string; description?: string }>
-}
-type DirectoryModel = { id: string; name: string; reasoning?: { defaultEffort?: string; efforts: Array<{ id: string; name: string }> } }
+type DirectoryModel = { id: string; name: string; description?: string; reasoning?: { defaultEffort?: string; efforts: Array<{ id: string; name: string }> } }
 type DirectoryState = {
   current: ModelSelection | null
   routable: boolean | null
@@ -32,28 +23,84 @@ export const BRIDGE_PROVIDER = 'agent-bridge'
 
 function errorText(error: unknown): string { return error instanceof Error ? error.message : String(error) }
 function record(value: JsonValue | undefined): Record<string, JsonValue> { return value && typeof value === 'object' && !Array.isArray(value) ? value : {} }
+function array(value: JsonValue | undefined): JsonValue[] { return Array.isArray(value) ? value : [] }
+function text(value: JsonValue | undefined): string { return typeof value === 'string' ? value.trim() : '' }
 
-// `id` is the provider-qualified identity when an adapter exposes multiple
-// providers (Pi uses e.g. `deepseek/deepseek-chat`). Keep it intact so a
-// selection can carry the provider switch through the Bridge turn request.
-function modelId(model: BridgeModel): string { return (model.id ?? model.model ?? '').trim() }
-function isGptModel(model: BridgeModel): boolean {
-  return /(?:^|[/#])gpt(?:[-_\.]|$)/i.test(modelId(model)) || /^gpt(?:[-_\.]|$)/i.test((model.displayName ?? '').trim())
+/** Adopt a DSH catalog model verbatim; its id is already provider-qualified where that matters. */
+function directoryModel(value: JsonValue): DirectoryModel | undefined {
+  const model = record(value)
+  const id = text(model['id'])
+  if (!id) return undefined
+  const reasoning = record(model['reasoning'])
+  const efforts = array(reasoning['efforts']).flatMap(entry => {
+    const effort = text(record(entry)['id'])
+    return effort ? [{ id: effort, name: text(record(entry)['name']) || effort }] : []
+  })
+  const defaultEffort = text(reasoning['defaultEffort'])
+  const description = text(model['description'])
+  return {
+    id, name: text(model['name']) || id,
+    ...(description ? { description } : {}),
+    ...(efforts.length || defaultEffort ? { reasoning: { ...(defaultEffort ? { defaultEffort } : {}), efforts } } : {}),
+  }
+}
+
+function isGptModel(model: DirectoryModel): boolean {
+  return /(?:^|[/#])gpt(?:[-_.]|$)/i.test(model.id) || /^gpt(?:[-_.]|$)/i.test(model.name)
 }
 function isCodexWorker(entry: NativeEntry): boolean {
+  // The worker id is `<codex|claude|pi>@machine`; the execution location's agent
+  // and the display name are fallbacks for catalogs that predate that format.
   const location = entry.executionLocations.find(value => value.workerId === entry.workerId)
-  return /codex/i.test(`${entry.worker} ${location?.agent ?? ''}`)
+  return /^codex\b/i.test(entry.workerId) || /codex/i.test(`${entry.worker} ${location?.agent ?? ''}`)
 }
-function directoryModel(model: BridgeModel): DirectoryModel | undefined {
-  const id = modelId(model)
-  if (!id) return undefined
-  const efforts = (model.supportedReasoningEfforts ?? []).flatMap(value => {
-    const effort = value.reasoningEffort?.trim()
-    return effort ? [{ id: effort, name: value.description?.trim() || effort }] : []
-  })
-  return { id, name: model.displayName?.trim() || id, ...(efforts.length || model.defaultReasoningEffort ? {
-    reasoning: { ...(model.defaultReasoningEffort ? { defaultEffort: model.defaultReasoningEffort } : {}), efforts },
-  } : {}) }
+
+/**
+ * Codex reaches the relay over the OpenAI Responses wire (`wire_api =
+ * "responses"`), which only serves the GPT family, so a Codex session must not
+ * be offered anything else. Claude and Pi reach the same relay over wires that
+ * carry every model, so they get the whole catalog.
+ */
+export function modelsForWorker(entry: NativeEntry, models: readonly DirectoryModel[]): DirectoryModel[] {
+  return isCodexWorker(entry) ? models.filter(isGptModel) : [...models]
+}
+
+/**
+ * One DSH model catalog shared by every Bridge session directory. Bridge workers
+ * advertise no usable catalog of their own, and DSH already knows every provider
+ * it is configured against, so the menu reads that instead of round-tripping the
+ * control plane. It is a Host-generation value: fetched once, reused until a
+ * Host-side model input invalidates it.
+ */
+export class NativeModels {
+  private cached: DirectoryModel[] | undefined
+  private inflight: Promise<DirectoryModel[]> | undefined
+  constructor(private readonly loadCatalog: () => Promise<JsonValue>) {}
+
+  invalidate(): void { this.cached = undefined; this.inflight = undefined }
+
+  async load(): Promise<DirectoryModel[]> {
+    if (this.cached) return this.cached
+    if (this.inflight) return this.inflight
+    const operation = this.fetch().then(models => { this.cached = models; return models })
+      .finally(() => { if (this.inflight === operation) this.inflight = undefined })
+    this.inflight = operation
+    return operation
+  }
+
+  private async fetch(): Promise<DirectoryModel[]> {
+    const groups = array(record(await this.loadCatalog())['groups']).map(record)
+    if (!groups.length) throw new Error('DSH 未提供任何模型 provider。')
+    // Every provider's models, deduplicated by id: the Bridge worker routes one
+    // upstream relay, so which DSH provider surfaced a model carries no meaning.
+    const models = new Map<string, DirectoryModel>()
+    for (const group of groups) for (const value of array(group['models'])) {
+      const model = directoryModel(value)
+      if (model && !models.has(model.id)) models.set(model.id, model)
+    }
+    if (!models.size) throw new Error('DSH 模型目录为空。')
+    return [...models.values()]
+  }
 }
 
 function sameState(left: DirectoryState, right: DirectoryState): boolean {
@@ -74,7 +121,7 @@ export class BridgeModelDirectory implements Directory {
     subscribe: listener => { this.listeners.add(listener); return () => { this.listeners.delete(listener) } },
   }
 
-  constructor(private readonly nativeId: string, private readonly catalog: NativeCatalog, private readonly rpc: Rpc, private readonly selectModel: SelectModel) {
+  constructor(private readonly nativeId: string, private readonly catalog: NativeCatalog, private readonly models: NativeModels, private readonly selectModel: SelectModel) {
     this.syncEntry(catalog.entry(nativeId))
     this.stopCatalog = catalog.subscribe(() => this.syncEntry(catalog.entry(nativeId)))
   }
@@ -112,20 +159,12 @@ export class BridgeModelDirectory implements Directory {
       if (!entry) { await this.catalog.refresh(); entry = this.catalog.entry(this.nativeId) }
       if (!entry) throw new Error('Bridge 会话尚未同步，请稍后重试。')
       if (!entry.workerId) throw new Error('Bridge 会话缺少执行 worker。')
-      const response = record(await this.rpc('models', { workerId: entry.workerId }))
-      if (!Array.isArray(response['models'])) throw new Error('Bridge worker 返回了无效的模型列表。')
-      const raw = response['models'].map(value => record(value) as BridgeModel)
-      // GPT models are Codex-only. Other models are deliberately left available
-      // to every Agent; the worker catalog remains the source of truth for them.
-      const compatible = isCodexWorker(entry) ? raw : raw.filter(value => !isGptModel(value))
-      const models = compatible.flatMap(value => { const model = directoryModel(value); return model ? [model] : [] })
+      const models = modelsForWorker(entry, await this.models.load())
       if (!models.length) throw new Error('此 Bridge worker 没有可用模型。')
-      const fallback = compatible.find(value => value.isDefault && modelId(value)) ?? compatible.find(value => modelId(value))
-      const currentModel = (compatible.some(value => modelId(value) === this.state.current?.model) ? this.state.current?.model
-        : compatible.some(value => modelId(value) === entry.model?.trim()) ? entry.model?.trim() : (fallback ? modelId(fallback) : '')
-      ) ?? ''
-      const selectedModel = compatible.find(value => modelId(value) === currentModel)
-      const reasoningEffort = selectedModel?.defaultReasoningEffort?.trim()
+      const has = (model: string | undefined) => !!model && models.some(value => value.id === model)
+      const currentModel = has(this.state.current?.model) ? this.state.current!.model
+        : has(entry.model?.trim()) ? entry.model!.trim() : models[0]!.id
+      const reasoningEffort = models.find(value => value.id === currentModel)?.reasoning?.defaultEffort
       const current = { provider: BRIDGE_PROVIDER, model: currentModel, ...(reasoningEffort ? { reasoningEffort } : {}) }
       this.set({ current, routable: true, groups: [{ id: BRIDGE_PROVIDER, name: `Agent Bridge · ${entry.worker}`, models }], failures: [], status: 'ready', error: null })
       return this.state
@@ -155,13 +194,13 @@ export class BridgeModelDirectory implements Directory {
 }
 
 /** Route only imported Bridge sessions to worker-scoped models; native DSH sessions keep their original directory. */
-export function installBridgeModelDirectories(resolver: Resolver, catalog: NativeCatalog, rpc: Rpc, selectModel: SelectModel): () => void {
+export function installBridgeModelDirectories(resolver: Resolver, catalog: NativeCatalog, models: NativeModels, selectModel: SelectModel): () => void {
   const original = resolver.directoryFor.bind(resolver)
   const directories = new Map<string, BridgeModelDirectory>()
   resolver.directoryFor = (sessionId: string) => {
     if (!sessionId.startsWith('agent-bridge-')) return original(sessionId)
     let directory = directories.get(sessionId)
-    if (!directory) { directory = new BridgeModelDirectory(sessionId, catalog, rpc, selectModel); directories.set(sessionId, directory) }
+    if (!directory) { directory = new BridgeModelDirectory(sessionId, catalog, models, selectModel); directories.set(sessionId, directory) }
     return directory
   }
   return () => {
