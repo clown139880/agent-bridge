@@ -99,6 +99,12 @@ export interface InterruptRequest extends ControlRequest {
   subtype: "interrupt";
 }
 
+/** Switches the model for subsequent turns; omitting `model` restores the workspace default. */
+export interface SetModelRequest extends ControlRequest {
+  subtype: "set_model";
+  model?: string;
+}
+
 export interface CanUseToolRequest extends ControlRequest {
   subtype: "can_use_tool";
   tool_name: string;

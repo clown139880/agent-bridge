@@ -56,6 +56,12 @@ function directoryModel(model: BridgeModel): DirectoryModel | undefined {
   } : {}) }
 }
 
+function sameState(left: DirectoryState, right: DirectoryState): boolean {
+  if (left === right) return true
+  if (left.status !== right.status || left.error !== right.error || left.routable !== right.routable) return false
+  return JSON.stringify([left.current, left.groups, left.failures]) === JSON.stringify([right.current, right.groups, right.failures])
+}
+
 export class BridgeModelDirectory implements Directory {
   private state: DirectoryState = { current: null, routable: true, groups: [], failures: [], status: 'idle', error: null }
   private readonly listeners = new Set<() => void>()
@@ -74,7 +80,11 @@ export class BridgeModelDirectory implements Directory {
   }
 
   private set(state: DirectoryState): void {
-    if (this.disposed) return
+    // The session catalog polls on a timer and every load rebuilds the group
+    // array, so identity alone cannot tell an unchanged catalog from a changed
+    // one. Notifying on a structurally identical snapshot re-renders the
+    // composer model seat and reads as a flicker.
+    if (this.disposed || sameState(this.state, state)) return
     this.state = state
     for (const listener of this.listeners) listener()
   }
@@ -94,7 +104,9 @@ export class BridgeModelDirectory implements Directory {
   }
 
   private async loadFresh(): Promise<DirectoryState> {
-    this.set({ ...this.state, status: 'loading', error: null })
+    // Keep a loaded menu on screen across reloads; only a first load shows the
+    // loading affordance, so a failing reload cannot flash loading → error.
+    if (!this.state.groups.length) this.set({ ...this.state, status: 'loading', error: null })
     try {
       let entry = this.catalog.entry(this.nativeId)
       if (!entry) { await this.catalog.refresh(); entry = this.catalog.entry(this.nativeId) }

@@ -63,3 +63,27 @@ describe('BridgeModelDirectory', () => {
     expect(state.groups[0]?.models.map(model => model.id)).toEqual(['deepseek-v4'])
   })
 })
+
+describe('BridgeModelDirectory rendering', () => {
+  const models = [{ id: 'gpt-5.6-sol', model: 'gpt-5.6-sol', displayName: 'GPT-5.6 Sol' }]
+  it('does not notify subscribers when a reload produces the same snapshot', async () => {
+    const directory = new BridgeModelDirectory(nativeId, catalog(), vi.fn(async () => ({ models })), vi.fn())
+    await directory.load()
+    const listener = vi.fn()
+    directory.store.subscribe(listener)
+    await directory.load()
+    expect(listener).not.toHaveBeenCalled()
+  })
+
+  it('keeps a loaded menu on screen when a reload fails', async () => {
+    let fail = false
+    const rpc = vi.fn(async () => { if (fail) throw new Error('worker offline'); return { models } })
+    const directory = new BridgeModelDirectory(nativeId, catalog(), rpc, vi.fn())
+    await directory.load()
+    fail = true
+    await expect(directory.load()).rejects.toThrow('worker offline')
+    const state = directory.store.getSnapshot()
+    expect(state.status).toBe('error')
+    expect(state.groups[0]?.models.map(model => model.id)).toEqual(['gpt-5.6-sol'])
+  })
+})

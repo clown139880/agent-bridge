@@ -24,6 +24,7 @@ import {
   type SDKControlRequest,
   type SDKControlResponse,
   type SDKMessage,
+  type SetModelRequest,
 } from "./types.js";
 import {
   getDefaultClaudeCodePath,
@@ -136,6 +137,13 @@ export class Query implements AsyncIterableIterator<SDKMessage> {
   async interrupt(): Promise<void> {
     if (!this.childStdin) throw new Error("Interrupt requires --input-format stream-json");
     await this.request({ subtype: "interrupt" }, this.childStdin);
+  }
+
+  /** Switch the model used by subsequent turns. Takes effect on the next turn, not the running one. */
+  async setModel(model: string): Promise<void> {
+    if (!this.childStdin) throw new Error("Model switching requires --input-format stream-json");
+    const request: SetModelRequest = { subtype: "set_model", model };
+    await this.request(request, this.childStdin);
   }
 
   private request(request: ControlRequest, childStdin: Writable): Promise<SDKControlResponse["response"]> {

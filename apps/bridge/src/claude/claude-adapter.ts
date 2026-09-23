@@ -7,6 +7,7 @@ import type {
   ApprovalChoice,
   ApprovalKind,
   AttachmentRef,
+  CodexModelInfo,
   SessionState,
   StructuredSessionEventType,
   UserInputQuestion,
@@ -15,6 +16,7 @@ import type { AgentAdapter, AdapterEmit } from "../agent-adapter.js";
 import type { AttachmentFetcher, FetchedAttachment } from "../attachments.js";
 import { resolveProjectPath, summarizePrompt } from "../app-server.js";
 import { deriveProjectIdentity } from "../path-utils.js";
+import { fetchClaudeRelayModels, resolveClaudeRelay } from "./model-catalog.js";
 import { PushableAsyncIterable, query, type Query } from "./sdk/index.js";
 import type {
   ClaudePermissionMode,
@@ -67,6 +69,8 @@ interface ClaudeSession {
   updatedAt: number;
   discovered: boolean;
   input: PushableAsyncIterable<SDKUserMessage>;
+  /** Model in force for the next turn; undefined means the workspace default. */
+  model?: string;
   query?: Query;
   abort: AbortController;
   activeTurnId?: string;
@@ -92,6 +96,7 @@ interface ClaudeSession {
 export class ClaudeCodeAdapter implements AgentAdapter {
   private readonly sessions = new Map<string, ClaudeSession>();
   private ready = false;
+  private modelCatalog: CodexModelInfo[] | undefined;
 
   constructor(
     private readonly options: {
@@ -201,6 +206,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       projectPath: cwd,
       projectIdentity: await deriveProjectIdentity(cwd),
       promptSummary: summarizePrompt(prompt),
+      ...(model ? { model } : {}),
       createdAt: Date.now(),
       updatedAt: Date.now(),
       discovered: false,
@@ -452,9 +458,9 @@ export class ClaudeCodeAdapter implements AgentAdapter {
 
   // ---- input / actions ---------------------------------------------------
 
-  async input(sessionId: string, text: string, _model?: string, attachments?: AttachmentRef[]): Promise<void> {
-    // Claude's model is fixed at query start; mid-session model overrides are ignored.
+  async input(sessionId: string, text: string, model?: string, attachments?: AttachmentRef[]): Promise<void> {
     const session = this.require(sessionId);
+    await this.applyModel(session, model);
     if (session.pendingUserInput) {
       // Interpret free text as the answer to the pending question(s); images are
       // not meaningful as an answer, so they are dropped here.
@@ -463,6 +469,20 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       return;
     }
     this.beginTurn(session, text, await this.materialize(attachments));
+  }
+
+  /**
+   * Claude Code applies a model switch to the next turn, not the running one,
+   * so this runs before the prompt is pushed. A rejected switch fails the turn
+   * rather than silently answering on the previous model.
+   */
+  private async applyModel(session: ClaudeSession, model?: string): Promise<void> {
+    const next = model?.trim();
+    if (!next || next === session.model) return;
+    if (!session.query) throw new Error("Claude session is not running");
+    await session.query.setModel(next);
+    session.model = next;
+    log.info({ sessionId: session.sessionId, model: next }, "claude model switched");
   }
 
   async createSessionAction(actionId: string, projectPath: string, input?: string, model?: string, attachments?: AttachmentRef[]): Promise<{ sessionId: string; turnId?: string }> {
@@ -567,9 +587,17 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     return { sessionId };
   }
 
-  /** Claude Code does not expose an enumerable model catalog through this transport. */
-  async models(): Promise<never[]> {
-    return [];
+  /**
+   * Claude Code exposes no catalog over this transport, so the catalog comes
+   * from the relay it is pointed at. A deployment on a plain Anthropic account
+   * configures no relay and keeps the empty list.
+   */
+  async models(): Promise<CodexModelInfo[]> {
+    if (this.modelCatalog) return this.modelCatalog;
+    const relay = await resolveClaudeRelay(this.options.claudeHome);
+    if (!relay) return (this.modelCatalog = []);
+    // A relay that is unreachable right now must not be cached as "no models".
+    return (this.modelCatalog = await fetchClaudeRelayModels(relay));
   }
 
   /** No long-lived server to reconcile against; activity is tracked live from the stream. */
