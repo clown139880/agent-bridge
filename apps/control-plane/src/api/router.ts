@@ -94,8 +94,12 @@ export class AgentControlApi {
         this.ok(response,{workerId:id,deleted:true,deletedSessions});return true;
       }
       const workerModels=url.pathname.match(/^\/api\/v1\/workers\/([^/]+)\/models$/);
-      if(request.method==="GET"&&workerModels){const workerId=decodeURIComponent(workerModels[1]!);const machineId=parseWorkerId(workerId)?.machineId??workerId;
-        try{this.ok(response,await this.bridges.requestModels(machineId));}catch(error){throw new ApiProblem(503,'model_catalog_unavailable',error instanceof Error?error.message:String(error));}return true;}
+      if(request.method==="GET"&&workerModels){const workerId=decodeURIComponent(workerModels[1]!);const parsed=parseWorkerId(workerId);const machineId=parsed?.machineId??workerId;
+        // A bridge runs several backends with different catalogs, so the worker's
+        // agent prefix has to survive the hop or every worker on a machine answers
+        // with whichever backend happens to be configured first.
+        const agentType=parsed?agentTypeForWorkerPrefix(parsed.prefix):undefined;
+        try{this.ok(response,await this.bridges.requestModels(machineId,agentType));}catch(error){throw new ApiProblem(503,'model_catalog_unavailable',error instanceof Error?error.message:String(error));}return true;}
       if(request.method==="GET"&&url.pathname==="/api/v1/snapshot"){this.snapshot(url,response);return true;}
       if(request.method==="GET"&&url.pathname==="/api/v1/session-groups"){this.sessionGroups(url,response);return true;}
       if(request.method==="GET"&&url.pathname==="/api/v1/sessions"){this.sessions(url,response);return true;}

@@ -360,7 +360,7 @@ export class BridgeClient {
           this.send({ type: "log_response", sessionId: message.sessionId, text: this.adapterForSession(message.sessionId).logs(message.sessionId, message.lines) });
           break;
         case "model_catalog_request":
-          void this.adapterForType().models().then(models => this.send({ type: "model_catalog_response", requestId: message.requestId, models }))
+          void this.adapterForType(message.agentType).models().then(models => this.send({ type: "model_catalog_response", requestId: message.requestId, models }))
             .catch(error => this.send({ type: "model_catalog_response", requestId: message.requestId, error: error instanceof Error ? error.message : String(error) }));
           break;
         case "action.create_session":

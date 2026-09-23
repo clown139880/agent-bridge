@@ -223,7 +223,8 @@ export interface CodexModelInfo {
   defaultReasoningEffort?: string;
   supportedReasoningEfforts?: Array<{ reasoningEffort: string; description?: string }>;
 }
-export interface ModelCatalogRequestMessage { type: "model_catalog_request"; requestId: string; }
+/** `agentType` selects the backend to enumerate; a bridge runs several and they have different catalogs. */
+export interface ModelCatalogRequestMessage { type: "model_catalog_request"; requestId: string; agentType?: AgentType; }
 export interface ModelCatalogResponseMessage {
   type: "model_catalog_response";
   requestId: string;

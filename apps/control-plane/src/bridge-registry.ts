@@ -1,5 +1,5 @@
 import type { WebSocket } from "ws";
-import type { ControlToBridgeMessage } from "@agent-bridge/protocol";
+import type { AgentType, ControlToBridgeMessage } from "@agent-bridge/protocol";
 
 export interface BridgeConnection {
   machineId: string;
@@ -28,12 +28,13 @@ export class BridgeRegistry {
     try { bridge.socket.send(JSON.stringify(message)); return true; }
     catch { return false; }
   }
-  requestModels(machineId: string, timeoutMs = 10_000): Promise<unknown> {
+  /** `agentType` picks the backend on a bridge that runs several; omitting it lets the bridge choose. */
+  requestModels(machineId: string, agentType?: AgentType, timeoutMs = 10_000): Promise<unknown> {
     const requestId = crypto.randomUUID()
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => { this.modelRequests.delete(requestId); reject(new Error('model catalog request timed out')) }, timeoutMs)
       this.modelRequests.set(requestId, { machineId, resolve, timer })
-      if (!this.send(machineId, { type: 'model_catalog_request', requestId })) {
+      if (!this.send(machineId, { type: 'model_catalog_request', requestId, ...(agentType ? { agentType } : {}) })) {
         clearTimeout(timer); this.modelRequests.delete(requestId); reject(new Error('worker is offline'))
       }
     })
