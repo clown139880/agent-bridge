@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { BRIDGE_PROVIDER, BridgeModelDirectory, NativeModels, installBridgeModelDirectories } from '../src/client/bridge-model-directory.js'
+import { BRIDGE_PROVIDER, BridgeModelDirectory, NativeModels, installBridgeModelDirectories, modelsForWorker } from '../src/client/bridge-model-directory.js'
 import type { NativeCatalog, NativeEntry } from '../src/client/native-catalog.js'
 
 const nativeId = 'agent-bridge-session-1'
@@ -7,7 +7,7 @@ const entry: NativeEntry = {
   nativeId, sessionId: 'remote-1', workerId: 'codex@hal', model: 'gpt-5.6-sol', machineId: 'hal', workspace: '/repo',
   groupId: 'repo:test', groupTitle: 'repo', groupUpdatedAt: 1, executionLocations: [], title: 'test', status: 'idle', worker: 'HAL Codex', updatedAt: 1,
 }
-const claudeEntry: NativeEntry = { ...entry, workerId: 'claude@hal', model: 'deepseek-v4', worker: 'Claude @ HAL' }
+const claudeEntry: NativeEntry = { ...entry, workerId: 'claude@hal', model: 'claude-opus-5', worker: 'Claude @ HAL' }
 
 function catalog(row: NativeEntry | undefined = entry): NativeCatalog {
   return {
@@ -17,74 +17,91 @@ function catalog(row: NativeEntry | undefined = entry): NativeCatalog {
   } as unknown as NativeCatalog
 }
 
-const dshCatalog = {
-  default: { provider: 'tokensapi', model: 'gpt-5.6-sol' },
-  groups: [
-    { id: 'tokensapi', name: 'TokensAPI', models: [
-      { id: 'gpt-5.6-sol', name: 'GPT-5.6 Sol', reasoning: { defaultEffort: 'low', efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }] } },
-      { id: 'deepseek-v4', name: 'DeepSeek V4' },
-    ] },
-    { id: 'relay', name: 'Relay', models: [{ id: 'claude-opus-5', name: 'Claude Opus 5' }, { id: 'deepseek-v4', name: 'duplicate' }] },
-  ],
-}
+const ALL_WIRES = ['openai', 'openai-response', 'anthropic']
+const relayModels = [
+  { id: 'gpt-5.6-sol', name: 'gpt-5.6-sol', endpoints: ALL_WIRES },
+  { id: 'claude-opus-5', name: 'claude-opus-5', endpoints: ALL_WIRES },
+  { id: 'deepseek-v4-pro', name: 'deepseek-v4-pro', endpoints: ALL_WIRES },
+  { id: 'legacy-chat', name: 'legacy-chat' },
+  { id: 'openai-only', name: 'openai-only', endpoints: ['openai'] },
+]
 
-function models(load = vi.fn(async () => dshCatalog as never)) {
-  return { source: new NativeModels(load), load }
+function models(rpc = vi.fn(async () => ({ models: relayModels }) as never)) {
+  return { source: new NativeModels(rpc), rpc }
 }
 
 describe('NativeModels', () => {
-  it('flattens every provider group once and shares a single fetch', async () => {
-    const { source, load } = models()
+  it('reads the host relay catalog once and shares a single request', async () => {
+    const { source, rpc } = models()
     const [first, second] = await Promise.all([source.load(), source.load()])
-    expect(load).toHaveBeenCalledTimes(1)
-    expect(first.map(model => model.id)).toEqual(['gpt-5.6-sol', 'deepseek-v4', 'claude-opus-5'])
+    expect(rpc).toHaveBeenCalledTimes(1)
+    expect(rpc).toHaveBeenCalledWith('provider_models')
+    expect(first.map(model => model.id)).toEqual(['gpt-5.6-sol', 'claude-opus-5', 'deepseek-v4-pro', 'legacy-chat', 'openai-only'])
     expect(second).toBe(first)
     source.invalidate()
     await source.load()
-    expect(load).toHaveBeenCalledTimes(2)
+    expect(rpc).toHaveBeenCalledTimes(2)
   })
 
-  it('does not cache a failed catalog load', async () => {
+  it('does not cache a failed load', async () => {
     let fail = true
-    const load = vi.fn(async () => { if (fail) throw new Error('host offline'); return dshCatalog as never })
-    const source = new NativeModels(load)
+    const rpc = vi.fn(async () => { if (fail) throw new Error('host offline'); return { models: relayModels } as never })
+    const source = new NativeModels(rpc)
     await expect(source.load()).rejects.toThrow('host offline')
     fail = false
-    expect((await source.load()).length).toBe(3)
+    expect((await source.load()).length).toBe(5)
+  })
+})
+
+describe('modelsForWorker', () => {
+  it('keeps what each agent transport can reach, by declared endpoint rather than by name', () => {
+    const all = relayModels.map(model => ({ ...model, endpoints: model.endpoints ? [...model.endpoints] : undefined }))
+    // Claude is not restricted to claude-named models: the relay serves every
+    // model over the anthropic wire.
+    expect(modelsForWorker(claudeEntry, all).map(m => m.id)).toEqual(['gpt-5.6-sol', 'claude-opus-5', 'deepseek-v4-pro', 'legacy-chat'])
+    // Codex is not restricted to gpt-named models either.
+    expect(modelsForWorker(entry, all).map(m => m.id)).toEqual(['gpt-5.6-sol', 'claude-opus-5', 'deepseek-v4-pro', 'legacy-chat'])
+    expect(modelsForWorker({ ...entry, workerId: 'pi@hal', worker: 'Pi @ HAL' }, all).map(m => m.id))
+      .toEqual(['gpt-5.6-sol', 'claude-opus-5', 'deepseek-v4-pro', 'legacy-chat', 'openai-only'])
+  })
+
+  it('resolves the agent from the execution location when the worker id has no prefix', () => {
+    const legacy: NativeEntry = { ...entry, workerId: 'worker-1', worker: 'HAL', executionLocations: [
+      { workerId: 'worker-1', workerName: 'Claude', agent: 'claude-code', machineId: 'hal', machineName: 'HAL', workspace: '/repo', online: true, available: true },
+    ] }
+    expect(modelsForWorker(legacy, [{ id: 'a', name: 'a', endpoints: ['anthropic'] }, { id: 'b', name: 'b', endpoints: ['openai'] }]).map(m => m.id)).toEqual(['a'])
+  })
+
+  it('offers everything when the agent cannot be identified', () => {
+    const unknown: NativeEntry = { ...entry, workerId: 'mystery', worker: 'mystery' }
+    expect(modelsForWorker(unknown, [{ id: 'a', name: 'a', endpoints: ['openai'] }]).map(m => m.id)).toEqual(['a'])
   })
 })
 
 describe('BridgeModelDirectory', () => {
-  it('offers a codex worker only the GPT models and sends an agent-bridge selection', async () => {
+  it('offers the routable relay models and sends an agent-bridge selection', async () => {
     const selectModel = vi.fn(async () => ({ ok: true }))
-    const directory = new BridgeModelDirectory(nativeId, catalog(), models().source, selectModel)
+    const directory = new BridgeModelDirectory(nativeId, catalog(claudeEntry), models().source, selectModel)
 
     const state = await directory.load()
-    expect(state.groups[0]?.models.map(model => model.id)).toEqual(['gpt-5.6-sol'])
-    expect(state.current).toEqual({ provider: BRIDGE_PROVIDER, model: 'gpt-5.6-sol', reasoningEffort: 'low' })
+    expect(state.groups[0]?.models.map(model => model.id)).toEqual(['gpt-5.6-sol', 'claude-opus-5', 'deepseek-v4-pro', 'legacy-chat'])
+    expect(state.current).toEqual({ provider: BRIDGE_PROVIDER, model: 'claude-opus-5' })
 
-    await directory.select({ provider: BRIDGE_PROVIDER, model: 'gpt-5.6-sol', reasoningEffort: 'high' })
-    expect(selectModel).toHaveBeenCalledWith({ sessionId: nativeId, provider: BRIDGE_PROVIDER, model: 'gpt-5.6-sol', reasoningEffort: 'high' })
+    await directory.select({ provider: BRIDGE_PROVIDER, model: 'deepseek-v4-pro' })
+    expect(selectModel).toHaveBeenCalledWith({ sessionId: nativeId, provider: BRIDGE_PROVIDER, model: 'deepseek-v4-pro' })
+    expect(directory.store.getSnapshot().current?.model).toBe('deepseek-v4-pro')
   })
 
-  it('offers the whole catalog to workers that are not codex', async () => {
-    const directory = new BridgeModelDirectory(nativeId, catalog(claudeEntry), models().source, vi.fn())
-    const state = await directory.load()
-    expect(state.groups[0]?.models.map(model => model.id)).toEqual(['gpt-5.6-sol', 'deepseek-v4', 'claude-opus-5'])
-    expect(state.current).toEqual({ provider: BRIDGE_PROVIDER, model: 'deepseek-v4' })
-  })
-
-  it('falls back to the first offered model when the bound one is not routable', async () => {
-    // A codex session carrying a non-GPT model must not present it as current.
-    const stale: NativeEntry = { ...entry, model: 'deepseek-v4' }
+  it('falls back to the first routable model when the bound one is not offered', async () => {
+    const stale: NativeEntry = { ...claudeEntry, model: 'openai-only' }
     const directory = new BridgeModelDirectory(nativeId, catalog(stale), models().source, vi.fn())
     expect((await directory.load()).current?.model).toBe('gpt-5.6-sol')
   })
 
   it('rejects models the bound worker cannot route', async () => {
-    const directory = new BridgeModelDirectory(nativeId, catalog(), models().source, vi.fn())
+    const directory = new BridgeModelDirectory(nativeId, catalog(claudeEntry), models().source, vi.fn())
     await directory.load()
-    await expect(directory.select({ provider: BRIDGE_PROVIDER, model: 'deepseek-v4' })).rejects.toThrow('不在当前 Bridge worker')
+    await expect(directory.select({ provider: BRIDGE_PROVIDER, model: 'openai-only' })).rejects.toThrow('不在当前 Bridge worker')
   })
 
   it('keeps ordinary DSH sessions on the native directory', () => {
@@ -112,8 +129,8 @@ describe('BridgeModelDirectory rendering', () => {
 
   it('keeps a loaded menu on screen when a reload fails', async () => {
     let fail = false
-    const load = vi.fn(async () => { if (fail) throw new Error('host offline'); return dshCatalog as never })
-    const source = new NativeModels(load)
+    const rpc = vi.fn(async () => { if (fail) throw new Error('host offline'); return { models: relayModels } as never })
+    const source = new NativeModels(rpc)
     const directory = new BridgeModelDirectory(nativeId, catalog(), source, vi.fn())
     await directory.load()
     fail = true
@@ -121,6 +138,6 @@ describe('BridgeModelDirectory rendering', () => {
     await expect(directory.load()).rejects.toThrow('host offline')
     const state = directory.store.getSnapshot()
     expect(state.status).toBe('error')
-    expect(state.groups[0]?.models.map(model => model.id)).toEqual(['gpt-5.6-sol'])
+    expect(state.groups[0]?.models.length).toBe(4)
   })
 })

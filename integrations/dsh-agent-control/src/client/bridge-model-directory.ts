@@ -6,7 +6,14 @@ type SelectModel = (request: { sessionId: string; provider: string; model: strin
   ok: boolean
   error?: { code?: string; message?: string }
 }>
-type DirectoryModel = { id: string; name: string; description?: string; reasoning?: { defaultEffort?: string; efforts: Array<{ id: string; name: string }> } }
+type DirectoryModel = {
+  id: string
+  name: string
+  description?: string
+  /** Relay-declared wire protocols; the worker's transport must appear here. */
+  endpoints?: string[]
+  reasoning?: { defaultEffort?: string; efforts: Array<{ id: string; name: string }> }
+}
 type DirectoryState = {
   current: ModelSelection | null
   routable: boolean | null
@@ -26,56 +33,59 @@ function record(value: JsonValue | undefined): Record<string, JsonValue> { retur
 function array(value: JsonValue | undefined): JsonValue[] { return Array.isArray(value) ? value : [] }
 function text(value: JsonValue | undefined): string { return typeof value === 'string' ? value.trim() : '' }
 
-/** Adopt a DSH catalog model verbatim; its id is already provider-qualified where that matters. */
 function directoryModel(value: JsonValue): DirectoryModel | undefined {
   const model = record(value)
   const id = text(model['id'])
   if (!id) return undefined
-  const reasoning = record(model['reasoning'])
-  const efforts = array(reasoning['efforts']).flatMap(entry => {
-    const effort = text(record(entry)['id'])
-    return effort ? [{ id: effort, name: text(record(entry)['name']) || effort }] : []
-  })
-  const defaultEffort = text(reasoning['defaultEffort'])
+  const endpoints = array(model['endpoints']).map(text).filter(Boolean)
   const description = text(model['description'])
   return {
     id, name: text(model['name']) || id,
     ...(description ? { description } : {}),
-    ...(efforts.length || defaultEffort ? { reasoning: { ...(defaultEffort ? { defaultEffort } : {}), efforts } } : {}),
+    ...(endpoints.length ? { endpoints } : {}),
   }
 }
 
-function isGptModel(model: DirectoryModel): boolean {
-  return /(?:^|[/#])gpt(?:[-_.]|$)/i.test(model.id) || /^gpt(?:[-_.]|$)/i.test(model.name)
+/** The wire each coding agent speaks to the relay; anything else it cannot route. */
+const AGENT_ENDPOINT: Record<string, string> = {
+  codex: 'openai-response',
+  claude: 'anthropic',
+  pi: 'openai',
 }
-function isCodexWorker(entry: NativeEntry): boolean {
+
+function agentOf(entry: NativeEntry): string {
   // The worker id is `<codex|claude|pi>@machine`; the execution location's agent
   // and the display name are fallbacks for catalogs that predate that format.
+  const prefix = entry.workerId.split('@')[0]?.trim().toLowerCase() ?? ''
+  if (AGENT_ENDPOINT[prefix]) return prefix
   const location = entry.executionLocations.find(value => value.workerId === entry.workerId)
-  return /^codex\b/i.test(entry.workerId) || /codex/i.test(`${entry.worker} ${location?.agent ?? ''}`)
+  const haystack = `${entry.worker} ${location?.agent ?? ''}`.toLowerCase()
+  return Object.keys(AGENT_ENDPOINT).find(agent => haystack.includes(agent)) ?? ''
 }
 
 /**
- * Codex reaches the relay over the OpenAI Responses wire (`wire_api =
- * "responses"`), which only serves the GPT family, so a Codex session must not
- * be offered anything else. Claude and Pi reach the same relay over wires that
- * carry every model, so they get the whole catalog.
+ * Keep the models this worker's transport can actually reach. The relay maps one
+ * model onto several wires, so the filter is the endpoint type the relay
+ * declares — not the model's name. A row that declares no endpoints at all is
+ * kept: some relays disclose nothing, and guessing would hide working models.
  */
 export function modelsForWorker(entry: NativeEntry, models: readonly DirectoryModel[]): DirectoryModel[] {
-  return isCodexWorker(entry) ? models.filter(isGptModel) : [...models]
+  const endpoint = AGENT_ENDPOINT[agentOf(entry)]
+  if (!endpoint) return [...models]
+  return models.filter(model => !model.endpoints?.length || model.endpoints.includes(endpoint))
 }
 
 /**
- * One DSH model catalog shared by every Bridge session directory. Bridge workers
- * advertise no usable catalog of their own, and DSH already knows every provider
- * it is configured against, so the menu reads that instead of round-tripping the
- * control plane. It is a Host-generation value: fetched once, reused until a
- * Host-side model input invalidates it.
+ * The relay catalog shared by every Bridge session directory. DSH's own provider
+ * settings only list the models someone registered by hand, and the Bridge
+ * workers each describe a partial view, so the menu asks the Host for what the
+ * configured relay actually serves. The Host holds it for a while; this keeps
+ * one in-flight request per client.
  */
 export class NativeModels {
   private cached: DirectoryModel[] | undefined
   private inflight: Promise<DirectoryModel[]> | undefined
-  constructor(private readonly loadCatalog: () => Promise<JsonValue>) {}
+  constructor(private readonly rpc: (operation: string, args?: Record<string, string>) => Promise<JsonValue>) {}
 
   invalidate(): void { this.cached = undefined; this.inflight = undefined }
 
@@ -89,16 +99,13 @@ export class NativeModels {
   }
 
   private async fetch(): Promise<DirectoryModel[]> {
-    const groups = array(record(await this.loadCatalog())['groups']).map(record)
-    if (!groups.length) throw new Error('DSH 未提供任何模型 provider。')
-    // Every provider's models, deduplicated by id: the Bridge worker routes one
-    // upstream relay, so which DSH provider surfaced a model carries no meaning.
+    const rows = array(record(await this.rpc('provider_models'))['models'])
     const models = new Map<string, DirectoryModel>()
-    for (const group of groups) for (const value of array(group['models'])) {
+    for (const value of rows) {
       const model = directoryModel(value)
       if (model && !models.has(model.id)) models.set(model.id, model)
     }
-    if (!models.size) throw new Error('DSH 模型目录为空。')
+    if (!models.size) throw new Error('已配置的 provider 没有返回可用模型。')
     return [...models.values()]
   }
 }

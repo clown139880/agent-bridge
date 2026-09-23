@@ -270,7 +270,7 @@ export function apply(ctx: ClientContext): void {
     if (!response.ok) throw new Error(`${response.error.code}: ${response.error.message}`)
     return response.value
   }
-  const nativeModels = new NativeModels(loadNativeModelCatalog)
+  const nativeModels = new NativeModels((operation, args) => call('bridge', operation, args))
   const modelDirectories = (ctx as unknown as { get(name: string): unknown }).get('modelDirectories') as Parameters<typeof installBridgeModelDirectories>[0] | undefined
   if (modelDirectories) ctx.effect(() => installBridgeModelDirectories(modelDirectories, catalog,
     nativeModels, request => remote.session.selectModel(request)))

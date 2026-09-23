@@ -70,6 +70,9 @@ importers:
       react:
         specifier: ^18.2.0
         version: 18.3.1
+      yaml:
+        specifier: ^2.9.0
+        version: 2.9.0
     devDependencies:
       '@deepseek-ai/cordis':
         specifier: 4.0.2

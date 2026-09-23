@@ -3,6 +3,7 @@ import { ControlError } from './errors.js'
 import { KanbanClient, type KanbanConfig } from './kanban-client.js'
 import type { BridgeCall, DashboardRequest, JsonValue, KanbanCall } from './types.js'
 import type { AgentBridgeImportTarget } from './agent-bridge-provider/import-target.js'
+import { ProviderModelCatalog } from './provider-models.js'
 
 export interface AgentControlConfig { bridge: BridgeConfig; kanban: KanbanConfig }
 
@@ -21,6 +22,7 @@ export class AgentControlService {
   readonly kanban: KanbanClient
   /** Phase 2: native DSH-session importer; bound by the agent-bridge provider. */
   importTarget: AgentBridgeImportTarget | undefined
+  readonly providerModels = new ProviderModelCatalog()
   constructor(readonly config: AgentControlConfig) { this.bridge = new BridgeClient(config.bridge); this.kanban = new KanbanClient(config.kanban) }
   dispose(): void { this.kanban.dispose() }
 
@@ -28,6 +30,10 @@ export class AgentControlService {
     const args = request.args ?? {}
     if (request.domain === 'bridge') {
       if (request.operation === 'provider_status') return { registered: !!this.importTarget, ...(this.importTarget?.status() ?? {}) }
+      if (request.operation === 'provider_models') {
+        if (args['refresh'] === true || args['refresh'] === 'true') this.providerModels.invalidate()
+        return { models: await this.providerModels.models(signal) }
+      }
       if (request.operation === 'native_catalog') return this.importTarget?.catalog() ?? { sessions: [] }
       if (request.operation === 'delete_native') {
         if (!this.importTarget || typeof args['nativeId'] !== 'string') throw new ControlError('invalid_parameter', 'nativeId is required.', 400)
