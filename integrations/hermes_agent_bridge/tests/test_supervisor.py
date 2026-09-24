@@ -63,6 +63,32 @@ def test_event_summary_advances_cursor_and_keeps_latest_useful_text():
     assert summary == "fixed and verified"
 
 
+def test_event_summary_prefers_the_last_agent_output_over_the_concatenated_completion():
+    cursor, summary = _event_summary({
+        "next": 11,
+        "events": [
+            {"event": {"type": "agent.started", "summary": "New turn started"}},
+            {"event": {"type": "agent.output", "text": "I'll start by reading the file."}},
+            {"event": {"type": "agent.output", "text": "Done: bumped the version and pushed."}},
+            {"event": {"type": "agent.completed",
+                       "summary": "I'll start by reading the file.Done: bumped the version and pushed."}},
+        ],
+    }, None)
+
+    assert cursor == 11
+    assert summary == "Done: bumped the version and pushed."
+
+
+def test_event_summary_never_surfaces_the_started_placeholder():
+    cursor, summary = _event_summary({
+        "next": 3,
+        "events": [{"event": {"type": "agent.started", "summary": "New turn started"}}],
+    }, None)
+
+    assert cursor == 3
+    assert summary is None
+
+
 def test_conversation_id_is_always_scoped_to_the_card():
     assert _conversation_id(_Task("dir", "/work/repo", session_id="matrix:room:thread"), "main") == "hermes-task:main:t_1"
     assert _conversation_id(_Task("dir", "/work/repo", id="t_9"), "main") == "hermes-task:main:t_9"

@@ -130,15 +130,30 @@ def _prompt(conn, task_id: str, source_status: str) -> str:
 
 
 def _event_summary(page: dict[str, Any], previous: str | None) -> tuple[int, str | None]:
+    """Pick the worker's closing message out of a run-event page.
+
+    ``agent.output`` carries one text block per assistant message, so the last
+    one is the turn's closing message. ``agent.completed`` repeats the whole
+    turn concatenated (chatty preamble included), and ``agent.started`` carries
+    a lifecycle placeholder ("New turn started") that must never become the card
+    result: an output-less failed turn used to surface that placeholder as a
+    fake success summary.
+    """
     cursor = int(page.get("next") or 0)
     summary = previous
     for wrapper in page.get("events") or ():
         event = wrapper.get("event") if isinstance(wrapper, dict) else None
         if not isinstance(event, dict):
             continue
-        candidate = event.get("summary") or event.get("text")
-        if isinstance(candidate, str) and candidate.strip():
-            summary = candidate.strip()
+        kind = event.get("type")
+        if kind == "agent.output":
+            text = event.get("text")
+            if isinstance(text, str) and text.strip():
+                summary = text.strip()
+        elif kind == "agent.completed" and summary is None:
+            candidate = event.get("summary") or event.get("text")
+            if isinstance(candidate, str) and candidate.strip():
+                summary = candidate.strip()
     return cursor, summary
 
 
