@@ -20,6 +20,9 @@ for (let i = 0; i < process.argv.length; i++) {
 function log(line) {
   if (LOG_PATH) appendFileSync(LOG_PATH, line + "\n");
 }
+// Record the launch-time provider/model so tests can assert what pi was started
+// with (mirrors the provider-qualified model-id resolution in the adapter).
+log(JSON.stringify({ type: "launch", provider, model: modelId }));
 function out(obj) {
   process.stdout.write(JSON.stringify(obj) + "\n");
 }
@@ -69,7 +72,12 @@ function handleLine(raw) {
     case "follow_up": {
       respond(command.type, {});
       out({ type: "turn_start" });
-      out({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "ok" }] } });
+      const err = process.env.PI_MOCK_ERROR;
+      if (err) {
+        out({ type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: err } });
+      } else {
+        out({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "ok" }], stopReason: "stop" } });
+      }
       out({ type: "turn_end" });
       out({ type: "agent_settled" });
       break;

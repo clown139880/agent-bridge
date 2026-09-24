@@ -46,6 +46,10 @@ interface PiSession {
   lastTurnStatus?: "completed" | "failed" | "interrupted";
   logs: string[];
   assistantBuffer: string[];
+  /** stopReason of the most recent assistant message, used to detect settled-failure. */
+  lastAssistantStopReason?: string;
+  /** errorMessage of the most recent assistant message (set when stopReason is "error"). */
+  lastAssistantError?: string;
   resolveInit?: () => void;
   ended: boolean;
 }
@@ -114,11 +118,19 @@ export class PiAdapter implements AgentAdapter {
     const cwd = await resolveProjectPath(projectPath, this.options.allowedRoots);
 
     const args = ["--mode", "rpc"];
-    if (this.options.provider) { args.push("--provider", this.options.provider); }
-    // The bridge may omit a model; default to the adapter-configured model so a
-    // first turn doesn't silently fall back to Pi's google default.
+    // A caller-supplied `provider/id` model selects the provider from its prefix;
+    // a bare model id (or no model) falls back to the adapter-configured provider.
+    // This mirrors the applyModel() convention so the launch path honours the
+    // same provider-qualified model ids as runtime model switching.
     const effectiveModel = model ?? this.options.model;
-    if (effectiveModel) { args.push("--model", effectiveModel); }
+    const launchProvider = effectiveModel?.includes("/")
+      ? effectiveModel.slice(0, effectiveModel.indexOf("/"))
+      : this.options.provider;
+    if (launchProvider) { args.push("--provider", launchProvider); }
+    if (effectiveModel) {
+      const launchModel = bareModelId(effectiveModel);
+      if (launchModel) args.push("--model", launchModel);
+    }
     if (this.options.sessionDir) { args.push("--session-dir", this.options.sessionDir); }
     if (prompt) {
       const title = summarizePrompt(prompt, 60);
@@ -293,6 +305,12 @@ export class PiAdapter implements AgentAdapter {
     const message = (event.message as Record<string, unknown>) ?? {};
     const role = message.role as string | undefined;
     if (role !== "assistant") return;
+    // Record the terminal assistant-message outcome so handleSettled can report
+    // a genuinely failed turn (e.g. stopReason "error" with an errorMessage)
+    // instead of always marking it completed. Must run before the empty-content
+    // early return: an errored message often has no text output at all.
+    session.lastAssistantStopReason = message.stopReason as string | undefined;
+    session.lastAssistantError = message.errorMessage as string | undefined;
     const content = message.content;
     const text = extractText(content);
     if (!text) return;
@@ -312,9 +330,19 @@ export class PiAdapter implements AgentAdapter {
   private handleSettled(session: PiSession): void {
     if (session.activeTurnId) {
       const text = session.assistantBuffer.join("");
-      this.finishTurn(session, "completed", text ? truncate(text) : undefined);
+      const error = session.lastAssistantError;
+      const failed = session.lastAssistantStopReason === "error" || Boolean(error);
+      if (failed) {
+        // A settled turn whose final assistant message errored must be reported
+        // as failed so the card turns red and carries the actual error text.
+        this.finishTurn(session, "failed", truncate(error ?? text) || "pi reported an error");
+      } else {
+        this.finishTurn(session, "completed", text ? truncate(text) : undefined);
+      }
     }
     session.assistantBuffer = [];
+    session.lastAssistantStopReason = undefined;
+    session.lastAssistantError = undefined;
   }
 
   private handleToolEnd(session: PiSession, event: Record<string, unknown>): void {

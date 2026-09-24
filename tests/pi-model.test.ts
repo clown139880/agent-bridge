@@ -28,6 +28,7 @@ afterEach(() => {
   rmSync(logPath, { force: true });
   delete process.env.PI_MOCK_LOG;
   delete process.env.PI_MOCK_MODELS;
+  delete process.env.PI_MOCK_ERROR;
 });
 
 function makeAdapter(model?: string): PiAdapter {
@@ -86,4 +87,42 @@ test("startSession with a model launches pi and records the session", async () =
   assert.ok(sessionId.startsWith("pi-"));
   assert.equal(emitMessages.filter((m) => m.type === "session.discovered").length, 1);
   assert.equal(adapter.stateSnapshot().sessions.length, 1);
+});
+
+test("startSession with a provider-qualified model uses the prefix as the launch provider", async () => {
+  const adapter = makeAdapter("model-a");
+  await adapter.startSession("run-1", tmpdir(), undefined, undefined, "other/model-x");
+  const launch = readCommands().find((c) => c.type === "launch") as Record<string, unknown>;
+  assert.ok(launch, "expected a launch record");
+  assert.equal(launch.provider, "other");
+  assert.equal(launch.model, "model-x");
+});
+
+test("startSession with a bare model keeps the adapter-configured provider", async () => {
+  const adapter = makeAdapter("model-a");
+  const sessionId = await adapter.startSession("run-1", tmpdir(), undefined, undefined, "model-a");
+  assert.ok(sessionId.startsWith("pi-"));
+  const launch = readCommands().find((c) => c.type === "launch") as Record<string, unknown>;
+  assert.equal(launch.provider, "mock");
+  assert.equal(launch.model, "model-a");
+});
+
+test("a settled turn whose final assistant message errored is reported as failed", async () => {
+  process.env.PI_MOCK_ERROR = "503 model_not_found: no channel for modeldeck/qwen3.8-27b";
+  const adapter = makeAdapter("model-a");
+  const sessionId = await adapter.startSession("run-1", tmpdir());
+  await adapter.submitTurnAction("turn-2", sessionId, "continue", "start_turn");
+  await waitFor(() => emitMessages.some((m) => m.type === "agent.failed"));
+  const failed = emitMessages.find((m) => m.type === "agent.failed") as { summary: string };
+  assert.ok(failed, "expected an agent.failed event");
+  assert.equal(failed.summary, "503 model_not_found: no channel for modeldeck/qwen3.8-27b");
+  assert.ok(!emitMessages.some((m) => m.type === "agent.completed"), "must not report completed on an errored settle");
+});
+
+test("a settled turn with a clean assistant stopReason is reported as completed", async () => {
+  const adapter = makeAdapter("model-a");
+  const sessionId = await adapter.startSession("run-1", tmpdir());
+  await adapter.submitTurnAction("turn-2", sessionId, "continue", "start_turn");
+  await waitFor(() => emitMessages.some((m) => m.type === "agent.completed"));
+  assert.ok(!emitMessages.some((m) => m.type === "agent.failed"));
 });
