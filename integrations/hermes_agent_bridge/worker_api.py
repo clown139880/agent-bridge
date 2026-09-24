@@ -76,7 +76,8 @@ class WorkerApi:
         return {"session": session, "events": events}
 
     def start(self, *, run_id: str, task_id: str, worker_id: str, project_path: str, prompt: str,
-              resume_session_id: str | None = None, conversation_id: str | None = None) -> dict[str, Any]:
+              resume_session_id: str | None = None, conversation_id: str | None = None,
+              model: str | None = None) -> dict[str, Any]:
         body = {
             "runId": run_id,
             "taskId": task_id,
@@ -88,6 +89,8 @@ class WorkerApi:
             body["resumeSessionId"] = resume_session_id
         if conversation_id:
             body["conversationId"] = conversation_id
+        if model:
+            body["model"] = model
         return self._request("POST", "/api/v1/runs", body)
 
     def run(self, run_id: str) -> dict[str, Any]:

@@ -96,6 +96,26 @@ def _resume_session_id(body: str | None) -> str | None:
     return matches[0].group(1)
 
 
+def _model_request(task) -> str | None:
+    """Return the model the remote run should use, from the card's per-task
+    ``--model``/``--provider`` overrides.
+
+    The Control Plane run API accepts a single ``model`` string and hands it to
+    the worker's adapter, so a ``provider_override`` is folded into the model id
+    as ``provider/modelId`` (the form ``pi --model`` accepts) unless the caller
+    already qualified the model. ``None`` means "let the worker use its own
+    configured default" (the bridge's ``PI_MODEL`` / Codex default) — a card
+    that sets neither override keeps the previous behaviour.
+    """
+    model = (getattr(task, "model_override", None) or "").strip()
+    if not model:
+        return None
+    provider = (getattr(task, "provider_override", None) or "").strip()
+    if provider and "/" not in model:
+        return f"{provider}/{model}"
+    return model
+
+
 def _prompt(conn, task_id: str, source_status: str) -> str:
     from hermes_cli.kanban_db import build_worker_context
 
@@ -165,6 +185,7 @@ def supervise(args: argparse.Namespace) -> int:
             workspace = _remote_workspace(claimed)
             prompt = _prompt(conn, task.id, source_status)
             resume_session_id = _resume_session_id(claimed.body)
+            model = _model_request(claimed)
             stable_run_id = f"hermes-{args.board}-{task.id}-{run_id}"
             api = WorkerApi(args.api_url, token)
             api.start(
@@ -175,6 +196,7 @@ def supervise(args: argparse.Namespace) -> int:
                 prompt=prompt,
                 resume_session_id=resume_session_id,
                 conversation_id=_conversation_id(claimed, args.board),
+                model=model,
             )
         except (ValueError, WorkerApiError) as exc:
             _settle(conn, task.id, run_id, source_status, "failed", None, str(exc),

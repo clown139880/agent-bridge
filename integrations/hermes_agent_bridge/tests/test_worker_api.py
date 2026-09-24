@@ -43,3 +43,18 @@ def test_session_context_reads_session_and_tail_events(monkeypatch):
         ("GET", "/api/v1/sessions/a%2Fb", None),
         ("GET", "/api/v1/sessions/a%2Fb/events?tail=true", None),
     ]
+
+
+def test_start_includes_the_model_only_when_pinned(monkeypatch):
+    api = WorkerApi("http://bridge", "secret")
+    calls = []
+    monkeypatch.setattr(api, "_request", lambda method, path, body=None: calls.append((method, path, body)) or {})
+
+    api.start(run_id="r1", task_id="t_1", worker_id="pi@hal",
+              project_path="/work/repo", prompt="do it")
+    api.start(run_id="r2", task_id="t_1", worker_id="pi@hal",
+              project_path="/work/repo", prompt="do it",
+              model="tokensapi/deepseek-v4-flash-vision-exp")
+
+    assert "model" not in calls[0][2]
+    assert calls[1][2]["model"] == "tokensapi/deepseek-v4-flash-vision-exp"

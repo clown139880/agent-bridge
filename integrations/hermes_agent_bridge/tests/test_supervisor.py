@@ -10,6 +10,7 @@ from integrations.hermes_agent_bridge.supervisor import (
     UPDATE_ADMISSION_STATUSES,
     _conversation_id,
     _event_summary,
+    _model_request,
     _normalize_prefixes,
     _remote_workspace,
     _resume_session_id,
@@ -280,3 +281,103 @@ def test_completed_remote_run_closes_the_owned_kanban_run(tmp_path, monkeypatch)
     assert task is not None
     assert task.status == "done"
     assert task.result == "fixed and verified"
+
+
+def test_model_request_composes_the_card_overrides():
+    assert _model_request(SimpleNamespace()) is None
+    assert _model_request(SimpleNamespace(model_override=None, provider_override=None)) is None
+    assert _model_request(SimpleNamespace(model_override="deepseek-v4-flash-vision-exp")) == \
+        "deepseek-v4-flash-vision-exp"
+    assert _model_request(SimpleNamespace(
+        model_override="deepseek-v4-flash-vision-exp", provider_override="tokensapi",
+    )) == "tokensapi/deepseek-v4-flash-vision-exp"
+    # An already provider-qualified model keeps its own provider.
+    assert _model_request(SimpleNamespace(
+        model_override="modeldeck/qwen3.8-27b", provider_override="tokensapi",
+    )) == "modeldeck/qwen3.8-27b"
+    # A provider without a model is not a request (matches the kanban validation).
+    assert _model_request(SimpleNamespace(model_override="  ", provider_override="tokensapi")) is None
+
+
+def test_supervisor_forwards_the_card_model_override(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    monkeypatch.setenv("AGENT_BRIDGE_WORKER_API_TOKEN", "secret")
+    from hermes_cli.kanban_db import create_board, create_task
+    from hermes_cli.kanban_db_connect import connect_closing
+    import integrations.hermes_agent_bridge.supervisor as supervisor_module
+
+    board = "model-override-test"
+    create_board(board)
+    with connect_closing(board=board) as conn:
+        task_id = create_task(
+            conn,
+            title="Run on a pinned model",
+            assignee="pi@hal",
+            workspace_kind="dir",
+            workspace_path="/root/pi-smoke",
+            model_override="deepseek-v4-flash-vision-exp",
+            provider_override="tokensapi",
+            board=board,
+        )
+
+    starts = []
+
+    class FakeApi:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def start(self, **kwargs):
+            starts.append(kwargs)
+            return {}
+
+        def run(self, _run_id):
+            return {"status": "completed"}
+
+        def events(self, _run_id, _after):
+            return {"next": 0, "events": []}
+
+    monkeypatch.setattr(supervisor_module, "WorkerApi", FakeApi)
+
+    assert supervise(_supervisor_args(task_id, board, worker_prefix="pi@")) == 0
+    assert starts[0]["model"] == "tokensapi/deepseek-v4-flash-vision-exp"
+
+
+def test_supervisor_leaves_the_model_unset_without_a_card_override(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    monkeypatch.setenv("AGENT_BRIDGE_WORKER_API_TOKEN", "secret")
+    from hermes_cli.kanban_db import create_board, create_task
+    from hermes_cli.kanban_db_connect import connect_closing
+    import integrations.hermes_agent_bridge.supervisor as supervisor_module
+
+    board = "no-model-override-test"
+    create_board(board)
+    with connect_closing(board=board) as conn:
+        task_id = create_task(
+            conn,
+            title="Use the worker default",
+            assignee="pi@hal",
+            workspace_kind="dir",
+            workspace_path="/root/pi-smoke",
+            board=board,
+        )
+
+    starts = []
+
+    class FakeApi:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def start(self, **kwargs):
+            starts.append(kwargs)
+            return {}
+
+        def run(self, _run_id):
+            return {"status": "completed"}
+
+        def events(self, _run_id, _after):
+            return {"next": 0, "events": []}
+
+    monkeypatch.setattr(supervisor_module, "WorkerApi", FakeApi)
+
+    assert supervise(_supervisor_args(task_id, board, worker_prefix="pi@")) == 0
+    assert starts[0]["model"] is None
