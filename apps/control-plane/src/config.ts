@@ -1,6 +1,5 @@
 import "dotenv/config";
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // The fleet version lives in the repo-root package.json (same value BRIDGE_LATEST_VERSION
@@ -28,11 +27,6 @@ const databasePath = process.env.DATABASE_PATH ?? "./data/control-plane.sqlite";
 const duration = (name: string, fallback: number): number => {
   const value = Number(process.env[name] ?? fallback);
   if (!Number.isFinite(value) || value <= 0) throw new Error(`${name} must be a positive number of milliseconds`);
-  return value;
-};
-const bytes = (name: string, fallback: number, minimum: number): number => {
-  const value = Number(process.env[name] ?? fallback);
-  if (!Number.isSafeInteger(value) || value < minimum) throw new Error(`${name} must be an integer >= ${minimum}`);
   return value;
 };
 const bridgeLatestVersion = process.env.BRIDGE_LATEST_VERSION;
@@ -70,21 +64,15 @@ export const config = {
   controlApiWriteToken,
   conversationMemory: {
     mcpReadToken: process.env.CONVERSATION_MCP_READ_TOKEN,
-    objectDir: process.env.CONVERSATION_OBJECT_DIR ?? join(dirname(databasePath), "conversation-objects"),
-    hotRetentionMs: duration("CONVERSATION_HOT_RETENTION_MS", 30 * 86_400_000),
-    archiveChunkBytes: bytes("CONVERSATION_ARCHIVE_CHUNK_BYTES", 1_048_576, 65_536),
-    maxCapacityBytes: bytes("CONVERSATION_TOTAL_CAPACITY_BYTES", 5 * 1024 ** 3, 1_048_576),
-    maxMessageBytes: bytes("CONVERSATION_MAX_MESSAGE_BYTES", 1_048_576, 65_536),
   },
   retention: {
-    sessionEventsMs: duration("CONTROL_SESSION_EVENT_RETENTION_MS", 30 * 86_400_000),
-    streamEventsMs: duration("CONTROL_STREAM_RETENTION_MS", 7 * 86_400_000),
     actionsMs: duration("CONTROL_ACTION_RETENTION_MS", 86_400_000),
     attachmentsMs: duration("CONTROL_ATTACHMENT_RETENTION_MS", 7 * 86_400_000),
   },
   sse: {
     keepaliveMs: duration("CONTROL_SSE_KEEPALIVE_MS", 15_000),
-    pollMs: duration("CONTROL_SSE_POLL_MS", 250),
+    // Writes wake streams immediately; the poll only bounds a missed wakeup.
+    pollMs: duration("CONTROL_SSE_POLL_MS", 2_000),
     maxBackpressure: Math.max(1, Number(process.env.CONTROL_SSE_MAX_BACKPRESSURE ?? "3")),
     actionTimeoutMs: duration("CONTROL_ACTION_TIMEOUT_MS", 30_000),
   },

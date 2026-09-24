@@ -187,6 +187,16 @@ test("Hermes worker API starts and observes a headless Codex run", async () => {
       type: "approval_response", sessionId: "thread-1", approvalId: "approval-1", choice: "allow",
     });
 
+    // Bridges report a turn both as structured session events (the stored history) and as
+    // the legacy agent.* status message that drives the run state.
+    await internals.handleBridgeMessage("dev", {
+      type: "session.event", eventType: "message.completed", eventId: "reply-1", sessionId: "thread-1", turnId: "turn-1",
+      timestamp: Date.now(), payload: { role: "assistant", text: "Fixed the failing test" },
+    });
+    await internals.handleBridgeMessage("dev", {
+      type: "session.event", eventType: "turn.completed", eventId: "turn-1-completed", sessionId: "thread-1", turnId: "turn-1",
+      timestamp: Date.now(), payload: { status: "completed", summary: "Tests fixed" },
+    });
     await internals.handleBridgeMessage("dev", {
       type: "agent.completed", eventId: "event-1", sessionId: "thread-1", timestamp: Date.now(), summary: "Tests fixed",
     });
@@ -202,12 +212,10 @@ test("Hermes worker API starts and observes a headless Codex run", async () => {
     assert.equal(run.sessionId, "thread-1");
 
     const eventPage = await fetch(`${base}/runs/run-1/events?after=0`, { headers }).then((response) => response.json()) as {
-      next: number; events: Array<{ sequence: number; event: { type: string; summary?: string } }>;
+      next: number; events: Array<{ sequence: number; event: { type: string; summary?: string; text?: string } }>;
     };
-    assert.equal(eventPage.events.length, 2);
-    assert.equal(eventPage.events[0]?.event.type, "agent.completed");
-    assert.equal(eventPage.events[0]?.event.summary, "Tests fixed");
-    assert.equal(eventPage.events[1]?.event.type, "agent.progress");
+    assert.deepEqual(eventPage.events.map(({ event }) => [event.type, event.text ?? event.summary]),
+      [["agent.output", "Fixed the failing test"], ["agent.completed", "Tests fixed"]]);
     assert.equal(eventPage.next, eventPage.events[1]?.sequence);
 
     const resumeResponse = await fetch(`${base}/runs`, {
@@ -233,6 +241,10 @@ test("Hermes worker API starts and observes a headless Codex run", async () => {
     await internals.handleBridgeMessage("dev", {
       type: "session.discovered", requestId: "run-2", sessionId: "thread-1", nativeSessionId: "thread-1",
       agentType: "codex-cli", projectPath: "/work/repo", status: "working", createdAt: Date.now(),
+    });
+    await internals.handleBridgeMessage("dev", {
+      type: "session.event", eventType: "turn.completed", eventId: "turn-2-completed", sessionId: "thread-1", turnId: "turn-2",
+      timestamp: Date.now(), payload: { status: "completed", summary: "You asked me to remember cobalt-orchid-731." },
     });
     await internals.handleBridgeMessage("dev", {
       type: "agent.completed", eventId: "event-2", sessionId: "thread-1", timestamp: Date.now(),

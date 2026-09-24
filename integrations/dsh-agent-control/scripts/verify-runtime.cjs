@@ -113,7 +113,6 @@ fs.writeFileSync(target, source);
       let submittedAttachments;
       bridge.call = async ({operation,args}) => {
         if (operation === 'upload') { uploadedImage = args; return {id:'fixture-image',filename:'probe.png',mimeType:'image/png',size:Buffer.from(args.content,'base64').length}; }
-        if (operation === 'live_events') return {data:[],nextCursor:'l:0'};
         if (operation === 'session_events') return {data:submitted ? [...rows,...receiptRows] : rows,hasMore:false};
         if (operation === 'session') return remote;
         if (operation === 'submit_turn') { submitted = true; submittedAttachments = args.attachments; return {status:'succeeded',actionId:'fixture-action',turnId:'reply'}; }

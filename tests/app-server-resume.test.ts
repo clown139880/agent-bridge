@@ -391,7 +391,7 @@ test("turn events retain the rerouted model through completion", async () => {
   assert.equal(events.find(event=>event.eventType==="model.rerouted")?.turnId,"turn-1");
 });
 
-test("App Server deltas are forwarded live and turn completion replays user and assistant messages with an explicit turn", async () => {
+test("App Server token deltas are not forwarded and turn completion replays user and assistant messages with an explicit turn", async () => {
   const emitted: BridgeToControlMessage[] = [];
   const adapter = new CodexAppServerAdapter({ command: "codex", url: "ws://127.0.0.1:4500",
     allowedRoots: [process.cwd()], manageServer: false, reconnectMs: 3_000 }, message => emitted.push(message));
@@ -408,11 +408,7 @@ test("App Server deltas are forwarded live and turn completion replays user and 
       { id: "question", type: "userMessage", content: [{ type: "text", text: "First prompt" }] },
       { id: "answer", type: "agentMessage", text: "Hello" },
     ] } });
-  const deltas = emitted.filter((message): message is Extract<BridgeToControlMessage, { type: "session.delta" }> => message.type === "session.delta");
-  assert.deepEqual(deltas.map(delta => ({ type: delta.deltaType, blockId: delta.blockId, delta: delta.delta })), [
-    { type: "text", blockId: "text:answer", delta: "Hel" },
-    { type: "reasoning", blockId: "reasoning:thought:summary:0", delta: "Checking" },
-  ]);
+  assert.equal(emitted.some(message => JSON.stringify(message).includes("Checking")), false);
   const messages = emitted.filter((message): message is Extract<BridgeToControlMessage, { type: "session.event" }> =>
     message.type === "session.event" && message.eventType === "message.completed");
   assert.deepEqual(messages.map(message => ({ turnId: message.turnId, role: message.payload.role, text: message.payload.text })), [

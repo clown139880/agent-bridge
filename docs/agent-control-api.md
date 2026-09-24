@@ -53,7 +53,6 @@ DSH Host 插件保存 Control token 并代理请求/事件；浏览器 Client �
 | 新增 | `DELETE` | `/sessions/{sessionId}` | 通过 owning Bridge adapter 删除/遗忘 session |
 | 新增 | `GET` | `/sessions/{sessionId}/runs` | session 关联的 Worker runs |
 | 新增 | `GET` | `/sessions/{sessionId}/events` | session 全量结构化事件/对话 |
-| 新增 | `GET` | `/sessions/{sessionId}/live-events` | 活动 turn 的瞬态 text/reasoning 增量长轮询 |
 | 新增 | `POST` | `/sessions/{sessionId}/turns` | 自动或显式 steer/start-new-turn |
 | 新增 | `POST` | `/sessions/{sessionId}/interrupt` | interrupt 当前 turn |
 | 新增 | `GET` | `/actions/{actionId}` | 查询异步写操作结果 |
@@ -421,7 +420,7 @@ lastSeenAt}`，其中 `workspaces` 是路径字符串数组。当前工作树已
     "recentWorkspaces": [{"path":"/work/agent-bridge","name":"agent-bridge","lastUsedAt":1788770000000}],
     "lastSeenAt": 1788770000000, "bridgeVersion": "0.4.2", "activeSessionCount": 1
   }],
-  "streamCursor": "g:1842"
+  "streamCursor": "c:1842:97"
 }
 ```
 
@@ -451,7 +450,7 @@ lastSeenAt}`，其中 `workspaces` 是路径字符串数组。当前工作树已
   "sessions": [],
   "approvals": [],
   "userInput": [],
-  "streamCursor": "g:1842",
+  "streamCursor": "c:1842:97",
   "truncated": {"sessions": false}
 }
 ```
@@ -519,16 +518,8 @@ action receipt 和 idempotency key 按正常保留期保留，因此删除成功
 请求的 `after`（首次空页可为 `null`），`hasMore` 表示当前页后仍有已落库事件。
 
 这是 session 的跨 run 对话真相，必须包括 user/assistant 完整消息、turn 边界、工具摘要、approval 和 user
-input；不得只返回当前 `AgentEvent` 的生命周期摘要。文本 delta 可用于 SSE 的临时体验，但持久 REST 默认只
-提供 completed item，避免回放重复文本。secret user-input 的答案在任何事件和响应中都返回 `"[REDACTED]"`。
-
-#### `GET /sessions/{sessionId}/live-events`（新增）
-
-返回当前进程内的有界瞬态增量：`{data,nextCursor}`。首次不带 `after` 时只取得
-当前 `l:<sequence>` 水位；后续带 `after` 与 `waitMs=0..30000` 长轮询。事件包含
-`sessionId`、`turnId`、`itemId`、`blockId`、`deltaType=text|reasoning`、`delta` 和
-`timestamp`。该通道不写 SQLite、不参与历史回放；游标过期返回 `cursor_expired`，
-客户端应重新取水位并依靠 `/events` 的完成态补齐。
+input；不得只返回当前 `AgentEvent` 的生命周期摘要。系统不传输、不存储 token/文本 delta，只提供
+completed item。secret user-input 的答案在任何事件和响应中都返回 `"[REDACTED]"`。
 
 #### `POST /sessions/{sessionId}/turns`（新增）
 
@@ -691,8 +682,13 @@ DSH Host 使用可设置 Authorization header 的 fetch/HTTP client 连接 SSE�
 2. Host 连接 `GET /stream?cursor=<C>`，header 带 Bearer 和 `Accept: text/event-stream`。
 3. 重连时优先发送 `Last-Event-ID: <last fully applied cursor>`；若同时有 query cursor，header 优先。
 4. Server 每 15 秒发送 `: keepalive\n\n`，并建议 `retry: 3000`。这些 comment 不推进 cursor。
-5. Server 先补发 cursor 之后的持久事件，再发送 live event，二者使用同一全局顺序。
-6. cursor 过期时在建立流前返回 HTTP 410 `cursor_expired`；Host 丢弃局部缓存、重新 snapshot。
+5. 游标 `c:<E>:<C>` 同时记录已投递的事件位置 E 与资源变更位置 C。Server 先按序补发 E 之后追加的每个
+   `session.event.appended`，再对 C 之后变更过的每个资源投递一次其**当前**状态（`session.updated|deleted`、
+   `worker.upserted|offline`、`run.upserted`、`approval.upserted`、`user_input.upserted`、`action.updated`）。
+   资源变更日志每资源只保留一行，离线期间的多次中间状态合并为最新一次，因此游标永不因保留期过期。
+   写入即唤醒所有连接，轮询仅兜底。不带 cursor 时从当前位置开始。
+6. 0.6.63 之前的 `g:N` 游标在建立流前返回 HTTP 410 `cursor_expired`；Host 丢弃局部缓存、重新 snapshot。
+   格式错误或超过当前位置的游标返回 400 `invalid_cursor`。
 
 响应头还应含 `Content-Type: text/event-stream`、`Cache-Control: no-cache, no-transform`、
 `X-Accel-Buffering: no`。一次连接只保证至少一次投递；客户端必须按 `eventId` 去重并按 cursor 顺序应用。
@@ -702,16 +698,16 @@ DSH Host 使用可设置 Authorization header 的 fetch/HTTP client 连接 SSE�
 每帧事件名固定为 `bridge.event`，SSE `id` 等于 envelope cursor：
 
 ```text
-id: g:1843
+id: c:1842:98
 event: bridge.event
-data: {"cursor":"g:1843","eventId":"01J...","type":"session.updated","timestamp":1788770000123,"resource":{"kind":"session","id":"thr_123"},"sessionId":"thr_123","data":{"status":"active","activeTurnId":"turn_9"}}
+data: {"cursor":"c:1842:98","eventId":"01J...","type":"session.updated","timestamp":1788770000123,"resource":{"kind":"session","id":"thr_123"},"sessionId":"thr_123","data":{"status":"active","activeTurnId":"turn_9"}}
 
 ```
 
 ```ts
 export type StreamEventType =
   | "worker.upserted" | "worker.offline"
-  | "session.upserted" | "session.updated" | "session.event.appended"
+  | "session.updated" | "session.deleted" | "session.event.appended"
   | "run.upserted" | "approval.upserted" | "user_input.upserted"
   | "action.updated" | (string & {});
 export interface StreamEnvelope<T = unknown> {
@@ -788,9 +784,9 @@ export interface StreamEnvelope<T = unknown> {
    Authorization: Bearer ***
    ```
 
-   返回 sessions、workers、pending queues 和 `streamCursor: "g:200"`。Client 以 `sessionId` 作行 key。
+   返回 sessions、workers、pending queues 和 `streamCursor: "c:200:40"`。Client 以 `sessionId` 作行 key。
 
-2. Host 从 `g:200` 接 SSE；用户打开 session 后补读对话：
+2. Host 从 `c:200:40` 接 SSE；用户打开 session 后补读对话：
 
    ```http
    GET /api/v1/sessions/thr_123
@@ -863,8 +859,9 @@ UI mock 应至少模拟：worker 离线、空列表、100+ session 游标、acti
 ## 12. 实现说明与已知降级
 
 本次实现通过 version 1/2 事务迁移扩展 0.4.2 schema；旧 `events.id`、Worker runs 和 Hermes 数字 cursor 保留。
-结构化 session events、pending requests、actions、idempotency keys 与 SSE outbox 已落库。默认保留期分别为
-30 天、7 天和 24 小时，并可由环境变量配置。
+0.6.63 起 `events` 是唯一且永久的历史：每个上游事件一行，SSE 与对话检索都读取它；另有每资源一行的
+`stream_changes` 供 SSE 投递当前状态。actions/idempotency keys 与附件分别保留 24 小时和 7 天，可由
+`CONTROL_ACTION_RETENTION_MS`、`CONTROL_ATTACHMENT_RETENTION_MS` 配置。
 
 实现与理想上游能力之间有以下明确降级：
 

@@ -440,46 +440,6 @@ describe('Bridge native turn', () => {
     } }, expect.any(AbortSignal))
     await f.target.dispose()
   })
-  it('maps live Bridge deltas to native text and reasoning blocks without replaying the completed text', async () => {
-    const f = await fixture([])
-    const agent = await f.target.ensure(summary)
-    let submitted = false
-    let historyReads = 0
-    let liveDelivered = false
-    f.bridge.call.mockImplementation(async request => {
-      if (request.operation === 'session') return summary
-      if (request.operation === 'submit_turn') { submitted = true; return { actionId: 'live', status: 'succeeded', turnId: 't1' } }
-      if (request.operation === 'live_events') {
-        if (!request.args?.['after']) return { data: [], nextCursor: 'l:0' }
-        if (!liveDelivered) {
-          liveDelivered = true
-          return { data: [
-            { cursor: 'l:1', sessionId: 'remote-1', turnId: 't1', itemId: 'answer', blockId: 'text:answer', deltaType: 'text', delta: 'Hel', timestamp: 11 },
-            { cursor: 'l:2', sessionId: 'remote-1', turnId: 't1', itemId: 'thought', blockId: 'reasoning:thought:summary:0', deltaType: 'reasoning', delta: 'Checking', timestamp: 12 },
-          ], nextCursor: 'l:2' }
-        }
-        return { data: [], nextCursor: 'l:2' }
-      }
-      if (request.operation === 'session_events') {
-        if (!submitted) return page([])
-        historyReads++
-        return historyReads === 1 ? page([]) : page([
-          { ...row('answer', 'message.completed', { role: 'assistant', text: 'Hello' }), itemId: 'answer' },
-          row('done', 'turn.completed', { status: 'completed' }),
-        ])
-      }
-      return page([])
-    })
-    const adapter = new AgentBridgeLlmAdapter({ bridge: f.bridge } as unknown as AgentControlService, f.target, 1)
-    const chunks = []
-    for await (const chunk of adapter.stream({ sessionId: agent.id, provider: 'agent-bridge', model: 'remote',
-      messages: [{ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'go' }] }] } as GenerateOptions)) chunks.push(chunk)
-    expect(chunks.filter(chunk => chunk.type === 'text-delta')).toEqual([{ type: 'text-delta', index: 0, text: 'Hel' }])
-    expect(chunks.filter(chunk => chunk.type === 'reasoning-delta')).toEqual([{ type: 'reasoning-delta', index: 1, text: 'Checking' }])
-    expect(chunks.find(chunk => chunk.type === 'block-end' && chunk.index === 0)).toMatchObject({ block: { type: 'text', text: 'Hello' } })
-    expect(chunks.at(-1)?.type).toBe('finish')
-    await f.target.dispose()
-  })
   it('reports failed receipts rather than emitting a successful finish', async () => {
     const f = await fixture([])
     const agent = await f.target.ensure(summary)

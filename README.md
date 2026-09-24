@@ -95,17 +95,10 @@ Control Plane 主要变量：
 | `WORKER_API_TOKEN` | 启用 worker API 时必填的独立 bearer token |
 | `CONTROL_API_READ_TOKEN` / `CONTROL_API_WRITE_TOKEN` | Agent Control Host 的只读/读写 token；浏览器不得持有 |
 | `CONVERSATION_MCP_READ_TOKEN` | `/mcp` 的独立只读 bearer token；不得复用 Bridge 或 Control API 写密钥 |
-| `CONVERSATION_OBJECT_DIR` | 冷归档对象目录；生产环境必须位于 Git checkout 外 |
-| `CONVERSATION_HOT_RETENTION_MS` | 正文转入分块压缩冷归档前的热存储时间，默认 30 天 |
-| `CONVERSATION_ARCHIVE_CHUNK_BYTES` | 冷归档分块目标上限，默认 1 MiB |
-| `CONVERSATION_TOTAL_CAPACITY_BYTES` | SQLite 与冷归档对象的硬上限，默认 5 GiB；达到后停止确认新正文 |
-| `CONVERSATION_MAX_MESSAGE_BYTES` | 单条归档正文上限，默认 1 MiB；超限时保留待传并报告错误 |
-| `CONTROL_SESSION_EVENT_RETENTION_MS` | 结构化 session event 保留期，默认 30 天 |
-| `CONTROL_STREAM_RETENTION_MS` | SSE outbox 补读窗口，默认 7 天 |
 | `CONTROL_ACTION_RETENTION_MS` | action/idempotency 保留期，默认 24 小时 |
 | `CONTROL_ATTACHMENT_RETENTION_MS` | 内容寻址图片附件保留期，默认 7 天 |
 | `CONTROL_ACTION_TIMEOUT_MS` | Bridge action ack 超时，默认 30 秒 |
-| `CONTROL_SSE_KEEPALIVE_MS` / `CONTROL_SSE_POLL_MS` | SSE keepalive 与 outbox 轮询间隔 |
+| `CONTROL_SSE_KEEPALIVE_MS` / `CONTROL_SSE_POLL_MS` | SSE keepalive 与漏唤醒兜底轮询间隔（写入即唤醒，轮询默认 2 秒） |
 | `BRIDGE_LATEST_VERSION` | 可选的 bridge 最新版本注册表；与 `BRIDGE_UPDATE_SOURCE` 一起配置 |
 | `BRIDGE_UPDATE_SOURCE` | 通告中的推荐获取源；Control Plane 只广播字符串，不访问该源 |
 

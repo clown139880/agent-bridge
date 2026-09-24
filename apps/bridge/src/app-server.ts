@@ -923,19 +923,6 @@ export class CodexAppServerAdapter implements AgentAdapter {
           inputTokens:usage.total.inputTokens??0,outputTokens:usage.total.outputTokens??0,reasoningTokens:usage.total.reasoningOutputTokens??0},this.activeTurns.get(threadId));
       return;
     }
-    if (method === "item/agentMessage/delta") {
-      this.emitLiveDelta(threadId, params, "text", `text:${String(params.itemId ?? "")}`);
-      return;
-    }
-    if (method === "item/reasoning/summaryTextDelta") {
-      this.emitLiveDelta(threadId, params, "reasoning",
-        `reasoning:${String(params.itemId ?? "")}:summary:${String(params.summaryIndex ?? 0)}`);
-      return;
-    }
-    if (method === "item/plan/delta") {
-      this.emitLiveDelta(threadId, params, "reasoning", `reasoning:${String(params.itemId ?? "")}:plan`);
-      return;
-    }
     if (method === "item/completed") {
       const item = params.item as ThreadItem | undefined;
       if (item) this.handleCompletedItem(threadId, item,
@@ -1116,14 +1103,6 @@ export class CodexAppServerAdapter implements AgentAdapter {
     this.activeThreads.clear();
     this.readyPromise = undefined;
     if (!this.rotating) this.scheduleReconnect();
-  }
-
-  private emitLiveDelta(threadId:string,params:Record<string,unknown>,deltaType:"text"|"reasoning",blockId:string):void{
-    const turnId=typeof params.turnId==="string"?params.turnId:this.activeTurns.get(threadId);
-    const itemId=typeof params.itemId==="string"?params.itemId:"";
-    const delta=typeof params.delta==="string"?params.delta:"";
-    if(!turnId||!itemId||!delta)return;
-    this.emit({type:"session.delta",sessionId:threadId,turnId,itemId,blockId,deltaType,delta,timestamp:Date.now()});
   }
 
   private scheduleReconnect(): void {

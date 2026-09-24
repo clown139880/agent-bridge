@@ -12,16 +12,17 @@ export class BridgeStreamError extends Error {
 
 const object = (value: JsonValue | undefined): JsonObject | undefined => value && typeof value === 'object' && !Array.isArray(value) ? value : undefined
 
-function event(value: unknown): BridgeStreamEvent {
+/** Returns undefined for a well-formed event of a type this client does not consume. */
+function event(value: unknown): BridgeStreamEvent | undefined {
   const row = object(value as JsonValue)
   const resource = object(row?.['resource'])
   if (!row || typeof row['cursor'] !== 'string' || typeof row['eventId'] !== 'string' || typeof row['type'] !== 'string' ||
-    !TYPES.has(row['type'] as BridgeStreamEventType) || typeof row['timestamp'] !== 'number' || !resource ||
+    typeof row['timestamp'] !== 'number' || !resource ||
     typeof resource['kind'] !== 'string' || typeof resource['id'] !== 'string' ||
     !(typeof row['sessionId'] === 'string' || row['sessionId'] === null) || row['data'] === undefined) {
     throw new BridgeStreamError('bridge_protocol_error', 'Agent Bridge returned an invalid stream event.')
   }
-  return row as unknown as BridgeStreamEvent
+  return TYPES.has(row['type'] as BridgeStreamEventType) ? row as unknown as BridgeStreamEvent : undefined
 }
 
 async function responseError(response: Response): Promise<BridgeStreamError> {
@@ -52,7 +53,8 @@ export async function* openBridgeStream(cursor: string | undefined, signal: Abor
         const lines = block.split('\n')
         const kind = lines.find(line => line.startsWith('event:'))?.slice(6).trim()
         const data = lines.filter(line => line.startsWith('data:')).map(line => line.slice(5).trimStart()).join('\n')
-        if (kind === 'bridge.event' && data) yield event(JSON.parse(data) as unknown)
+        const parsed = kind === 'bridge.event' && data ? event(JSON.parse(data) as unknown) : undefined
+        if (parsed) yield parsed
         boundary = buffer.indexOf('\n\n')
       }
       if (chunk.done) break

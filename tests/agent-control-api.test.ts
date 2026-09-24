@@ -58,22 +58,6 @@ test("orphaned archive replay records a gap and is acknowledged instead of retry
   } finally { await f.close(); }
 });
 
-test("live session deltas are relayed without entering retained history", async () => {
-  const f = await fixture();
-  try {
-    const baseline = await fetch(`${f.base}/sessions/thread-1/live-events?waitMs=0`, { headers: f.headers }).then(r => r.json()) as any;
-    const waiting = fetch(`${f.base}/sessions/thread-1/live-events?after=${encodeURIComponent(baseline.nextCursor)}&waitMs=1000`, { headers: f.headers })
-      .then(r => r.json()) as Promise<any>;
-    await f.internals.handleBridgeMessage("dev", { type: "session.delta", sessionId: "thread-1", turnId: "turn-live",
-      itemId: "answer", blockId: "text:answer", deltaType: "text", delta: "hello", timestamp: Date.now() });
-    const live = await waiting;
-    assert.equal(live.data.length, 1);
-    assert.equal(live.data[0].delta, "hello");
-    const retained = await fetch(`${f.base}/sessions/thread-1/events`, { headers: f.headers }).then(r => r.json()) as any;
-    assert.equal(retained.data.some((event:any) => event.type === "session.delta"), false);
-  } finally { await f.close(); }
-});
-
 test('offline worker deletion is scoped, durable, and rejects online workers',async()=>{
   const f=await fixture();try{
     const remove=()=>fetch(`${f.base}/workers/codex%40dev`,{method:'DELETE',headers:f.headers,body:'{}'});
@@ -101,7 +85,7 @@ test('offline worker deletion is scoped, durable, and rejects online workers',as
 test("Agent Control REST exposes snapshot, pagination, actions, idempotency and pending CAS",async()=>{
   const f=await fixture();try{
     const snapshot=await fetch(`${f.base}/snapshot`,{headers:f.headers}).then(r=>r.json()) as any;
-    assert.equal(snapshot.sessions[0].sessionId,"thread-1");assert.match(snapshot.streamCursor,/^g:\d+$/);
+    assert.equal(snapshot.sessions[0].sessionId,"thread-1");assert.match(snapshot.streamCursor,/^c:\d+:\d+$/);
     const first=await fetch(`${f.base}/sessions?limit=1`,{headers:f.headers}).then(r=>r.json()) as any;
     assert.equal(first.data.length,1);assert.equal(first.hasMore,true);assert.ok(first.nextCursor);
     assert.equal(first.data[0].projectIdentity,"github.com/example/repo");
@@ -306,19 +290,22 @@ test("snapshot cursor followed by SSE does not miss a committed session event",a
   }finally{await f.close();}
 });
 
-test("SSE watermark remains monotonic and expired cursors fail before streaming",async()=>{
+test("SSE delivers each appended event and one current state per changed resource; stale cursors fail before streaming",async()=>{
   const f=await fixture();try{
-    const oldest=Number((f.store.db.prepare("SELECT MIN(sequence) AS n FROM stream_events").get() as {n:number}).n);
-    const highBefore=f.internals.controlStore.streamCursor();
-    f.store.db.prepare("UPDATE stream_events SET created_at=0").run();
-    f.internals.controlStore.cleanup();
-    assert.equal(f.internals.controlStore.streamCursor(),highBefore);
-    await f.internals.handleBridgeMessage("dev",{type:"session.event",eventId:"after-retention",eventType:"progress",
-      sessionId:"thread-1",timestamp:Date.now(),payload:{message:"new"}});
-    const expired=await fetch(`${f.base}/stream?cursor=${encodeURIComponent(`g:${oldest}`)}`,
-      {headers:{authorization:"Bearer read"}});
-    assert.equal(expired.status,410);
-    assert.equal((await expired.json() as any).error.code,"cursor_expired");
+    const from=f.internals.controlStore.streamCursor();
+    for(const [eventId,eventType] of [["t9-start","turn.started"],["t9-reply","message.completed"],["t9-end","turn.completed"]])
+      await f.internals.handleBridgeMessage("dev",{type:"session.event",eventId,eventType,sessionId:"thread-1",turnId:"turn-9",
+        timestamp:Date.now(),payload:eventType==="message.completed"?{role:"assistant",text:"done"}:{status:"completed"}});
+    const {items}=f.internals.controlStore.streamAfter(f.internals.controlStore.parseStreamCursor(from));
+    assert.deepEqual(items.filter(item=>item.type==="session.event.appended").map(item=>(item.payload as any).eventId),
+      ["t9-start","t9-reply","t9-end"]);
+    const updates=items.filter(item=>item.type==="session.updated");
+    assert.equal(updates.length,1);assert.equal((updates[0]!.payload as any).status,"idle");
+    assert.ok(items.every((item,index)=>index===0||item.cursor!==items[index-1]!.cursor));
+    const expired=await fetch(`${f.base}/stream?cursor=g:1`,{headers:{authorization:"Bearer read"}});
+    assert.equal(expired.status,410);assert.equal((await expired.json() as any).error.code,"cursor_expired");
+    const ahead=await fetch(`${f.base}/stream?cursor=c:999999:0`,{headers:{authorization:"Bearer read"}});
+    assert.equal((await ahead.json() as any).error.code,"invalid_cursor");
   }finally{await f.close();}
 });
 

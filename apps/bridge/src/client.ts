@@ -10,7 +10,6 @@ import {
   type AgentType,
   type BridgeToControlMessage,
   type ControlToBridgeMessage,
-  type ArchiveGapMessage,
   type RegisterMessage,
   type SessionState,
 } from "@agent-bridge/protocol";
@@ -21,17 +20,9 @@ import { PiAdapter } from "./pi/pi-adapter.js";
 import { makeAttachmentFetcher } from "./attachments.js";
 import type { AgentAdapter } from "./agent-adapter.js";
 import { BridgeSelfUpdater } from "./self-updater.js";
-import { CoalescedFileWriter } from "./coalesced-writer.js";
+import { ArchiveOutbox, type ArchiveEvent } from "./archive-outbox.js";
 
 const log = pino({ name: "bridge-client" });
-
-/**
- * Coalesce archive-outbox persistence into at most one disk write per second.
- * A burst of session events — or a growing outbox while the control plane is
- * disconnected and acks stall — would otherwise rewrite the whole snapshot on
- * every mutation, turning O(n) writes into O(n^2) bytes.
- */
-const ARCHIVE_OUTBOX_SAVE_COALESCE_MS = 1_000;
 
 /** Map a provider name from config to its canonical AgentType. */
 function providerToAgentType(provider: string): AgentType | undefined {
@@ -61,10 +52,8 @@ export class BridgeClient {
   private readonly actionResults = new Map<string, ActionResultMessage>();
   private readonly inFlightActions = new Set<string>();
   private readonly queuedStateMessages: BridgeToControlMessage[] = [];
-  private readonly archiveOutbox = new Map<string, Extract<BridgeToControlMessage, { type: "session.event" }>>();
-  private archiveGap?: ArchiveGapMessage;
+  private readonly archiveOutbox: ArchiveOutbox;
   private registered = false;
-  private readonly archiveWriter: CoalescedFileWriter;
 
   constructor(private readonly options: {
     url: string;
@@ -114,10 +103,9 @@ export class BridgeClient {
     updateRestartExecutable: string;
     updateRestartArgs: string[];
   }) {
-    this.archiveWriter = new CoalescedFileWriter(options.archiveOutboxPath, ARCHIVE_OUTBOX_SAVE_COALESCE_MS,
+    this.archiveOutbox = new ArchiveOutbox(options.archiveOutboxPath, options.archiveOutboxLimit, options.machineId,
       (error) => log.error({ error }, "Unable to persist conversation archive outbox"));
     this.loadActionResults();
-    this.loadArchiveOutbox();
 
     const providers = options.providers?.length ? options.providers : ["codex"];
     if (providers.includes("codex")) {
@@ -262,7 +250,6 @@ export class BridgeClient {
     this.stopped = true;
     clearTimeout(this.reconnectTimer);
     clearInterval(this.heartbeatTimer);
-    this.archiveWriter.flushSync();
     for (const adapter of this.adapters.values()) adapter.stop();
     this.socket?.close(1000, "bridge shutdown");
   }
@@ -334,10 +321,10 @@ export class BridgeClient {
           this.sendStateSnapshot();
           break;
         case "archive.ack":
-          if (this.archiveOutbox.delete(message.eventId)) this.saveArchiveOutbox();
+          this.archiveOutbox.ack(message.eventId);
           break;
         case "archive.gap_ack":
-          if (this.archiveGap?.gapId === message.gapId) { this.archiveGap = undefined; this.saveArchiveOutbox(); }
+          this.archiveOutbox.ackGap(message.gapId);
           break;
         case "bridge_update.available":
           void this.updater.consider(message).catch((error) => {
@@ -410,8 +397,8 @@ export class BridgeClient {
     }
     this.send({type:"state.snapshot",generation:`${Date.now()}`,sessions,approvals,userInputs,complete:true} as BridgeToControlMessage);
     while(this.queuedStateMessages.length)this.send(this.queuedStateMessages.shift()!);
-    if(this.archiveGap)this.send(this.archiveGap);
-    for(const message of this.archiveOutbox.values())this.send(message);
+    if(this.archiveOutbox.gap)this.send(this.archiveOutbox.gap);
+    for(const message of this.archiveOutbox.messages.values())this.send(message);
   }
 
   private sendDurable(message:BridgeToControlMessage):void {
@@ -423,31 +410,10 @@ export class BridgeClient {
     }
   }
 
-  private sendArchiveDurable(message:Extract<BridgeToControlMessage,{type:"session.event"}>):void {
-    if(!this.archiveOutbox.has(message.eventId))this.archiveOutbox.set(message.eventId,message);
-    while(this.archiveOutbox.size>this.options.archiveOutboxLimit){
-      const oldest=this.archiveOutbox.entries().next().value as [string,Extract<BridgeToControlMessage,{type:"session.event"}>];
-      this.archiveOutbox.delete(oldest[0]);
-      if(!this.archiveGap)this.archiveGap={type:"archive.gap",gapId:`gap:${this.options.machineId}:${Date.now()}`,
-        firstEventId:oldest[0],lastEventId:oldest[0],droppedCount:1,reason:"outbox-capacity",reportedAt:Date.now()};
-      else{this.archiveGap.lastEventId=oldest[0];this.archiveGap.droppedCount++;}
-      log.error({eventId:oldest[0]},"Conversation archive outbox exceeded capacity; reporting a collection gap");
-    }
-    this.saveArchiveOutbox();
+  private sendArchiveDurable(message:ArchiveEvent):void {
+    for(const eventId of this.archiveOutbox.add(message))
+      log.error({eventId},"Conversation archive outbox exceeded capacity; reporting a collection gap");
     if(this.registered&&this.socket?.readyState===WebSocket.OPEN)this.send(message);
-  }
-
-  private loadArchiveOutbox():void {
-    try{
-      const value=JSON.parse(readFileSync(this.options.archiveOutboxPath,"utf8")) as
-        {messages?:Array<Extract<BridgeToControlMessage,{type:"session.event"}>>;gap?:ArchiveGapMessage};
-      for(const message of value.messages??[])if(message?.type==="session.event"&&message.eventId)this.archiveOutbox.set(message.eventId,message);
-      if(value.gap?.type==="archive.gap")this.archiveGap=value.gap;
-    }catch{/* first boot or invalid file */}
-  }
-
-  private saveArchiveOutbox():void {
-    this.archiveWriter.schedule(()=>JSON.stringify({messages:[...this.archiveOutbox.values()],gap:this.archiveGap}));
   }
 
   private sharedSkillsStatus(): NonNullable<RegisterMessage["sharedSkills"]> {

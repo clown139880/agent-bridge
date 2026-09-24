@@ -1,4 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
+import { decodeEventBody, encodeEventBody, indexEvent } from "./events.js";
 
 function columns(db: DatabaseSync, table: string): Set<string> {
   return new Set((db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((row) => row.name));
@@ -286,4 +287,99 @@ export function migrateDatabase(db: DatabaseSync): void {
     } catch (error) { try { db.exec("ROLLBACK"); } catch {} throw error; }
   }
 
+  if (!db.prepare("SELECT 1 FROM schema_migrations WHERE version=8").get()) {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      migrateToSingleEventStore(db);
+      db.prepare("INSERT INTO schema_migrations(version,applied_at) VALUES (8,?)").run(Date.now());
+      db.exec("COMMIT");
+    } catch (error) { try { db.exec("ROLLBACK"); } catch {} throw error; }
+    // Return the pages of every dropped copy to the filesystem once.
+    db.exec("VACUUM");
+  }
+}
+
+/**
+ * Version 8 makes `events` the single permanent history. Each row stores only the
+ * upstream body; the wire envelope is rebuilt from columns on read. Every other
+ * copy (full-envelope payloads, stream snapshots, conversation message bodies,
+ * content-bearing FTS tables, archives, summaries) is folded back or dropped.
+ */
+function migrateToSingleEventStore(db: DatabaseSync): void {
+  const highWater = Number((db.prepare("SELECT seq FROM sqlite_sequence WHERE name='events'").get() as
+    { seq: number } | undefined)?.seq ?? 0);
+  db.exec(`
+    CREATE TABLE events_v8 (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL REFERENCES sessions(id),
+      event_id TEXT NOT NULL, worker_run_id TEXT, type TEXT NOT NULL, turn_id TEXT, item_id TEXT,
+      created_at INTEGER NOT NULL, body BLOB NOT NULL
+    );
+    INSERT INTO events_v8(id,session_id,event_id,worker_run_id,type,turn_id,item_id,created_at,body)
+      SELECT id,session_id,event_id,worker_run_id,type,turn_id,item_id,created_at,
+        COALESCE(CASE WHEN json_valid(payload) THEN json_extract(payload,'$.payload') END,'{}')
+      FROM events WHERE event_schema=2 AND event_id IS NOT NULL;
+  `);
+  // Conversation memory outlived event retention for some bodies; those originals
+  // become ordinary events again so a single table holds all history.
+  if (db.prepare("SELECT 1 FROM sqlite_master WHERE name='conversation_messages'").get()) {
+    const lost = db.prepare(`SELECT m.session_id,m.source_event_id,m.role,m.turn_id,m.item_id,m.occurred_at,
+        COALESCE(m.content,(SELECT content FROM conversation_messages_fts f WHERE f.rowid=m.sequence)) AS content
+      FROM conversation_messages m JOIN sessions s ON s.id=m.session_id
+      WHERE NOT EXISTS (SELECT 1 FROM events_v8 e WHERE e.session_id=m.session_id AND e.event_id=m.source_event_id)
+      ORDER BY m.occurred_at,m.sequence`).all() as Array<Record<string, unknown>>;
+    // History reads in id order, and these predate every retained event, so they take the
+    // free ids just below the oldest one when there is room.
+    const oldest = Number((db.prepare("SELECT MIN(id) AS id FROM events_v8").get() as { id: number | null }).id ?? highWater + 1);
+    let nextId = oldest - lost.length >= 1 ? oldest - lost.length : null;
+    const insert = db.prepare(`INSERT INTO events_v8(id,session_id,event_id,worker_run_id,type,turn_id,item_id,created_at,body)
+      SELECT ?,?,?,NULL,?,?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM events_v8 WHERE session_id=? AND event_id=?)`);
+    for (const row of lost) {
+      const id = nextId === null ? null : nextId++;
+      if (typeof row.content !== "string") continue;
+      let type = "message.completed", payload: Record<string, unknown>;
+      if (row.role === "tool") {
+        const [head = "", ...rest] = row.content.split("\n");
+        type = "command.completed";
+        payload = { command: head.replace(/^\$ /, ""), output: rest.filter((line) => !/^\[status=/.test(line)).join("\n"),
+          status: "unknown", restored: true };
+      } else payload = { role: row.role === "user" ? "user" : "assistant", text: row.content, restored: true };
+      insert.run(id, String(row.session_id), String(row.source_event_id), type, row.turn_id == null ? null : String(row.turn_id),
+        row.item_id == null ? null : String(row.item_id),
+        Number(row.occurred_at), encodeEventBody(type, payload), String(row.session_id), String(row.source_event_id));
+    }
+  }
+  const bulky = db.prepare(`SELECT id FROM events_v8 WHERE type IN ('command.completed','file_change.completed')
+    AND typeof(body)='text' AND length(body)>=1024`).all() as Array<{ id: number }>;
+  const read = db.prepare("SELECT type,body FROM events_v8 WHERE id=?");
+  const write = db.prepare("UPDATE events_v8 SET body=? WHERE id=?");
+  for (const { id } of bulky) {
+    const row = read.get(id) as { type: string; body: string };
+    write.run(encodeEventBody(row.type, decodeEventBody(row.body)), id);
+  }
+  db.exec(`
+    DROP TABLE events;
+    ALTER TABLE events_v8 RENAME TO events;
+    CREATE UNIQUE INDEX events_upstream_idx ON events(session_id, event_id);
+    CREATE INDEX events_session_id_idx ON events(session_id, id);
+    DROP TABLE IF EXISTS conversation_messages_fts;
+    DROP TABLE IF EXISTS conversation_messages_fts_trigram;
+    DROP TABLE IF EXISTS conversation_source_aliases;
+    DROP TABLE IF EXISTS conversation_archive_chunks;
+    DROP TABLE IF EXISTS conversation_summaries;
+    DROP TABLE IF EXISTS conversation_cleanup_audit;
+    DROP TABLE IF EXISTS conversation_messages;
+    DROP TABLE IF EXISTS stream_events;
+    CREATE VIRTUAL TABLE event_search USING fts5(text, tokenize='trigram', content='', contentless_delete=1);
+    CREATE TABLE stream_changes (
+      seq INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, id TEXT NOT NULL, UNIQUE(kind, id)
+    );
+  `);
+  // Ids are public cursors (`e:<id>`); never hand out an id a client has already seen.
+  db.prepare(`INSERT INTO sqlite_sequence(name,seq) SELECT 'events',0
+    WHERE NOT EXISTS (SELECT 1 FROM sqlite_sequence WHERE name='events')`).run();
+  db.prepare("UPDATE sqlite_sequence SET seq=MAX(seq,?) WHERE name='events'").run(highWater);
+  const indexable = db.prepare(`SELECT id,session_id,type,turn_id,body FROM events
+    WHERE type IN ('message.completed','turn.completed','command.completed','file_change.completed') ORDER BY id`)
+    .all() as Array<{ id: number; session_id: string; type: string; turn_id: string | null; body: unknown }>;
+  for (const row of indexable) indexEvent(db, row, decodeEventBody(row.body));
 }

@@ -110,6 +110,7 @@ export class ControlPlane {
   private readonly approvalsById = new Map<string, PendingApproval>();
   private readonly resolvedApprovalIds = new Set<string>();
   private readonly progressNotifiedSessions = new Set<string>();
+  private readonly seenAgentEvents = new Set<string>();
   private readonly launchSelectionsByEvent = new Map<string, PendingLaunchSelection>();
   private readonly launchSelectionsBySender = new Map<string, PendingLaunchSelection>();
   private readonly launchesAwaitingPath = new Map<string, PendingLaunch>();
@@ -118,7 +119,6 @@ export class ControlPlane {
   private readonly pendingRunLaunches = new Map<string, PendingRunLaunch>();
   private roomId = "";
   private cleanupTimer?: NodeJS.Timeout;
-  private archiveTimer?: NodeJS.Timeout;
 
   constructor(
     private readonly store: Store,
@@ -132,9 +132,8 @@ export class ControlPlane {
       workerApiToken?: string;
       controlApiReadToken?: string;
       controlApiWriteToken?: string;
-      conversationMemory?: { mcpReadToken?: string; objectDir: string; hotRetentionMs: number;
-        archiveChunkBytes: number; maxCapacityBytes?: number; maxMessageBytes?: number };
-      retention?: { sessionEventsMs: number; streamEventsMs: number; actionsMs: number; attachmentsMs: number };
+      conversationMemory?: { mcpReadToken?: string };
+      retention?: { actionsMs: number; attachmentsMs: number };
       sse?: { keepaliveMs: number; pollMs: number; maxBackpressure: number; actionTimeoutMs?: number };
       bridgeUpdate?: {
         latestVersion: string;
@@ -146,25 +145,18 @@ export class ControlPlane {
     },
   ) {
     this.webhook = new WebhookNotifier(options.webhook);
-    this.memory = new ConversationMemoryStore(store.db,
-      options.conversationMemory?.objectDir ?? "./data/conversation-objects", {
-        maxCapacityBytes: options.conversationMemory?.maxCapacityBytes,
-        maxMessageBytes: options.conversationMemory?.maxMessageBytes,
-      });
-    const backfill = this.memory.backfillStoredEvents();
-    if (backfill.scanned) log.info(backfill, "Backfilled retained session events into conversation memory");
+    this.memory = new ConversationMemoryStore(store.db);
     if (options.conversationMemory?.mcpReadToken) {
       this.memoryMcp = new ConversationMcpServer(this.memory, options.conversationMemory.mcpReadToken);
     }
     this.controlStore = new AgentControlStore(store.db, options.retention ?? {
-      sessionEventsMs: 30 * 86_400_000, streamEventsMs: 7 * 86_400_000, actionsMs: 86_400_000,
-      attachmentsMs: 7 * 86_400_000,
+      actionsMs: 86_400_000, attachmentsMs: 7 * 86_400_000,
     });
     this.controlApi = new AgentControlApi(store, this.controlStore, this.registry, {
       workerToken: options.workerApiToken, readToken: options.controlApiReadToken,
       writeToken: options.controlApiWriteToken, bridgeToken: options.bridgeToken,
       sseKeepaliveMs: options.sse?.keepaliveMs ?? 15_000,
-      ssePollMs: options.sse?.pollMs ?? 250, sseMaxBackpressure: options.sse?.maxBackpressure ?? 3,
+      ssePollMs: options.sse?.pollMs ?? 2_000, sseMaxBackpressure: options.sse?.maxBackpressure ?? 3,
       actionTimeoutMs: options.sse?.actionTimeoutMs ?? 30_000,
     });
     this.http = createServer((request, response) => {
@@ -214,11 +206,8 @@ export class ControlPlane {
     await new Promise<void>((resolve) => this.http.listen(this.options.port, this.options.host, resolve));
     setInterval(() => this.store.markStaleMachinesOffline(Date.now() - 45_000), 15_000).unref();
     this.controlStore.cleanup();
-    this.archiveConversationMemory();
     this.cleanupTimer = setInterval(() => this.controlStore.cleanup(), 60 * 60_000);
     this.cleanupTimer.unref();
-    this.archiveTimer = setInterval(() => this.archiveConversationMemory(), 60 * 60_000);
-    this.archiveTimer.unref();
     log.info({ host: this.options.host, port: this.options.port, roomId: this.roomId }, "Control plane listening");
     // Announce the control-plane restart and the version it is advertising to the fleet.
     // This is the operator's "control-plane upgraded / broadcasting version" signal.
@@ -234,27 +223,13 @@ export class ControlPlane {
   async stop(): Promise<void> {
     this.matrix.stop();
     clearInterval(this.cleanupTimer);
-    clearInterval(this.archiveTimer);
     for (const bridge of this.bridges.values()) bridge.socket.close(1001, "server shutdown");
     for (const launch of this.pendingRunLaunches.values()) clearTimeout(launch.timeout);
     await new Promise<void>((resolve) => this.http.close(() => resolve()));
   }
 
-  private archiveConversationMemory(): void {
-    const policy = this.options.conversationMemory;
-    if (!policy) return;
-    try {
-      const result = this.memory.archiveEligible(Date.now() - policy.hotRetentionMs, policy.archiveChunkBytes);
-      if (result.messages) log.info({ ...result }, "Archived cold conversation messages");
-    } catch (error) {
-      // Archival is a derived storage transition. Originals stay hot on failure.
-      log.error({ error }, "Conversation archival failed; hot originals were retained");
-    }
-  }
-
   private deleteSessionRecord(sessionId: string): void {
-    const objects = this.memory.archiveObjectPaths(sessionId);
-    if (this.controlStore.deleteSession(sessionId)) this.memory.removeOrphanedArchiveObjects(objects, sessionId);
+    this.controlStore.deleteSession(sessionId);
   }
 
   async onRoomMessage(body: string, sender = "", eventId = ""): Promise<void> {
@@ -525,8 +500,8 @@ export class ControlPlane {
       if (request.method === "GET" && action === "events") {
         const after = Math.max(0, Number(url.searchParams.get("after") ?? "0") || 0);
         const limit = Math.min(500, Math.max(1, Number(url.searchParams.get("limit") ?? "100") || 100));
-        const events = run.sessionId ? this.store.listEvents(run.sessionId, after, limit, run.id) : [];
-        this.json(response, 200, { runId, events, next: events.at(-1)?.sequence ?? after });
+        const page = run.sessionId ? this.store.listRunEvents(run.sessionId, run.id, after, limit) : { events: [], next: after };
+        this.json(response, 200, { runId, ...page });
         return;
       }
       if (request.method === "POST" && (action === "input" || action === "interrupt")) {
@@ -715,7 +690,7 @@ export class ControlPlane {
         const stale = this.store.db.prepare("SELECT id,active_turn_id FROM sessions WHERE machine_id=? AND (active_turn_id IS NOT NULL OR activity_status IN ('active','waiting_for_approval','waiting_for_input'))")
           .all(machineId) as Array<{id:string;active_turn_id:string|null}>;
         for (const session of stale) if (!present.has(session.id)) {
-          if (session.active_turn_id) this.controlStore.appendSessionEvent(machineId, {
+          if (session.active_turn_id) this.controlStore.appendSessionEvent({
             type: "session.event", sessionId: session.id, turnId: session.active_turn_id,
             eventId: `snapshot:${session.id}:${session.active_turn_id}:interrupted`,
             eventType: "turn.interrupted", timestamp: Date.now(), payload: {reason:"worker no longer owns this turn"},
@@ -730,14 +705,7 @@ export class ControlPlane {
       }
       return;
     }
-    if (message.type === "session.delta") {
-      const canonical = this.store.getSession(message.sessionId) ?? this.store.getSessionByNative(machineId, message.sessionId);
-      if (!canonical || canonical.machineId !== machineId) return;
-      this.controlApi.publishLive(canonical.id === message.sessionId ? message : { ...message, sessionId: canonical.id });
-      return;
-    }
     if (message.type === "session.event") {
-      const sourceSessionId = message.sessionId;
       // Claude inventory is keyed by its native transcript id, while sessions
       // launched through Bridge retain their original public identity.
       const canonical = this.store.getSession(message.sessionId) ?? this.store.getSessionByNative(machineId, message.sessionId);
@@ -759,8 +727,7 @@ export class ControlPlane {
         message = { ...message, sessionId: canonical.id,
           eventId: message.eventId === `claude:${oldId}:first:user` ? `claude:${canonical.id}:first:user` : message.eventId };
       }
-      this.memory.ingestEvent(machineId, message, sourceSessionId);
-      const inserted = this.controlStore.appendSessionEvent(machineId, message);
+      const inserted = this.controlStore.appendSessionEvent(message);
       const bridge = this.bridges.get(machineId);
       if (bridge) this.send(bridge.socket, { type: "archive.ack", eventId: message.eventId });
       // Only a first-seen event may drive the live activity state machine. The
@@ -1060,7 +1027,14 @@ export class ControlPlane {
     const session = this.store.getSession(event.sessionId);
     if (!session) return;
     const workerRun = this.store.getWorkerRunBySession(event.sessionId);
-    if (!this.store.addEvent(event, workerRun?.id)) return;
+    // Legacy agent events are signals, not history (the structured session events
+    // are). Only a replay of a recently seen event is dropped.
+    if (event.eventId) {
+      const key = `${event.sessionId}\0${event.eventId}`;
+      if (this.seenAgentEvents.has(key)) return;
+      this.seenAgentEvents.add(key);
+      if (this.seenAgentEvents.size > 4_096) this.seenAgentEvents.delete(this.seenAgentEvents.values().next().value!);
+    }
     const status = statusForEvent(event.type);
     const runIsTerminal = workerRun && ["completed", "failed", "stopped"].includes(workerRun.status);
     // App Server can deliver a final item/progress notification just after

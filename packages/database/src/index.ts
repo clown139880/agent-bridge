@@ -1,10 +1,13 @@
 import { mkdirSync } from "node:fs";
-import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { workerId, type AgentEvent, type AgentStatus, type AgentType } from "@agent-bridge/protocol";
+import { type AgentEvent, type AgentStatus, type AgentType } from "@agent-bridge/protocol";
+import { decodeEventBody } from "./events.js";
 import { migrateDatabase } from "./migrations.js";
+import { markChanged } from "./stream.js";
 export * from "./control.js";
+export * from "./events.js";
+export * from "./stream.js";
 export * from "./memory.js";
 
 export interface MachineRecord {
@@ -160,7 +163,7 @@ export class Store {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(run.id, run.taskId, run.conversationId, run.machineId, run.agentType, run.projectPath, run.sessionId,
       run.status, run.error, run.createdAt, run.updatedAt);
-      this.addRunStream(run.id); this.db.exec("COMMIT");
+      markChanged(this.db, "run", run.id); this.db.exec("COMMIT");
     } catch (error) { try { this.db.exec("ROLLBACK"); } catch {} throw error; }
   }
 
@@ -198,43 +201,43 @@ export class Store {
   attachWorkerRun(id: string, sessionId: string, status: AgentStatus): void {
     this.db.exec("BEGIN IMMEDIATE"); try {
       this.db.prepare("UPDATE worker_runs SET session_id=?, status=?, updated_at=? WHERE id=?")
-        .run(sessionId, status, Date.now(), id); this.addRunStream(id); this.db.exec("COMMIT");
+        .run(sessionId, status, Date.now(), id); markChanged(this.db, "run", id); this.db.exec("COMMIT");
     } catch (error) { try { this.db.exec("ROLLBACK"); } catch {} throw error; }
   }
 
   updateWorkerRun(id: string, status: AgentStatus, error?: string): void {
     this.db.exec("BEGIN IMMEDIATE"); try {
       this.db.prepare("UPDATE worker_runs SET status=?, error=?, updated_at=? WHERE id=?")
-        .run(status, error ?? null, Date.now(), id); this.addRunStream(id); this.db.exec("COMMIT");
+        .run(status, error ?? null, Date.now(), id); markChanged(this.db, "run", id); this.db.exec("COMMIT");
     } catch (caught) { try { this.db.exec("ROLLBACK"); } catch {} throw caught; }
   }
 
-  listEvents(sessionId: string, after = 0, limit = 100, workerRunId?: string): StoredAgentEvent[] {
-    const sql = `
-      SELECT id, payload FROM events
-      WHERE session_id=? AND id>? AND event_schema=1${workerRunId ? " AND worker_run_id=?" : ""}
-      ORDER BY id ASC
-      LIMIT ?
-    `;
-    const params = workerRunId ? [sessionId, after, workerRunId, limit] : [sessionId, after, limit];
-    const rows = this.db.prepare(sql).all(...params) as Array<{ id: number; payload: string }>;
-    return rows.map((row) => ({ sequence: Number(row.id), event: JSON.parse(row.payload) as AgentEvent }));
-  }
-
-  addEvent(event: AgentEvent, workerRunId?: string): boolean {
-    const result = this.db.prepare(
-      "INSERT OR IGNORE INTO events (session_id, event_id, worker_run_id, type, payload, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-    ).run(event.sessionId, event.eventId ?? null, workerRunId ?? null, event.type, JSON.stringify(event), event.timestamp);
-    return result.changes > 0;
-  }
-
-  private addRunStream(id: string): void {
-    const run=this.getWorkerRun(id);if(!run)return;
-    const payload={runId:run.id,taskId:run.taskId,conversationId:run.conversationId,workerId:workerId(run.agentType,run.machineId),
-      machineId:run.machineId,agent:run.agentType,workspace:run.projectPath,sessionId:run.sessionId,status:run.status,
-      error:run.error,createdAt:run.createdAt,updatedAt:run.updatedAt};
-    this.db.prepare(`INSERT INTO stream_events(event_id,type,resource_kind,resource_id,session_id,payload,created_at)
-      VALUES (?,'run.upserted','run',?,?,?,?)`).run(randomUUID(),id,run.sessionId,JSON.stringify(payload),Date.now());
+  /**
+   * The legacy run event feed, projected from the run's stored session events.
+   * `next` is the last scanned event id so a caller never rescans skipped rows.
+   */
+  listRunEvents(sessionId: string, workerRunId: string, after = 0, limit = 100): { events: StoredAgentEvent[]; next: number } {
+    const rows = this.db.prepare(`SELECT id,event_id,type,created_at,body FROM events
+      WHERE session_id=? AND worker_run_id=? AND id>? AND type IN
+        ('message.completed','turn.started','turn.completed','turn.failed','turn.interrupted')
+      ORDER BY id LIMIT ?`).all(sessionId, workerRunId, after, limit) as Array<Record<string, unknown>>;
+    const events: StoredAgentEvent[] = [];
+    for (const row of rows) {
+      const payload = decodeEventBody(row.body), timestamp = Number(row.created_at), eventId = String(row.event_id);
+      const text = (value: unknown) => typeof value === "string" && value ? value : undefined;
+      let event: AgentEvent | undefined;
+      if (row.type === "message.completed") {
+        if (payload.role === "assistant" && text(payload.text)) event = { type: "agent.output", eventId, sessionId, timestamp, text: text(payload.text) };
+      } else if (row.type === "turn.started") event = { type: "agent.started", eventId, sessionId, timestamp };
+      else if (row.type === "turn.completed") event = payload.status === "failed"
+        ? { type: "agent.failed", eventId, sessionId, timestamp, summary: text(payload.error) ?? text(payload.summary) }
+        : { type: "agent.completed", eventId, sessionId, timestamp, summary: text(payload.summary) };
+      else if (row.type === "turn.failed") event = { type: "agent.failed", eventId, sessionId, timestamp,
+        summary: text(payload.error) ?? text(payload.message) ?? text(payload.summary) };
+      else event = { type: "agent.stopped", eventId, sessionId, timestamp, summary: text(payload.reason) };
+      if (event) events.push({ sequence: Number(row.id), event });
+    }
+    return { events, next: rows.length ? Number(rows.at(-1)!.id) : after };
   }
 }
 

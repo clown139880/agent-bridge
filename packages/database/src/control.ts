@@ -5,10 +5,10 @@ import {
   type AgentType, type ActionKind, type ActionResultMessage, type ApprovalChoice, type SessionActivityStatus,
   type SessionState, type StructuredSessionEventMessage, type TurnStatus, type UserInputQuestion,
 } from "@agent-bridge/protocol";
+import { decodeEventBody, encodeEventBody, EVENT_COLUMNS, eventWire, indexEvent, type EventRow } from "./events.js";
+import { markChanged, signalStream, type StreamKind } from "./stream.js";
 
 export interface RetentionOptions {
-  sessionEventsMs: number;
-  streamEventsMs: number;
   actionsMs: number;
   attachmentsMs: number;
 }
@@ -20,8 +20,9 @@ export interface StoredAttachment {
   size: number;
 }
 
-export interface StreamRow {
-  sequence: number;
+/** One delivery on the realtime feed: an appended session event or a resource's current state. */
+export interface StreamItem {
+  cursor: string;
   eventId: string;
   type: string;
   resourceKind: string;
@@ -30,6 +31,9 @@ export interface StreamRow {
   payload: unknown;
   createdAt: number;
 }
+
+/** Feed position: last delivered `events.id` and last delivered `stream_changes.seq`. */
+export interface StreamPosition { events: number; changes: number }
 
 export interface ActionRow {
   actionId: string;
@@ -87,6 +91,8 @@ function parseJson<T>(value: unknown, fallback: T): T {
   try { return value == null ? fallback : JSON.parse(String(value)) as T; } catch { return fallback; }
 }
 
+function formatStreamCursor(position: StreamPosition): string { return `c:${position.events}:${position.changes}`; }
+
 function promptExcerpt(value: string, limit = 80): string | null {
   const text=value.replace(/\s+/g," ").trim();
   if(!text)return null;
@@ -130,44 +136,88 @@ export class AgentControlStore {
     catch (error) { try { this.db.exec("ROLLBACK"); } catch {} throw error; }
   }
 
-  private appendStream(type: string, kind: string, id: string, sessionId: string | null, payload: unknown): number {
-    const now = Date.now();
-    const eventId = randomUUID();
-    const result = this.db.prepare(`INSERT INTO stream_events
-      (event_id,type,resource_kind,resource_id,session_id,payload,created_at) VALUES (?,?,?,?,?,?,?)`)
-      .run(eventId, type, kind, id, sessionId, JSON.stringify(payload), now);
-    return Number(result.lastInsertRowid);
-  }
-
-  streamCursor(): string { return `g:${this.maxStreamSequence()}`; }
-  maxStreamSequence(): number {
-    // MAX(table.sequence) falls back to zero after retention deletes every row,
-    // which would move the advertised watermark backwards. sqlite_sequence is
-    // the durable AUTOINCREMENT high-water mark and remains globally monotonic.
-    const row = this.db.prepare("SELECT seq FROM sqlite_sequence WHERE name='stream_events'").get() as
-      { seq: number } | undefined;
+  private sequence(table: string): number {
+    // sqlite_sequence is the AUTOINCREMENT high-water mark, so it never moves backwards.
+    const row = this.db.prepare("SELECT seq FROM sqlite_sequence WHERE name=?").get(table) as { seq: number } | undefined;
     return Number(row?.seq ?? 0);
   }
 
-  parseStreamCursor(cursor?: string): number {
-    if (!cursor) return 0;
-    const match = cursor.match(/^g:(\d+)$/);
+  streamPosition(): StreamPosition { return { events: this.sequence("events"), changes: this.sequence("stream_changes") }; }
+  streamCursor(): string { return formatStreamCursor(this.streamPosition()); }
+
+  parseStreamCursor(cursor?: string): StreamPosition {
+    if (!cursor) return { events: 0, changes: 0 };
+    // Pre-0.6.63 cursors addressed a feed that no longer exists; clients re-snapshot.
+    if (/^g:\d+$/.test(cursor)) throw new Error("cursor_expired");
+    const match = cursor.match(/^c:(\d+):(\d+)$/);
     if (!match) throw new Error("invalid_cursor");
-    return Number(match[1]);
+    const position = { events: Number(match[1]), changes: Number(match[2]) }, high = this.streamPosition();
+    if (position.events > high.events || position.changes > high.changes) throw new Error("invalid_cursor");
+    return position;
   }
 
-  streamAfter(after: number, limit = 200): StreamRow[] {
-    const first = this.db.prepare("SELECT MIN(sequence) AS n FROM stream_events").get() as { n: number | null };
-    const highWater = this.maxStreamSequence();
-    if (after > highWater) throw new Error("invalid_cursor");
-    if (after > 0 && ((first.n !== null && after < first.n - 1)
-      || (first.n === null && after < highWater))) throw new Error("cursor_expired");
-    const rows = this.db.prepare("SELECT * FROM stream_events WHERE sequence>? ORDER BY sequence LIMIT ?")
-      .all(after, limit) as Record<string, unknown>[];
-    return rows.map((row) => ({ sequence: Number(row.sequence), eventId: String(row.event_id),
-      type: String(row.type), resourceKind: String(row.resource_kind), resourceId: String(row.resource_id),
-      sessionId: row.session_id ? String(row.session_id) : null, payload: parseJson(row.payload, null),
-      createdAt: Number(row.created_at) }));
+  /**
+   * Deliver what happened after `from`: every appended session event, then the present
+   * state of every resource that changed. A resource that changed many times is
+   * delivered once, as it is now; one that no longer exists is skipped.
+   */
+  streamAfter(from: StreamPosition, limit = 200): { items: StreamItem[]; position: StreamPosition } {
+    const items: StreamItem[] = [];
+    let position = { ...from };
+    const events = this.db.prepare(`SELECT ${EVENT_COLUMNS} FROM events WHERE id>? ORDER BY id LIMIT ?`)
+      .all(position.events, limit) as unknown as EventRow[];
+    for (const row of events) {
+      position = { ...position, events: row.id };
+      items.push({ cursor: formatStreamCursor(position), eventId: `event:${row.id}`, type: "session.event.appended",
+        resourceKind: "session", resourceId: row.session_id, sessionId: row.session_id, payload: eventWire(row),
+        createdAt: Number(row.created_at) });
+    }
+    const changes = this.db.prepare("SELECT seq,kind,id FROM stream_changes WHERE seq>? ORDER BY seq LIMIT ?")
+      .all(position.changes, Math.max(0, limit - items.length)) as Array<{ seq: number; kind: StreamKind; id: string }>;
+    const now = Date.now();
+    for (const change of changes) {
+      position = { ...position, changes: Number(change.seq) };
+      const state = this.currentState(change.kind, change.id);
+      if (state) items.push({ cursor: formatStreamCursor(position), eventId: `change:${change.seq}`, type: state.type,
+        resourceKind: change.kind, resourceId: change.id, sessionId: state.sessionId, payload: state.payload, createdAt: now });
+    }
+    return { items, position };
+  }
+
+  private currentState(kind: StreamKind, id: string): { type: string; sessionId: string | null; payload: unknown } | undefined {
+    if (kind === "session") {
+      const session = this.session(id);
+      if (session) return { type: "session.updated", sessionId: id, payload: session };
+      const deleted = this.db.prepare("SELECT deleted_at FROM deleted_sessions WHERE session_id=?").get(id) as
+        { deleted_at: number } | undefined;
+      return deleted ? { type: "session.deleted", sessionId: id, payload: { sessionId: id, deletedAt: Number(deleted.deleted_at) } } : undefined;
+    }
+    if (kind === "worker") {
+      if (this.workerRemoved(id)) return undefined;
+      const machineId = id.slice(id.indexOf("@") + 1);
+      const machine = this.db.prepare("SELECT * FROM machines WHERE id=?").get(machineId) as Record<string, unknown> | undefined;
+      const agent = machine && this.machineAgents(parseJson<string[]>(machine.capabilities, []))
+        .find(({ agentType }) => buildWorkerId(agentType, machineId) === id);
+      if (!machine || !agent) return undefined;
+      return machine.status === "offline"
+        ? { type: "worker.offline", sessionId: null, payload: { workerId: id, machineId, status: "offline" } }
+        : { type: "worker.upserted", sessionId: null, payload: this.workerWire(machine, agent.agentType, agent.label) };
+    }
+    if (kind === "run") {
+      const run = this.db.prepare("SELECT * FROM worker_runs WHERE id=?").get(id) as Record<string, unknown> | undefined;
+      if (!run) return undefined;
+      const sessionId = run.session_id ? String(run.session_id) : null;
+      return { type: "run.upserted", sessionId, payload: { runId: String(run.id), taskId: run.task_id ?? null,
+        conversationId: run.conversation_id ?? null, workerId: buildWorkerId(String(run.agent_type) as AgentType, String(run.machine_id)),
+        machineId: String(run.machine_id), agent: String(run.agent_type), workspace: String(run.project_path), sessionId,
+        status: String(run.status), error: run.error ?? null, createdAt: Number(run.created_at), updatedAt: Number(run.updated_at) } };
+    }
+    if (kind === "action") {
+      const action = this.action(id);
+      return action ? { type: "action.updated", sessionId: action.sessionId, payload: this.actionWire(action) } : undefined;
+    }
+    const pending = this.pending(id);
+    return pending ? { type: `${pending.kind}.upserted`, sessionId: pending.sessionId, payload: this.pendingWire(pending) } : undefined;
   }
 
   updateMachineConnection(machineId: string, bridgeVersion: string | undefined, protocolVersion: number | undefined,
@@ -181,7 +231,7 @@ export class AgentControlStore {
       for (const { agentType, label } of this.machineAgents(parseJson<string[]>(machine.capabilities, []))) {
         const wire = this.workerWire(machine, agentType, label);
         this.db.prepare("DELETE FROM deleted_workers WHERE worker_id=?").run(String(wire.id));
-        this.appendStream("worker.upserted", "worker", String(wire.id), null, wire);
+        markChanged(this.db, "worker", String(wire.id));
       }
     });
   }
@@ -191,12 +241,11 @@ export class AgentControlStore {
       this.db.prepare("UPDATE machines SET status='offline' WHERE id=?").run(machineId);
       const machine = this.db.prepare("SELECT capabilities FROM machines WHERE id=?").get(machineId) as Record<string,unknown> | undefined;
       for (const { agentType } of this.machineAgents(machine ? parseJson<string[]>(machine.capabilities, []) : [])) {
-        const wid = buildWorkerId(agentType, machineId);
-        this.appendStream("worker.offline", "worker", wid, null, { workerId: wid, machineId, status: "offline" });
+        markChanged(this.db, "worker", buildWorkerId(agentType, machineId));
       }
       const sessions=this.db.prepare("SELECT id FROM sessions WHERE machine_id=?").all(machineId) as Array<{id:string}>;
       this.db.prepare("UPDATE sessions SET activity_status='offline' WHERE machine_id=?").run(machineId);
-      for(const session of sessions)this.appendStream("session.updated","session",session.id,session.id,this.session(session.id));
+      for(const session of sessions)markChanged(this.db,"session",session.id);
     });
   }
 
@@ -223,8 +272,7 @@ export class AgentControlStore {
           state.title ?? null, state.promptSummary ?? null, state.source, state.historyCompleteness,
           state.activityStatus, state.activeTurnId ?? null, state.lastTurnStatus ?? null, Date.now());
       }
-      this.appendStream(exists ? "session.updated" : "session.upserted", "session", state.sessionId,
-        state.sessionId, this.session(state.sessionId));
+      markChanged(this.db, "session", state.sessionId);
     });
   }
 
@@ -234,37 +282,32 @@ export class AgentControlStore {
       this.db.prepare(`UPDATE sessions SET activity_status=?,active_turn_id=?,last_turn_status=COALESCE(?,last_turn_status),
         last_error=?,status=? WHERE id=?`).run(activity, activeTurnId ?? null,
         lastTurnStatus ?? null, error ?? null, legacyStatus(activity, lastTurnStatus), sessionId);
-      this.appendStream("session.updated", "session", sessionId, sessionId, this.session(sessionId));
+      markChanged(this.db, "session", sessionId);
     });
   }
 
-  appendSessionEvent(machineId: string, message: StructuredSessionEventMessage): boolean {
+  /** Store one upstream event, once. Returns the new event id, or false for a replayed or unwanted event. */
+  appendSessionEvent(message: StructuredSessionEventMessage): number | false {
     if (this.isSessionDeleted(message.sessionId)) return false;
     return this.transaction(() => {
       const run = this.db.prepare("SELECT id FROM worker_runs WHERE session_id=? ORDER BY created_at DESC LIMIT 1")
         .get(message.sessionId) as { id: string } | undefined;
-      const inserted = this.db.prepare(`INSERT OR IGNORE INTO events
-        (session_id,event_id,worker_run_id,type,payload,created_at,turn_id,item_id,event_schema)
-        VALUES (?,?,?,?,?,?,?,?,2)`).run(message.sessionId, message.eventId, run?.id ?? null, message.eventType,
-          JSON.stringify({ cursor: "", eventId: message.eventId, type: message.eventType, sessionId: message.sessionId,
-            runId: run?.id ?? null, turnId: message.turnId ?? null, itemId: message.itemId ?? null,
-            timestamp: message.timestamp, payload: message.payload, machineId }), message.timestamp,
-          message.turnId ?? null, message.itemId ?? null);
-      if (!inserted.changes) return false;
-      const sequence = Number(inserted.lastInsertRowid);
-      const event = { cursor: `e:${sequence}`, eventId: message.eventId, type: message.eventType,
-        sessionId: message.sessionId, runId: run?.id ?? null, turnId: message.turnId ?? null,
-        itemId: message.itemId ?? null, timestamp: message.timestamp, payload: message.payload };
-      this.db.prepare("UPDATE events SET payload=? WHERE id=?").run(JSON.stringify(event), sequence);
       const payload = message.payload && typeof message.payload === "object" && !Array.isArray(message.payload)
         ? message.payload as Record<string, unknown> : {};
+      const inserted = this.db.prepare(`INSERT OR IGNORE INTO events
+        (session_id,event_id,worker_run_id,type,turn_id,item_id,created_at,body) VALUES (?,?,?,?,?,?,?,?)`)
+        .run(message.sessionId, message.eventId, run?.id ?? null, message.eventType, message.turnId ?? null,
+          message.itemId ?? null, message.timestamp, encodeEventBody(message.eventType, payload));
+      if (!inserted.changes) return false;
+      const id = Number(inserted.lastInsertRowid);
+      indexEvent(this.db, { id, session_id: message.sessionId, type: message.eventType, turn_id: message.turnId ?? null }, payload);
       const isReply = (message.eventType === "message.completed" && payload.role === "assistant")
         || (message.eventType === "turn.completed" && typeof payload.summary === "string" && payload.summary.trim().length > 0);
-      if (isReply) this.db.prepare(`UPDATE sessions SET last_response_at=?,updated_at=?
+      if (isReply && this.db.prepare(`UPDATE sessions SET last_response_at=?,updated_at=?
         WHERE id=? AND (last_response_at IS NULL OR last_response_at<?)`)
-        .run(message.timestamp, message.timestamp, message.sessionId, message.timestamp);
-      this.appendStream("session.event.appended", "session", message.sessionId, message.sessionId, event);
-      return true;
+        .run(message.timestamp, message.timestamp, message.sessionId, message.timestamp).changes) markChanged(this.db, "session", message.sessionId);
+      signalStream();
+      return id;
     });
   }
 
@@ -294,8 +337,8 @@ export class AgentControlStore {
       const activity = kind === "approval" ? "waiting_for_approval" : "waiting_for_input";
       if(this.pending(id)?.status==="pending")this.db.prepare("UPDATE sessions SET activity_status=?,active_turn_id=COALESCE(?,active_turn_id) WHERE id=?")
         .run(activity, turnId ?? null, sessionId);
-      this.appendStream(kind === "approval" ? "approval.upserted" : "user_input.upserted", kind, id,
-        sessionId, this.pendingWire(this.pending(id)!));
+      markChanged(this.db, kind, id);
+      markChanged(this.db, "session", sessionId);
     });
   }
 
@@ -306,9 +349,8 @@ export class AgentControlStore {
       const now = Date.now();
       this.db.prepare("UPDATE pending_requests SET status=?,decision_json=?,resolved_at=? WHERE id=?")
         .run(status, decision ? JSON.stringify(decision) : null, now, id);
-      const type = current.kind === "approval" ? "approval.upserted" : "user_input.upserted";
       const resolved = this.pending(id)!;
-      this.appendStream(type, current.kind, id, current.sessionId, this.pendingWire(resolved));
+      markChanged(this.db, current.kind, id);
       this.refreshPendingActivity(current.sessionId, now);
       return resolved;
     });
@@ -361,7 +403,7 @@ export class AgentControlStore {
         (principal,key,method,path,request_hash,action_id,created_at,expires_at) VALUES (?,?,?,?,?,?,?,?)`)
         .run(input.principal, input.key, input.method, input.path, requestHash, id, now, expires);
       const action = this.action(id)!;
-      this.appendStream("action.updated", "action", id, input.sessionId ?? null, this.actionWire(action));
+      markChanged(this.db, "action", id);
       return { action, existing: false };
     });
   }
@@ -384,7 +426,7 @@ export class AgentControlStore {
           message.turnId ?? null, message.resolvedAction ?? null, message.error ? JSON.stringify(message.error) : null,
           JSON.stringify(message), message.timestamp, message.actionId);
       const action = this.action(message.actionId)!;
-      this.appendStream("action.updated", "action", action.actionId, action.sessionId, this.actionWire(action));
+      markChanged(this.db, "action", action.actionId);
       const pending = this.db.prepare("SELECT * FROM pending_requests WHERE resolving_action_id=?")
         .get(message.actionId) as Record<string,unknown>|undefined;
       if (pending) {
@@ -395,8 +437,7 @@ export class AgentControlStore {
           const decision = pending.kind === "approval" ? { choice: request.choice } : { answers: request.answers };
           this.db.prepare(`UPDATE pending_requests SET status=?,decision_json=?,resolved_at=?,resolving_action_id=NULL WHERE id=?`)
             .run(status, JSON.stringify(decision), message.timestamp, String(pending.id));
-          this.appendStream(pending.kind === "approval" ? "approval.upserted" : "user_input.upserted",
-            String(pending.kind), String(pending.id), String(pending.session_id), this.pendingWire(this.pending(String(pending.id))!));
+          markChanged(this.db, pending.kind as StreamKind, String(pending.id));
           this.refreshPendingActivity(String(pending.session_id), message.timestamp);
         }
       }
@@ -434,7 +475,7 @@ export class AgentControlStore {
       :kinds.some(row=>row.kind==="approval")?"waiting_for_approval":"active";
     this.db.prepare("UPDATE sessions SET activity_status=?,status=? WHERE id=?")
       .run(activity,activity==="active"?"working":activity==="waiting_for_input"?"waiting":"blocked",sessionId);
-    this.appendStream("session.updated","session",sessionId,sessionId,this.session(sessionId));
+    markChanged(this.db,"session",sessionId);
   }
 
   session(id: string): Record<string, unknown> | undefined {
@@ -542,14 +583,12 @@ export class AgentControlStore {
     { data: unknown[]; nextCursor: string | null; hasMore: boolean } {
     let sequence=0;
     if(after){const match=after.match(/^e:(\d+)$/);if(!match)throw new Error("invalid_cursor");sequence=Number(match[1]);}
-    const first=this.db.prepare("SELECT MIN(id) AS n FROM events WHERE session_id=? AND event_schema=2").get(sessionId) as {n:number|null};
-    if(sequence>0&&first.n!==null&&sequence<first.n-1)throw new Error("cursor_expired");
-    const where=["session_id=?","id>?","event_schema=2"],params:any[]=[sessionId,sequence];
+    const where=["session_id=?","id>?"],params:any[]=[sessionId,sequence];
     if(types.length){where.push(`type IN (${types.map(()=>"?").join(",")})`);params.push(...types);}
-    const rows=this.db.prepare(`SELECT id,payload FROM events WHERE ${where.join(" AND ")} ORDER BY id LIMIT ?`)
-      .all(...params,limit+1) as Array<{id:number;payload:string}>;
+    const rows=this.db.prepare(`SELECT ${EVENT_COLUMNS} FROM events WHERE ${where.join(" AND ")} ORDER BY id LIMIT ?`)
+      .all(...params,limit+1) as unknown as EventRow[];
     const hasMore=rows.length>limit;if(hasMore)rows.pop();
-    const data=rows.map(row=>parseJson(row.payload,{}));const last=rows.at(-1);
+    const data=rows.map(eventWire);const last=rows.at(-1);
     return {data,hasMore,nextCursor:last?`e:${last.id}`:(after??null)};
   }
 
@@ -571,24 +610,12 @@ export class AgentControlStore {
       // Keep action receipts and idempotency keys until their normal retention
       // deadline so callers can observe the result of the delete action.
       this.db.prepare("DELETE FROM pending_requests WHERE session_id=?").run(id);
+      // The contentless index is keyed by event id and has no trigger on `events`.
+      this.db.prepare("DELETE FROM event_search WHERE rowid IN (SELECT id FROM events WHERE session_id=?)").run(id);
       this.db.prepare("DELETE FROM events WHERE session_id=?").run(id);
       this.db.prepare("DELETE FROM worker_runs WHERE session_id=?").run(id);
-      this.db.prepare("DELETE FROM stream_events WHERE session_id=?").run(id);
-      // FTS5 content tables are maintained explicitly rather than by triggers,
-      // so deleting their source rows does not remove the indexed documents.
-      // Delete every memory relation explicitly as well: foreign_keys is a
-      // per-connection pragma and maintenance clients may not have enabled it.
-      this.db.prepare(`DELETE FROM conversation_messages_fts WHERE rowid IN
-        (SELECT sequence FROM conversation_messages WHERE session_id=?)`).run(id);
-      this.db.prepare(`DELETE FROM conversation_messages_fts_trigram WHERE rowid IN
-        (SELECT sequence FROM conversation_messages WHERE session_id=?)`).run(id);
-      this.db.prepare(`DELETE FROM conversation_source_aliases WHERE message_id IN
-        (SELECT message_id FROM conversation_messages WHERE session_id=?)`).run(id);
-      this.db.prepare("DELETE FROM conversation_messages WHERE session_id=?").run(id);
-      this.db.prepare("DELETE FROM conversation_summaries WHERE session_id=?").run(id);
-      this.db.prepare("DELETE FROM conversation_archive_chunks WHERE session_id=?").run(id);
       this.db.prepare("DELETE FROM sessions WHERE id=?").run(id);
-      this.appendStream("session.deleted", "session", id, id, { sessionId: id, deletedAt: now });
+      markChanged(this.db, "session", id);
       return true;
   }
 
@@ -611,21 +638,19 @@ export class AgentControlStore {
     { data: unknown[]; nextCursor: string | null; hasMore: boolean } {
     let sequence: number | undefined;
     if(before){const match=before.match(/^e:(\d+)$/);if(!match)throw new Error("invalid_cursor");sequence=Number(match[1]);}
-    const where=["session_id=?","event_schema=2"],params:any[]=[sessionId];
+    const where=["session_id=?"],params:any[]=[sessionId];
     if(sequence!==undefined){where.push("id<?");params.push(sequence);}
     if(types.length){where.push(`type IN (${types.map(()=>"?").join(",")})`);params.push(...types);}
-    const rows=this.db.prepare(`SELECT id,payload FROM events WHERE ${where.join(" AND ")} ORDER BY id DESC LIMIT ?`)
-      .all(...params,limit+1) as Array<{id:number;payload:string}>;
+    const rows=this.db.prepare(`SELECT ${EVENT_COLUMNS} FROM events WHERE ${where.join(" AND ")} ORDER BY id DESC LIMIT ?`)
+      .all(...params,limit+1) as unknown as EventRow[];
     const hasMore=rows.length>limit;if(hasMore)rows.pop();
     rows.reverse();
-    const data=rows.map(row=>parseJson(row.payload,{}));const first=rows.at(0);
+    const data=rows.map(eventWire);const first=rows.at(0);
     return {data,hasMore,nextCursor:hasMore&&first?`e:${first.id}`:null};
   }
 
   cleanup(now = Date.now()): void {
     this.transaction(() => {
-      this.db.prepare("DELETE FROM stream_events WHERE created_at<?").run(now-this.retention.streamEventsMs);
-      this.db.prepare("DELETE FROM events WHERE event_schema=2 AND created_at<?").run(now-this.retention.sessionEventsMs);
       this.db.prepare("DELETE FROM idempotency_keys WHERE expires_at<?").run(now);
       this.db.prepare("DELETE FROM actions WHERE expires_at<?").run(now);
       this.db.prepare("DELETE FROM attachments WHERE created_at<?").run(now-this.retention.attachmentsMs);
@@ -660,13 +685,11 @@ export class AgentControlStore {
       createdAt:Number(latest.created_at),updatedAt:Number(latest.updated_at)}:null;
     let promptSummary=row.prompt_summary?String(row.prompt_summary):null;
     if(!promptSummary){
-      const messages=this.db.prepare("SELECT payload FROM events WHERE session_id=? AND event_schema=2 AND type='message.completed' ORDER BY id LIMIT 20")
-        .all(String(row.id)) as Array<{payload:string}>;
+      const messages=this.db.prepare("SELECT body FROM events WHERE session_id=? AND type='message.completed' ORDER BY id LIMIT 20")
+        .all(String(row.id)) as Array<{body:unknown}>;
       for(const message of messages){
-        const event=parseJson<Record<string,unknown>>(message.payload,{});
-        const payload=event.payload&&typeof event.payload==="object"&&!Array.isArray(event.payload)
-          ?event.payload as Record<string,unknown>:undefined;
-        if(payload?.role==="user"&&typeof payload.text==="string"){
+        const payload=decodeEventBody(message.body);
+        if(payload.role==="user"&&typeof payload.text==="string"){
           promptSummary=promptExcerpt(payload.text);
           if(promptSummary)break;
         }
@@ -690,11 +713,9 @@ export class AgentControlStore {
       historyCompleteness:String(row.history_completeness??"loaded-only")};
     if(detail){const runs=this.db.prepare("SELECT * FROM worker_runs WHERE session_id=? ORDER BY created_at DESC,id DESC LIMIT 20")
       .all(String(row.id)) as Record<string,unknown>[];
-      const contextRow=this.db.prepare("SELECT payload FROM events WHERE session_id=? AND event_schema=2 AND type='context.updated' ORDER BY id DESC LIMIT 1")
-        .get(String(row.id)) as {payload:string}|undefined;
-      const contextEvent=parseJson<Record<string,unknown>>(contextRow?.payload,{});
-      const context=contextEvent.payload&&typeof contextEvent.payload==="object"&&!Array.isArray(contextEvent.payload)
-        ? contextEvent.payload as Record<string,unknown>:undefined;
+      const contextRow=this.db.prepare("SELECT body FROM events WHERE session_id=? AND type='context.updated' ORDER BY id DESC LIMIT 1")
+        .get(String(row.id)) as {body:unknown}|undefined;
+      const context=contextRow?decodeEventBody(contextRow.body):undefined;
       Object.assign(result,{capabilities:[],runs:runs.map(r=>({runId:String(r.id),taskId:r.task_id?String(r.task_id):null,conversationId:r.conversation_id?String(r.conversation_id):null,status:String(r.status),createdAt:Number(r.created_at),updatedAt:Number(r.updated_at)})),...(context?{context}:{}),matrixRoomId:row.matrix_room_id?String(row.matrix_room_id):null,matrixThreadId:row.matrix_thread_id?String(row.matrix_thread_id):null,error:row.last_error?{error:{code:"session_error",message:String(row.last_error),requestId:"",retryable:true}}:null});}
     return result;
   }
