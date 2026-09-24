@@ -73,6 +73,7 @@ DSH 原生 Composer
 
 ## 文档导航
 
+- 待办与规划（含 provider/model 中央注册表方向）：[`todo.zh.md`](todo.zh.md)
 - 当前 DSH provider 契约与限制：[`integrations/dsh-agent-control/docs/bridge-conversation-provider.md`](../integrations/dsh-agent-control/docs/bridge-conversation-provider.md)
 - Agent Control HTTP/SSE 契约：[`agent-control-api.md`](agent-control-api.md)
 - 旧 External UI 迭代记录：[`dsh-session-ui-design.zh.md`](dsh-session-ui-design.zh.md)（历史）
