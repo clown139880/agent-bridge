@@ -38,6 +38,8 @@ interface PiSession {
   promptSummary?: string;
   createdAt: number;
   updatedAt: number;
+  /** Set to `Date.now()` whenever the session has no active turn; cleared while a turn runs. Drives idle reaping. */
+  settledAt?: number;
   discovered: boolean;
   proc: ChildProcessWithoutNullStreams;
   activeTurnId?: string;
@@ -149,6 +151,7 @@ export class PiAdapter implements AgentAdapter {
       promptSummary: summarizePrompt(prompt),
       createdAt: Date.now(),
       updatedAt: Date.now(),
+      settledAt: Date.now(),
       discovered: false,
       proc,
       turnSeq: 0,
@@ -430,6 +433,7 @@ export class PiAdapter implements AgentAdapter {
   private startTurnEvents(session: PiSession): string {
     const turnId = `${session.sessionId}:t${++session.turnSeq}:${randomUUID()}`;
     session.activeTurnId = turnId;
+    session.settledAt = undefined;
     session.pendingTurnStart = false;
     this.appendLog(session, "Turn started");
     this.emit({ type: "agent.started", sessionId: session.sessionId, timestamp: Date.now(), summary: "New turn started" });
@@ -440,6 +444,7 @@ export class PiAdapter implements AgentAdapter {
   private finishTurn(session: PiSession, status: "completed" | "failed" | "interrupted", summary?: string): void {
     const turnId = session.activeTurnId;
     session.activeTurnId = undefined;
+    session.settledAt = Date.now();
     session.lastTurnStatus = status;
     if (!turnId) return;
     const eventId = `pi:${session.sessionId}:${turnId}:terminal`;
@@ -627,6 +632,28 @@ export class PiAdapter implements AgentAdapter {
 
   async reconcileActivity(): Promise<void> {
     /* no long-lived server to reconcile; activity is tracked live from the stream. */
+  }
+
+  /**
+   * Kill the subprocess of any session that has been idle (no active turn) for
+   * at least `idleMs`, and drop it from the live map so it stops consuming RSS.
+   * The pi session file survives, so a later turn revives it via resumeSession.
+   * A non-positive `idleMs` disables reaping (keeps every process resident).
+   */
+  reapIdleSessions(idleMs: number): string[] {
+    if (idleMs <= 0) return [];
+    const now = Date.now();
+    const reaped: string[] = [];
+    for (const [id, session] of this.sessions) {
+      if (session.ended || session.activeTurnId) continue;
+      if (session.settledAt === undefined || now - session.settledAt < idleMs) continue;
+      const idleFor = now - session.settledAt;
+      this.kill(session);
+      this.sessions.delete(id);
+      reaped.push(id);
+      log.info({ sessionId: id, idleMs: idleFor }, "reaped idle pi session; subprocess closed");
+    }
+    return reaped;
   }
 
   stateSnapshot(): { sessions: SessionState[]; approvals: Array<Record<string, unknown>>; userInputs: Array<Record<string, unknown>> } {

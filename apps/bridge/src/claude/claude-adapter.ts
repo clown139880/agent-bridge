@@ -67,6 +67,8 @@ interface ClaudeSession {
   promptSummary?: string;
   createdAt: number;
   updatedAt: number;
+  /** Set to `Date.now()` whenever the session has no active turn; cleared while a turn runs. Drives idle reaping. */
+  settledAt?: number;
   discovered: boolean;
   input: PushableAsyncIterable<SDKUserMessage>;
   /** Model in force for the next turn; undefined means the workspace default. */
@@ -209,6 +211,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       ...(model ? { model } : {}),
       createdAt: Date.now(),
       updatedAt: Date.now(),
+      settledAt: Date.now(),
       discovered: false,
       input: new PushableAsyncIterable<SDKUserMessage>(),
       abort: new AbortController(),
@@ -432,6 +435,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
   private startTurnEvents(session: ClaudeSession): string {
     const turnId = `${session.sessionId}:t${++session.turnSeq}:${randomUUID()}`;
     session.activeTurnId = turnId;
+    session.settledAt = undefined;
     this.appendLog(session, "Turn started");
     this.emit({ type: "agent.started", sessionId: session.sessionId, timestamp: Date.now(), summary: "New turn started" });
     this.emitSessionEvent(session, "turn.started", `claude:${session.sessionId}:${turnId}:started`, { status: "in_progress" });
@@ -441,6 +445,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
   private finishTurn(session: ClaudeSession, status: "completed" | "failed" | "interrupted", summary?: string): void {
     const turnId = session.activeTurnId;
     session.activeTurnId = undefined;
+    session.settledAt = Date.now();
     session.lastTurnStatus = status;
     if (!turnId) return;
     const eventId = `claude:${session.sessionId}:${turnId}:terminal`;
@@ -603,6 +608,36 @@ export class ClaudeCodeAdapter implements AgentAdapter {
   /** No long-lived server to reconcile against; activity is tracked live from the stream. */
   async reconcileActivity(): Promise<void> {
     /* no-op */
+  }
+
+  /**
+   * Kill the subprocess of any session idle (no active turn, no pending approval
+   * or user-input) for at least `idleMs`, and drop it from the live map so it
+   * stops consuming RSS. Claude's transcript survives, so a later turn revives
+   * the session via resumeSession using its native uuid. A non-positive `idleMs`
+   * disables reaping (keeps every process resident).
+   */
+  reapIdleSessions(idleMs: number): string[] {
+    if (idleMs <= 0) return [];
+    const now = Date.now();
+    const reaped: string[] = [];
+    for (const [id, session] of this.sessions) {
+      if (session.ended || session.activeTurnId || session.pendingUserInput) continue;
+      if ([...session.pendingApprovals.values()].some((a) => !a.answered)) continue;
+      if (session.settledAt === undefined || now - session.settledAt < idleMs) continue;
+      const idleFor = now - session.settledAt;
+      session.ended = true;
+      session.abort.abort();
+      try {
+        session.input.end();
+      } catch {
+        /* already ended */
+      }
+      this.sessions.delete(id);
+      reaped.push(id);
+      log.info({ sessionId: id, idleMs: idleFor }, "reaped idle claude session; subprocess closed");
+    }
+    return reaped;
   }
 
   // ---- approvals ---------------------------------------------------------

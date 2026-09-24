@@ -17,6 +17,10 @@ function positiveNumber(name: string, fallback: number): number {
   const value=Number(process.env[name]??fallback);if(!Number.isFinite(value)||value<=0)throw new Error(`${name} must be positive`);return value;
 }
 
+function nonNegativeNumber(name: string, fallback: number): number {
+  const value=Number(process.env[name]??fallback);if(!Number.isFinite(value)||value<0)throw new Error(`${name} must be zero or positive`);return value;
+}
+
 function autoApproveMode(name: string, fallback: "off" | "readonly" | "all"): "off" | "readonly" | "all" {
   const raw = (process.env[name] ?? fallback).trim().toLowerCase();
   if (raw !== "off" && raw !== "readonly" && raw !== "all") throw new Error(`${name} must be one of off|readonly|all`);
@@ -93,6 +97,11 @@ export const config = {
   allowedRoots: splitAllowedRoots(process.env.BRIDGE_ALLOWED_ROOTS, platform()).length
     ? splitAllowedRoots(process.env.BRIDGE_ALLOWED_ROOTS, platform()) : [process.cwd()],
   reconnectMs: Number(process.env.BRIDGE_RECONNECT_MS ?? "3000"),
+  // How long a per-session agent subprocess (Claude, Pi) may sit idle after its
+  // last turn settles before the bridge kills it to reclaim memory. The session
+  // stays resumable — the next turn revives it from its transcript/session file.
+  // 0 disables reaping and keeps every idle process resident (legacy behavior).
+  idleSessionTimeoutMs: nonNegativeNumber("BRIDGE_IDLE_SESSION_TIMEOUT_MS", 300_000),
   version: process.env.BRIDGE_VERSION ?? packageVersion,
   updateEnabled: process.env.BRIDGE_AUTO_UPDATE === "true",
   updateSource: process.env.BRIDGE_UPDATE_SOURCE,

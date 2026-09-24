@@ -14,7 +14,7 @@ testActionDedupe("duplicate action replay waits for the in-flight RPC and then r
   const client=new BridgeClient({url:"ws://127.0.0.1:1/bridge",machineId:"dev",machineName:"dev",
     hostname:"dev.local",platform:"linux",command:"codex",appServerUrl:"ws://127.0.0.1:1",
     manageAppServer:false,desktopScanIntervalMs:3000,desktopReplayExisting:false,allowedRoots:["/work"],
-    reconnectMs:1000,version:"0.4.2",updateEnabled:false,updateSourceRef:"main",updateInstallRoot:"/tmp/unused",
+    reconnectMs:1000,idleSessionTimeoutMs:0,version:"0.4.2",updateEnabled:false,updateSourceRef:"main",updateInstallRoot:"/tmp/unused",
     updateCurrentLink:"/tmp/unused/current",updateStatePath:"/tmp/unused/state.json",actionCachePath:cachePath,
     actionCacheTtlMs:86_400_000,updatePackageManager:"pnpm",updateRestartExecutable:"true",updateRestartArgs:[]});
   type StubAdapter={createSessionAction(actionId:string,path:string,input?:string):Promise<{sessionId:string}>;
@@ -50,7 +50,7 @@ test("delete actions use the authoritative agent type when the session is absent
   const client=new BridgeClient({url:"ws://127.0.0.1:1/bridge",machineId:"dev",machineName:"dev",
     hostname:"dev.local",platform:"linux",command:"codex",appServerUrl:"ws://127.0.0.1:1",
     manageAppServer:false,desktopScanIntervalMs:3000,desktopReplayExisting:false,allowedRoots:["/work"],
-    reconnectMs:1000,version:"0.6.55",updateEnabled:false,updateSourceRef:"main",updateInstallRoot:"/tmp/unused",
+    reconnectMs:1000,idleSessionTimeoutMs:0,version:"0.6.55",updateEnabled:false,updateSourceRef:"main",updateInstallRoot:"/tmp/unused",
     updateCurrentLink:"/tmp/unused/current",updateStatePath:"/tmp/unused/state.json",actionCachePath:cachePath,
     actionCacheTtlMs:86_400_000,updatePackageManager:"pnpm",updateRestartExecutable:"true",updateRestartArgs:[]});
   const codexDelete=async()=>({sessionId:"wrong"}),claudeDelete=async(sessionId:string)=>({sessionId});

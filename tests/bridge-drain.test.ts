@@ -15,6 +15,7 @@ test("a manual deployment drain rejects new work without touching the App Server
     url: "ws://127.0.0.1:1/bridge", machineId: "dev", machineName: "dev", hostname: "dev.local",
     platform: process.platform, command: "codex", appServerUrl: "ws://127.0.0.1:1", manageAppServer: false,
     desktopScanIntervalMs: 3_000, desktopReplayExisting: false, allowedRoots: [tmpdir()], reconnectMs: 1_000,
+    idleSessionTimeoutMs: 0,
     version: "0.6.1", updateEnabled: false, updateSourceRef: "main", updateInstallRoot: tmpdir(),
     updateCurrentLink: join(tmpdir(), "unused-current"), updateStatePath: join(tmpdir(), "unused-state"),
     actionCachePath: cachePath, actionCacheTtlMs: 86_400_000, drainFile, updatePackageManager: "pnpm",

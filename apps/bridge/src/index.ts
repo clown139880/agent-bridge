@@ -30,6 +30,7 @@ const client = new BridgeClient({
   piSessionDir: config.piSessionDir,
   allowedRoots: config.allowedRoots,
   reconnectMs: config.reconnectMs,
+  idleSessionTimeoutMs: config.idleSessionTimeoutMs,
   version: config.version,
   updateEnabled: config.updateEnabled,
   updateSource: config.updateSource,

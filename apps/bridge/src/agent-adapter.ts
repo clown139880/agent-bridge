@@ -48,6 +48,15 @@ export interface AgentAdapter {
   models(): Promise<CodexModelInfo[]>;
   /** Reconcile long-running activity after a heartbeat (no-op for stateless backends). */
   reconcileActivity(): Promise<void>;
+  /**
+   * Reclaim idle per-session subprocesses whose last turn settled more than
+   * `idleMs` ago, returning the reaped session ids so the caller can drop any
+   * routing state. Only meaningful for adapters that spawn one process per
+   * session (Claude, Pi); adapters backed by a single long-lived server (Codex
+   * App Server) omit it. The session stays resumable — the control-plane keeps
+   * its row and the next turn revives it via {@link resumeSession}.
+   */
+  reapIdleSessions?(idleMs: number): string[];
 
   /** Full state snapshot for (re)connect. */
   stateSnapshot(): {

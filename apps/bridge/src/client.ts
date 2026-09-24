@@ -85,6 +85,7 @@ export class BridgeClient {
     piSessionDir?: string;
     allowedRoots: string[];
     reconnectMs: number;
+    idleSessionTimeoutMs: number;
     version: string;
     updateEnabled: boolean;
     updateSource?: string;
@@ -513,7 +514,22 @@ export class BridgeClient {
     this.send(result);queueMicrotask(()=>void this.updater.activityChanged());
   }
 
+  /**
+   * Close idle per-session subprocesses that have outlived the configured grace
+   * window, so a completed/stopped/failed session stops holding a resident agent
+   * process. Reaped ids are dropped from the owner map so the next turn falls
+   * through to revival (resume) instead of routing to a dead in-memory session.
+   */
+  private reapIdleSessions(): void {
+    if (this.options.idleSessionTimeoutMs <= 0) return;
+    for (const adapter of this.adapters.values()) {
+      if (!adapter.isReady() || !adapter.reapIdleSessions) continue;
+      for (const id of adapter.reapIdleSessions(this.options.idleSessionTimeoutMs)) this.sessionOwner.delete(id);
+    }
+  }
+
   private async sendHeartbeat(): Promise<void> {
+    this.reapIdleSessions();
     // Liveness must not depend on the (potentially slow) App Server reads used
     // to reconcile active turns.  Send the heartbeat first so Control Plane
     // never mistakes a busy App Server for an offline Bridge.
