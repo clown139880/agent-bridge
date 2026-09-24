@@ -21,8 +21,17 @@ import { PiAdapter } from "./pi/pi-adapter.js";
 import { makeAttachmentFetcher } from "./attachments.js";
 import type { AgentAdapter } from "./agent-adapter.js";
 import { BridgeSelfUpdater } from "./self-updater.js";
+import { CoalescedFileWriter } from "./coalesced-writer.js";
 
 const log = pino({ name: "bridge-client" });
+
+/**
+ * Coalesce archive-outbox persistence into at most one disk write per second.
+ * A burst of session events — or a growing outbox while the control plane is
+ * disconnected and acks stall — would otherwise rewrite the whole snapshot on
+ * every mutation, turning O(n) writes into O(n^2) bytes.
+ */
+const ARCHIVE_OUTBOX_SAVE_COALESCE_MS = 1_000;
 
 /** Map a provider name from config to its canonical AgentType. */
 function providerToAgentType(provider: string): AgentType | undefined {
@@ -55,6 +64,7 @@ export class BridgeClient {
   private readonly archiveOutbox = new Map<string, Extract<BridgeToControlMessage, { type: "session.event" }>>();
   private archiveGap?: ArchiveGapMessage;
   private registered = false;
+  private readonly archiveWriter: CoalescedFileWriter;
 
   constructor(private readonly options: {
     url: string;
@@ -104,6 +114,8 @@ export class BridgeClient {
     updateRestartExecutable: string;
     updateRestartArgs: string[];
   }) {
+    this.archiveWriter = new CoalescedFileWriter(options.archiveOutboxPath, ARCHIVE_OUTBOX_SAVE_COALESCE_MS,
+      (error) => log.error({ error }, "Unable to persist conversation archive outbox"));
     this.loadActionResults();
     this.loadArchiveOutbox();
 
@@ -250,6 +262,7 @@ export class BridgeClient {
     this.stopped = true;
     clearTimeout(this.reconnectTimer);
     clearInterval(this.heartbeatTimer);
+    this.archiveWriter.flushSync();
     for (const adapter of this.adapters.values()) adapter.stop();
     this.socket?.close(1000, "bridge shutdown");
   }
@@ -434,10 +447,7 @@ export class BridgeClient {
   }
 
   private saveArchiveOutbox():void {
-    try{mkdirSync(dirname(this.options.archiveOutboxPath),{recursive:true});const temp=`${this.options.archiveOutboxPath}.tmp`;
-      writeFileSync(temp,JSON.stringify({messages:[...this.archiveOutbox.values()],gap:this.archiveGap}),{mode:0o600});
-      renameSync(temp,this.options.archiveOutboxPath);
-    }catch(error){log.error({error},"Unable to persist conversation archive outbox");}
+    this.archiveWriter.schedule(()=>JSON.stringify({messages:[...this.archiveOutbox.values()],gap:this.archiveGap}));
   }
 
   private sharedSkillsStatus(): NonNullable<RegisterMessage["sharedSkills"]> {
