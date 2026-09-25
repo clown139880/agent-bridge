@@ -422,6 +422,34 @@ describe('Bridge native turn', () => {
     expect(f.target.isPresenting(String(agent.id))).toBe(false)
     await f.target.dispose()
   })
+  it('presents assistant text after a remote tool below that tool, not above it', async () => {
+    const f = await fixture([])
+    const agent = await f.target.ensure(summary)
+    let submitted = false
+    f.bridge.call.mockImplementation(async request => {
+      if (request.operation === 'session_events') return page(submitted ? [
+        row('plan', 'message.completed', { role: 'assistant', text: 'checking' }),
+        row('cmd', 'command.completed', { command: 'pwd', output: '/repo' }),
+        row('answer', 'message.completed', { role: 'assistant', text: 'done' }),
+        row('end', 'turn.completed', { status: 'completed' }),
+      ] : [])
+      if (request.operation === 'session') return summary
+      if (request.operation === 'submit_turn') { submitted = true; return { actionId: 'action', status: 'succeeded', turnId: 't1' } }
+      return page([])
+    })
+    const adapter = new AgentBridgeLlmAdapter({ bridge: f.bridge } as unknown as AgentControlService, f.target, 1)
+    const chunks = []
+    for await (const chunk of adapter.stream({ sessionId: agent.id, provider: 'agent-bridge', model: 'remote',
+      messages: [{ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'go' }] }] } as GenerateOptions)) chunks.push(chunk)
+    expect(chunks.filter(c => c.type === 'text-delta')).toEqual([{ type: 'text-delta', index: 0, text: 'checking' }])
+    adapter.commitAcks(String(agent.id))
+    const events = sessionEvents(nativeSession(agent))
+    const toolAt = events.findIndex(e => e.type === 'tool/call')
+    const answerAt = events.findIndex(e => e.type === 'assistant/message' && JSON.stringify(e.data['message']).includes('"done"'))
+    expect(toolAt).toBeGreaterThan(-1)
+    expect(answerAt).toBeGreaterThan(toolAt)
+    await f.target.dispose()
+  })
   it('forwards a worker-scoped model selection on a new Bridge turn', async () => {
     const f = await fixture([])
     const agent = await f.target.ensure(summary)

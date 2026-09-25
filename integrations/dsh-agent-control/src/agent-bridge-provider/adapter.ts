@@ -71,6 +71,11 @@ export class AgentBridgeLlmAdapter extends LlmAdapter {
       const presentationRows: JsonObject[] = []
       const emitted = new Set<string>()
       let nextBlockIndex = 0
+      // Tool cards can only be appended after the local turn closes. Once a tool
+      // event arrives, later assistant text joins the same ordered presentation
+      // batch instead of the live stream, so the final answer never sits above
+      // the commands that produced it.
+      let presentingInOrder = false
       const ackBatches = this.pendingAcks.get(nativeId) ?? []
       ackBatches.push({ acknowledgements: ackRows, presentations: presentationRows })
       this.pendingAcks.set(nativeId, ackBatches)
@@ -95,7 +100,12 @@ export class AgentBridgeLlmAdapter extends LlmAdapter {
             // already executed, so finalizeNativeTurn appends display-only tool events
             // after the local turn closes instead of returning executable tool chunks.
             const rendered = row['type'] === 'message.completed' && payload['role'] === 'assistant' ? str(payload['text']) : ''
-            if (rendered) {
+            if (['command.completed', 'file_change.completed', 'tool.completed'].includes(str(row['type']))) {
+              presentingInOrder = true
+              presentationRows.push(row)
+            }
+            if (rendered && presentingInOrder) presentationRows.push(row)
+            else if (rendered) {
               const key = str(row['itemId'], str(row['eventId']))
               if (!emitted.has(key)) {
                 emitted.add(key)
@@ -106,7 +116,6 @@ export class AgentBridgeLlmAdapter extends LlmAdapter {
               }
               ackRows.push(row)
             }
-            if (['command.completed', 'file_change.completed', 'tool.completed'].includes(str(row['type']))) presentationRows.push(row)
             if (row['type'] === 'turn.failed' || (row['type'] === 'turn.completed' && payload['status'] === 'failed')) throw new Error('Bridge turn failed: ' + JSON.stringify(payload))
             if (row['type'] === 'turn.completed' || row['type'] === 'turn.interrupted') finished = true
           }
