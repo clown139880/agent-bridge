@@ -1118,7 +1118,11 @@ export class ControlPlane {
 
   private async handleSessionDiscovered(machineId: string, message: SessionDiscoveredMessage): Promise<void> {
     if (this.controlStore.isSessionDeleted(message.sessionId)) return;
-    let session = this.store.getSessionByNative(machineId, message.nativeSessionId);
+    // A Claude session is re-announced once its native uuid is known; match it by
+    // its stable public id so the native id is corrected rather than forked.
+    const known = this.store.getSession(message.sessionId);
+    let session = this.store.getSessionByNative(machineId, message.nativeSessionId)
+      ?? (known?.machineId === machineId ? known : undefined);
     if (session) {
       this.store.updateSessionStatus(session.id, message.status);
       const workerRun = message.requestId ? this.store.getWorkerRun(message.requestId) : undefined;

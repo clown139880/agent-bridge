@@ -48,3 +48,15 @@ test('Claude discovery recovers the full first user text after discovery, includ
     assert.equal(recovered.timestamp, Date.parse('2026-09-01T00:00:01Z'));
   } finally { rmSync(root, {recursive:true,force:true}); }
 });
+
+test('a Claude session created without a prompt is re-announced under its native uuid once Claude reports it', () => {
+  const events: BridgeToControlMessage[] = [];
+  const adapter = new ClaudeCodeAdapter({command:'',allowedRoots:[]}, event => events.push(event));
+  const seam = adapter as unknown as { emitDiscovered(session: unknown): void; handleSystem(session: unknown, message: unknown): void };
+  const session: Record<string, unknown> = {sessionId:'claude-public',requestId:'claude-public',projectPath:'/work',discovered:false,turnSeq:0,logs:[]};
+  seam.emitDiscovered(session);
+  seam.handleSystem(session, {type:'system',subtype:'init',session_id:'native-uuid'});
+  seam.handleSystem(session, {type:'system',subtype:'init',session_id:'native-uuid'});
+  const announced = events.filter(event => event.type === 'session.discovered').map(event => event.type === 'session.discovered' ? event.nativeSessionId : '');
+  assert.deepEqual(announced, ['claude-public', 'native-uuid']);
+});

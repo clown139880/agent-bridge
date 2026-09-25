@@ -71,6 +71,17 @@ test('Claude transcript discovery and first prompt preserve the public Bridge se
   } finally { item.dispose(); }
 });
 
+test('a re-announced Claude session corrects its native id instead of forking a second session', async () => {
+  const item = fixture();
+  try {
+    const discovered = { type:'session.discovered' as const, sessionId:'claude-public',nativeSessionId:'claude-public',agentType:'claude-code' as const,projectPath:'/work/agent-bridge',projectName:'agent-bridge',status:'waiting' as const,createdAt:Date.now() };
+    await item.internals.handleBridgeMessage('dev',discovered);
+    await item.internals.handleBridgeMessage('dev',{...discovered,nativeSessionId:'native-uuid',status:'working' as const});
+    assert.equal(item.store.getSession('claude-public')?.nativeSessionId,'native-uuid');
+    assert.equal((item.store.db.prepare('SELECT COUNT(*) AS n FROM sessions').get() as {n:number}).n,1);
+  } finally { item.dispose(); }
+});
+
 function fixture(): {
   control: ControlPlane;
   internals: ControlInternals;

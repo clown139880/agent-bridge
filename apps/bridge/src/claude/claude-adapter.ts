@@ -346,6 +346,10 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     if (message.subtype !== "init" || !message.session_id) return;
     // Learn Claude's own uuid for resume, but keep the stable public id as the
     // session key — never rename it out from under the control-plane.
+    // A session created without a prompt was announced before Claude had a uuid,
+    // under its public id; announce again so a later revival resumes the real
+    // transcript instead of failing with "No conversation found".
+    if (session.discovered && session.nativeSessionId !== message.session_id) session.discovered = false;
     session.nativeSessionId = message.session_id;
     // Fires on the first turn of a session created with an initial prompt; a
     // session created without one was already announced at create time.
