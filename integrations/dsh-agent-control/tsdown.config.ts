@@ -1,4 +1,5 @@
-import { readFile } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
+import { cp, readFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 import { defineConfig, type UserConfig } from 'tsdown'
 
@@ -18,6 +19,29 @@ function scopedCss(source: string): { css: string; classes: Record<string, strin
   return { css, classes }
 }
 
+// DSH_PLUGIN_MIRROR (env or a gitignored .env.local) names the folder a DSH
+// profile links this plugin from. Every build (and each `--watch` rebuild)
+// copies the published package files there, so building is updating, as with
+// the other linked plugins. It must be a bare folder without node_modules:
+// a checkout's own @deepseek-ai copies would shadow the host's, so event types
+// the plugin registers would land in a registry the host never reads.
+if (existsSync('.env.local')) process.loadEnvFile('.env.local')
+const mirror = process.env['DSH_PLUGIN_MIRROR']
+
+// Host and client builds finish concurrently; copying in parallel races on the
+// same target files, so chain the copies.
+let mirroring = Promise.resolve()
+function mirrorBuild(): Promise<void> {
+  if (!mirror) return mirroring
+  mirroring = mirroring.catch(() => {}).then(async () => {
+    const { files } = JSON.parse(await readFile('package.json', 'utf8')) as { files: string[] }
+    for (const file of ['package.json', ...files]) {
+      if (existsSync(file)) await cp(file, resolve(mirror, file), { recursive: true, force: true })
+    }
+  })
+  return mirroring
+}
+
 const host: UserConfig = {
   name: packageId,
   entry: { index: 'src/index.ts' },
@@ -29,6 +53,7 @@ const host: UserConfig = {
   sourcemap: true,
   clean: true,
   external: [/^@deepseek-ai\//],
+  onSuccess: mirrorBuild,
 }
 
 const client: UserConfig = {
@@ -42,6 +67,7 @@ const client: UserConfig = {
   clean: false,
   sourcemap: true,
   external: [/^@deepseek-ai\//, /^react(?:\/.*)?$/],
+  onSuccess: mirrorBuild,
   plugins: [{
     name: 'agent-control-css-inline',
     resolveId(source: string, importer?: string) {
