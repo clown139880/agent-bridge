@@ -752,7 +752,7 @@ export class AgentControlStore {
 
   private workerWire(row:Record<string,unknown>,agentType:AgentType,label:string):Record<string,unknown>{
     const machineId=String(row.id),capabilities=parseJson<string[]>(row.capabilities,[]),features=parseJson<string[]>(row.features_json,[]);
-    return{id:buildWorkerId(agentType,machineId),machineId,name:`${label} @ ${String(row.name)}`,status:String(row.status),
+    return{id:buildWorkerId(agentType,machineId),machineId,machineName:String(row.name),agentType,name:`${label} @ ${String(row.name)}`,status:String(row.status),
       platform:String(row.platform),hostname:String(row.hostname),capabilities:[...new Set([...capabilities,...features])],
       workspaces:[],recentWorkspaces:[],lastSeenAt:Number(row.last_seen_at),bridgeVersion:row.bridge_version?String(row.bridge_version):null,
       sharedSkills:parseJson<unknown[]>(row.shared_skills_json,[]),

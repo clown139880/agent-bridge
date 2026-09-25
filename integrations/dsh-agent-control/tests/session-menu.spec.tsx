@@ -34,6 +34,31 @@ it('extends the actual DSH menu and targets an unselected local session', async 
     await menu(); await click('menu.archiveSession'); expect(archive).toHaveBeenCalledWith('session-local')
   } finally { await act(async () => root.unmount()); div.remove() }
 })
+it('decorates the actual DSH rows with agent identity and a machine label', async () => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
+  const relative = 'node_modules/@deepseek-ai/dsh-client-ui-workspace/lib/client.js'
+  const source = readFileSync(existsSync(relative) ? relative : 'integrations/dsh-agent-control/' + relative, 'utf8').replace('return module.exports;', 'module.exports.TestRow = SessionNodeItem; module.exports.TestProject = ProjectRowItem; return module.exports;')
+  let exports: any
+  const primitives = new Proxy({ relativeTime: () => ({unit: 'now', value: 0}), HoverCard: ({ anchor }: any) => anchor, Menu: ({ anchor }: any) => anchor }, { get: (target, key) => Reflect.get(target, key) ?? (() => null) })
+  const require = (id: string) => id === 'react' ? React : id === 'react/jsx-runtime' ? jsx : id.endsWith('primitives') ? primitives : id.endsWith('cordis') ? { Service: class {} } : {}
+  new Function('window', source)({ __ModuleLoader__: { load: ({ factory }: any) => { exports = factory(require) } } })
+  const decor = { session: (id: string) => <i data-identity={id} />, workspace: (id: string, label: string) => id === 'repo' ? <b data-label>{label.replace(' @ hal', '')}</b> : undefined }
+  const t = (key: string) => key
+  const Browser = extendSessionMenu(() => <>
+    {createElement(exports.TestProject as React.ComponentType<any>, { group: { workspaceId: 'repo', label: 'repo @ hal', key: 'repo', expanded: true }, onToggle: vi.fn(), onCreate: vi.fn(), t })}
+    {createElement(exports.TestRow as React.ComponentType<any>, { node: { id: 'session-1', title: '修复登录', status: 'idle', descendants: [], pendingInteractions: [], createdAt: 1, updatedAt: 1 }, currentId: '', now: 1, onOpen: vi.fn(), onRename: vi.fn(), onFork: vi.fn(), onArchive: vi.fn(), t })}
+  </>, undefined, decor)
+  const div = document.createElement('div'); document.body.append(div); const root = createRoot(div)
+  try {
+    await act(async () => root.render(<Browser />))
+    expect(div.querySelector('[data-label]')?.textContent).toBe('repo')
+    expect(div.textContent).not.toContain('repo @ hal')
+    const identity = div.querySelector('[data-identity="session-1"]')!
+    // The icon sits directly before the title, inside the clickable row.
+    expect(identity.nextElementSibling?.textContent).toBe('修复登录')
+    expect(identity.closest('[role=treeitem]')).not.toBeNull()
+  } finally { await act(async () => root.unmount()); div.remove() }
+})
 it('restores the native component on unload', () => {
   const original = () => null; const entry = { component: original }; const stop = vi.fn()
   const dispose = installSessionMenu({ entries: () => [entry], subscribe: () => stop })

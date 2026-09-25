@@ -239,12 +239,16 @@ export class AgentBridgeImportTarget {
       const machineId = str(worker['machineId'], str(worker['id']))
       locations.set(machineId + '\0' + canonical, { machineId, workspace: canonical })
     }
-    const sources: JsonObject[] = local ? [{ id: 'dsh', name: 'DSH @ ' + hostname(), machineId: 'local-dsh', workspace: canonical, available: true }] : []
+    const sources: JsonObject[] = local ? [{ id: 'dsh', name: 'DSH @ ' + hostname(), agentType: 'dsh', machineId: 'local-dsh', machineName: hostname(), platform: process.platform, local: true, workspace: canonical, available: true }] : []
     for (const location of locations.values()) for (const worker of this.workers.values()) {
       if (str(worker['machineId'], str(worker['id'])) !== location.machineId) continue
       const id = str(worker['id']) + '\0' + location.workspace
       if (sources.some(source => source['id'] === id)) continue
-      sources.push({ id, workerId: str(worker['id']), name: workerAtMachine(str(worker['name'], str(worker['id'])), location.machineId), ...location, available: worker['status'] === 'online' })
+      const name = str(worker['name'], str(worker['id']))
+      // The picker groups by machine and badges by agent; older Bridges only send the combined name.
+      sources.push({ id, workerId: str(worker['id']), name: workerAtMachine(name, location.machineId), agentType: str(worker['agentType']),
+        machineName: str(worker['machineName'], name.split(/\s@\s/)[1] ?? location.machineId), platform: str(worker['platform']),
+        local: this.isLocalWorker(worker), ...location, available: worker['status'] === 'online' })
     }
     return { cwd: canonical, sources }
   }

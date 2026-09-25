@@ -1,5 +1,7 @@
-import { useEffect, useState, useSyncExternalStore } from 'react'
+import { useEffect, useState, useSyncExternalStore, type ReactNode } from 'react'
 import { useDialog } from './dialog.js'
+import { AGENT_LABELS, AgentIcon, MachineChip, agentKind } from './agent-identity.js'
+import type { SidebarDecor } from './session-menu.js'
 import css from './workspace.module.css'
 
 export type ExecutionLocation = { workerId: string; workerName: string; agent?: string; machineId: string; machineName: string; workspace: string; online: boolean; available: boolean; local?: boolean }
@@ -101,6 +103,28 @@ export class NativeCatalog {
     const workspace = this.workspaceSource?.getSnapshot().items.find(row => row.sessionIds.includes(nativeId))
     return workspace ? { kind: 'local', worker: 'Local DSH', machine: '本机', workspace: workspace.path } : undefined
   }
+  private location(entry: NativeEntry): ExecutionLocation | undefined {
+    return entry.executionLocations.find(value => value.workerId === entry.workerId)
+      ?? entry.executionLocations.find(value => value.machineId === entry.machineId)
+  }
+  /** Agent and machine of a sidebar row; ids the catalog does not list are Host-native DSH sessions. */
+  identity(nativeId: string): { agent: ReturnType<typeof agentKind>; label: string } | undefined {
+    const entry = this.entry(nativeId)
+    if (!entry) return nativeId.startsWith('agent-bridge-') ? undefined : { agent: 'dsh', label: 'DSH · 本机' }
+    const location = this.location(entry)
+    const agent = agentKind({ workerId: entry.workerId, agentType: location?.agent, name: entry.worker })
+    return { agent, label: `${agent ? AGENT_LABELS[agent] : entry.worker} · ${location?.machineName || entry.machineId}` }
+  }
+  /** Distinct machines the Bridge sessions of one (merged) sidebar workspace run on. */
+  machines(workspaceId: string): { machineId: string; machineName: string }[] {
+    const row = this.workspaceSource?.getSnapshot().items.find(item => item.workspaceId === workspaceId)
+    const machines = new Map<string, string>()
+    for (const id of row?.sessionIds ?? []) {
+      const entry = this.entry(id)
+      if (entry && !machines.has(entry.machineId)) machines.set(entry.machineId, this.location(entry)?.machineName || entry.machineId)
+    }
+    return [...machines].map(([machineId, machineName]) => ({ machineId, machineName }))
+  }
   async refresh(): Promise<void> {
     const data = await this.rpc('native_catalog') as { sessions: NativeEntry[] }
     if (!Array.isArray(data.sessions)) throw new Error('会话目录不可用')
@@ -168,6 +192,27 @@ export class NativeCatalog {
     const tick = async () => { try { await this.refresh() } catch { /* retry transient Host startup/transport failures */ } finally { if (!disposed) timer = setTimeout(() => { void tick() }, 5000) } }
     void tick()
     return () => { disposed = true; clearTimeout(timer); this.workspaceSource = undefined; source.getSnapshot = original; source.subscribe = subscribe; workspaces.rename = rename; workspaces.delete = remove; workspaces.insertSessionBefore = move }
+  }
+}
+
+/** Sidebar identity: a brand icon per session row and a machine chip per workspace,
+ * replacing the server's `name @ machine` suffix so every workspace reads the same way. */
+export function sidebarDecor(catalog: NativeCatalog): SidebarDecor {
+  return {
+    session(id) {
+      const identity = catalog.identity(id)
+      return identity ? <span className={css.sidebarAgent}><AgentIcon agent={identity.agent} size={14} title={identity.label} /></span> : null
+    },
+    workspace(workspaceId, label): ReactNode {
+      const machines = catalog.machines(workspaceId)
+      if (!machines.length) return undefined
+      const suffix = machines.flatMap(machine => [machine.machineId, machine.machineName]).find(name => label.endsWith(' @ ' + name))
+      const name = suffix ? label.slice(0, -(' @ ' + suffix).length) : label
+      const chip = machines.length === 1
+        ? <MachineChip machineId={machines[0]!.machineId} label={machines[0]!.machineName} title={`${machines[0]!.machineName} (${machines[0]!.machineId})`} />
+        : <MachineChip machineId="" label={`${machines.length} 台机器`} title={machines.map(machine => machine.machineName).join('、')} />
+      return <span className={css.sidebarLabel}><span className={css.sidebarName}>{name}</span>{chip}</span>
+    },
   }
 }
 

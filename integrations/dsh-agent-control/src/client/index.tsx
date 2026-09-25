@@ -1,6 +1,6 @@
 import { installSessionMenu } from './session-menu.js'
 import { useDialog } from './dialog.js'
-import { NativeCatalog, DeleteNativeSession, SessionSourceMetadata, type CatalogSessions } from './native-catalog.js'
+import { NativeCatalog, DeleteNativeSession, SessionSourceMetadata, sidebarDecor, type CatalogSessions } from './native-catalog.js'
 import { MarkdownText } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
@@ -277,7 +277,7 @@ export function apply(ctx: ClientContext): void {
   ctx.effect(() => catalog.install(ctx.get('workspaces') as unknown as Parameters<NativeCatalog['install']>[0]))
   // TokensCowork creates its root workspace hook before third-party plugins load.
   // Override that captured hook on the native slot while retaining its component.
-  ctx.effect(() => installSessionMenu(ctx.slots, catalog.useWorkspaces))
+  ctx.effect(() => installSessionMenu(ctx.slots, catalog.useWorkspaces, sidebarDecor(catalog)))
   ctx.slots.inject('conversation.session.header.utilities', () => ctx.slots.register({
     name: 'conversation.session.header.utilities', id: 'agent-control-session-source-metadata', order: 5,
     inject: (sessionId: string) => ({ catalog, sessionId }),

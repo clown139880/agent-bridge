@@ -48,6 +48,35 @@ describe('management UI interactions', () => {
     dispose()
   })
 
+  it('groups sources by machine, badges each agent by kind, and remembers the last choice', async () => {
+    const sources = [
+      {id:'dsh', name:'DSH @ PC', agentType:'dsh', machineId:'local-dsh', machineName:'PC', local:true, workspace:'C:\\repo', available:true},
+      {id:'codex@win\0C:\\repo', workerId:'codex@win', name:'Codex @ dev-windows', agentType:'codex-cli', machineId:'win', machineName:'dev-windows', platform:'win32', local:true, workspace:'C:\\repo', available:true},
+      {id:'codex@hal\0/r', workerId:'codex@hal', name:'Codex @ hal.local', machineId:'hal', machineName:'hal.local', platform:'linux', workspace:'/r', available:true},
+      {id:'pi@hal\0/r', workerId:'pi@hal', name:'Pi @ hal.local', machineId:'hal', machineName:'hal.local', platform:'linux', workspace:'/r', available:true},
+    ]
+    const store = new Map<string, string>()
+    vi.stubGlobal('localStorage', { getItem: (key: string) => store.get(key) ?? null, setItem: (key: string, value: string) => { store.set(key, value) } })
+    const rpc = vi.fn(async (op: string) => op === 'creation_sources' ? { sources } : {nativeSessionId:'created'})
+    const controller = new SessionCreationController(rpc)
+    const sessions = {create:async (_options?:{cwd?:string}) => 'local',refresh:async () => {}}
+    const dispose = controller.install(sessions,{list:{getSnapshot:() => ({items:[]})}})
+    await act(async () => root.render(<SessionSourcePicker controller={controller} />))
+    let creation!: Promise<string>
+    await act(async () => { creation = sessions.create({cwd:'/repo'}) })
+    const groups = [...container.querySelectorAll('fieldset')]
+    expect(groups.map(group => group.querySelector('legend')?.textContent)).toEqual(['dev-windows', 'hal.local'])
+    expect(groups[0]!.textContent).toContain('本机')
+    expect([...groups[1]!.querySelectorAll('[data-agent]')].map(icon => icon.getAttribute('data-agent'))).toEqual(['codex', 'pi'])
+    await click(container.querySelector('input[aria-label="Pi @ hal.local"]')!)
+    await click([...container.querySelectorAll('button')].find(button => button.textContent?.includes('创建对话'))!)
+    await expect(creation).resolves.toBe('created')
+    await act(async () => { creation = sessions.create({cwd:'/repo'}) })
+    expect(container.querySelector<HTMLInputElement>('input[aria-label="Pi @ hal.local"]')!.checked).toBe(true)
+    await act(async () => controller.cancel()); await creation.catch(() => {})
+    dispose(); vi.unstubAllGlobals()
+  })
+
   it('filters the board and closes only the nested dialog, returning focus to its trigger', async () => {
     const closed = vi.fn()
     function Harness() { const ref = useDialog(true,closed); return <div ref={ref}><Tasks snapshot={{board:{assignees:['Ada'],columns:[{name:'todo',tasks:[{id:'T1',title:'Fix long workspace names',assignee:'Ada'}]},{name:'done',tasks:[{id:'T2',title:'Deploy release'}]}]}}} refresh={async () => {}} openSession={() => {}} /></div> }
