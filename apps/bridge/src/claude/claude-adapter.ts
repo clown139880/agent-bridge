@@ -501,7 +501,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     text: string,
     delivery: "auto" | "steer" | "start_turn",
     expectedTurnId?: string,
-    _model?: string,
+    model?: string,
     _reasoningEffort?: string,
     attachments?: AttachmentRef[],
   ): Promise<{ sessionId: string; turnId?: string; resolvedAction: "steer" | "start_turn" }> {
@@ -513,6 +513,9 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     if (delivery === "steer" && !activeTurnId) throw domainError("no_active_turn", "session has no active turn");
     if (delivery === "start_turn" && activeTurnId) throw domainError("turn_already_active", "session already has an active turn");
     const resolvedAction = activeTurnId ? "steer" : "start_turn";
+    // A steer joins the running turn, whose model is already fixed; the
+    // control-plane rejects a model on steer, so only a fresh turn switches.
+    if (!activeTurnId) await this.applyModel(session, model);
     this.beginTurn(session, text, await this.materialize(attachments));
     this.emitSessionEvent(session, "message.completed", `claude:${sessionId}:action:${actionId}:user`, { role: "user", text: truncate(text), attachments: attachments ?? [] });
     return { sessionId, turnId: session.activeTurnId, resolvedAction };

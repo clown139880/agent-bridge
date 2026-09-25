@@ -123,3 +123,25 @@ test('a model switch on a session that is not running fails the turn', async () 
   const seam = adapter as unknown as { applyModel(session: unknown, model?: string): Promise<void> };
   await assert.rejects(seam.applyModel({ sessionId: 'session' }, 'deepseek-v4'), /not running/);
 });
+
+test('submit_turn switches the model for a fresh turn but not for a steer', async () => {
+  const adapter = new ClaudeCodeAdapter({ command: '', allowedRoots: [] }, () => {});
+  const applied: string[] = [];
+  const pushed: unknown[] = [];
+  const session = {
+    sessionId: 'session', turnSeq: 0, logs: [], pendingApprovals: new Map(),
+    input: { push: (message: unknown) => pushed.push(message) },
+    query: { setModel: async (model: string) => { applied.push(model); } },
+  } as Record<string, unknown>;
+  (adapter as unknown as { sessions: Map<string, unknown> }).sessions.set('session', session);
+
+  // A DSH-created session starts without a model; the first turn carries the pick.
+  await adapter.submitTurnAction('a1', 'session', 'which model?', 'auto', undefined, 'claude-opus-5-5');
+  assert.deepEqual(applied, ['claude-opus-5-5']);
+  assert.equal(session['model'], 'claude-opus-5-5');
+  assert.ok(session['activeTurnId']);
+
+  await adapter.submitTurnAction('a2', 'session', 'also this', 'auto', undefined, 'deepseek-v4');
+  assert.deepEqual(applied, ['claude-opus-5-5']);
+  assert.equal(pushed.length, 2);
+});
