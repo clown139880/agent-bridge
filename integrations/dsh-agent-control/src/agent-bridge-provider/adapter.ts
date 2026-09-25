@@ -7,7 +7,7 @@ import type { AgentControlService } from '../service.js'
 import type { JsonObject } from '../types.js'
 import type { AgentBridgeImportTarget } from './import-target.js'
 import { readHistory } from './import-target.js'
-import { lastUserText, PROVIDER, record, str } from './mapping.js'
+import { lastUserMessageId, lastUserText, PROVIDER, record, sameUserText, str } from './mapping.js'
 import { relayPendingInteractions } from './approval-bridge.js'
 import { uploadPromptImages } from './attachments.js'
 
@@ -44,6 +44,7 @@ export class AgentBridgeLlmAdapter extends LlmAdapter {
     const remoteId = str(binding['sessionId'])
     const signal = options.signal ?? new AbortController().signal
     let input = lastUserText(options)
+    const localMessageId = lastUserMessageId(options)
     const attachments = await uploadPromptImages(options, agent, this.service.bridge, signal)
     if (!input.trim() && !attachments.length) throw new Error('Bridge requires text or an image')
     if (!input.trim()) input = '[Image attached]'
@@ -94,7 +95,7 @@ export class AgentBridgeLlmAdapter extends LlmAdapter {
           for (const row of ready) {
             const payload = record(row['payload'])
             if (row['type'] === 'message.completed') {
-              if (payload['role'] === 'user' && payload['text'] === input) ackRows.push(row)
+              if (payload['role'] === 'user' && sameUserText(str(payload['text']), input)) ackRows.push(localMessageId ? { ...row, localMessageId } : row)
             }
             // Only assistant text goes through the native LLM stream. Remote tools have
             // already executed, so finalizeNativeTurn appends display-only tool events

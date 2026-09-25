@@ -15,6 +15,34 @@ export function lastUserText(options: GenerateOptions): string {
     ?? [...options.messages].reverse().find(message => message.role === 'user')
   return user ? textFromBlocks(user.content) : ''
 }
+/** The DSH message a live turn submitted, so its remote echo can name what it answers. */
+export function lastUserMessageId(options: GenerateOptions): string {
+  const user = [...options.messages].reverse().find(message => message.role === 'user' && message.source?.kind === 'user')
+  return str((user as { id?: unknown } | undefined)?.id)
+}
+
+/**
+ * Whether a remote user echo is the prompt typed locally. Workers shorten long
+ * echoes (`…`, or `\n…[truncated]`) and replace an image-only prompt with a
+ * placeholder, so strict equality misses exactly the prompts that then show twice.
+ */
+export function sameUserText(remote: string, local: string): boolean {
+  const echo = remote.trim()
+  const typed = local.trim()
+  if (echo === typed) return true
+  if (echo === '[Image attached]' && !typed) return true
+  const cut = /(?:\n…\[truncated\]|…)$/.exec(echo)
+  return !!cut && echo.length > cut[0].length && typed.startsWith(echo.slice(0, cut.index).trim())
+}
+
+/**
+ * A remote echo pairs with a local prompt only if the worker recorded it around
+ * when DSH sent it: a little earlier for clock skew between machines, and up to
+ * hours later — a prompt sent during a running turn is queued and echoed, under
+ * the next turn's id, only once that turn ends.
+ */
+const echoesLocal = (echoAt: number, sentAt: number) => echoAt >= sentAt - 2 * 60 * 1000 && echoAt <= sentAt + 6 * 60 * 60 * 1000
+
 /** Only assistant text goes to the loop. Remote tools have already executed. */
 export function projectStreamChunks(event: JsonObject, index = 0): StreamChunk[] {
   const payload = record(event['payload'])
@@ -33,6 +61,12 @@ export function projectNativeEvents(rows: readonly JsonObject[], existing: reado
   const seen = new Set(acknowledgements.map(e => str(e.data['eventId'])))
   const seenItems = new Set([...seen].map(presentationItemKey).filter((key): key is string => !!key))
   const submittedUserTurns = new Set(acknowledgements.filter(e => /^action:[^:]+:user$/.test(str(e.data['eventId']))).map(e => str(e.data['turnId'])))
+  // Prompts typed in DSH are already on screen. Their remote echo must not be
+  // shown again even when the live turn never recorded it — a restart, crash or
+  // failure mid-turn skips that — so each echo claims one unclaimed local prompt.
+  const claimed = new Set(acknowledgements.map(e => str(e.data['localMessageId'])).filter(Boolean))
+  const localPrompts = existing.filter(e => e.type === 'user/message' && record(e.data['source'])['kind'] === 'user'
+    && !str(e.data['id']).startsWith('bridge:') && !claimed.has(str(e.data['id'])))
   let turn = existing.reduce((n, e) => Math.max(n, Number(e.data['turn']) || 0), 0)
   const output: NativeEvent[] = []
   const add = (type: string, data: JsonObject, time: number, surface = false) => {
@@ -50,6 +84,15 @@ export function projectNativeEvents(rows: readonly JsonObject[], existing: reado
     const type = str(row['type'])
     if (type === 'message.completed' && payload['role'] === 'user' && submittedUserTurns.has(str(row['turnId']))) continue
     const time = typeof row['timestamp'] === 'number' ? row['timestamp'] : Date.now()
+    if (type === 'message.completed' && payload['role'] === 'user') {
+      const local = localPrompts.find(e => !claimed.has(str(e.data['id'])) && echoesLocal(time, e.time)
+        && sameUserText(str(payload['text']), messageText(e.data['content'])))
+      if (local) {
+        claimed.add(str(local.data['id']))
+        add(ACK_EVENT, { eventId: id, turnId: str(row['turnId']), localMessageId: str(local.data['id']) }, time)
+        continue
+      }
+    }
     const isMessage = type === 'message.completed' && ['user', 'assistant'].includes(str(payload['role']))
     const isTool = ['command.completed', 'file_change.completed', 'tool.completed'].includes(type)
     if (isMessage || isTool) {
@@ -77,6 +120,10 @@ export function projectNativeEvents(rows: readonly JsonObject[], existing: reado
     add(ACK_EVENT, { eventId: id, turnId: str(row['turnId']) }, time)
   }
   return output
+}
+
+function messageText(content: unknown): string {
+  return Array.isArray(content) ? content.map(block => record(block)['type'] === 'text' ? str(record(block)['text']) : '').join('') : ''
 }
 
 /** Treat pre-canonical history ids as the same App Server item as their live ids. */

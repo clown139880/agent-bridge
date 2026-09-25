@@ -4,7 +4,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
 import type { JsonObject, JsonValue } from '../src/types.js'
 import { AgentBridgeImportTarget, nativeSessionId, readHistory } from '../src/agent-bridge-provider/import-target.js'
-import { ACK_EVENT, BINDING_EVENT, projectNativeEvents, projectStreamChunks } from '../src/agent-bridge-provider/mapping.js'
+import { ACK_EVENT, BINDING_EVENT, projectNativeEvents, projectStreamChunks, sameUserText } from '../src/agent-bridge-provider/mapping.js'
 import { nativeSession, sessionEvents, appendSessionEvent, guardImportedTurnNumbers, type NativeHost, type NativeEvent } from '../src/agent-bridge-provider/dsh-compat.js'
 import { AgentBridgeLlmAdapter } from '../src/agent-bridge-provider/adapter.js'
 import { uploadPromptImages } from '../src/agent-bridge-provider/attachments.js'
@@ -565,5 +565,45 @@ describe('local DSH deletion', () => {
     await expect(f.target.deleteNative('agent-bridge-unloaded')).rejects.toThrow('尚未加载')
     f.agents.set('session-local', { status: 'running', session: Session.create(SessionId('session-local'), []) } as unknown as Agent)
     await expect(f.target.deleteNative('session-local')).rejects.toThrow('请先结束')
+  })
+})
+
+describe('remote echoes of prompts typed in DSH', () => {
+  const T = 1_790_305_206_220
+  const local = (id: string, text: string, time = T): NativeEvent =>
+    ({ type: 'user/message', seq: 15, time, data: { id, role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text }] } }) as NativeEvent
+  const echo = (eventId: string, text: string, timestamp = T + 50): JsonObject =>
+    ({ eventId, turnId: 't1', type: 'message.completed', timestamp, payload: { role: 'user', text } })
+  const shown = (events: NativeEvent[]) => events.filter(event => event.type === 'user/message').length
+
+  it('claims the local prompt when the live turn never acknowledged it (restart mid-turn)', () => {
+    const events = projectNativeEvents([echo('claude:s:action:a1:user', '现在agent选择的辨识度太低了')], [local('m1', '现在agent选择的辨识度太低了')])
+    expect(shown(events)).toBe(0)
+    expect(events.find(event => event.type === ACK_EVENT)?.data['localMessageId']).toBe('m1')
+  })
+
+  it('claims a prompt queued behind a long turn and echoed under the next turn half an hour later', () => {
+    expect(shown(projectNativeEvents([echo('e1', '你已经提交并安装到我的客户端了么？', T + 32 * 60 * 1000)], [local('m1', '你已经提交并安装到我的客户端了么？')]))).toBe(0)
+  })
+
+  it('recognises truncated echoes and the image-only placeholder', () => {
+    const long = 'x'.repeat(5000)
+    expect(sameUserText(`${long.slice(0, 3999)}…`, long)).toBe(true)
+    expect(sameUserText(`${long.slice(0, 4000)}\n…[truncated]`, long)).toBe(true)
+    expect(sameUserText('[Image attached]', '')).toBe(true)
+    expect(sameUserText('hello…', 'goodbye')).toBe(false)
+  })
+
+  it('pairs each local prompt with one echo only, so a repeated prompt still shows the second time', () => {
+    const existing = [local('m1', '继续')]
+    const events = projectNativeEvents([echo('e1', '继续'), echo('e2', '继续', T + 60_000)], existing)
+    expect(shown(events)).toBe(1)
+    const later = projectNativeEvents([echo('e3', '继续', T + 120_000)], [...existing, ...events])
+    expect(shown(later)).toBe(1)
+  })
+
+  it('still shows a prompt typed in another CLI long after an identical DSH prompt', () => {
+    const events = projectNativeEvents([echo('e1', '继续', T + 7 * 60 * 60 * 1000)], [local('m1', '继续')])
+    expect(shown(events)).toBe(1)
   })
 })

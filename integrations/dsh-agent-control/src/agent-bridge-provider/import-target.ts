@@ -275,7 +275,7 @@ export class AgentBridgeImportTarget {
     const session = nativeSession(agent)
     const seen = new Set(sessionEvents(session).filter(e => e.type === ACK_EVENT).map(e => e.data['eventId']))
     for (const row of rows) if (!seen.has(row['eventId'])) {
-      session.append(ACK_EVENT, { eventId: str(row['eventId']), turnId: str(row['turnId']) })
+      session.append(ACK_EVENT, { eventId: str(row['eventId']), turnId: str(row['turnId']), ...(str(row['localMessageId']) ? { localMessageId: str(row['localMessageId']) } : {}) })
       seen.add(row['eventId'])
     }
   }
