@@ -6,7 +6,7 @@ import type { JsonObject, JsonValue } from '../src/types.js'
 import { AgentBridgeImportTarget, nativeSessionId, readHistory } from '../src/agent-bridge-provider/import-target.js'
 import { ACK_EVENT, BINDING_EVENT, projectNativeEvents, projectStreamChunks, sameUserText } from '../src/agent-bridge-provider/mapping.js'
 import { nativeSession, sessionEvents, appendSessionEvent, guardImportedTurnNumbers, type NativeHost, type NativeEvent } from '../src/agent-bridge-provider/dsh-compat.js'
-import { AgentBridgeLlmAdapter } from '../src/agent-bridge-provider/adapter.js'
+import { AgentBridgeLlmAdapter, toolProgressLine } from '../src/agent-bridge-provider/adapter.js'
 import { uploadPromptImages } from '../src/agent-bridge-provider/attachments.js'
 import type { AgentControlService } from '../src/service.js'
 import type { BridgeClient } from '../src/bridge-client.js'
@@ -227,6 +227,9 @@ describe('native session catalog', () => {
       { name: 'Codex @ dev-wsl', machineId: 'dev-wsl', workspace: '/remote/repo' },
       { name: 'Claude @ Windows PC', machineId: 'windows', workspace: 'D:\\Workspace\\repo' },
     ])
+    // Older Bridges send neither field; the picker still needs a machine name and agent.
+    expect(sources[1]).toMatchObject({ machineName: 'Windows PC', local: false })
+    expect(sources.map(source => source['agentType'])).toEqual(['', ''])
     await f.target.dispose()
   })
   it('automatically merges remote sessions into the native registry without touching native sessions', async () => {
@@ -408,8 +411,11 @@ describe('Bridge native turn', () => {
       messages: [{ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'go' }] }] } as GenerateOptions)) chunks.push(chunk)
     expect(chunks.at(-1)?.type).toBe('finish')
     expect(chunks.filter(c => c.type === 'text-delta')).toEqual([{ type: 'text-delta', index: 0, text: 'foreign' }])
-    expect(chunks.filter(c => c.type === 'block-start')).toHaveLength(1)
-    expect(chunks.filter(c => c.type === 'block-end')).toHaveLength(1)
+    expect(chunks.filter(c => c.type === 'block-start')).toEqual([
+      { type: 'block-start', index: 0, blockType: 'text' },
+      { type: 'block-start', index: 1, blockType: 'reasoning' }])
+    expect(chunks.filter(c => c.type === 'reasoning-delta')).toEqual([{ type: 'reasoning-delta', index: 1, text: '💻 pwd' }])
+    expect(chunks.filter(c => c.type === 'block-end').at(-1)).toEqual({ type: 'block-end', index: 1, block: { type: 'reasoning', text: '💻 pwd' } })
     expect(chunks.some(c => c.type === 'tool-call-delta')).toBe(false)
     adapter.commitAcks(String(agent.id))
     expect(sessionEvents(nativeSession(agent)).some(e => e.data['eventId'] === 'foreign')).toBe(true)
@@ -421,6 +427,12 @@ describe('Bridge native turn', () => {
     expect(events.some(e => e.type === ACK_EVENT && e.data['eventId'] === 'cmd')).toBe(true)
     expect(f.target.isPresenting(String(agent.id))).toBe(false)
     await f.target.dispose()
+  })
+  it('names each remote tool on one live progress line', () => {
+    expect(toolProgressLine(row('c', 'command.completed', { command: 'pnpm build\n  && echo ok' }))).toBe('💻 pnpm build')
+    expect(toolProgressLine(row('f', 'file_change.completed', { changes: [{ path: 'src/a.ts' }, { path: 'src/b.ts' }] }))).toBe('✏️ src/a.ts, src/b.ts')
+    expect(toolProgressLine(row('x', 'command.completed', { command: 'false', status: 'failed' }))).toBe('❌ 💻 false')
+    expect(toolProgressLine(row('t', 'tool.completed', { name: 'WebFetch' }))).toBe('🔧 WebFetch')
   })
   it('presents assistant text after a remote tool below that tool, not above it', async () => {
     const f = await fixture([])
@@ -442,6 +454,7 @@ describe('Bridge native turn', () => {
     for await (const chunk of adapter.stream({ sessionId: agent.id, provider: 'agent-bridge', model: 'remote',
       messages: [{ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'go' }] }] } as GenerateOptions)) chunks.push(chunk)
     expect(chunks.filter(c => c.type === 'text-delta')).toEqual([{ type: 'text-delta', index: 0, text: 'checking' }])
+    expect(chunks.filter(c => c.type === 'reasoning-delta').map(c => c.type === 'reasoning-delta' && c.text)).toEqual(['💻 pwd'])
     adapter.commitAcks(String(agent.id))
     const events = sessionEvents(nativeSession(agent))
     const toolAt = events.findIndex(e => e.type === 'tool/call')

@@ -12,6 +12,19 @@ import { relayPendingInteractions } from './approval-bridge.js'
 import { uploadPromptImages } from './attachments.js'
 
 export const AGENT_BRIDGE_PROVIDER = PROVIDER
+
+/** One recognisable line per remote tool: an icon for its kind, then what it touched. */
+export function toolProgressLine(row: JsonObject): string {
+  const payload = record(row['payload'])
+  const failed = payload['status'] === 'failed' ? '❌ ' : ''
+  const short = (text: string) => { const first = text.trim().split('\n')[0] ?? ''; return first.length > 160 ? first.slice(0, 159) + '…' : first }
+  if (row['type'] === 'command.completed') return failed + '💻 ' + short(str(payload['command'], 'command'))
+  if (row['type'] === 'file_change.completed') {
+    const paths = (Array.isArray(payload['changes']) ? payload['changes'] : []).map(change => str(record(change)['path'])).filter(Boolean)
+    return failed + '✏️ ' + (paths.length ? paths.join(', ') : str(payload['summary'], 'file change'))
+  }
+  return failed + '🔧 ' + short(str(payload['name'], str(payload['summary'], 'tool')))
+}
 interface PendingTurn {
   acknowledgements: JsonObject[]
   presentations: JsonObject[]
@@ -77,6 +90,11 @@ export class AgentBridgeLlmAdapter extends LlmAdapter {
       // batch instead of the live stream, so the final answer never sits above
       // the commands that produced it.
       let presentingInOrder = false
+      // Those cards only land when the turn closes, so a long remote turn would
+      // show nothing while it edits files. Each tool also gets a line in one live
+      // reasoning block, which the ordered cards then replace in detail.
+      let progressIndex = -1
+      let progressText = ''
       const ackBatches = this.pendingAcks.get(nativeId) ?? []
       ackBatches.push({ acknowledgements: ackRows, presentations: presentationRows })
       this.pendingAcks.set(nativeId, ackBatches)
@@ -104,6 +122,13 @@ export class AgentBridgeLlmAdapter extends LlmAdapter {
             if (['command.completed', 'file_change.completed', 'tool.completed'].includes(str(row['type']))) {
               presentingInOrder = true
               presentationRows.push(row)
+              if (progressIndex < 0) {
+                progressIndex = nextBlockIndex++
+                yield { type: 'block-start', index: progressIndex, blockType: 'reasoning' }
+              }
+              const line = (progressText ? '\n' : '') + toolProgressLine(row)
+              progressText += line
+              yield { type: 'reasoning-delta', index: progressIndex, text: line }
             }
             if (rendered && presentingInOrder) presentationRows.push(row)
             else if (rendered) {
@@ -136,6 +161,7 @@ export class AgentBridgeLlmAdapter extends LlmAdapter {
         }
         if (!finished) await delay(this.pollMs, undefined, { signal })
       }
+      if (progressIndex >= 0) yield { type: 'block-end', index: progressIndex, block: { type: 'reasoning', text: progressText } }
       yield { type: 'finish', reason: { kind: 'stop' }, replayState: { response: { actionId: str(receipt['actionId']), turnId } } }
     } finally {
       interactionAbort.abort()
