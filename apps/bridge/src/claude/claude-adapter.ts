@@ -298,6 +298,12 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       // Any still-open turn is terminal: failed if the stream errored, else completed
       // (e.g. process exit without a final result).
       if (session.activeTurnId) this.finishTurn(session, streamError ? "failed" : "completed", streamError);
+      // The subprocess is gone. Forget the session so the next turn revives it;
+      // kept, that turn would be pushed into a dead stdin and never finish.
+      if (!session.ended) {
+        session.ended = true;
+        if (this.sessions.get(session.sessionId) === session) this.sessions.delete(session.sessionId);
+      }
     }
   }
 

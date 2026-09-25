@@ -60,3 +60,15 @@ test('a Claude session created without a prompt is re-announced under its native
   const announced = events.filter(event => event.type === 'session.discovered').map(event => event.type === 'session.discovered' ? event.nativeSessionId : '');
   assert.deepEqual(announced, ['claude-public', 'native-uuid']);
 });
+
+test('a Claude session whose subprocess exits is forgotten so the next turn revives it', async () => {
+  const events: BridgeToControlMessage[] = [];
+  const adapter = new ClaudeCodeAdapter({command:'',allowedRoots:[]}, event => events.push(event));
+  const sessions = (adapter as unknown as { sessions: Map<string, unknown> }).sessions;
+  const seam = adapter as unknown as { consume(session: unknown): Promise<void> };
+  const session = {sessionId:'claude-public',turnSeq:0,logs:[],ended:false,query:(async function* () { throw new Error('Claude Code process exited with code 1'); })()};
+  sessions.set('claude-public', session);
+  await seam.consume(session);
+  assert.equal(sessions.has('claude-public'), false);
+  assert.equal(session.ended, true);
+});

@@ -254,11 +254,14 @@ export class AgentControlStore {
     this.transaction(() => {
       const exists = this.db.prepare("SELECT id FROM sessions WHERE id=?").get(state.sessionId);
       if (exists) {
-        this.db.prepare(`UPDATE sessions SET machine_id=?,agent_type=?,project_name=?,project_path=?,native_session_id=?,
+        // A worker that has not learned the agent's own id reports the public id
+        // instead; never let that overwrite a native id already on record.
+        this.db.prepare(`UPDATE sessions SET machine_id=?,agent_type=?,project_name=?,project_path=?,
+          native_session_id=CASE WHEN ?=id AND COALESCE(native_session_id,'')<>'' THEN native_session_id ELSE ? END,
           status=?,title=COALESCE(?,title),prompt_summary=COALESCE(?,prompt_summary),source=?,history_completeness=?,
           activity_status=?,active_turn_id=?,last_turn_status=COALESCE(?,last_turn_status),inventory_seen_at=?,
           updated_at=?,last_response_at=CASE WHEN last_response_at>? THEN ? ELSE last_response_at END WHERE id=?`).run(
-          machineId, state.agentType, state.projectName, state.projectPath, state.nativeSessionId,
+          machineId, state.agentType, state.projectName, state.projectPath, state.nativeSessionId, state.nativeSessionId,
           legacyStatus(state.activityStatus, state.lastTurnStatus), state.title ?? null, state.promptSummary ?? null,
           state.source, state.historyCompleteness, state.activityStatus, state.activeTurnId ?? null,
           state.lastTurnStatus ?? null, Date.now(), state.updatedAt, state.updatedAt, state.updatedAt, state.sessionId);

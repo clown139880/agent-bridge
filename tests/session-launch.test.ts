@@ -82,6 +82,16 @@ test('a re-announced Claude session corrects its native id instead of forking a 
   } finally { item.dispose(); }
 });
 
+test('an inventory that falls back to the public id keeps the native id already on record', async () => {
+  const item = fixture();
+  try {
+    const discovered = { type:'session.discovered' as const, sessionId:'claude-public',nativeSessionId:'native-uuid',agentType:'claude-code' as const,projectPath:'/work/agent-bridge',projectName:'agent-bridge',status:'waiting' as const,createdAt:Date.now() };
+    await item.internals.handleBridgeMessage('dev',discovered);
+    await item.internals.handleBridgeMessage('dev',{ type:'state.snapshot', complete:false, approvals:[], userInputs:[], sessions:[{ sessionId:'claude-public',nativeSessionId:'claude-public',agentType:'claude-code',projectPath:'/work/agent-bridge',projectName:'agent-bridge',activityStatus:'idle',createdAt:Date.now(),updatedAt:Date.now(),source:'app-server',historyCompleteness:'loaded-only' }] } as unknown as BridgeToControlMessage);
+    assert.equal(item.store.getSession('claude-public')?.nativeSessionId,'native-uuid');
+  } finally { item.dispose(); }
+});
+
 function fixture(): {
   control: ControlPlane;
   internals: ControlInternals;
