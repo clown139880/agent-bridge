@@ -294,8 +294,9 @@ export function migrateDatabase(db: DatabaseSync): void {
       db.prepare("INSERT INTO schema_migrations(version,applied_at) VALUES (8,?)").run(Date.now());
       db.exec("COMMIT");
     } catch (error) { try { db.exec("ROLLBACK"); } catch {} throw error; }
-    // Return the pages of every dropped copy to the filesystem once.
-    db.exec("VACUUM");
+    // The dropped copies leave free pages behind; SQLite reuses them for new
+    // events, so we deliberately skip VACUUM here — rewriting a multi-gigabyte
+    // file in the startup path stalls the control plane past its service timeout.
   }
 }
 
@@ -318,7 +319,13 @@ function migrateToSingleEventStore(db: DatabaseSync): void {
       SELECT id,session_id,event_id,worker_run_id,type,turn_id,item_id,created_at,
         COALESCE(CASE WHEN json_valid(payload) THEN json_extract(payload,'$.payload') END,'{}')
       FROM events WHERE event_schema=2 AND event_id IS NOT NULL;
+    CREATE INDEX events_v8_lookup ON events_v8(session_id, event_id);
   `);
+  // The (session_id, event_id) lookup above is required before the conversation
+  // recovery below: its per-message NOT EXISTS check would otherwise full-scan
+  // events_v8 once per row (O(messages * events)), which never finishes on a real
+  // database. The permanent indexes are created under their final names after the
+  // rename, so this one is dropped there.
   // Conversation memory outlived event retention for some bodies; those originals
   // become ordinary events again so a single table holds all history.
   if (db.prepare("SELECT 1 FROM sqlite_master WHERE name='conversation_messages'").get()) {
@@ -359,6 +366,7 @@ function migrateToSingleEventStore(db: DatabaseSync): void {
   db.exec(`
     DROP TABLE events;
     ALTER TABLE events_v8 RENAME TO events;
+    DROP INDEX events_v8_lookup;
     CREATE UNIQUE INDEX events_upstream_idx ON events(session_id, event_id);
     CREATE INDEX events_session_id_idx ON events(session_id, id);
     DROP TABLE IF EXISTS conversation_messages_fts;
