@@ -14,9 +14,11 @@ export interface ProviderModel {
 }
 
 const ENDPOINTS: ProviderEndpoint[] = ['openai', 'openai-response', 'anthropic']
-// The relay also lists image, video, ASR and embedding rows. They advertise no
-// chat wire, and offering them as a coding-agent model would just fail the turn.
-const NON_CHAT = /(^|-)(asr|embedding|rerank|tts|whisper)(-|$)/i
+// The relay also lists image, video, ASR and embedding rows. Image and video
+// rows advertise no chat wire; ASR and embedding rows claim the plain `openai`
+// wire, so only their name gives them away. Offering any of them as a
+// coding-agent model would just fail the turn.
+const NON_CHAT = /(^|[-_])(asr|embeddings?|rerank|tts|whisper|image|video)([-_]|$)/i
 
 function record(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}

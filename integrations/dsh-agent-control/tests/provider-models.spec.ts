@@ -125,3 +125,27 @@ describe('ProviderModelCatalog', () => {
     expect((await catalog.models()).map(model => model.id)).toEqual(['a'])
   })
 })
+
+describe('relay row filter', () => {
+  it('keeps chat models and drops image, video, ASR and embedding rows', async () => {
+    const chat = ['openai', 'openai-response', 'openai-response-compact', 'anthropic', 'gemini']
+    const data = [
+      { id: 'claude-opus-5', supported_endpoint_types: chat },
+      { id: 'deepseek-v4-flash-vision-exp', supported_endpoint_types: chat },
+      { id: 'image2', supported_endpoint_types: ['image-generation'] },
+      { id: 'seedance_2_5', supported_endpoint_types: ['openai-video'] },
+      // These claim the plain chat wire; only the name shows what they are.
+      { id: 'qwen3-asr', supported_endpoint_types: ['openai'] },
+      { id: 'meeting-asr', supported_endpoint_types: ['openai'] },
+      { id: 'qwen3-embedding', supported_endpoint_types: ['openai'] },
+      // A relay that declares nothing is filtered by name alone.
+      { id: 'qwen_image' },
+      { id: 'z_image_turbo' },
+    ]
+    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(Response.json({ data }))
+    try {
+      const catalog = new ProviderModelCatalog(10_000, () => 0, async () => [{ key: 'relay', displayName: 'Relay', baseURL: 'https://relay.test/v1' }])
+      expect((await catalog.models()).map(model => model.id)).toEqual(['claude-opus-5', 'deepseek-v4-flash-vision-exp'])
+    } finally { fetch.mockRestore() }
+  })
+})

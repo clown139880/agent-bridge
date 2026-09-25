@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { BRIDGE_PROVIDER, BridgeModelDirectory, NativeModels, installBridgeModelDirectories, modelsForWorker } from '../src/client/bridge-model-directory.js'
+import { BRIDGE_PROVIDER, BridgeModelDirectory, NativeModels, REMOTE_MODEL, groupIdOf, groupModels, installBridgeModelDirectories, modelsForWorker } from '../src/client/bridge-model-directory.js'
 import type { NativeCatalog, NativeEntry } from '../src/client/native-catalog.js'
 
 const nativeId = 'agent-bridge-session-1'
@@ -9,9 +9,10 @@ const entry: NativeEntry = {
 }
 const claudeEntry: NativeEntry = { ...entry, workerId: 'claude@hal', model: 'claude-opus-5', worker: 'Claude @ HAL' }
 
-function catalog(row: NativeEntry | undefined = entry): NativeCatalog {
+function catalog(row: NativeEntry | undefined = entry, others: NativeEntry[] = []): NativeCatalog {
   return {
     entry: vi.fn(() => row),
+    snapshot: vi.fn(() => [...(row ? [row] : []), ...others]),
     refresh: vi.fn(async () => {}),
     subscribe: vi.fn(() => () => {}),
   } as unknown as NativeCatalog
@@ -79,23 +80,51 @@ describe('modelsForWorker', () => {
 })
 
 describe('BridgeModelDirectory', () => {
-  it('offers the routable relay models and sends an agent-bridge selection', async () => {
+  it('groups the routable relay models by family behind a Remote auto choice', async () => {
     const selectModel = vi.fn(async () => ({ ok: true }))
     const directory = new BridgeModelDirectory(nativeId, catalog(claudeEntry), models().source, selectModel)
 
     const state = await directory.load()
-    expect(state.groups[0]?.models.map(model => model.id)).toEqual(['gpt-5.6-sol', 'claude-opus-5', 'deepseek-v4-pro', 'legacy-chat'])
-    expect(state.current).toEqual({ provider: BRIDGE_PROVIDER, model: 'claude-opus-5' })
+    expect(state.groups.map(group => [group.name, group.models.map(model => model.id)])).toEqual([
+      ['自动', [REMOTE_MODEL]], ['Claude', ['claude-opus-5']], ['OpenAI', ['gpt-5.6-sol']], ['DeepSeek', ['deepseek-v4-pro']], ['其他', ['legacy-chat']],
+    ])
+    expect(state.current).toEqual({ provider: groupIdOf('claude-opus-5'), model: 'claude-opus-5' })
+    expect(selectModel).not.toHaveBeenCalled()
 
-    await directory.select({ provider: BRIDGE_PROVIDER, model: 'deepseek-v4-pro' })
+    await directory.select({ provider: groupIdOf('deepseek-v4-pro'), model: 'deepseek-v4-pro' })
     expect(selectModel).toHaveBeenCalledWith({ sessionId: nativeId, provider: BRIDGE_PROVIDER, model: 'deepseek-v4-pro' })
-    expect(directory.store.getSnapshot().current?.model).toBe('deepseek-v4-pro')
+    expect(directory.store.getSnapshot().current).toEqual({ provider: groupIdOf('deepseek-v4-pro'), model: 'deepseek-v4-pro' })
   })
 
-  it('falls back to the first routable model when the bound one is not offered', async () => {
+  it('orders a family newest-looking first', () => {
+    const groups = groupModels([{ id: 'claude-opus-4-8', name: 'a' }, { id: 'claude-opus-5-5', name: 'b' }, { id: 'claude-opus-5', name: 'c' }])
+    expect(groups[1]?.models.map(model => model.id)).toEqual(['claude-opus-5-5', 'claude-opus-5', 'claude-opus-4-8'])
+  })
+
+  it('starts a new session on the most recently used model and applies it for real', async () => {
+    const fresh: NativeEntry = { ...claudeEntry, model: undefined as never }
+    const older: NativeEntry = { ...claudeEntry, nativeId: 'agent-bridge-old', model: 'claude-opus-5', lastUsedAt: 10 }
+    const newer: NativeEntry = { ...claudeEntry, nativeId: 'agent-bridge-new', model: 'deepseek-v4-pro', lastUsedAt: 20 }
+    const codex: NativeEntry = { ...entry, nativeId: 'agent-bridge-codex', model: 'gpt-5.6-sol', lastUsedAt: 30 }
+    const selectModel = vi.fn(async () => ({ ok: true }))
+    const directory = new BridgeModelDirectory(nativeId, catalog(fresh, [older, newer, codex]), models().source, selectModel)
+
+    expect((await directory.load()).current?.model).toBe('deepseek-v4-pro')
+    expect(selectModel).toHaveBeenCalledWith({ sessionId: nativeId, provider: BRIDGE_PROVIDER, model: 'deepseek-v4-pro' })
+  })
+
+  it('shows Remote auto on a new session with no usable history instead of the first row', async () => {
+    const fresh: NativeEntry = { ...claudeEntry, model: undefined as never }
+    const selectModel = vi.fn(async () => ({ ok: true }))
+    const directory = new BridgeModelDirectory(nativeId, catalog(fresh), models().source, selectModel)
+    expect((await directory.load()).current).toEqual({ provider: groupIdOf(REMOTE_MODEL), model: REMOTE_MODEL })
+    expect(selectModel).not.toHaveBeenCalled()
+  })
+
+  it('shows Remote auto when the bound model is no longer offered', async () => {
     const stale: NativeEntry = { ...claudeEntry, model: 'openai-only' }
     const directory = new BridgeModelDirectory(nativeId, catalog(stale), models().source, vi.fn())
-    expect((await directory.load()).current?.model).toBe('gpt-5.6-sol')
+    expect((await directory.load()).current?.model).toBe(REMOTE_MODEL)
   })
 
   it('rejects models the bound worker cannot route', async () => {
@@ -138,6 +167,6 @@ describe('BridgeModelDirectory rendering', () => {
     await expect(directory.load()).rejects.toThrow('host offline')
     const state = directory.store.getSnapshot()
     expect(state.status).toBe('error')
-    expect(state.groups[0]?.models.length).toBe(4)
+    expect(state.groups.flatMap(group => group.models).length).toBe(5)
   })
 })
