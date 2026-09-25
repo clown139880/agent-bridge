@@ -52,6 +52,36 @@ it('uses projected recency for updated mode without overriding manual order', ()
   expect(render({ useStore: (selector: any) => selector(state) }).props.children).toBe('old,new')
 })
 
+it('does not loop DSH order sync when a workspace lists a session DSH has not loaded', async () => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
+  // A just-deleted Bridge session lingers in the workspace row but is gone from the session list.
+  const snapshot = { items: [{ workspaceId: 'repo', path: '/repo', title: 'repo', sessionIds: ['live', 'agent-bridge-gone'], createdAt: '', updatedAt: '' }], archivedSessionIds: [] }
+  const useWorkspaces = (selector: any) => selector(snapshot)
+  const list = { byId: { live: { updatedAt: 1 } } as Record<string, { updatedAt: number }> }
+  const useSessions = (selector: any) => selector(list)
+  let state = { orderBy: 'updated', sessionOrderByAccount: {} as Record<string, string[]> }
+  const listeners = new Set<() => void>()
+  const writes = { count: 0 }
+  const useStore = (selector: any) => React.useSyncExternalStore(l => { listeners.add(l); return () => listeners.delete(l) }, () => state) && selector(state)
+  const sync = (key: string, order: string[]) => { writes.count++; state = { ...state, sessionOrderByAccount: { ...state.sessionOrderByAccount, [key]: order } }; for (const l of listeners) l() }
+  // Mirrors DSH SessionTree: account only loaded ids and sync when the stored order differs.
+  const Browser = ({ useStore, useWorkspaces, useSessions }: any) => {
+    const workspaces = useWorkspaces((s: any) => s.items); const byId = useSessions((s: any) => s.byId)
+    const stored = useStore((s: any) => s.sessionOrderByAccount)
+    React.useEffect(() => { for (const w of workspaces) {
+      const ids = w.sessionIds.filter((id: string) => byId[id] !== undefined)
+      const previous = stored[w.workspaceId]
+      if (!previous || previous.length !== ids.length || previous.some((id: string, i: number) => id !== ids[i])) sync(w.workspaceId, ids)
+    } }, [workspaces, byId, stored])
+    return null
+  }
+  const Wrapped = extendSessionMenu(Browser, useWorkspaces)
+  const root = createRoot(document.createElement('div'))
+  await act(async () => { root.render(<Wrapped useStore={useStore} useSessions={useSessions} />) })
+  expect(writes.count).toBeLessThanOrEqual(1)
+  root.unmount()
+})
+
 it('overrides the sidebar workspace hook and refreshes an existing subscriber', async () => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
   const rows = ['codex', 'claude'].map(id => ({ workspaceId: id, path: '/presentation/' + id, title: `agent-bridge · ${id}`, sessionIds: [id], createdAt: '2026-01-01', updatedAt: '2026-01-01' }))

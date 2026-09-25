@@ -27,6 +27,9 @@ export function mergeWorkspaces(rows: readonly WorkspaceRow[], catalog: readonly
     return sessionIds.length ? [{ ...row, sessionIds }] : []
   })
   const entries = new Map(catalog.map(entry => [entry.nativeId, entry]))
+  // A Bridge id the loaded catalog no longer lists was deleted; its host row can
+  // linger until archival lands and must not resurface as a local DSH session.
+  const isBridgeId = (id: string) => id.startsWith('agent-bridge-') && !entries.has(id)
   const groups = new Map<string, NativeEntry[]>()
   for (const entry of catalog) { const values = groups.get(entry.groupId); if (values) values.push(entry); else groups.set(entry.groupId, [entry]) }
   const consumed = new Set<WorkspaceRow>()
@@ -44,7 +47,7 @@ export function mergeWorkspaces(rows: readonly WorkspaceRow[], catalog: readonly
     if (!owner) continue
     for (const row of related) consumed.add(row)
     const bridgeIds = members.map(entry => entry.nativeId)
-    const nativeIds = [...new Set(localRows.flatMap(row => row.sessionIds).filter(id => !entries.has(id)))]
+    const nativeIds = [...new Set(localRows.flatMap(row => row.sessionIds).filter(id => !entries.has(id) && !isBridgeId(id)))]
       .sort((left, right) => updatedAt(right) - updatedAt(left))
     // The server already owns Bridge ordering. Merge local DSH rows into that
     // order by activity without independently re-sorting Bridge members.
@@ -60,7 +63,9 @@ export function mergeWorkspaces(rows: readonly WorkspaceRow[], catalog: readonly
     result.push(merged)
     activity.set(merged, Math.max(members[0]!.groupUpdatedAt, ...nativeIds.map(updatedAt)))
   }
-  for (const row of rows.filter(row => !consumed.has(row) && !row.sessionIds.some(id => entries.has(id)))) {
+  for (const source of rows.filter(row => !consumed.has(row) && !row.sessionIds.some(id => entries.has(id)))) {
+    const row = source.sessionIds.some(isBridgeId) ? { ...source, sessionIds: source.sessionIds.filter(id => !isBridgeId(id)) } : source
+    if (!row.sessionIds.length && source.sessionIds.length) continue
     const ordered = sessions.byId ? { ...row, sessionIds: [...row.sessionIds].sort((left, right) => updatedAt(right) - updatedAt(left)) } : row
     result.push(ordered)
     const latest = Math.max(...row.sessionIds.map(updatedAt))
@@ -106,7 +111,8 @@ export class NativeCatalog {
   async remove(entry: Pick<NativeEntry, 'nativeId'>): Promise<void> {
     const result = await this.rpc('delete_native', { nativeId: entry.nativeId }) as { deleted?: boolean }
     if (!result.deleted) throw new Error('尚未确认删除成功')
-    if (this.sessions.list.getSnapshot().current === entry.nativeId) this.sessions.clear()
+    // No sessions.clear(): it persists DSH's explicit "no session selected" mode.
+    // The deletion archives the row, and DSH clears an archived current itself.
     this.entries = this.entries.filter(row => row.nativeId !== entry.nativeId); this.emit()
     await this.sessions.refresh()
   }

@@ -6,6 +6,7 @@ import type { WorkspaceHook } from './native-catalog.js'
 type Props = Record<string, any>
 type Entry = { component: unknown }
 type ViewState = { orderBy?: string; sessionOrderByAccount?: Record<string, string[]> }
+type SessionList = { byId?: Record<string, unknown> }
 export interface MenuSlots { entries(name: string): readonly Entry[]; subscribe(name: string, listener: () => void): () => void }
 
 /** DSH 0.1.3 compatibility seam: retain the original sidebar, locale, store and
@@ -50,9 +51,15 @@ export function extendSessionMenu(Component: ComponentType<any>, useWorkspaces?:
   return (props: Props) => {
     const workspaces = useWorkspaces?.(snapshot => snapshot.items)
     const useStore = props['useStore'] as ((selector: (state: ViewState) => unknown) => unknown) | undefined
+    const useSessions = props['useSessions'] as ((selector: (state: SessionList) => unknown) => unknown) | undefined
+    const byId = useSessions?.(state => state.byId) as SessionList['byId'] | undefined
     const projectedUseStore = workspaces && useStore ? (selector: (state: ViewState) => unknown) => useStore(state => {
       if (state.orderBy !== 'updated') return selector(state)
-      const projected = Object.fromEntries(workspaces.map(workspace => [workspace.workspaceId, [...workspace.sessionIds]]))
+      // DSH's order-sync effect only accounts for ids it has loaded. Projecting any
+      // other id (e.g. a just-deleted Bridge session) makes every sync look stale,
+      // so it rewrites the store forever: React #185 and a blank sidebar.
+      const projected = Object.fromEntries(workspaces.map(workspace => [workspace.workspaceId,
+        byId ? workspace.sessionIds.filter(id => byId[id] !== undefined) : [...workspace.sessionIds]]))
       return selector({ ...state, sessionOrderByAccount: { ...state.sessionOrderByAccount, ...projected } })
     }) : useStore
     return visit((Component as (props: Props) => ReactNode)(useWorkspaces ? { ...props, useWorkspaces, ...(projectedUseStore ? { useStore: projectedUseStore } : {}) } : props))

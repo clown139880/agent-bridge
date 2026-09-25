@@ -13,6 +13,13 @@ describe('native catalog', () => {
       { ...mixed, sessionIds: ['session-native'] },
     ])
   })
+  it('drops Bridge ids the loaded catalog no longer lists instead of treating them as local sessions', () => {
+    const local = { ...workspace('local'), path: '/work/agent-bridge', sessionIds: ['session-native', 'agent-bridge-deleted'] }
+    const orphan = { ...workspace('orphan'), sessionIds: ['agent-bridge-deleted-too'] }
+    const current = { ...entry('agent-bridge-live'), executionLocations: [{ ...entry('x').executionLocations[0]!, local: true }] }
+    const merged = mergeWorkspaces([local, orphan], [current])
+    expect(merged.flatMap(row => row.sessionIds).sort()).toEqual(['agent-bridge-live', 'session-native'])
+  })
   it('merges legacy presentation groups containing native blank sessions and stale ids', () => {
     const rows = ['codex','claude'].map(id => ({...workspace(id),path:'C:\\Users\\test\\.dsh\\agent-bridge\\workspaces\\'+id,sessionIds:['native-blank-'+id,id,'stale-'+id]}))
     const merged = mergeWorkspaces(rows,[entry('codex'),entry('claude')])
