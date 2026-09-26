@@ -253,3 +253,29 @@ test("version 8 folds every retained copy into one event row per upstream event"
   assert.equal((store.db.prepare("SELECT COUNT(*) AS n FROM event_search WHERE event_search MATCH 'cold prompt'").get() as {n:number}).n,1);
   store.db.close();rmSync(path,{force:true});
 });
+
+test("tool progress touches a session's updated_at without counting as a reply", () => {
+  const path = join(tmpdir(), `agent-bridge-${randomUUID()}.sqlite`);
+  const store = new Store(path);
+  store.upsertMachine({ id: "dev", name: "dev", platform: "linux", hostname: "dev", capabilities: [] });
+  store.createSession({
+    id: "thread-1", machineId: "dev", agentType: "claude-code", projectName: "project",
+    projectPath: "/tmp/project", matrixRoomId: "", matrixThreadId: null,
+    nativeSessionId: "thread-1", status: "working", createdAt: 1, updatedAt: 1,
+  });
+  const control = new AgentControlStore(store.db, { actionsMs: 1_000, attachmentsMs: 1_000 });
+  const row = () => store.db.prepare("SELECT updated_at,last_response_at FROM sessions WHERE id='thread-1'").get() as
+    { updated_at: number; last_response_at: number | null };
+  control.appendSessionEvent({ type: "session.event", eventType: "command.completed", eventId: "cmd", sessionId: "thread-1",
+    turnId: "turn-1", timestamp: 5, payload: { command: "ls", status: "completed" } });
+  assert.deepEqual({ ...row() }, { updated_at: 5, last_response_at: null });
+  control.appendSessionEvent({ type: "session.event", eventType: "file_change.completed", eventId: "edit", sessionId: "thread-1",
+    turnId: "turn-1", timestamp: 7, payload: { changes: [], status: "completed" } });
+  assert.equal(row().updated_at, 7);
+  // A late (replayed) tool event never moves updated_at backwards.
+  control.appendSessionEvent({ type: "session.event", eventType: "command.completed", eventId: "old", sessionId: "thread-1",
+    turnId: "turn-0", timestamp: 3, payload: { command: "pwd", status: "completed" } });
+  assert.equal(row().updated_at, 7);
+  store.db.close();
+  rmSync(path, { force: true });
+});

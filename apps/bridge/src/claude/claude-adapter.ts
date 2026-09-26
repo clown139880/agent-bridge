@@ -35,6 +35,9 @@ const FILE_CHANGE_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]
  *  Deliberately excludes Bash (can mutate) and Task (spawns an arbitrary subagent). */
 const READONLY_TOOLS = new Set(["Read", "Grep", "Glob", "LS", "NotebookRead", "WebSearch", "WebFetch", "TodoWrite"]);
 const LOG_LIMIT = 2_000;
+/** A success result with no summary this soon after its turn started is the stray empty
+ *  result a revived Claude emits before working on the prompt; it must not close the turn. */
+const STRAY_RESULT_WINDOW_MS = 2_000;
 const CLAUDE_SESSION_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 interface PendingApproval {
@@ -79,6 +82,7 @@ interface ClaudeSession {
   query?: Query;
   abort: AbortController;
   activeTurnId?: string;
+  turnStartedAt?: number;
   turnSeq: number;
   /** First-turn prompt was pushed before init; emit its turn-start events once discovered. */
   pendingTurnStart: boolean;
@@ -380,6 +384,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
   private handleAssistant(session: ClaudeSession, message: SDKAssistantMessage): void {
     session.updatedAt = Date.now();
     session.lastMessageAt = session.updatedAt;
+    this.ensureTurn(session);
     for (const block of message.message.content ?? []) {
       if (block.type === "text" && block.text) {
         this.appendLog(session, block.text);
@@ -398,6 +403,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     session.lastMessageAt = Date.now();
     const content = message.message.content;
     if (!Array.isArray(content)) return;
+    if (content.some((block) => block.type === "tool_result")) this.ensureTurn(session);
     for (const block of content) {
       if (block.type !== "tool_result" || typeof block.tool_use_id !== "string") continue;
       const tool = session.toolUses.get(block.tool_use_id);
@@ -436,6 +442,11 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     const failed = message.is_error || message.subtype !== "success";
     // On failure, fall back to the result subtype so DSH shows a reason instead of a bare "Turn failed".
     const summary = failed ? (message.result?.trim() || message.subtype || "error") : message.result;
+    if (!failed && !summary?.trim() && session.turnStartedAt !== undefined
+      && Date.now() - session.turnStartedAt < STRAY_RESULT_WINDOW_MS) {
+      log.info({ sessionId: session.sessionId, turnId: session.activeTurnId }, "ignoring empty Claude result at turn start");
+      return;
+    }
     if (failed) log.warn({ sessionId: session.sessionId, subtype: message.subtype, result: message.result }, "Claude turn failed");
     this.finishTurn(session, failed ? "failed" : "completed", summary);
   }
@@ -452,10 +463,23 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     session.input.push(userMessage(text, images));
   }
 
+  /**
+   * Claude is streaming work outside any turn (its turn was closed early, e.g. by a
+   * stray result). Open an autonomous turn so the events carry a turn id DSH follows
+   * live and the session is not reaped as idle. Stragglers after an interrupt are
+   * not new work.
+   */
+  private ensureTurn(session: ClaudeSession): void {
+    if (session.activeTurnId || !session.discovered || session.lastTurnStatus === "interrupted") return;
+    log.info({ sessionId: session.sessionId }, "Claude is working outside a turn; opening an autonomous turn");
+    this.startTurnEvents(session);
+  }
+
   /** Assign a turn id and emit agent.started + turn.started. */
   private startTurnEvents(session: ClaudeSession): string {
     const turnId = `${session.sessionId}:t${++session.turnSeq}:${randomUUID()}`;
     session.activeTurnId = turnId;
+    session.turnStartedAt = Date.now();
     session.settledAt = undefined;
     this.appendLog(session, "Turn started");
     this.emit({ type: "agent.started", sessionId: session.sessionId, timestamp: Date.now(), summary: "New turn started" });
@@ -466,6 +490,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
   private finishTurn(session: ClaudeSession, status: "completed" | "failed" | "interrupted", summary?: string): void {
     const turnId = session.activeTurnId;
     session.activeTurnId = undefined;
+    session.turnStartedAt = undefined;
     session.settledAt = Date.now();
     session.lastTurnStatus = status;
     if (!turnId) return;

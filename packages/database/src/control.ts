@@ -309,6 +309,11 @@ export class AgentControlStore {
       if (isReply && this.db.prepare(`UPDATE sessions SET last_response_at=?,updated_at=?
         WHERE id=? AND (last_response_at IS NULL OR last_response_at<?)`)
         .run(message.timestamp, message.timestamp, message.sessionId, message.timestamp).changes) markChanged(this.db, "session", message.sessionId);
+      // Tool progress is activity too: without this the updatedAfter background sync
+      // cannot see a turn's tool calls until its next reply.
+      const isToolProgress = message.eventType === "command.completed" || message.eventType === "file_change.completed";
+      if (isToolProgress && this.db.prepare("UPDATE sessions SET updated_at=? WHERE id=? AND updated_at<?")
+        .run(message.timestamp, message.sessionId, message.timestamp).changes) markChanged(this.db, "session", message.sessionId);
       signalStream();
       return id;
     });
