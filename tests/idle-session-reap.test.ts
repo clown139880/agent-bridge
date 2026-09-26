@@ -111,6 +111,7 @@ test("claude: reap closes idle sessions but spares active / waiting ones", () =>
   const pendingApprovals = new Map([["a1", { answered: false, resolve: () => {} }]]);
   make("waiting-approval", { pendingApprovals });
   make("fresh", { settledAt: Date.now() }); // inside the grace window
+  make("recent-message", { lastMessageAt: Date.now() }); // settled long ago, but Claude is still streaming
 
   const reaped = adapter.reapIdleSessions(1_000);
 
@@ -118,7 +119,7 @@ test("claude: reap closes idle sessions but spares active / waiting ones", () =>
   assert.ok(idle.aborted, "reaped session must be aborted");
   assert.ok(idle.inputEnded, "reaped session input stream must be ended");
   assert.ok(!sessions.has("idle"));
-  assert.ok(sessions.has("active") && sessions.has("waiting-input") && sessions.has("waiting-approval") && sessions.has("fresh"));
+  assert.ok(sessions.has("active") && sessions.has("waiting-input") && sessions.has("waiting-approval") && sessions.has("fresh") && sessions.has("recent-message"));
 
   adapter.stop();
 });
@@ -129,5 +130,27 @@ test("claude: a non-positive idle timeout disables reaping", () => {
   sessions.set("idle", { sessionId: "idle", ended: false, settledAt: 0, pendingApprovals: new Map(), abort: { abort: () => {} }, input: { end: () => {} } });
   assert.deepEqual(adapter.reapIdleSessions(0), []);
   assert.ok(sessions.has("idle"));
+  adapter.stop();
+});
+
+test("claude: a streamed message restarts the idle clock of a settled session", () => {
+  const adapter = new ClaudeCodeAdapter({ command: "", claudeHome: tmpdir(), allowedRoots: [tmpdir()], scanExisting: false }, () => {});
+  const internals = adapter as unknown as {
+    sessions: Map<string, Record<string, unknown>>;
+    handleMessage(session: unknown, message: unknown): void;
+  };
+  const session: Record<string, unknown> = {
+    sessionId: "s", ended: false, settledAt: Date.now() - 10_000, pendingApprovals: new Map(),
+    toolUses: new Map(), logs: [], abort: { abort: () => {} }, input: { end: () => {} },
+  };
+  internals.sessions.set("s", session);
+  // Tool result arriving after an approval was answered: the process is working.
+  internals.handleMessage(session, { type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "x", content: "ok" }] } });
+  assert.deepEqual(adapter.reapIdleSessions(1_000), []);
+  session.lastMessageAt = Date.now() - 10_000;
+  internals.handleMessage(session, { type: "assistant", message: { content: [] } });
+  assert.deepEqual(adapter.reapIdleSessions(1_000), []);
+  session.lastMessageAt = Date.now() - 10_000;
+  assert.deepEqual(adapter.reapIdleSessions(1_000), ["s"]);
   adapter.stop();
 });

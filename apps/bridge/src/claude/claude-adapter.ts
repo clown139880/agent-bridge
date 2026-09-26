@@ -70,6 +70,8 @@ interface ClaudeSession {
   updatedAt: number;
   /** Set to `Date.now()` whenever the session has no active turn; cleared while a turn runs. Drives idle reaping. */
   settledAt?: number;
+  /** Last time Claude streamed an assistant or user (tool result) message. Idle reaping measures from the later of this and settledAt. */
+  lastMessageAt?: number;
   discovered: boolean;
   input: PushableAsyncIterable<SDKUserMessage>;
   /** Model in force for the next turn; undefined means the workspace default. */
@@ -377,6 +379,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
 
   private handleAssistant(session: ClaudeSession, message: SDKAssistantMessage): void {
     session.updatedAt = Date.now();
+    session.lastMessageAt = session.updatedAt;
     for (const block of message.message.content ?? []) {
       if (block.type === "text" && block.text) {
         this.appendLog(session, block.text);
@@ -392,6 +395,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
   }
 
   private handleUser(session: ClaudeSession, message: SDKUserMessage): void {
+    session.lastMessageAt = Date.now();
     const content = message.message.content;
     if (!Array.isArray(content)) return;
     for (const block of content) {
@@ -636,6 +640,10 @@ export class ClaudeCodeAdapter implements AgentAdapter {
    * stops consuming RSS. Claude's transcript survives, so a later turn revives
    * the session via resumeSession using its native uuid. A non-positive `idleMs`
    * disables reaping (keeps every process resident).
+   *
+   * Idle time counts from the later of settledAt and the last streamed message:
+   * a process still working after its turn was (wrongly) closed keeps streaming,
+   * and must not be killed mid-task.
    */
   reapIdleSessions(idleMs: number): string[] {
     if (idleMs <= 0) return [];
@@ -644,8 +652,9 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     for (const [id, session] of this.sessions) {
       if (session.ended || session.activeTurnId || session.pendingUserInput) continue;
       if ([...session.pendingApprovals.values()].some((a) => !a.answered)) continue;
-      if (session.settledAt === undefined || now - session.settledAt < idleMs) continue;
-      const idleFor = now - session.settledAt;
+      if (session.settledAt === undefined) continue;
+      const idleFor = now - Math.max(session.settledAt, session.lastMessageAt ?? 0);
+      if (idleFor < idleMs) continue;
       session.ended = true;
       session.abort.abort();
       try {
