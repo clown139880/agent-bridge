@@ -35,6 +35,7 @@ const FILE_CHANGE_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]
  *  Deliberately excludes Bash (can mutate) and Task (spawns an arbitrary subagent). */
 const READONLY_TOOLS = new Set(["Read", "Grep", "Glob", "LS", "NotebookRead", "WebSearch", "WebFetch", "TodoWrite"]);
 const LOG_LIMIT = 2_000;
+const CLAUDE_SESSION_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 interface PendingApproval {
   approvalId: string;
@@ -188,10 +189,16 @@ export class ClaudeCodeAdapter implements AgentAdapter {
    * while keeping the stable bridge-assigned public id, so the control-plane and UI
    * keep tracking the same session. No first prompt — the caller submits the turn
    * next, reusing the same path as a no-input session create.
+   *
+   * Only a Claude uuid names a resumable transcript. A session that never ran a turn
+   * was recorded under its public id (`claude-<uuid>`); resuming that fails the first
+   * turn with "No conversation found", so it starts fresh instead and init
+   * re-announces the real uuid.
    */
   async resumeSession(sessionId: string, projectPath: string, nativeSessionId?: string, model?: string): Promise<void> {
     if (this.sessions.has(sessionId)) return;
-    await this.launch({ publicSessionId: sessionId, requestId: sessionId, projectPath, resumeNativeId: nativeSessionId, model });
+    const resumeNativeId = nativeSessionId && CLAUDE_SESSION_UUID.test(nativeSessionId) ? nativeSessionId : undefined;
+    await this.launch({ publicSessionId: sessionId, requestId: sessionId, projectPath, resumeNativeId, model });
   }
 
   private async launch(params: { publicSessionId: string; requestId: string; projectPath: string; prompt?: string; resumeNativeId?: string; model?: string; attachments?: AttachmentRef[] }): Promise<string> {

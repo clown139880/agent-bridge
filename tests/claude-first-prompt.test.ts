@@ -72,3 +72,27 @@ test('a Claude session whose subprocess exits is forgotten so the next turn revi
   assert.equal(sessions.has('claude-public'), false);
   assert.equal(session.ended, true);
 });
+
+test('reviving a Claude session that never ran a turn starts fresh instead of resuming its public id', async () => {
+  const events: BridgeToControlMessage[] = [];
+  const adapter = new ClaudeCodeAdapter({command:'',allowedRoots:[]}, event => events.push(event));
+  const launches: Array<{ publicSessionId: string; resumeNativeId?: string }> = [];
+  const seam = adapter as unknown as {
+    launch(params: { publicSessionId: string; resumeNativeId?: string }): Promise<string>;
+    emitDiscovered(session: unknown): void;
+    handleSystem(session: unknown, message: unknown): void;
+  };
+  seam.launch = async params => { launches.push(params); return params.publicSessionId; };
+  const publicId = 'claude-0b7e3f52-5a1c-4d8e-9f3a-2c6b1d4e8a90';
+  const nativeId = '6f1d2c3b-4a5e-4f60-8b7c-9d0e1f2a3b4c';
+  // Created without a prompt, then reaped while idle: the control-plane only knows the public id.
+  await adapter.resumeSession(publicId, '/work', publicId);
+  await adapter.resumeSession('claude-other', '/work', nativeId);
+  assert.deepEqual(launches.map(launch => launch.resumeNativeId), [undefined, nativeId]);
+  // The fresh process announces itself, then its init corrects the stored native id.
+  const session: Record<string, unknown> = {sessionId:publicId,requestId:publicId,projectPath:'/work',discovered:false,turnSeq:0,logs:[]};
+  seam.emitDiscovered(session);
+  seam.handleSystem(session, {type:'system',subtype:'init',session_id:nativeId});
+  const announced = events.filter(event => event.type === 'session.discovered').map(event => event.type === 'session.discovered' ? event.nativeSessionId : '');
+  assert.deepEqual(announced, [publicId, nativeId]);
+});
