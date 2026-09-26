@@ -68,6 +68,7 @@ export class AgentBridgeImportTarget {
   private readonly abort = new AbortController()
   private timer: ReturnType<typeof setTimeout> | undefined
   private refreshJob: Promise<void> | undefined
+  private presetDisposer: (() => Promise<void>) | undefined
   private readonly versions = new Map<string, number>()
   private readonly placementOverrides = new Map<string, string>()
   private readonly presentationPlacements = new Map<string, string>()
@@ -381,16 +382,15 @@ export class AgentBridgeImportTarget {
   async ensurePreset(): Promise<void> {
     const presets = this.host.agentPresets
     if (!presets) throw new Error('DSH agentPresets is required for isolated Bridge sessions')
-    const root = presets.roots.find(root => root.trust === 'user')
-    if (!root) throw new Error('DSH has no writable preset root')
-    const folder = join(root.path, PROVIDER)
-    await mkdir(folder, { recursive: true })
-    const composition = join(folder, 'agent.cordis.yml')
-    try { await writeFile(composition, '[]\n', { flag: 'wx' }) }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error }
-    if ((await readFile(composition, 'utf8')).trim() !== '[]') throw new Error('Existing agent-bridge preset is not empty; refusing to compose local tools')
-    try { await writeFile(join(folder, 'preset.yml'), 'name: Agent Bridge\ndescription: Bridge remote sessions\n', { flag: 'wx' }) }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error }
+    // DSH 0.1.7-rc.2 replaced the on-disk preset roots (`presets.roots` + a
+    // written `agent.cordis.yml`) with programmatic registration. Reading the
+    // removed `roots` array was the source of the sync-time
+    // "Cannot read properties of undefined (reading 'find')" TypeError. Declare
+    // an isolated, empty (no local tools) preset in memory instead; the
+    // returned disposer is released on dispose so hot reload can re-register.
+    if (!this.presetDisposer) {
+      this.presetDisposer = await presets.register({ id: PROVIDER, name: 'Agent Bridge', description: 'Bridge remote sessions', plugins: [] })
+    }
     await presets.resolve(PROVIDER)
   }
   async restoreLocalDeletions(): Promise<void> {
@@ -420,6 +420,8 @@ export class AgentBridgeImportTarget {
     // Owned idle presentation agents only. Plugin reload must be refused while a native turn is running.
     await Promise.allSettled([...this.handles.values()].map(handle => handle.dispose()))
     this.handles.clear()
+    await this.presetDisposer?.().catch(() => {})
+    this.presetDisposer = undefined
   }
   refresh(): Promise<void> {
     if (!this.refreshJob) this.refreshJob = this.refreshAll().finally(() => { this.refreshJob = undefined })

@@ -82,17 +82,27 @@ describe('native history projection', () => {
     const ids = events.filter(event => event.type === 'tool/call').map(event => event.data['callId'])
     expect(new Set(ids).size).toBe(2)
   })
-  it('replays real message/command/file events through DSH Session, and appends no duplicate events', () => {
+  it('projects message/command/file events into a replayable seed with no duplicates', () => {
     const rows = [row('u', 'message.completed', { role: 'user', text: 'hello' }), row('a'),
       row('cmd', 'command.completed', { command: 'pwd', output: '/repo', exitCode: 0 }),
       row('files', 'file_change.completed', { changes: [{ path: 'a.ts' }] })]
     const seed = projectNativeEvents(rows, [])
-    const session = Session.create(SessionId('projection'), seed as never)
-    expect(session.snapshotEvents().filter(e => e.type === 'tool/call')).toHaveLength(2)
-    expect(projectNativeEvents(rows, sessionEvents(session as never))).toEqual([])
-    const next = projectNativeEvents([row('next')], sessionEvents(session as never))
-    next.forEach(event => appendSessionEvent(session as never, event))
-    expect(session.snapshotEvents().filter(e => e.type === 'assistant/message')).toHaveLength(4)
+    // The tool/result seed contract diverged across the plugin's DSH peer range:
+    // 0.1.2-rc.1 wanted role "user" with a single tool-result content block, while
+    // 0.1.7-rc.2 (which production runs) wants role "tool" with a top-level
+    // toolCallId and plain content blocks — the "tool-result" block type was
+    // dropped. The dev-pinned Session predates that change, so we replay the
+    // version-stable message/assistant events through a real Session for envelope
+    // validation and assert the tool/result shape against the production contract.
+    const messageSeed = projectNativeEvents([row('u', 'message.completed', { role: 'user', text: 'hello' }), row('a')], [])
+    const session = Session.create(SessionId('projection'), messageSeed as never)
+    expect(session.snapshotEvents().filter(e => e.type === 'assistant/message')).toHaveLength(1)
+    expect(seed.filter(e => e.type === 'tool/call')).toHaveLength(2)
+    expect(seed.find(e => e.type === 'tool/result')?.data['message']).toMatchObject(
+      { role: 'tool', toolCallId: 'bridge:cmd', source: { kind: 'tool', callId: 'bridge:cmd' }, content: [{ type: 'text', text: '/repo' }] })
+    expect(projectNativeEvents(rows, seed)).toEqual([])
+    const next = projectNativeEvents([row('next')], seed)
+    expect([...seed, ...next].filter(e => e.type === 'assistant/message')).toHaveLength(4)
     expect(projectStreamChunks(rows[2]!)).toEqual([])
   })
   it('deduplicates legacy history ids against canonical live App Server item ids', () => {
@@ -501,7 +511,7 @@ describe('Bridge native turn', () => {
     expect(events.filter(e => e.type === 'tool/call')).toHaveLength(1)
     expect(events.filter(e => e.type === 'tool/result')).toHaveLength(1)
     expect(events.find(e => e.type === 'tool/call')?.data).toMatchObject({ name: 'agent-bridge:command', arguments: JSON.stringify({ command: 'pwd' }) })
-    expect(events.find(e => e.type === 'tool/result')?.data['message']).toMatchObject({ content: [{ type: 'tool-result', content: [{ type: 'text', text: '/repo' }] }] })
+    expect(events.find(e => e.type === 'tool/result')?.data['message']).toMatchObject({ role: 'tool', toolCallId: 'bridge:cmd', source: { kind: 'tool', callId: 'bridge:cmd' }, content: [{ type: 'text', text: '/repo' }] })
     expect(events.some(e => e.type === ACK_EVENT && e.data['eventId'] === 'cmd')).toBe(true)
     expect(f.target.isPresenting(String(agent.id))).toBe(false)
     await f.target.dispose()

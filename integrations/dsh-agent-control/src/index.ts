@@ -28,8 +28,15 @@ export const Config: Schema<Config> = Schema.object({
 }) as Schema<Config>
 
 declare module '@deepseek-ai/cordis' { interface Context { agentControl: AgentControlService } }
+type RpcChannelHandler = (endpoint: string, payload: unknown, signal: AbortSignal) => Promise<unknown>
 interface ConnectionFace {
-  rpc: { handle(channel: string, handler: (endpoint: string, payload: unknown, signal: AbortSignal) => Promise<unknown>, options: { authority: 'trusted-host' | 'loopback' }): () => Promise<void> }
+  rpc: { handle(channel: string, handler: RpcChannelHandler, options: { authority: 'trusted-host' | 'loopback' }): () => Promise<void> }
+  // Low-level channel registration. `rpc.handle` is sugar for `register(this.ctx, …)`,
+  // but in 0.1.7-rc.2 `this.ctx` is the Connection plugin's own fiber, which never
+  // injected `webServer`, so `register` throws "cannot get property webServer without
+  // inject" and the channel is silently dropped. Calling `register` directly lets us
+  // pass our own `webServer`-injected fiber as the owner. See apply() for details.
+  register(owner: unknown, channel: string, handler: RpcChannelHandler): () => Promise<void>
   fetch: { register(route: { path: string; methods: readonly ('GET' | 'HEAD' | 'POST')[]; requestBody: 'buffered' | 'streaming'; fetch(request: Request): Promise<Response> }): () => Promise<void> }
 }
 
@@ -85,12 +92,29 @@ export function apply(ctx: Context, config: Config): void {
   ctx.on('tools/pre-execute', async (execution, next) => MUTATING_TOOL_NAMES.has(execution.name)
     ? { kind: 'ask', reason: `${execution.name} changes external Agent Bridge or Hermes state.` }
     : next())
-  // Register through the dependency-scoped fiber, matching DSH's built-in
-  // plugins. This makes channel lifetime and hot reload disposal deterministic.
-  ctx.inject(['connection'], (scoped) => {
+  // Register through a fiber that injects BOTH `connection` and `webServer`,
+  // then mount the RPC channel with `connection.register(scoped, …)` rather than
+  // the `connection.rpc.handle(…)` sugar.
+  //
+  // Why not `rpc.handle`: in 0.1.7-rc.2 the `rpc` getter captures
+  // `owner = this.ctx`, and cordis resolves that `this.ctx` against the
+  // Connection *service's own* fiber — which only ever injected `credentials`,
+  // never `webServer`. `register` then does `owner.webServer.register(route)`,
+  // which trips cordis's guard ("cannot get property \"webServer\" without
+  // inject"). The effect throws, the deferred inject callback swallows it, the
+  // `/agent-control` prefix route is never mounted, and every POST falls through
+  // to the web server's 405 — exactly the dispatch failure we were chasing.
+  //
+  // `register(owner, channel, handler)` takes the owner fiber as its first
+  // argument and resolves `owner.webServer` / `owner.effect` from it, so passing
+  // our own `webServer`-injected `scoped` fiber makes registration succeed. This
+  // is the same call `rpc.handle` makes internally, only with a correct owner.
+  // (Connection mounts its own `/api` route through an equivalent `webServer`
+  // inject; the SSE proxy below uses `fetch.register`, which never needs it.)
+  ctx.inject(['connection', 'webServer'], (scoped) => {
     const connection = Reflect.get(scoped, 'connection') as ConnectionFace
     scoped.effect(
-      () => connection.rpc.handle(AGENT_CONTROL_RPC_CHANNEL, createAgentControlRpcHandler(service), { authority: 'trusted-host' }),
+      () => connection.register(scoped, AGENT_CONTROL_RPC_CHANNEL, createAgentControlRpcHandler(service)),
       'agent-control: rpc channel',
     )
     scoped.effect(

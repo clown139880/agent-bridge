@@ -28,7 +28,7 @@ export interface NativeHost {
     resolveByPath(path: string): Promise<NativeWorkspace | undefined>
     create(path: string, title?: string): Promise<NativeWorkspace>
   }
-  agentPresets?: { roots: readonly { path: string; trust: string }[]; resolve(id: string): Promise<unknown>; mount(ctx: Context, id: string): Promise<unknown> }
+  agentPresets?: { register(definition: { id: string; name?: string; description?: string; order?: number; plugins: readonly unknown[] }): Promise<() => Promise<void>>; resolve(id?: string): Promise<unknown>; mount(ctx: Context, id?: string): Promise<unknown> }
   emit(event: string, ...args: unknown[]): void
   logger: { warn(message: string): void }
 }

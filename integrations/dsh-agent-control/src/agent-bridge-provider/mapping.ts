@@ -111,7 +111,12 @@ export function projectNativeEvents(rows: readonly JsonObject[], existing: reado
         add('assistant/message', { turn, step: 1, message: { id: 'bridge:' + id + ':assistant', role: 'assistant', source: { kind: 'model', provider: PROVIDER, model }, content }, stream: [] }, time, true)
         if (isTool) {
           add('tool/call', { turn, step: 1, callId, name, arguments: args }, time)
-          add('tool/result', { turn, step: 1, message: { id: 'bridge:' + id + ':result', role: 'user', source: { kind: 'tool', callId }, content: [{ type: 'tool-result', toolCallId: callId, content: [{ type: 'text', text: str(payload['output'], JSON.stringify(payload)) }], isError: payload['status'] === 'failed' }] } }, time, true)
+          // A tool/result message must carry role "tool", a top-level toolCallId
+          // matching source.callId, and model-facing content blocks. DSH 0.1.7-rc.2
+          // dropped the "tool-result" content block type and now validates this
+          // shape at the seed boundary, so the result text goes in a plain text
+          // block with the tool-call linkage lifted to the message envelope.
+          add('tool/result', { turn, step: 1, message: { id: 'bridge:' + id + ':result', role: 'tool', toolCallId: callId, isError: payload['status'] === 'failed', source: { kind: 'tool', callId }, content: [{ type: 'text', text: str(payload['output'], JSON.stringify(payload)) }] } }, time, true)
         }
       }
       add('step/end', { turn, step: 1 }, time)
