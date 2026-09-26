@@ -16,7 +16,8 @@
 
 ## DSH Agent Control plugin deployment
 
-- For changes under `integrations/dsh-agent-control`, run its checks/build and install the compiled plugin with `deploy/windows-native/update-dsh-client.ps1` after pushing.
+- For changes under `integrations/dsh-agent-control`, run its checks/build and install the compiled plugin with `deploy/windows-native/update-dsh-client.ps1` (Windows Desktop) or `deploy/hal/sync-dsh-agent-control.sh` (Linux/HAL web console) after pushing.
+- On HAL the plugin is installed into the DSH profile at `/root/.dsh/profiles/agent-control`; `pnpm --filter dsh-agent-control-plugin sync:hal` builds and installs it, then restarts `dsh-agent-control.service`. This restart is the DSH web console only — never the Bridge or Control Plane. See `deploy/hal/README-dsh-sync.md`.
 - Plugin-only changes do not trigger or restart either Bridge or the Control Plane.
 - Update the installed Host and browser bundles directly even while TokensCowork is running. Restart TokensCowork when needed to activate the installed plugin; deployment may interrupt in-flight plugin calls.
 - Verify source and installed bundle hashes. Verify the served hash when the Desktop endpoint permits it; an authenticated endpoint may be reported as not externally hash-verifiable.

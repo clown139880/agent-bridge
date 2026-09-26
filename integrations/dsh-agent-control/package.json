@@ -1,6 +1,6 @@
 {
   "name": "dsh-agent-control-plugin",
-  "version": "0.1.61",
+  "version": "0.1.62",
   "description": "Out-of-tree DeepSeek Harness Agent Bridge and Hermes Kanban control workspace",
   "type": "module",
   "main": "lib/index.js",
@@ -52,6 +52,7 @@
   "scripts": {
     "preview:mock": "pnpm build && vite --config preview.config.ts --open /fixtures/session-preview.html",
     "build": "tsdown && tsc -p tsconfig.build.json",
+    "sync:hal": "bash ../../deploy/hal/sync-dsh-agent-control.sh --build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "oxlint src tests",
     "test": "vitest run",
