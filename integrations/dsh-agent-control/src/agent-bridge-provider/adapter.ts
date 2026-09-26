@@ -54,7 +54,7 @@ export class AgentBridgeLlmAdapter extends LlmAdapter {
     if (!binding) throw new Error('This DSH session is not bound to a Bridge session')
     const agent = this.target.host.agents.get(nativeId)
     if (!agent) throw new Error('Bridge session has no native Agent')
-    const remoteId = str(binding['sessionId'])
+    let remoteId = str(binding['sessionId'])
     const signal = options.signal ?? new AbortController().signal
     let input = lastUserText(options)
     const localMessageId = lastUserMessageId(options)
@@ -68,17 +68,28 @@ export class AgentBridgeLlmAdapter extends LlmAdapter {
     let receipt: JsonObject = {}
     let turnId = ''
     try {
-      const baseline = await readHistory(this.service.bridge, remoteId, undefined, signal)
-      let cursor = baseline.cursor
-      const seen = new Set(baseline.rows.map(row => str(row['eventId'])))
-      const session = record(await this.service.bridge.call({ operation: 'session', args: { sessionId: remoteId } }, signal))
-      const expectedTurnId = ['active', 'waiting_for_approval', 'waiting_for_input'].includes(str(session['status'])) ? str(session['activeTurnId']) : ''
-      const args: JsonObject = { sessionId: remoteId, input, delivery: 'auto', ...(expectedTurnId ? { expectedTurnId } : {}) }
-      if (attachments.length) args['attachments'] = attachments
+      let cursor: string | undefined
+      const seen = new Set<string>()
+      let expectedTurnId = ''
       // Native provider catalogs are not remote model catalogs.
-      if (!expectedTurnId && options.provider === PROVIDER && options.model !== 'remote') args['model'] = options.model
-      if (!expectedTurnId && options.reasoningEffort) args['reasoningEffort'] = options.reasoningEffort
-      receipt = record(await this.service.bridge.call({ operation: 'submit_turn', args }, signal))
+      const model = options.provider === PROVIDER && options.model !== 'remote' ? options.model : undefined
+      if (!remoteId) {
+        // A draft's first message creates its Bridge session; that session has no
+        // earlier history to skip. create_session takes no reasoning effort.
+        receipt = await this.target.createDraftRemote(nativeId, { input, ...(model ? { model } : {}), ...(attachments.length ? { attachments } : {}) }, signal)
+        remoteId = str(receipt['sessionId'])
+      } else {
+        const baseline = await readHistory(this.service.bridge, remoteId, undefined, signal)
+        cursor = baseline.cursor
+        for (const row of baseline.rows) seen.add(str(row['eventId']))
+        const session = record(await this.service.bridge.call({ operation: 'session', args: { sessionId: remoteId } }, signal))
+        expectedTurnId = ['active', 'waiting_for_approval', 'waiting_for_input'].includes(str(session['status'])) ? str(session['activeTurnId']) : ''
+        const args: JsonObject = { sessionId: remoteId, input, delivery: 'auto', ...(expectedTurnId ? { expectedTurnId } : {}) }
+        if (attachments.length) args['attachments'] = attachments
+        if (!expectedTurnId && model) args['model'] = model
+        if (!expectedTurnId && options.reasoningEffort) args['reasoningEffort'] = options.reasoningEffort
+        receipt = record(await this.service.bridge.call({ operation: 'submit_turn', args }, signal))
+      }
       let finished = false
       let buffered: JsonObject[] = []
       const ackRows: JsonObject[] = []

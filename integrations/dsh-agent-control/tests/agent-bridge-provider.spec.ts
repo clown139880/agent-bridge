@@ -205,6 +205,84 @@ describe('native session catalog', () => {
     expect(f.bridge.call.mock.calls.some(([request]) => request.operation === 'create_session')).toBe(false)
     await f.target.dispose()
   })
+  it('creates a new session as a local draft and only creates the Bridge session with its first message', async () => {
+    const f = await fixture([])
+    const summaries: JsonObject[] = [summary]
+    let created: JsonObject | undefined
+    f.bridge.call.mockImplementation(async request => {
+      if (request.operation === 'workers') return { workers: [{ id: 'w', machineId: 'dev-wsl', hostname: 'remote-host', name: 'Codex', status: 'online' }] }
+      if (request.operation === 'session_groups') return groupPage(summaries)
+      if (request.operation === 'create_session') {
+        created = request.args
+        // The remote session is listed before the create action settles.
+        summaries.push({ ...summary, sessionId: 'remote-new', title: '', createdAt: 20, updatedAt: 20 })
+        return { actionId: 'create', status: 'accepted' }
+      }
+      if (request.operation === 'action') {
+        // A sync while the action is pending must not claim the draft's new session.
+        await f.target.refresh()
+        expect(f.agents.has(nativeSessionId('http://bridge.test', 'remote-new'))).toBe(false)
+        return { actionId: 'create', status: 'succeeded', sessionId: 'remote-new', turnId: 't1' }
+      }
+      if (request.operation === 'session_events') return page(request.args?.['sessionId'] === 'remote-new' && created ? [
+        { ...row('u', 'message.completed', { role: 'user', text: 'go' }), sessionId: 'remote-new' },
+        { ...row('a', 'message.completed', { role: 'assistant', text: 'done' }), sessionId: 'remote-new' },
+        { ...row('end', 'turn.completed', { status: 'completed' }), sessionId: 'remote-new' },
+      ] : [])
+      if (request.operation === 'session') return summaries.find(item => item['sessionId'] === request.args?.['sessionId']) ?? summary
+      return page([])
+    })
+    await f.target.refresh()
+    const cwd = nativeSession(f.agents.get(nativeSessionId('http://bridge.test', 'remote-1'))!).header.cwd!
+    const draft = await f.target.createInWorkspace(cwd, 'w\0/remote/repo')
+    const draftId = String(draft.id)
+    expect(f.bridge.call.mock.calls.some(([request]) => request.operation === 'create_session')).toBe(false)
+    expect(f.target.isDraft(draftId)).toBe(true)
+    expect((f.target.catalog()['sessions'] as JsonObject[]).find(item => item['nativeId'] === draftId)).toMatchObject({ sessionId: '', groupId: 'repo:github.com/example/repo', workspace: '/remote/repo' })
+    // The remote catalog cannot know a draft, so a sync must keep it.
+    await f.target.refresh()
+    expect(f.agents.has(draftId)).toBe(true)
+
+    const adapter = new AgentBridgeLlmAdapter({ bridge: f.bridge } as unknown as AgentControlService, f.target, 1)
+    const chunks = []
+    for await (const chunk of adapter.stream({ sessionId: draftId, provider: 'agent-bridge', model: 'gpt-5.6-sol',
+      messages: [{ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'go' }] }] } as GenerateOptions)) chunks.push(chunk)
+    expect(created).toEqual({ input: 'go', model: 'gpt-5.6-sol', workerId: 'w', workspace: '/remote/repo' })
+    expect(f.bridge.call.mock.calls.some(([request]) => request.operation === 'submit_turn')).toBe(false)
+    expect(chunks.filter(c => c.type === 'text-delta')).toEqual([{ type: 'text-delta', index: 0, text: 'done' }])
+    expect(f.target.binding(draftId)?.['sessionId']).toBe('remote-new')
+    adapter.commitAcks(draftId)
+
+    // The new remote session resolves to the draft, never to a second native session.
+    await f.target.refresh()
+    expect(f.agents.has(nativeSessionId('http://bridge.test', 'remote-new'))).toBe(false)
+    // The first turn was acknowledged live, so the sync re-imports none of it.
+    const events = sessionEvents(nativeSession(f.agents.get(draftId)!))
+    expect(events.filter(e => e.type === ACK_EVENT).map(e => e.data['eventId'])).toEqual(expect.arrayContaining(['u', 'a']))
+    expect(events.filter(e => e.type === 'user/message' || e.type === 'assistant/message')).toHaveLength(0)
+    // ...including after a restart, when only the persisted alias knows the mapping.
+    const restarted = new AgentBridgeImportTarget(f.host, f.bridge, 'http://bridge.test', (f.target as unknown as { dataRoot: string }).dataRoot)
+    f.agents.delete(draftId)
+    await restarted.refresh()
+    expect(f.agents.has(draftId)).toBe(true)
+    expect(f.agents.has(nativeSessionId('http://bridge.test', 'remote-new'))).toBe(false)
+    await f.target.dispose(); await restarted.dispose()
+  })
+  it('removes a draft locally without asking the Bridge', async () => {
+    const f = await fixture()
+    const originalCall = f.bridge.call.getMockImplementation()!
+    f.bridge.call.mockImplementation(async (request, signal) => request.operation === 'workers'
+      ? { workers: [{ id: 'w', machineId: 'dev-wsl', hostname: 'remote-host', name: 'Codex', status: 'online' }] } : originalCall(request, signal))
+    await f.target.refresh()
+    const cwd = nativeSession(f.agents.get(nativeSessionId('http://bridge.test', 'remote-1'))!).header.cwd!
+    const draftId = String((await f.target.createInWorkspace(cwd, 'w\0/remote/repo')).id)
+    f.host.workspaceRegistry.archiveSession = vi.fn(async () => {})
+    await expect(f.target.deleteNative(draftId)).resolves.toMatchObject({ deleted: true, nativeId: draftId })
+    expect(f.host.workspaceRegistry.archiveSession).toHaveBeenCalledWith(draftId)
+    expect(f.bridge.call.mock.calls.some(([request]) => request.operation === 'delete_session')).toBe(false)
+    expect((f.target.catalog()['sessions'] as JsonObject[]).some(item => item['nativeId'] === draftId)).toBe(false)
+    await f.target.dispose()
+  })
   it('offers worker-at-machine locations from every checkout of the same repository identity', async () => {
     const f = await fixture()
     const summaries: JsonObject[] = [summary,

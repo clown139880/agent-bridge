@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { mkdir, realpath, readFile, writeFile, readdir } from 'node:fs/promises'
 import { homedir, hostname } from 'node:os'
 import { isAbsolute, join, basename, relative } from 'node:path'
@@ -76,6 +76,11 @@ export class AgentBridgeImportTarget {
   lastSyncAt = 0
   private readonly deleting = new Set<string>()
   private readonly deleted = new Set<string>()
+  /** Remote id → native id for drafts, whose native id predates (so is not derived from) their remote id. */
+  private readonly aliases = new Map<string, string>()
+  private aliasesLoaded: Promise<void> | undefined
+  /** Drafts whose remote session is being created; its id is not known until the action settles. */
+  private readonly drafting = new Set<string>()
   constructor(readonly host: NativeHost, readonly bridge: Pick<BridgeClient, 'call'>, readonly origin: string,
     readonly dataRoot = join(homedir(), '.dsh', 'agent-bridge')) {}
 
@@ -89,6 +94,26 @@ export class AgentBridgeImportTarget {
       return event.data
     }
     return undefined
+  }
+  /** A draft is a local session whose Bridge session is only created by its first message. */
+  isDraft(nativeId: string): boolean {
+    const binding = this.binding(nativeId)
+    return !!binding && !str(binding['sessionId'])
+  }
+  private nativeIdFor(remoteId: string): string {
+    return this.aliases.get(remoteId) ?? nativeSessionId(this.origin, remoteId)
+  }
+  private loadAliases(): Promise<void> {
+    this.aliasesLoaded ??= (async () => {
+      const directory = join(this.dataRoot, 'draft-aliases')
+      const files = await readdir(directory).catch((error: NodeJS.ErrnoException) => { if (error.code === 'ENOENT') return []; throw error })
+      for (const file of files) {
+        if (!file.endsWith('.json')) continue
+        const alias = record(JSON.parse(await readFile(join(directory, file), 'utf8')))
+        if (alias['origin'] === new URL(this.origin).origin && str(alias['remoteId']) && str(alias['nativeId'])) this.aliases.set(str(alias['remoteId']), str(alias['nativeId']))
+      }
+    })()
+    return this.aliasesLoaded
   }
   status(): JsonObject {
     const counts: Record<string, number> = {}
@@ -147,6 +172,11 @@ export class AgentBridgeImportTarget {
     if (!this.host.workspaceRegistry.archiveSession) throw new Error('客户端不支持会话移除')
     if (this.isBusy(nativeId) || ['active', 'waiting_for_approval', 'waiting_for_input'].includes(str(binding['status']))) throw new Error('请先结束当前回合并处理待确认事项，再删除会话')
     if (this.deleting.has(nativeId)) throw new Error('正在删除此会话')
+    // A draft never reached the Bridge, so there is nothing remote to delete.
+    if (!str(binding['sessionId'])) {
+      const localWarning = await this.cleanupDeletedNative(nativeId)
+      return { deleted: true, nativeId, ...(localWarning ? { localWarning } : {}) }
+    }
     this.deleting.add(nativeId)
     try {
       const fused = AbortSignal.any([this.abort.signal, AbortSignal.timeout(60000), ...(signal ? [signal] : [])])
@@ -252,20 +282,75 @@ export class AgentBridgeImportTarget {
     }
     return { cwd: canonical, sources }
   }
-  async createInWorkspace(cwd: string, sourceId: string, signal?: AbortSignal): Promise<Agent> {
-    const context = await this.creationSources(cwd)
+  async createInWorkspace(directory: string, sourceId: string, signal?: AbortSignal): Promise<Agent> {
+    const context = await this.creationSources(directory)
     const source = (context['sources'] as JsonObject[]).find(item => item['id'] === sourceId && item['workerId'])
     if (!source || source['available'] !== true) throw new Error('Selected Bridge source is unavailable in this directory')
-    const fused = AbortSignal.any([this.abort.signal, AbortSignal.timeout(60000), ...(signal ? [signal] : [])])
-    let receipt = record(await this.bridge.call({ operation: 'create_session', args: { workerId: str(source['workerId']), workspace: str(source['workspace']) } }, fused))
-    while (receipt['status'] === 'accepted') {
-      if (!str(receipt['actionId'])) throw new Error('Bridge create action has no identity')
-      await delay(300, undefined, { signal: fused })
-      receipt = record(await this.bridge.call({ operation: 'action', args: { actionId: str(receipt['actionId']) } }, fused))
+    signal?.throwIfAborted()
+    // Only a local draft for now: the Bridge session is created by the first
+    // message (see createDraftRemote), so an abandoned "new session" leaves no
+    // empty remote session behind.
+    const cwd = str(context['cwd'])
+    const workerId = str(source['workerId'])
+    const workspace = str(source['workspace'])
+    const origin = new URL(this.origin).origin
+    const id = 'agent-bridge-' + hash(origin + '\0draft\0' + randomUUID())
+    // Join the presentation group of a sibling in this directory so the catalog
+    // lists the draft with it, not in a group of its own.
+    const placedIn = (nativeId: string) => {
+      const agent = this.host.agents.get(nativeId)
+      return this.placementOverrides.get(nativeId) ?? (agent ? nativeSession(agent).header.cwd : undefined)
     }
-    if (receipt['status'] !== 'succeeded' || !str(receipt['sessionId'])) throw new Error('Bridge session creation failed: ' + JSON.stringify(receipt['error'] ?? receipt['status']))
-    this.placementOverrides.set(nativeSessionId(this.origin, str(receipt['sessionId'])), str(context['cwd']))
-    return this.open(str(receipt['sessionId']))
+    const sibling = [...this.bindings].find(([nativeId, binding]) => str(binding['sessionId']) && str(binding['workspace']) === workspace && placedIn(nativeId) === cwd)?.[1]
+    const time = Date.now()
+    const binding: JsonObject = { origin, workerId, workspace, status: 'idle', createdAt: time, updatedAt: time, presentationOrder: -1,
+      groupId: str(sibling?.['groupId'], 'draft:' + id), groupTitle: str(sibling?.['groupTitle'], basename(cwd)), groupUpdatedAt: time,
+      executionLocations: Array.isArray(sibling?.['executionLocations']) ? sibling['executionLocations'] : [{ workerId, machineId: str(source['machineId']), workspace }],
+      ...(str(sibling?.['projectIdentity']) ? { projectIdentity: str(sibling?.['projectIdentity']) } : {}) }
+    const seed: NativeEvent[] = [
+      { type: BINDING_EVENT, data: binding, seq: 0, time },
+      { type: 'session/title', data: { title: '新会话', messageSeqs: [], source: { kind: 'user' } }, seq: 1, time },
+    ]
+    const setup = async (ctx: Context) => { await this.host.agentPresets?.mount(ctx, PROVIDER) }
+    const handle = await this.host.agents.create({ sessionId: id, meta: { cwd, createdAt: time, agentPreset: PROVIDER }, seed, agentOptions: { provider: PROVIDER, model: 'remote' }, setup })
+    this.handles.set(id, handle)
+    this.bindings.set(id, binding)
+    this.placementOverrides.set(id, cwd)
+    if (!await this.host.sessions.flush(handle.agent.session)) throw new Error('Native session has no persistence writer')
+    const registered = await this.host.workspaceRegistry.resolveByPath(cwd) ?? await this.host.workspaceRegistry.create(cwd, basename(cwd))
+    await registered.attachSession(id)
+    return handle.agent
+  }
+  /**
+   * Create the Bridge session behind a draft with its first message, then bind the
+   * draft to it. Returns the settled create action, which carries the first turn.
+   */
+  async createDraftRemote(nativeId: string, args: JsonObject, signal: AbortSignal): Promise<JsonObject> {
+    const binding = this.binding(nativeId)
+    if (!binding || str(binding['sessionId'])) throw new Error('This DSH session is not a Bridge draft')
+    await this.loadAliases()
+    this.drafting.add(nativeId)
+    try {
+      let receipt = record(await this.bridge.call({ operation: 'create_session', args: { ...args, workerId: str(binding['workerId']), workspace: str(binding['workspace']) } }, signal))
+      while (receipt['status'] === 'accepted') {
+        if (!str(receipt['actionId'])) throw new Error('Bridge create action has no identity')
+        await delay(300, undefined, { signal })
+        receipt = record(await this.bridge.call({ operation: 'action', args: { actionId: str(receipt['actionId']) } }, signal))
+      }
+      const remoteId = str(receipt['sessionId'])
+      if (receipt['status'] !== 'succeeded' || !remoteId) throw new Error('Bridge session creation failed: ' + JSON.stringify(receipt['error'] ?? receipt['status']))
+      // Persist the alias before the binding so a restart never materializes the
+      // remote session a second time under its derived id.
+      const directory = join(this.dataRoot, 'draft-aliases')
+      await mkdir(directory, { recursive: true })
+      await writeFile(join(directory, nativeSessionId(this.origin, remoteId) + '.json'), JSON.stringify({ origin: binding['origin'], remoteId, nativeId }))
+      this.aliases.set(remoteId, nativeId)
+      const bound: JsonObject = { ...binding, sessionId: remoteId }
+      this.bindings.set(nativeId, bound)
+      const agent = this.host.agents.get(nativeId)
+      if (agent) nativeSession(agent).append(BINDING_EVENT, bound)
+      return receipt
+    } finally { this.drafting.delete(nativeId) }
   }
   private isLocalWorker(worker: JsonObject): boolean {
     return str(worker['hostname']).toLowerCase() === hostname().toLowerCase() && (!worker['platform'] || worker['platform'] === process.platform)
@@ -341,6 +426,7 @@ export class AgentBridgeImportTarget {
     return this.refreshJob
   }
   private async refreshAll(): Promise<void> {
+    await this.loadAliases()
     const workerPage = record(await this.bridge.call({ operation: 'workers' }, this.abort.signal))
     if (!Array.isArray(workerPage['workers'])) throw new Error('Invalid Bridge worker page')
     for (const worker of workerPage['workers']) { const row = record(worker); this.workers.set(str(row['id']), row) }
@@ -372,6 +458,8 @@ export class AgentBridgeImportTarget {
     // a confirmed remote deletion even if the previous Host exited before archiving.
     const retained = new Set(summaries.map(row => str(row['sessionId'])))
     for (const [id, binding] of this.bindings) {
+      // Drafts have no remote session yet, so the remote catalog cannot vouch for them.
+      if (!str(binding['sessionId'])) continue
       if (retained.has(str(binding['sessionId'])) || this.isBusy(id) || this.deleting.has(id) || this.deleted.has(id)) continue
       await this.cleanupDeletedNative(id)
     }
@@ -382,8 +470,12 @@ export class AgentBridgeImportTarget {
       while (index < summaries.length) {
         const row = summaries[index++]!
         const remoteId = str(row['sessionId'])
-        const id = nativeSessionId(this.origin, remoteId)
+        const id = this.nativeIdFor(remoteId)
         if (this.deleting.has(id) || this.deleted.has(id)) continue
+        // While a draft's create action is pending, a new session in its location
+        // may be that draft's; wait for the binding rather than materialize a twin.
+        if (!this.aliases.has(remoteId) && !this.bindings.has(id) && [...this.drafting].some(draft =>
+          str(this.bindings.get(draft)?.['workerId']) === str(row['workerId']) && str(this.bindings.get(draft)?.['workspace']) === str(row['workspace']))) continue
         try {
           this.abort.signal.throwIfAborted()
           const current = this.host.agents.get(id)
@@ -412,10 +504,11 @@ export class AgentBridgeImportTarget {
     const row = record(await this.bridge.call({ operation: 'session', args: { sessionId: remoteId } }, this.abort.signal))
     return this.ensure(row)
   }
-  ensure(row: JsonObject): Promise<Agent> {
+  async ensure(row: JsonObject): Promise<Agent> {
     const remoteId = str(row['sessionId'])
-    if (!remoteId || !str(row['workerId'])) return Promise.reject(new Error('Bridge session identity is missing'))
-    const id = nativeSessionId(this.origin, remoteId)
+    if (!remoteId || !str(row['workerId'])) throw new Error('Bridge session identity is missing')
+    await this.loadAliases()
+    const id = this.nativeIdFor(remoteId)
     let job = this.jobs.get(id)
     if (!job) {
       job = this.materialize(id, row).finally(() => { this.jobs.delete(id) })
@@ -499,7 +592,7 @@ export class AgentBridgeImportTarget {
     for (const group of groups) {
       const groupId = str(group['groupId']); const key = 'group\0' + groupId
       const rows = Array.isArray(group['sessions']) ? group['sessions'].map(record) : []
-      const ids = new Set(rows.map(row => nativeSessionId(this.origin, str(row['sessionId']))))
+      const ids = new Set(rows.map(row => this.nativeIdFor(str(row['sessionId']))))
       const members = workspaces.filter(workspace => workspace.sessionIds?.some(id => ids.has(id)))
       const expected = join(this.dataRoot, 'groups', hash(new URL(this.origin).origin + '\0' + groupId))
       const keep = members.find(workspace => workspace.path && !inside(this.dataRoot, workspace.path))
@@ -516,7 +609,7 @@ export class AgentBridgeImportTarget {
     for (const group of groups) {
       const groupId = str(group['groupId']); const key = 'group\0' + groupId
       const rows = Array.isArray(group['sessions']) ? group['sessions'].map(record) : []
-      const ids = new Set(rows.map(row => nativeSessionId(this.origin, str(row['sessionId']))))
+      const ids = new Set(rows.map(row => this.nativeIdFor(str(row['sessionId']))))
       let workspaces = registry.list()
       const members = workspaces.filter(workspace => workspace.sessionIds?.some(id => ids.has(id)))
       const cwd = join(this.dataRoot, 'groups', hash(new URL(this.origin).origin + '\0' + groupId))
@@ -551,7 +644,7 @@ export class AgentBridgeImportTarget {
   }
   async syncHistory(id: string, agent = this.host.agents.get(id)): Promise<void> {
     const binding = this.binding(id)
-    if (!agent || !binding || this.isBusy(id)) return
+    if (!agent || !binding || !str(binding['sessionId']) || this.isBusy(id)) return
     let history: Awaited<ReturnType<typeof readHistory>>
     try { history = await readHistory(this.bridge, str(binding['sessionId']), this.cursors.get(id), this.abort.signal) }
     catch (error) {
