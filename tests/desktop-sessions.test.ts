@@ -49,22 +49,25 @@ test("Desktop scanner baselines history, reports new completions, and tracks act
   await scanner.refresh();
 
   assert.equal(scanner.isThreadActive("session-1"), false);
-  assert.equal(emitted.length, 3);
-  assert.equal(emitted[0]?.type, "session.discovered");
-  if(emitted[0]?.type === "session.discovered") assert.equal(emitted[0].updatedAt,emitted[0].createdAt);
-  assert.equal(emitted[0] && "agentType" in emitted[0] ? emitted[0].agentType : undefined, "codex-desktop");
-  assert.deepEqual(emitted[1], {
+  assert.equal(emitted.length, 5);
+  assert.equal(emitted[0]?.type === "session.discovered" ? emitted[0].status : undefined, "working");
+  assert.equal(emitted[1]?.type === "session.event" ? emitted[1].eventType : undefined, "turn.started");
+  assert.equal(emitted[1]?.type === "session.event" ? emitted[1].eventId : undefined, "app-server:session-1:new-turn:started");
+  assert.equal(emitted[2]?.type, "session.discovered");
+  if(emitted[2]?.type === "session.discovered") assert.equal(emitted[2].updatedAt,emitted[2].createdAt);
+  assert.equal(emitted[2] && "agentType" in emitted[2] ? emitted[2].agentType : undefined, "codex-desktop");
+  assert.deepEqual(emitted[3], {
     type: "agent.completed",
     eventId: "desktop:session-1:new-turn:agent.completed",
     sessionId: "session-1",
-    timestamp: emitted[1] && "timestamp" in emitted[1] ? emitted[1].timestamp : undefined,
+    timestamp: emitted[3] && "timestamp" in emitted[3] ? emitted[3].timestamp : undefined,
     summary: "Finished from Desktop",
   });
-  assert.equal(emitted[2]?.type, "session.event");
-  assert.equal(emitted[2]?.type === "session.event" ? emitted[2].eventType : undefined, "turn.completed");
+  assert.equal(emitted[4]?.type, "session.event");
+  assert.equal(emitted[4]?.type === "session.event" ? emitted[4].eventType : undefined, "turn.completed");
 
   await scanner.refresh();
-  assert.equal(emitted.length, 3);
+  assert.equal(emitted.length, 5);
   scanner.stop();
   rmSync(root, { recursive: true, force: true });
 });
@@ -185,16 +188,133 @@ test("Desktop scanner uses rollout event times instead of synchronized file mtim
 
   await scanner.start();
 
-  const discovery = emitted.find((message) => message.type === "session.discovered");
+  const discovery = emitted.findLast((message) => message.type === "session.discovered");
   assert.ok(discovery?.type === "session.discovered");
   assert.equal(discovery.createdAt, Date.parse(createdAt));
   assert.equal(discovery.updatedAt, Date.parse(completedAt));
   const completed = emitted.find((message) => message.type === "agent.completed");
   assert.ok(completed?.type === "agent.completed");
   assert.equal(completed.timestamp, Date.parse(completedAt));
-  const terminal = emitted.find((message) => message.type === "session.event");
+  const terminal = emitted.find((message) => message.type === "session.event" && message.eventType === "turn.completed");
   assert.ok(terminal?.type === "session.event");
   assert.equal(terminal.timestamp, Date.parse(completedAt));
+  scanner.stop();
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("Desktop scanner streams completed rollout items while the turn is running", async () => {
+  const root = join(tmpdir(), `agent-bridge-desktop-items-${randomUUID()}`);
+  const project = join(root, "project");
+  const codexHome = join(root, ".codex");
+  const sessions = join(codexHome, "sessions");
+  const rollout = join(sessions, "rollout-items.jsonl");
+  mkdirSync(project, { recursive: true });
+  mkdirSync(sessions, { recursive: true });
+  writeFileSync(rollout, line({ type: "session_meta", payload: { id: "desktop-items", cwd: project, originator: "Codex Desktop" } }));
+  const emitted: BridgeToControlMessage[] = [];
+  const scanner = new CodexDesktopSessionScanner({ codexHome, allowedRoots: [root],
+    intervalMs: 60_000, replayExisting: false, emit: (message) => emitted.push(message) });
+  await scanner.start();
+
+  const item = (turn: string, value: Record<string, unknown>, completedAt: number) => line({
+    timestamp: "2026-09-26T00:00:59.000Z", type: "event_msg",
+    payload: { type: "item_completed", thread_id: "desktop-items", turn_id: turn, item: value,
+      started_at_ms: completedAt - 5, completed_at_ms: completedAt },
+  });
+  appendFileSync(rollout, [
+    line({ timestamp: "2026-09-26T00:00:00.000Z", type: "event_msg",
+      payload: { type: "task_started", turn_id: "turn-1", started_at: 1_790_000_000 } }),
+    item("turn-1", { type: "UserMessage", id: "user-1", content: [{ type: "text", text: "run it", text_elements: [] }] }, 1_000),
+    item("turn-1", { type: "Reasoning", id: "rs-1", summary_text: [] }, 1_500),
+    item("turn-1", { type: "CommandExecution", id: "exec-1", command: ["/usr/bin/zsh", "-lc", "echo 'hi' && ls"],
+      cwd: "file:///root/my%20project", status: "failed", exit_code: 2, aggregated_output: "boom" }, 2_000),
+    item("turn-1", { type: "FileChange", id: "exec-2", status: "completed", changes: {
+      "/root/a.ts": { type: "update", unified_diff: "@@ -1 +1 @@", move_path: null },
+      "/root/b.ts": { type: "add", content: "new" },
+    } }, 3_000),
+    item("turn-1", { type: "AgentMessage", id: "msg-1", phase: "commentary", content: [{ type: "Text", text: "Working" }] }, 4_000),
+    item("turn-1", { type: "CommandExecution", command: ["true"] }, 5_000),
+  ].join(""));
+  await scanner.refresh();
+
+  assert.equal(scanner.isThreadActive("desktop-items"), true);
+  const events = emitted.filter((message) => message.type === "session.event");
+  assert.deepEqual(events.map((event) => event.type === "session.event" && [event.eventType, event.eventId, event.turnId, event.itemId, event.timestamp]), [
+    ["turn.started", "app-server:desktop-items:turn-1:started", "turn-1", undefined, Date.parse("2026-09-26T00:00:00.000Z")],
+    ["message.completed", "app-server:desktop-items:user-1:message", "turn-1", "user-1", 1_000],
+    ["command.completed", "app-server:desktop-items:exec-1:command", "turn-1", "exec-1", 2_000],
+    ["file_change.completed", "app-server:desktop-items:exec-2:file-change", "turn-1", "exec-2", 3_000],
+    ["message.completed", "app-server:desktop-items:msg-1:message", "turn-1", "msg-1", 4_000],
+  ]);
+  assert.equal(emitted[0]?.type === "session.discovered" ? emitted[0].status : undefined, "working");
+  const payloads = events.map((event) => event.type === "session.event" ? event.payload : undefined);
+  assert.deepEqual(payloads[1], { role: "user", text: "run it" });
+  assert.deepEqual(payloads[2], { command: "/usr/bin/zsh -lc 'echo '\\''hi'\\'' && ls'", cwd: "/root/my project",
+    status: "failed", exitCode: 2, output: "boom" });
+  assert.deepEqual(payloads[3], { changes: [
+    { path: "/root/a.ts", kind: { type: "update" }, diff: "@@ -1 +1 @@" },
+    { path: "/root/b.ts", kind: { type: "add" }, diff: "new" },
+  ], summary: "2 file changes applied", truncated: false });
+  assert.deepEqual(payloads[4], { role: "assistant", text: "Working" });
+  scanner.stop();
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("Desktop scanner leaves turns run by the Bridge App Server to its notifications", async () => {
+  const root = join(tmpdir(), `agent-bridge-desktop-owned-${randomUUID()}`);
+  const project = join(root, "project");
+  const codexHome = join(root, ".codex");
+  const sessions = join(codexHome, "sessions");
+  const rollout = join(sessions, "rollout-owned.jsonl");
+  mkdirSync(project, { recursive: true });
+  mkdirSync(sessions, { recursive: true });
+  writeFileSync(rollout, line({ type: "session_meta", payload: { id: "desktop-owned", cwd: project, originator: "Codex Desktop" } }));
+  const emitted: BridgeToControlMessage[] = [];
+  const scanner = new CodexDesktopSessionScanner({ codexHome, allowedRoots: [root],
+    intervalMs: 60_000, replayExisting: false, emit: (message) => emitted.push(message),
+    isBridgeTurn: (_threadId, turnId) => turnId === "bridge-turn" });
+  await scanner.start();
+
+  const turn = (turnId: string) => [
+    line({ type: "event_msg", payload: { type: "task_started", turn_id: turnId } }),
+    line({ type: "event_msg", payload: { type: "item_completed", turn_id: turnId,
+      item: { type: "CommandExecution", id: `${turnId}-exec`, command: ["ls"], status: "completed", exit_code: 0 },
+      completed_at_ms: 1 } }),
+    line({ type: "event_msg", payload: { type: "task_complete", turn_id: turnId } }),
+  ].join("");
+  appendFileSync(rollout, turn("bridge-turn") + turn("desktop-turn"));
+  await scanner.refresh();
+
+  assert.ok(emitted.length > 0);
+  for (const message of emitted) {
+    if ("eventId" in message) assert.ok(!String(message.eventId).includes("bridge-turn"), String(message.eventId));
+  }
+  assert.ok(emitted.some((message) => message.type === "session.event" && message.itemId === "desktop-turn-exec"));
+  scanner.stop();
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("Desktop scanner rescans active rollouts faster than the idle interval", async () => {
+  const root = join(tmpdir(), `agent-bridge-desktop-fast-${randomUUID()}`);
+  const project = join(root, "project");
+  const codexHome = join(root, ".codex");
+  const sessions = join(codexHome, "sessions");
+  const rollout = join(sessions, "rollout-fast.jsonl");
+  mkdirSync(project, { recursive: true });
+  mkdirSync(sessions, { recursive: true });
+  writeFileSync(rollout, line({ type: "session_meta", payload: { id: "desktop-fast", cwd: project, originator: "Codex Desktop" } }));
+  const emitted: BridgeToControlMessage[] = [];
+  const scanner = new CodexDesktopSessionScanner({ codexHome, allowedRoots: [root],
+    intervalMs: 3_000, replayExisting: false, emit: (message) => emitted.push(message) });
+  await scanner.start();
+  appendFileSync(rollout, line({ type: "event_msg", payload: { type: "task_started", turn_id: "turn-fast" } }));
+  // Let the idle timer (3 s) discover the running turn, then time the next item.
+  await new Promise((resolve) => setTimeout(resolve, 3_300));
+  assert.equal(scanner.isThreadActive("desktop-fast"), true);
+  appendFileSync(rollout, line({ type: "event_msg", payload: { type: "item_completed", turn_id: "turn-fast",
+    item: { type: "CommandExecution", id: "fast-exec", command: ["ls"], status: "completed", exit_code: 0 }, completed_at_ms: 1 } }));
+  await new Promise((resolve) => setTimeout(resolve, 1_600));
+  assert.ok(emitted.some((message) => message.type === "session.event" && message.itemId === "fast-exec"));
   scanner.stop();
   rmSync(root, { recursive: true, force: true });
 });

@@ -643,3 +643,49 @@ test("a late real-time completion does not duplicate an idle-read completion", a
   assert.equal(completed[0] && "eventId" in completed[0] ? completed[0].eventId : undefined,
     "app-server:thread-1:turn-1:terminal");
 });
+
+test("a Desktop turn on a Bridge-subscribed thread still streams, while Bridge-run turns stay suppressed", async () => {
+  const root = join(tmpdir(), `agent-bridge-desktop-stream-${randomUUID()}`);
+  const project = join(root, "project");
+  const sessions = join(root, ".codex", "sessions");
+  const rollout = join(sessions, "rollout-desktop.jsonl");
+  mkdirSync(project, { recursive: true });
+  mkdirSync(sessions, { recursive: true });
+  writeFileSync(rollout,
+    rolloutLine({ type: "session_meta", payload: { id: "desktop-thread", cwd: project, originator: "Codex Desktop" } }));
+  const emitted: BridgeToControlMessage[] = [];
+  const adapter = new CodexAppServerAdapter({
+    command: "codex", url: "ws://127.0.0.1:4500", allowedRoots: [root], manageServer: false,
+    reconnectMs: 3_000, desktopHome: join(root, ".codex"), desktopScanIntervalMs: 60_000,
+  }, (message) => emitted.push(message));
+  const internals = adapter as unknown as {
+    subscribedThreads: Set<string>;
+    desktopScanner: { start(): Promise<void>; refresh(): Promise<void>; stop(): void };
+    setActiveTurn(threadId: string, turnId: string): void;
+    activeTurns: Map<string, string>;
+  };
+  await internals.desktopScanner.start();
+  internals.subscribedThreads.add("desktop-thread");
+  // The Bridge ran bridge-turn and has already seen it complete.
+  internals.setActiveTurn("desktop-thread", "bridge-turn");
+  internals.activeTurns.delete("desktop-thread");
+  const turn = (turnId: string) => [
+    rolloutLine({ type: "event_msg", payload: { type: "task_started", turn_id: turnId } }),
+    rolloutLine({ type: "event_msg", payload: { type: "item_completed", turn_id: turnId,
+      item: { type: "CommandExecution", id: `${turnId}-exec`, command: ["ls"], status: "completed", exit_code: 0 },
+      completed_at_ms: 1_000 } }),
+  ].join("");
+  appendFileSync(rollout, turn("bridge-turn")
+    + rolloutLine({ type: "event_msg", payload: { type: "task_complete", turn_id: "bridge-turn" } })
+    + turn("desktop-turn"));
+  await internals.desktopScanner.refresh();
+
+  const events = emitted.flatMap((message) => message.type === "session.event" ? [message.eventId] : []);
+  assert.deepEqual(events, [
+    "app-server:desktop-thread:desktop-turn:started",
+    "app-server:desktop-thread:desktop-turn-exec:command",
+  ]);
+  assert.ok(!emitted.some((message) => message.type === "agent.completed"));
+  internals.desktopScanner.stop();
+  rmSync(root, { recursive: true, force: true });
+});

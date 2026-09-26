@@ -122,6 +122,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
   private readonly pendingUserInput = new Map<string, PendingUserInput>();
   private readonly pendingApprovals = new Map<string, PendingApproval>();
   private readonly activeTurns = new Map<string, string>();
+  /** Turns this Bridge's App Server ran; the Desktop scanner leaves them to App Server notifications. */
+  private readonly bridgeTurns = new Set<string>();
   private readonly turnModels = new Map<string, string>();
   private readonly pendingTurnModels = new Map<string, string>();
   private readonly subscribedThreads = new Set<string>();
@@ -178,9 +180,13 @@ export class CodexAppServerAdapter implements AgentAdapter {
         allowedRoots: options.allowedRoots,
         intervalMs: options.desktopScanIntervalMs ?? 3_000,
         replayExisting: options.desktopReplayExisting ?? false,
-        emit: (message) => {
-          if (!("sessionId" in message) || !this.subscribedThreads.has(String(message.sessionId))) this.emit(message);
-        },
+        emit: (message) => this.emit(message),
+        // Only a turn the Bridge's own App Server is running is already
+        // reported live. A thread the Bridge once subscribed to can still run
+        // a turn in Codex Desktop, and that turn must stream from the rollout.
+        isBridgeTurn: (threadId, turnId) => turnId
+          ? this.bridgeTurns.has(turnId) || this.activeTurns.get(threadId) === turnId
+          : this.activeTurns.has(threadId),
       });
     }
   }
@@ -318,7 +324,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
         try{result=await this.request<{turn?:CodexTurn}>("turn/start",{threadId:sessionId,input,...(model?{model}:{}),...(reasoningEffort?{effort:reasoningEffort}:{})});}
         finally{this.pendingTurnModels.delete(sessionId);}
         if (result.turn?.id) {
-          this.activeTurns.set(sessionId, result.turn.id);
+          this.setActiveTurn(sessionId, result.turn.id);
           const actualModel=result.turn.model??model;if(actualModel)this.turnModels.set(result.turn.id,actualModel);
         }
       }
@@ -676,7 +682,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
           await this.syncLatestCompletedTurn(threadId, thread);
           if (this.activeTurns.get(threadId) !== previousTurnId) continue;
         }
-        if (activeTurnId) this.activeTurns.set(threadId, activeTurnId);
+        if (activeTurnId) this.setActiveTurn(threadId, activeTurnId);
         else this.activeTurns.delete(threadId);
         if (thread.status?.type === "active") this.activeThreads.add(threadId);
         else this.activeThreads.delete(threadId);
@@ -892,7 +898,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
       const turn = params.turn as CodexTurn;
       const model=turn?.model??this.turnModels.get(turn?.id)??this.pendingTurnModels.get(threadId)
         ??this.threadsById.get(threadId)?.model;
-      if (turn?.id) this.activeTurns.set(threadId, turn.id);
+      if (turn?.id) this.setActiveTurn(threadId, turn.id);
       if (turn?.id&&model)this.turnModels.set(turn.id,model);
       if (turn?.id) this.emitSessionEvent("turn.started", threadId, `app-server:${threadId}:${turn.id}:started`,
         { status: "in_progress", ...(model?{model}:{}) }, turn.id);
@@ -1064,7 +1070,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
     try{result=await this.request<{turn?:CodexTurn}>("turn/start", {threadId,
       input,...(model?{model}:{})});}
     finally{this.pendingTurnModels.delete(threadId);}
-    if(result.turn?.id){this.activeTurns.set(threadId,result.turn.id);
+    if(result.turn?.id){this.setActiveTurn(threadId,result.turn.id);
       const actual=result.turn.model??model;if(actual)this.turnModels.set(result.turn.id,actual);}
   }
 
@@ -1138,6 +1144,13 @@ export class CodexAppServerAdapter implements AgentAdapter {
       this.emit({ type: "approval_resolved", sessionId: approval.sessionId, approvalId });
     }
     this.pendingApprovals.clear();
+  }
+
+  private setActiveTurn(threadId: string, turnId: string): void {
+    this.activeTurns.set(threadId, turnId);
+    this.bridgeTurns.delete(turnId);
+    this.bridgeTurns.add(turnId);
+    if (this.bridgeTurns.size > 1_000) this.bridgeTurns.delete(this.bridgeTurns.values().next().value!);
   }
 
   private emitSessionEvent(eventType: import("@agent-bridge/protocol").StructuredSessionEventType,

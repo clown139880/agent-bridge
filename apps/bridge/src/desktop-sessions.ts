@@ -10,6 +10,11 @@ const MAX_READ_BYTES = 8 * 1024 * 1024;
 const MAX_SESSION_INDEX_BYTES = 8 * 1024 * 1024;
 const FIRST_LINE_BYTES = 64 * 1024;
 const MAX_PARTIAL_LINE_CHARS = 1024 * 1024;
+const MAX_EVENT_TEXT = 64 * 1024;
+// While a Desktop turn runs, re-read only the active rollouts at this pace so
+// tool events reach Control Plane while the turn is still in progress. The
+// full directory walk keeps its configured interval.
+const ACTIVE_SCAN_INTERVAL_MS = 750;
 
 interface DesktopSessionMetadata {
   threadId: string;
@@ -40,6 +45,7 @@ export class CodexDesktopSessionScanner {
   private timer?: NodeJS.Timeout;
   private currentScan?: Promise<void>;
   private stopped = true;
+  private lastFullScanAt = 0;
 
   constructor(private readonly options: {
     codexHome: string;
@@ -47,6 +53,8 @@ export class CodexDesktopSessionScanner {
     intervalMs: number;
     replayExisting: boolean;
     emit: (message: BridgeToControlMessage) => void;
+    /** True when the Bridge's own App Server is running this turn, so its notifications already report it. */
+    isBridgeTurn?: (threadId: string, turnId: string | undefined) => boolean;
   }) {}
 
   async start(): Promise<void> {
@@ -86,24 +94,39 @@ export class CodexDesktopSessionScanner {
 
   private schedule(): void {
     if (this.stopped) return;
+    const delay = this.hasActiveThreads()
+      ? Math.min(ACTIVE_SCAN_INTERVAL_MS, this.options.intervalMs)
+      : this.options.intervalMs;
     this.timer = setTimeout(() => {
       this.timer = undefined;
-      void this.scan(false).catch((error) => log.warn({ error }, "Unable to scan Codex Desktop sessions"))
+      const activeOnly = Date.now() - this.lastFullScanAt < this.options.intervalMs;
+      void this.scan(false, activeOnly).catch((error) => log.warn({ error }, "Unable to scan Codex Desktop sessions"))
         .finally(() => this.schedule());
-    }, this.options.intervalMs);
+    }, delay);
     this.timer.unref();
   }
 
-  private scan(initial: boolean): Promise<void> {
+  private scan(initial: boolean, activeOnly = false): Promise<void> {
     if (this.currentScan) return this.currentScan;
-    const attempt = this.scanInternal(initial).finally(() => {
+    const attempt = this.scanInternal(initial, activeOnly).finally(() => {
       if (this.currentScan === attempt) this.currentScan = undefined;
     });
     this.currentScan = attempt;
     return attempt;
   }
 
-  private async scanInternal(initial: boolean): Promise<void> {
+  private async scanInternal(initial: boolean, activeOnly: boolean): Promise<void> {
+    if (activeOnly) {
+      for (const state of [...this.files.values()].filter((file) => file.activeTurnId)) {
+        try {
+          this.scanFile(state.path, false);
+        } catch (error) {
+          log.warn({ error, path: state.path }, "Unable to inspect Codex Desktop rollout");
+        }
+      }
+      return;
+    }
+    this.lastFullScanAt = Date.now();
     const sessionsRoot = join(this.options.codexHome, "sessions");
     const indexedTitles = readDesktopSessionTitles(this.options.codexHome);
     const paths = listRecentRollouts(sessionsRoot);
@@ -180,6 +203,23 @@ export class CodexDesktopSessionScanner {
       if (entry.type === "event_msg" && payload.type === "task_started" && typeof payload.turn_id === "string") {
         state.activeTurnId = payload.turn_id;
         state.lastAssistantText = undefined;
+        if (baselineOnly || this.isBridgeTurn(state, payload.turn_id)) continue;
+        // Use the same event id as the App Server's turn/started so the two
+        // sources collapse into one row in Control Plane.
+        this.emitDiscovery(state, "working");
+        this.options.emit({
+          type: "session.event",
+          eventId: `app-server:${state.threadId}:${payload.turn_id}:started`,
+          eventType: "turn.started",
+          sessionId: state.threadId,
+          turnId: payload.turn_id,
+          timestamp: timestamp ?? codexSeconds(payload.started_at) ?? Date.now(),
+          payload: { status: "in_progress" },
+        });
+        continue;
+      }
+      if (entry.type === "event_msg" && payload.type === "item_completed") {
+        if (!baselineOnly) this.emitCompletedItem(state, payload, timestamp);
         continue;
       }
       const assistantText = extractAssistantText(entry);
@@ -194,7 +234,7 @@ export class CodexDesktopSessionScanner {
       const eventId = `desktop:${state.threadId}:${turnId}:${terminalType}`;
       if (this.reportedEvents.has(eventId)) continue;
       this.reportedEvents.add(eventId);
-      if (baselineOnly) continue;
+      if (baselineOnly || this.isBridgeTurn(state, turnId)) continue;
       this.emitDiscovery(state, terminalType === "agent.completed" ? "completed" : "stopped");
       this.options.emit({
         type: terminalType,
@@ -216,6 +256,56 @@ export class CodexDesktopSessionScanner {
           historyCompleteness: "terminal-only",
         },
       });
+    }
+  }
+
+  private isBridgeTurn(state: FileState, turnId: string | undefined): boolean {
+    return Boolean(this.options.isBridgeTurn?.(state.threadId, turnId));
+  }
+
+  /**
+   * Forward one finished rollout item while its turn is still running.
+   *
+   * The rollout carries no item_started records and no streamed command
+   * output, so a long command appears only once it exits, stamped with its
+   * real completion time. The rollout is an internal Codex format that can
+   * change between releases: anything unrecognized is skipped, and the App
+   * Server read after the turn still backfills it. Event ids match the App
+   * Server's (rollout item ids equal thread/read item ids), so that later
+   * backfill is dropped as a duplicate instead of re-timestamping the item.
+   */
+  private emitCompletedItem(state: FileState, payload: Record<string, unknown>, entryTimestamp: number | undefined): void {
+    const item = payload.item && typeof payload.item === "object" ? payload.item as Record<string, unknown> : undefined;
+    const itemId = typeof item?.id === "string" && item.id ? item.id : undefined;
+    if (!item || !itemId) return;
+    const turnId = typeof payload.turn_id === "string" ? payload.turn_id : state.activeTurnId;
+    if (this.isBridgeTurn(state, turnId)) return;
+    const timestamp = finiteNumber(payload.completed_at_ms) ?? entryTimestamp ?? Date.now();
+    const threadId = state.threadId;
+    const emit = (eventType: "message.completed" | "command.completed" | "file_change.completed",
+      suffix: string, eventPayload: Record<string, unknown>) => this.options.emit({
+      type: "session.event", eventId: `app-server:${threadId}:${itemId}:${suffix}`, eventType,
+      sessionId: threadId, turnId, itemId, timestamp, payload: eventPayload,
+    });
+    if (item.type === "AgentMessage" || item.type === "UserMessage") {
+      const text = contentText(item.content);
+      if (!text) return;
+      emit("message.completed", "message",
+        { role: item.type === "UserMessage" ? "user" : "assistant", text: truncateEventText(text) });
+    } else if (item.type === "CommandExecution") {
+      const exitCode = finiteNumber(item.exit_code) ?? null;
+      const output = [item.aggregated_output, item.formatted_output, item.stdout]
+        .find((value): value is string => typeof value === "string") ?? "";
+      emit("command.completed", "command", {
+        command: commandText(item.command), cwd: rolloutPath(item.cwd),
+        status: typeof item.status === "string" ? item.status : "unknown", exitCode,
+        output: truncateEventText(output),
+      });
+    } else if (item.type === "FileChange") {
+      const changes = fileChanges(item.changes);
+      const summary = `${changes.length} file change${changes.length === 1 ? "" : "s"} applied`;
+      emit("file_change.completed", "file-change",
+        { changes: changes.slice(0, 200), summary, truncated: changes.length > 200 });
     }
   }
 
@@ -363,4 +453,67 @@ function extractAssistantText(entry: RolloutEntry): string | undefined {
     return typeof record.text === "string" ? [record.text] : [];
   }).join("\n").trim();
   return text || undefined;
+}
+
+function finiteNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function codexSeconds(value: unknown): number | undefined {
+  const seconds = finiteNumber(value);
+  return seconds === undefined ? undefined : seconds * 1000;
+}
+
+function truncateEventText(text: string): string {
+  return text.length <= MAX_EVENT_TEXT ? text : `${text.slice(0, MAX_EVENT_TEXT)}\n…[truncated]`;
+}
+
+function contentText(content: unknown): string | undefined {
+  if (typeof content === "string") return content.trim() || undefined;
+  if (!Array.isArray(content)) return undefined;
+  const text = content.flatMap((part) => part && typeof part === "object"
+    && typeof (part as Record<string, unknown>).text === "string" ? [(part as Record<string, string>).text] : [])
+    .join("\n").trim();
+  return text || undefined;
+}
+
+/** The rollout stores argv; App Server shows one shell-quoted line. */
+function commandText(command: unknown): string {
+  if (typeof command === "string") return command || "command";
+  if (!Array.isArray(command) || !command.length) return "command";
+  return command.map((arg) => {
+    const value = String(arg);
+    return /^[\w@%+=:,./-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`;
+  }).join(" ");
+}
+
+/** The rollout stores cwd as a file URL; App Server reports a plain path. */
+function rolloutPath(value: unknown): string | undefined {
+  if (typeof value !== "string" || !value) return undefined;
+  if (!value.startsWith("file://")) return normalizeDesktopPath(value);
+  let path: string;
+  try {
+    path = decodeURIComponent(value.slice("file://".length));
+  } catch {
+    return undefined;
+  }
+  // file:///C:/Users/... carries a leading slash before the drive letter.
+  if (/^\/[A-Za-z]:[\\/]/.test(path)) path = path.slice(1);
+  return normalizeDesktopPath(path);
+}
+
+/** Convert the rollout's `{ path: change }` map into App Server's change list. */
+function fileChanges(changes: unknown): Array<Record<string, unknown>> {
+  if (Array.isArray(changes)) return changes.filter((change) => change && typeof change === "object");
+  if (!changes || typeof changes !== "object") return [];
+  return Object.entries(changes as Record<string, unknown>).map(([path, raw]) => {
+    const change = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
+    const movePath = typeof change.move_path === "string" ? change.move_path : undefined;
+    const diff = [change.unified_diff, change.content].find((value): value is string => typeof value === "string") ?? "";
+    return {
+      path,
+      kind: { type: typeof change.type === "string" ? change.type : "update", ...(movePath ? { move_path: movePath } : {}) },
+      diff,
+    };
+  });
 }
