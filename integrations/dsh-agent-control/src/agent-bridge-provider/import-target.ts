@@ -10,6 +10,7 @@ import { ControlError } from '../errors.js'
 import type { JsonObject } from '../types.js'
 import { appendSessionEvent, guardImportedTurnNumbers, nativeSession, sessionEvents, toolResultShape, type NativeHost, type NativeHandle, type NativeEvent } from './dsh-compat.js'
 import { ACK_EVENT, BINDING_EVENT, PROVIDER, projectNativeEvents, record, str } from './mapping.js'
+import { isStoredSessionCorruption, repairStoredToolResults } from './session-repair.js'
 import { relayPendingInteractions } from './approval-bridge.js'
 
 const hash = (value: string) => createHash('sha256').update(value).digest('hex').slice(0, 32)
@@ -560,7 +561,19 @@ export class AgentBridgeImportTarget {
       const options = { provider: PROVIDER, model }
       const setup = async (ctx: Context) => { await this.host.agentPresets?.mount(ctx, PROVIDER) }
       let handle: NativeHandle
-      if (stored) handle = await this.host.agents.resume({ resumeSessionId: id, agentOptions: options, setup })
+      if (stored) {
+        try { handle = await this.host.agents.resume({ resumeSessionId: id, agentOptions: options, setup }) }
+        catch (error) {
+          // A log another plugin release wrote in the other DSH generation's
+          // tool/result shape is refused whole; convert it once, then resume.
+          if (!isStoredSessionCorruption(error)) throw error
+          const repaired = await repairStoredToolResults(this.host.sessionPersistence, id, toolResultShape(this.host), this.dataRoot)
+            .catch((repairError: unknown) => { this.host.logger.warn(`Agent Bridge could not repair stored session "${id}": ${String(repairError)}`); return [] })
+          if (!repaired.length) throw error
+          this.host.logger.warn(`Agent Bridge repaired ${repaired.length} tool result(s) in stored session "${id}" (seq ${repaired.slice(0, 5).join(', ')})`)
+          handle = await this.host.agents.resume({ resumeSessionId: id, agentOptions: options, setup })
+        }
+      }
       else {
         const history = await readHistory(this.bridge, remoteId, undefined, this.abort.signal)
         const time = Number(row['createdAt'] ?? row['updatedAt']) || Date.now()

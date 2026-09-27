@@ -1,6 +1,6 @@
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { Context } from '@deepseek-ai/cordis'
-import type { JsonObject } from '../types.js'
+import type { JsonObject, JsonValue } from '../types.js'
 
 /** DSH 0.1.2-rc.1 / 0.1.3-alpha.1 session and persistence seam. */
 export interface NativeEvent { type: string; data: JsonObject; seq: number; time: number; surfaceOp?: 'append' }
@@ -20,7 +20,7 @@ export interface NativeHost {
     resume(options: { resumeSessionId: string; agentOptions: { provider: string; model: string }; setup?(ctx: Context): Promise<void> }): Promise<NativeHandle>
   }
   sessions: { flush(session: unknown): Promise<boolean> }
-  sessionPersistence: { stat(id: string): Promise<unknown> }
+  sessionPersistence: { stat(id: string): Promise<unknown>; locate?(header: unknown): { kind?: string; path?: string } | undefined }
   workspaceRegistry: {
     archiveSession?(id: string): Promise<void>
     list?(): NativeWorkspace[]
@@ -51,6 +51,29 @@ export interface NativePresets {
 export type ToolResultShape = 'tool-result-block' | 'tool-role'
 export function toolResultShape(host: NativeHost): ToolResultShape {
   return typeof host.agentPresets?.register === 'function' ? 'tool-role' : 'tool-result-block'
+}
+export function toolResultMessage(id: string, callId: string, text: string, isError: boolean, shape: ToolResultShape): JsonObject {
+  const content: JsonValue[] = [{ type: 'text', text }]
+  return shape === 'tool-role'
+    ? { id, role: 'tool', toolCallId: callId, isError, source: { kind: 'tool', callId }, content }
+    : { id, role: 'user', source: { kind: 'tool', callId }, content: [{ type: 'tool-result', toolCallId: callId, content, isError }] }
+}
+/**
+ * The same tool/result message in `shape`, or undefined when it already conforms.
+ * A log written under one DSH generation is refused whole by the other, so a
+ * stored Bridge session is repaired by converting its own (`bridge:`) results.
+ */
+export function conformToolResult(message: JsonObject, shape: ToolResultShape): JsonObject | undefined {
+  const id = typeof message['id'] === 'string' ? message['id'] : ''
+  const source = message['source'] && typeof message['source'] === 'object' && !Array.isArray(message['source']) ? message['source'] : {}
+  const callId = typeof source['callId'] === 'string' ? source['callId'] : ''
+  const content = Array.isArray(message['content']) ? message['content'] : []
+  const block = content.length === 1 && content[0] && typeof content[0] === 'object' && !Array.isArray(content[0]) && content[0]['type'] === 'tool-result' ? content[0] : undefined
+  if (!id.startsWith('bridge:') || !callId) return undefined
+  if (shape === 'tool-role' ? message['role'] === 'tool' && message['toolCallId'] === callId && !block : message['role'] === 'user' && block?.['toolCallId'] === callId && Array.isArray(block['content'])) return undefined
+  const inner = block && Array.isArray(block['content']) ? block['content'] : content
+  const text = inner.map(part => part && typeof part === 'object' && !Array.isArray(part) && part['type'] === 'text' && typeof part['text'] === 'string' ? part['text'] : '').join('')
+  return toolResultMessage(id, callId, text, (block?.['isError'] ?? message['isError']) === true, shape)
 }
 export interface NativeWorkspace { id?: string; path?: string; title?: string; sessionIds?: readonly string[]; setTitle?(title: string): Promise<void>; attachSession(id: string): Promise<void> }
 export function nativeHost(ctx: Context): NativeHost { return ctx as unknown as NativeHost }

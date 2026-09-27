@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { Session, SessionId, SESSION_FORMAT_VERSION, KNOWN_SESSION_EVENT_TYPES } from '@deepseek-ai/dsh-session'
+import { Session, SessionId, SESSION_FORMAT_VERSION, KNOWN_SESSION_EVENT_TYPES, adoptSessionEvent } from '@deepseek-ai/dsh-session'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
 import type { JsonObject, JsonValue } from '../src/types.js'
 import { AgentBridgeImportTarget, nativeSessionId, readHistory } from '../src/agent-bridge-provider/import-target.js'
 import { ACK_EVENT, BINDING_EVENT, projectNativeEvents, projectStreamChunks, sameUserText } from '../src/agent-bridge-provider/mapping.js'
-import { nativeSession, sessionEvents, appendSessionEvent, guardImportedTurnNumbers, toolResultShape, type NativeHost, type ToolResultShape, type NativeEvent } from '../src/agent-bridge-provider/dsh-compat.js'
+import { nativeSession, sessionEvents, appendSessionEvent, guardImportedTurnNumbers, toolResultShape, conformToolResult, type NativeHost, type ToolResultShape, type NativeEvent } from '../src/agent-bridge-provider/dsh-compat.js'
 import { AgentBridgeLlmAdapter, toolProgressLine } from '../src/agent-bridge-provider/adapter.js'
 import { uploadPromptImages } from '../src/agent-bridge-provider/attachments.js'
 import type { AgentControlService } from '../src/service.js'
@@ -13,7 +13,9 @@ import type { BridgeClient } from '../src/bridge-client.js'
 import { ControlError } from '../src/errors.js'
 import { bridgeUserInputToQuestions, userInputAnswerToBridge, relayPendingInteractions } from '../src/agent-bridge-provider/approval-bridge.js'
 import type { Context } from '@deepseek-ai/cordis'
-import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { constants, zstdCompressSync, zstdDecompressSync } from 'node:zlib'
+import { isStoredSessionCorruption, repairStoredToolResults, zstdFrames } from '../src/agent-bridge-provider/session-repair.js'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -107,6 +109,43 @@ describe('native history projection', () => {
     const host = (agentPresets?: NativeHost['agentPresets']) => ({ agentPresets }) as NativeHost
     expect(toolResultShape(host({ ...presets, register: async () => async () => {} }))).toBe('tool-role')
     expect(toolResultShape(host({ ...presets, roots: [] }))).toBe('tool-result-block')
+  })
+  it('converts stored Bridge tool results between the two DSH shapes', () => {
+    const rows = [row('cmd', 'command.completed', { command: 'false', output: 'boom', status: 'failed' })]
+    const result = (shape: ToolResultShape) => projectNativeEvents(rows, [], 'remote', shape).find(e => e.type === 'tool/result')!.data['message'] as JsonObject
+    expect(conformToolResult(result('tool-role'), 'tool-result-block')).toEqual(result('tool-result-block'))
+    expect(conformToolResult(result('tool-result-block'), 'tool-role')).toEqual(result('tool-role'))
+    expect(conformToolResult(result('tool-role'), 'tool-role')).toBeUndefined()
+    expect(conformToolResult(result('tool-result-block'), 'tool-result-block')).toBeUndefined()
+    // Only the plugin's own results are rewritten.
+    expect(conformToolResult({ ...result('tool-role'), id: 'local-1' }, 'tool-result-block')).toBeUndefined()
+  })
+  it('repairs a stored log written in the other DSH generation so it validates again', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'agent-bridge-repair-'))
+    try {
+      const id = 'agent-bridge-repair'
+      const path = join(directory, 'session.v3.jsonl.zstd')
+      const header = { type: 'session', version: 3, id, createdAt: 1, isSeeded: false, delegationDepth: 0, agentPreset: 'agent-bridge' }
+      // 0.1.63 appended tool-role results into a DSH 0.1.5 (block-shape) log.
+      const events = projectNativeEvents([row('cmd', 'command.completed', { command: 'pwd', output: '/repo' }), row('answer')], [], 'remote', 'tool-role')
+      const frame = (text: string) => zstdCompressSync(text, { params: { [constants.ZSTD_c_checksumFlag]: 1 } })
+      await writeFile(path, Buffer.concat([frame(JSON.stringify(header) + '\n'), ...events.map(event => frame(JSON.stringify(event) + '\n'))]))
+      const decode = async () => zstdFrames(await readFile(path)).map(part => zstdDecompressSync(part).toString('utf8'))
+      const stored = async () => (await decode()).join('').split('\n').filter(Boolean).slice(1).map(line => JSON.parse(line) as NativeEvent)
+      expect(() => (events.map(event => adoptSessionEvent(structuredClone(event) as never)))).toThrow(/must have role "user"/)
+      const persistence = { stat: async () => ({ header }), locate: () => ({ kind: 'jsonl', path }) }
+      expect(await repairStoredToolResults(persistence, id, 'tool-result-block', directory)).toEqual([events.find(e => e.type === 'tool/result')!.seq])
+      const repaired = await stored()
+      expect(() => repaired.map(event => adoptSessionEvent(event as never))).not.toThrow()
+      expect(repaired.map(e => e.type)).toEqual(events.map(e => e.type))
+      // DSH lists sessions by decoding only the first frame: it must stay the header alone.
+      expect((await decode())[0]).toBe(JSON.stringify(header) + '\n')
+      expect(await readdir(join(directory, 'session-repairs', id))).toHaveLength(1)
+      expect(await repairStoredToolResults(persistence, id, 'tool-result-block', directory)).toEqual([])
+      expect(isStoredSessionCorruption(new Error(`stored session "${id}" is corrupt`, { cause: new Error('x') }))).toBe(true)
+      expect(isStoredSessionCorruption(Object.assign(new Error('x'), { name: 'SessionPersistenceCorruptionError' }))).toBe(true)
+      expect(isStoredSessionCorruption(new Error('会话不存在'))).toBe(false)
+    } finally { await rm(directory, { recursive: true, force: true }) }
   })
   it('deduplicates legacy history ids against canonical live App Server item ids', () => {
     const liveId = 'app-server:thread-1:exec-1:command'
@@ -377,6 +416,33 @@ describe('native session catalog', () => {
     expect(f.resume).toHaveBeenCalledTimes(1)
     expect(sessionEvents(nativeSession(f.agents.get(String(a.id))!)).filter(e => e.type === 'assistant/message')).toHaveLength(1)
     await f.target.dispose()
+  })
+  it('repairs a stored session refused for its tool/result shape, then resumes it', async () => {
+    const f = await fixture([])
+    const id = nativeSessionId('http://bridge.test', 'remote-1')
+    const header = { type: 'session', version: SESSION_FORMAT_VERSION, id, createdAt: 1, isSeeded: false, delegationDepth: 0 }
+    const events = projectNativeEvents([row('cmd', 'command.completed', { command: 'pwd', output: '/repo' })], [], 'remote', 'tool-role')
+    const path = join(roots[0]!, 'session.v3.jsonl')
+    await writeFile(path, [header, ...events].map(line => JSON.stringify(line) + '\n').join(''))
+    const { type: _type, ...meta } = header
+    f.stored.set(id, { header: meta, events: [] })
+    f.host.sessionPersistence.locate = () => ({ kind: 'jsonl', path })
+    const corrupt = new Error(`stored session "${id}" is corrupt: stored session "${id}" failed validation: Error: session event at seq 3 message must have role "user"`)
+    f.resume.mockRejectedValueOnce(corrupt)
+    await f.target.open('remote-1')
+    expect(f.resume).toHaveBeenCalledTimes(2)
+    expect(f.host.logger.warn).toHaveBeenCalledWith(expect.stringContaining('repaired 1 tool result(s)'))
+    const repaired = (await readFile(path, 'utf8')).split('\n').filter(Boolean).slice(1).map(line => JSON.parse(line) as NativeEvent)
+    expect(() => repaired.map(event => adoptSessionEvent(event as never))).not.toThrow()
+    // Nothing left to repair: the refusal is surfaced instead of looping.
+    await f.target.dispose()
+    const g = await fixture([])
+    g.stored.set(id, { header: meta, events: [] })
+    g.host.sessionPersistence.locate = () => ({ kind: 'jsonl', path })
+    g.resume.mockRejectedValueOnce(corrupt)
+    await expect(g.target.open('remote-1')).rejects.toBe(corrupt)
+    expect(g.resume).toHaveBeenCalledTimes(1)
+    await g.target.dispose()
   })
   it('replaces legacy per-location presentation workspaces with one durable project workspace', async () => {
     const f = await fixture([])

@@ -1,6 +1,6 @@
 import type { ContentBlock, GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { JsonObject, JsonValue } from '../types.js'
-import type { NativeEvent, ToolResultShape } from './dsh-compat.js'
+import { toolResultMessage, type NativeEvent, type ToolResultShape } from './dsh-compat.js'
 
 export const PROVIDER = 'agent-bridge'
 export const BINDING_EVENT = 'agent-bridge/binding'
@@ -114,10 +114,7 @@ export function projectNativeEvents(rows: readonly JsonObject[], existing: reado
           // The seed validator's tool/result shape depends on the DSH release; see ToolResultShape.
           const output = str(payload['output'], JSON.stringify(payload))
           const isError = payload['status'] === 'failed'
-          const message = toolResult === 'tool-role'
-            ? { id: 'bridge:' + id + ':result', role: 'tool', toolCallId: callId, isError, source: { kind: 'tool', callId }, content: [{ type: 'text', text: output }] }
-            : { id: 'bridge:' + id + ':result', role: 'user', source: { kind: 'tool', callId }, content: [{ type: 'tool-result', toolCallId: callId, content: [{ type: 'text', text: output }], isError }] }
-          add('tool/result', { turn, step: 1, message }, time, true)
+          add('tool/result', { turn, step: 1, message: toolResultMessage('bridge:' + id + ':result', callId, output, isError, toolResult) }, time, true)
         }
       }
       add('step/end', { turn, step: 1 }, time)
