@@ -8,7 +8,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { BridgeClient } from '../bridge-client.js'
 import { ControlError } from '../errors.js'
 import type { JsonObject } from '../types.js'
-import { appendSessionEvent, guardImportedTurnNumbers, nativeSession, sessionEvents, type NativeHost, type NativeHandle, type NativeEvent } from './dsh-compat.js'
+import { appendSessionEvent, guardImportedTurnNumbers, nativeSession, sessionEvents, toolResultShape, type NativeHost, type NativeHandle, type NativeEvent } from './dsh-compat.js'
 import { ACK_EVENT, BINDING_EVENT, PROVIDER, projectNativeEvents, record, str } from './mapping.js'
 import { relayPendingInteractions } from './approval-bridge.js'
 
@@ -375,21 +375,32 @@ export class AgentBridgeImportTarget {
     const session = nativeSession(agent)
     this.presenting.add(nativeId)
     try {
-      for (const event of projectNativeEvents(presentations, sessionEvents(session), str(this.binding(nativeId)?.['model'], 'remote'))) appendSessionEvent(session, event)
+      for (const event of projectNativeEvents(presentations, sessionEvents(session), str(this.binding(nativeId)?.['model'], 'remote'), toolResultShape(this.host))) appendSessionEvent(session, event)
       this.acknowledge(nativeId, acknowledgements)
     } finally { this.presenting.delete(nativeId) }
   }
   async ensurePreset(): Promise<void> {
     const presets = this.host.agentPresets
     if (!presets) throw new Error('DSH agentPresets is required for isolated Bridge sessions')
-    // DSH 0.1.7-rc.2 replaced the on-disk preset roots (`presets.roots` + a
-    // written `agent.cordis.yml`) with programmatic registration. Reading the
-    // removed `roots` array was the source of the sync-time
-    // "Cannot read properties of undefined (reading 'find')" TypeError. Declare
-    // an isolated, empty (no local tools) preset in memory instead; the
-    // returned disposer is released on dispose so hot reload can re-register.
-    if (!this.presetDisposer) {
-      this.presetDisposer = await presets.register({ id: PROVIDER, name: 'Agent Bridge', description: 'Bridge remote sessions', plugins: [] })
+    // DSH 0.1.7-rc.2 replaced the on-disk preset roots with programmatic
+    // registration; DSH <= 0.1.5 (Desktop) only has the roots. Either way the
+    // preset is isolated and empty (no local tools). The register disposer is
+    // released on dispose so hot reload can re-register.
+    if (presets.register) {
+      if (!this.presetDisposer) {
+        this.presetDisposer = await presets.register({ id: PROVIDER, name: 'Agent Bridge', description: 'Bridge remote sessions', plugins: [] })
+      }
+    } else {
+      const root = presets.roots?.find(root => root.trust === 'user')
+      if (!root) throw new Error('DSH has no writable preset root')
+      const folder = join(root.path, PROVIDER)
+      await mkdir(folder, { recursive: true })
+      const composition = join(folder, 'agent.cordis.yml')
+      try { await writeFile(composition, '[]\n', { flag: 'wx' }) }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error }
+      if ((await readFile(composition, 'utf8')).trim() !== '[]') throw new Error('Existing agent-bridge preset is not empty; refusing to compose local tools')
+      try { await writeFile(join(folder, 'preset.yml'), 'name: Agent Bridge\ndescription: Bridge remote sessions\n', { flag: 'wx' }) }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error }
     }
     await presets.resolve(PROVIDER)
   }
@@ -554,7 +565,7 @@ export class AgentBridgeImportTarget {
         const history = await readHistory(this.bridge, remoteId, undefined, this.abort.signal)
         const time = Number(row['createdAt'] ?? row['updatedAt']) || Date.now()
         const seed: NativeEvent[] = [{ type: BINDING_EVENT, data: binding, seq: 0, time }]
-        seed.push(...projectNativeEvents(history.rows, seed, model))
+        seed.push(...projectNativeEvents(history.rows, seed, model, toolResultShape(this.host)))
         // Empty retained histories still have a real, selectable presentation Session.
         if (!seed.some(e => e.type === 'turn/start')) seed.push(
           { type: 'turn/start', data: { turn: 1 }, seq: seed.length, time },
@@ -657,7 +668,7 @@ export class AgentBridgeImportTarget {
     // A native prompt may have started while the HTTP read was pending.
     if (this.isBusy(id)) return
     const session = nativeSession(agent)
-    for (const event of projectNativeEvents(history.rows, sessionEvents(session), str(binding['model'], 'remote'))) appendSessionEvent(session, event)
+    for (const event of projectNativeEvents(history.rows, sessionEvents(session), str(binding['model'], 'remote'), toolResultShape(this.host))) appendSessionEvent(session, event)
     if (history.cursor) this.cursors.set(id, history.cursor)
     await this.host.sessions.flush(agent.session)
   }

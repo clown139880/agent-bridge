@@ -1,6 +1,6 @@
 import type { ContentBlock, GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { JsonObject, JsonValue } from '../types.js'
-import type { NativeEvent } from './dsh-compat.js'
+import type { NativeEvent, ToolResultShape } from './dsh-compat.js'
 
 export const PROVIDER = 'agent-bridge'
 export const BINDING_EVENT = 'agent-bridge/binding'
@@ -56,7 +56,7 @@ export function projectStreamChunks(event: JsonObject, index = 0): StreamChunk[]
 }
 
 /** Balanced presentation transactions; never put remote tool calls in the local execution queue. */
-export function projectNativeEvents(rows: readonly JsonObject[], existing: readonly NativeEvent[], model = 'remote'): NativeEvent[] {
+export function projectNativeEvents(rows: readonly JsonObject[], existing: readonly NativeEvent[], model = 'remote', toolResult: ToolResultShape = 'tool-role'): NativeEvent[] {
   const acknowledgements = existing.filter(e => e.type === ACK_EVENT)
   const seen = new Set(acknowledgements.map(e => str(e.data['eventId'])))
   const seenItems = new Set([...seen].map(presentationItemKey).filter((key): key is string => !!key))
@@ -111,12 +111,13 @@ export function projectNativeEvents(rows: readonly JsonObject[], existing: reado
         add('assistant/message', { turn, step: 1, message: { id: 'bridge:' + id + ':assistant', role: 'assistant', source: { kind: 'model', provider: PROVIDER, model }, content }, stream: [] }, time, true)
         if (isTool) {
           add('tool/call', { turn, step: 1, callId, name, arguments: args }, time)
-          // A tool/result message must carry role "tool", a top-level toolCallId
-          // matching source.callId, and model-facing content blocks. DSH 0.1.7-rc.2
-          // dropped the "tool-result" content block type and now validates this
-          // shape at the seed boundary, so the result text goes in a plain text
-          // block with the tool-call linkage lifted to the message envelope.
-          add('tool/result', { turn, step: 1, message: { id: 'bridge:' + id + ':result', role: 'tool', toolCallId: callId, isError: payload['status'] === 'failed', source: { kind: 'tool', callId }, content: [{ type: 'text', text: str(payload['output'], JSON.stringify(payload)) }] } }, time, true)
+          // The seed validator's tool/result shape depends on the DSH release; see ToolResultShape.
+          const output = str(payload['output'], JSON.stringify(payload))
+          const isError = payload['status'] === 'failed'
+          const message = toolResult === 'tool-role'
+            ? { id: 'bridge:' + id + ':result', role: 'tool', toolCallId: callId, isError, source: { kind: 'tool', callId }, content: [{ type: 'text', text: output }] }
+            : { id: 'bridge:' + id + ':result', role: 'user', source: { kind: 'tool', callId }, content: [{ type: 'tool-result', toolCallId: callId, content: [{ type: 'text', text: output }], isError }] }
+          add('tool/result', { turn, step: 1, message }, time, true)
         }
       }
       add('step/end', { turn, step: 1 }, time)
