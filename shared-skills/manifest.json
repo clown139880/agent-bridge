@@ -29,7 +29,7 @@
       "name": "browser",
       "version": "1.0.0",
       "files": {
-        "SKILL.md": "e6e43883e5c9ff4dfd88b3ae30b83155ba0eaca8c53670fe51a212c72b00cd45",
+        "SKILL.md": "3a6b1cc15187e15de8a1aa62a438c171615f7b0fde70c17dcbe1169dfd8fa945",
         "agents/openai.yaml": "3921c5c440cdb11b3833cfe52050cb1858cf734a205f3413494f6b4249c9eef6"
       },
       "dependencies": [

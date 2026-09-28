@@ -14,19 +14,19 @@ One headed Chrome on the Windows desktop is shared by every agent on this PC and
 
 ## Drive it with agent-browser
 
-`~/.agent-browser/config.json` sets `{"cdp": "9222", "pinTab": true}`, so every command attaches to the shared browser. Always pass your own `--session <name>`, unique to this task (for example the project plus a short purpose), and reuse it for every command in the task.
+Pass `--cdp 9222 --pin-tab` on every command. Sandboxes may not see `~/.agent-browser/config.json`, and without `--cdp` agent-browser tries to launch its own Chrome ("Auto-launch failed"). Always pass your own `--session <name>`, unique to this task (for example the project plus a short purpose), and reuse it for every command in the task.
 
 ```bash
-agent-browser --session <name> open https://example.com   # binds the session to its own new tab
-agent-browser --session <name> snapshot -i                  # interactive elements with refs (@e1, @e2 ...)
-agent-browser --session <name> click @e2
-agent-browser --session <name> fill @e3 "text"
-agent-browser --session <name> get title
-agent-browser --session <name> screenshot page.png          # only when the text snapshot is not enough
-agent-browser --session <name> tab close                    # when finished: close only your own tab
+agent-browser --cdp 9222 --pin-tab --session <name> open https://example.com    # binds the session to its own new tab
+agent-browser --cdp 9222 --pin-tab --session <name> snapshot -i                 # interactive elements with refs (@e1, @e2 ...)
+agent-browser --cdp 9222 --pin-tab --session <name> click @e2
+agent-browser --cdp 9222 --pin-tab --session <name> fill @e3 "text"
+agent-browser --cdp 9222 --pin-tab --session <name> get title
+agent-browser --cdp 9222 --pin-tab --session <name> screenshot page.png         # only when the text snapshot is not enough
+agent-browser --cdp 9222 --pin-tab --session <name> tab close                   # when finished: close only your own tab
 ```
 
-Prefer `snapshot -i` over screenshots. Re-snapshot after navigation or page changes before using refs again. If a command reports `tab_gone`, the user closed your tab; open a new one with `agent-browser --session <name> tab new <url>` instead of taking over another tab.
+Prefer `snapshot -i` over screenshots. Re-snapshot after navigation or page changes before using refs again. If a command reports `tab_gone`, the user closed your tab; open a new one with `tab new <url>` instead of taking over another tab.
 
 ## Rules
 
