@@ -98,6 +98,7 @@ export class BridgeClient {
     archiveOutboxLimit: number;
     sharedSkillsManifest?: string;
     conversationMcpConfigured: boolean;
+    browserCdpConfigured?: boolean;
     drainFile?: string;
     updatePackageManager: string;
     updateRestartExecutable: string;
@@ -429,9 +430,11 @@ export class BridgeClient {
           if(!existsSync(path)){status="missing";break;}
           if(createHash("sha256").update(readFileSync(path)).digest("hex")!==expected)status="modified";
         }
+        const configured:Record<string,boolean|undefined>={"conversation-mcp":this.options.conversationMcpConfigured,
+          "browser-cdp":this.options.browserCdpConfigured};
         return{name:skill.name,version:skill.version,status,dependencies:Object.fromEntries(
-          (skill.dependencies??[]).map(name=>[name,name==="conversation-mcp"
-            ?this.options.conversationMcpConfigured?"configured":"missing":"unknown"]))};
+          (skill.dependencies??[]).map(name=>[name,!(name in configured)?"unknown"
+            :configured[name]?"configured":"missing"]))};
       });
     }catch(error){log.warn({error},"Unable to read shared skill status manifest");return [];}
   }

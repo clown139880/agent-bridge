@@ -1,0 +1,3 @@
+interface:
+  display_name: "Shared Browser"
+  short_description: "Drive the shared visible agent browser over CDP"

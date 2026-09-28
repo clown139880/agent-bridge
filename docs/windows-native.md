@@ -72,3 +72,11 @@ It does not deploy Host changes. Reload the renderer if the new version marker
 does not appear; an active client-module reload may apply the update automatically.
 To roll back, restore both backed-up files using temporary copies and replacement
 (rather than overwriting pnpm hardlinks), then reload the renderer.
+
+## Shared agent browser
+
+The Windows desktop hosts one headed Chrome with an isolated profile that Windows
+and WSL agents share over CDP at `127.0.0.1:9222`. Install the
+`Agent Bridge Browser` scheduled task with
+`deploy/windows-native/browser/install-browser-task.ps1`; setup, the WSL relay,
+and sandbox notes are in [browser-automation.zh.md](browser-automation.zh.md).

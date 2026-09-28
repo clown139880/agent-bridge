@@ -44,6 +44,7 @@ const client = new BridgeClient({
   archiveOutboxLimit: config.archiveOutboxLimit,
   sharedSkillsManifest: config.sharedSkillsManifest,
   conversationMcpConfigured: config.conversationMcpConfigured,
+  browserCdpConfigured: config.browserCdpConfigured,
   drainFile: config.drainFile,
   updatePackageManager: config.updatePackageManager,
   updateRestartExecutable: config.updateRestartExecutable,

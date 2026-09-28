@@ -1,0 +1,20 @@
+[Unit]
+Description=Agent Bridge CDP relay from WSL loopback to the shared Windows browser
+After=default.target
+
+[Service]
+Type=simple
+# Runs from the same immutable release as agent-bridge-wsl-user.service so pino
+# resolves from the release node_modules. The shared Chrome itself is started on
+# Windows by the "Agent Bridge Browser" scheduled task.
+WorkingDirectory=%h/.local/share/agent-bridge/current
+Environment=CDP_RELAY_PORT=9222
+Environment="CDP_RELAY_WINDOWS_NODE=/mnt/c/Program Files/nodejs/node.exe"
+ExecStart=/usr/bin/node deploy/wsl-browser/cdp-relay.mjs
+Restart=always
+RestartSec=5
+TimeoutStopSec=10
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

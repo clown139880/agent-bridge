@@ -118,6 +118,7 @@ export const config = {
   archiveOutboxLimit: positiveNumber("BRIDGE_ARCHIVE_OUTBOX_LIMIT", 10_000),
   sharedSkillsManifest: process.env.BRIDGE_SHARED_SKILLS_MANIFEST,
   conversationMcpConfigured: process.env.BRIDGE_CONVERSATION_MCP_CONFIGURED === "true",
+  browserCdpConfigured: process.env.BRIDGE_BROWSER_CDP_CONFIGURED === "true",
   drainFile: process.env.BRIDGE_DRAIN_FILE ?? (isWindows ? undefined : `/run/agent-bridge-${machineId}.drain`),
   updatePackageManager: process.env.BRIDGE_UPDATE_PACKAGE_MANAGER ?? "pnpm",
   updateRestartExecutable: process.env.BRIDGE_UPDATE_RESTART_EXECUTABLE ?? (isWindows ? "powershell.exe" : "systemctl"),
