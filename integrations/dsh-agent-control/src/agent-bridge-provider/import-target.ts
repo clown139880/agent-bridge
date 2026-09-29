@@ -32,9 +32,12 @@ export function promptTitle(row: JsonObject, events: readonly NativeEvent[]): st
   const prompt = (text || str(row['promptSummary'])).replace(/^【恢复的首条用户消息】\s*/, '').replace(/\s+/g, ' ').trim()
   return prompt ? Array.from(prompt).slice(0, 64).join('') + (Array.from(prompt).length > 64 ? '…' : '') : 'Bridge · ' + str(row['sessionId']).slice(0, 8)
 }
-/** Catalog fields that follow the whole page rather than the session's own version. */
 const STALE_SESSION_MS = 2 * 24 * 60 * 60 * 1000
+const FULL_SYNC_MS = 60_000
+/** Catalog fields that follow the whole page rather than the session's own version. */
 const PLACEMENT_FIELDS = ['presentationOrder', 'groupId', 'groupTitle', 'groupUpdatedAt', 'executionLocations', 'updatedAt', 'lastResponseAt'] as const
+const VOLATILE_BINDING_FIELDS = new Set<string>([...PLACEMENT_FIELDS, 'status'])
+const durableBinding = (binding: JsonObject): JsonObject => Object.fromEntries(Object.entries(binding).filter(([key]) => !VOLATILE_BINDING_FIELDS.has(key)))
 /** Sidebar recency: the agent's last reply. Tool progress and status changes do
  * not reorder the list; a session without a reply yet ranks by its creation. */
 export function activityAt(binding: JsonObject): number {
@@ -81,6 +84,8 @@ export class AgentBridgeImportTarget {
   private readonly versions = new Map<string, number>()
   /** Last running state published per native id; DSH rebuilds its whole session list on every status event. */
   private readonly published = new Map<string, boolean>()
+  /** Control-plane stream position of the last complete pass that left nothing deferred. */
+  private synced: { cursor: string; at: number } | undefined
   private readonly placementOverrides = new Map<string, string>()
   private readonly presentationPlacements = new Map<string, string>()
   private readonly presentationGroups = new Map<string, JsonObject>()
@@ -455,6 +460,15 @@ export class AgentBridgeImportTarget {
     const workerPage = record(await this.bridge.call({ operation: 'workers' }, this.abort.signal))
     if (!Array.isArray(workerPage['workers'])) throw new Error('Invalid Bridge worker page')
     for (const worker of workerPage['workers']) { const row = record(worker); this.workers.set(str(row['id']), row) }
+    // Every session, worker and pending-interaction change advances the stream cursor. When it has
+    // not moved since a clean pass, the catalog is unchanged; skip it, with a periodic full backstop.
+    const stream = str(workerPage['streamCursor'])
+    if (stream && this.synced?.cursor === stream && Date.now() - this.synced.at < FULL_SYNC_MS && !this.interactions.size) {
+      this.lastSyncAt = Date.now()
+      return
+    }
+    this.synced = undefined
+    let deferred = false
     const summaries: JsonObject[] = []
     const groups: JsonObject[] = []
     const cursors = new Set<string>()
@@ -507,7 +521,7 @@ export class AgentBridgeImportTarget {
         // While a draft's create action is pending, a new session in its location
         // may be that draft's; wait for the binding rather than materialize a twin.
         if (!this.aliases.has(remoteId) && !this.bindings.has(id) && [...this.drafting].some(draft =>
-          str(this.bindings.get(draft)?.['workerId']) === str(row['workerId']) && str(this.bindings.get(draft)?.['workspace']) === str(row['workspace']))) continue
+          str(this.bindings.get(draft)?.['workerId']) === str(row['workerId']) && str(this.bindings.get(draft)?.['workspace']) === str(row['workspace']))) { deferred = true; continue }
         try {
           this.abort.signal.throwIfAborted()
           const current = this.host.agents.get(id)
@@ -519,6 +533,7 @@ export class AgentBridgeImportTarget {
           if (!unchanged || running) {
             await this.ensure(row)
             if (!this.isBusy(id)) this.versions.set(id, Number(row['updatedAt']))
+            else deferred = true
           }
           // Publish transitions only: each status event makes DSH rebuild its whole session list,
           // and republishing every session on every poll saturated the Desktop renderer.
@@ -540,6 +555,7 @@ export class AgentBridgeImportTarget {
     await this.reconcilePresentationWorkspaces(groups)
     this.error = failures.join('\n')
     this.lastSyncAt = Date.now()
+    if (stream && !failures.length && !deferred) this.synced = { cursor: stream, at: this.lastSyncAt }
     if (failures.length) this.host.logger.warn('Agent Bridge: ' + failures.length + ' session(s) failed to sync: ' + failures.slice(0, 3).join('; '))
   }
   async open(remoteId: string): Promise<Agent> {
@@ -622,7 +638,9 @@ export class AgentBridgeImportTarget {
     await this.syncHistory(id, agent)
     const session = nativeSession(agent)
     const previousBinding = [...sessionEvents(session)].reverse().find(event => event.type === BINDING_EVENT)
-    if (JSON.stringify(previousBinding?.data) !== JSON.stringify(binding)) session.append(BINDING_EVENT, binding)
+    // Placement and status move on every sibling change and turn; the in-memory binding carries
+    // them and each sync refreshes them, so only a durable change is appended to the Session log.
+    if (!previousBinding || JSON.stringify(durableBinding(previousBinding.data)) !== JSON.stringify(durableBinding(binding))) session.append(BINDING_EVENT, binding)
     const title = promptTitle(row, sessionEvents(session))
     const previous = [...sessionEvents(session)].reverse().find(e => e.type === 'session/title')
     const previousBindingTitle = previousBinding ? promptTitle(previousBinding.data, sessionEvents(session)) : ''

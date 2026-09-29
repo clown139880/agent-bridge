@@ -293,6 +293,30 @@ describe('native session catalog', () => {
     expect(statuses().slice(3)).toEqual([[id, false]])
     await f.target.dispose()
   })
+  it('skips the catalog while the control-plane stream cursor has not moved', async () => {
+    const f = await fixture()
+    let cursor = 'c:1:1', current: JsonObject = { ...summary, updatedAt: Date.now() }
+    f.bridge.call.mockImplementation(async request => {
+      if (request.operation === 'workers') return { workers: [{ id: 'w', machineId: 'dev-wsl', name: 'Codex', status: 'online' }], streamCursor: cursor }
+      if (request.operation === 'session_groups') return groupPage([current])
+      return page([])
+    })
+    const groups = () => f.bridge.call.mock.calls.filter(([request]) => request.operation === 'session_groups').length
+    await f.target.refresh(); await f.target.refresh()
+    expect(groups()).toBe(1)
+    cursor = 'c:2:1'; current = { ...current, title: 'renamed', updatedAt: Date.now() + 1 }
+    await f.target.refresh()
+    expect(groups()).toBe(2)
+    const id = nativeSessionId('http://bridge.test', 'remote-1')
+    expect((f.target.catalog()['sessions'] as JsonObject[]).find(item => item['nativeId'] === id)?.['title']).toBe('renamed')
+    // Placement-only moves stay in memory instead of appending a binding event per poll.
+    const bindings = () => sessionEvents(nativeSession(f.agents.get(id)!)).filter(event => event.type === 'agent-bridge/binding').length
+    const before = bindings()
+    cursor = 'c:3:1'; current = { ...current, status: 'active', presentationOrder: 7, updatedAt: Date.now() + 2 }
+    await f.target.refresh()
+    expect(bindings()).toBe(before)
+    await f.target.dispose()
+  })
   it('does not report remote deletion as failed when stale local cleanup rejects', async () => {
     const f = await fixture()
     await f.target.refresh()
