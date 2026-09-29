@@ -43,6 +43,36 @@ export function sameUserText(remote: string, local: string): boolean {
  */
 const echoesLocal = (echoAt: number, sentAt: number) => echoAt >= sentAt - 2 * 60 * 1000 && echoAt <= sentAt + 6 * 60 * 60 * 1000
 
+/** Remote tool events presented as tool cards. */
+export const TOOL_EVENT_TYPES: readonly string[] = ['command.completed', 'file_change.completed', 'tool.completed']
+/** A tool call made by a subagent or background task rather than the main conversation. */
+export const parentItemId = (row: JsonObject): string => str(record(row['payload'])['parentItemId'])
+
+const TASK_ENDINGS: Record<string, string> = { completed: '完成', failed: '失败', killed: '已终止', stopped: '已停止', lost: '中断' }
+const taskLabel = (payload: JsonObject) => {
+  const kind = str(payload['kind'])
+  const who = kind === 'agent' ? '子代理' + (str(payload['subagentType']) ? ' ' + str(payload['subagentType']) : '') : kind === 'monitor' ? '监视' : '后台任务'
+  return who + (str(payload['description']) ? '：' + str(payload['description']) : '')
+}
+
+/** One recognisable line per remote tool: an icon for its kind, then what it touched. */
+export function toolProgressLine(row: JsonObject): string {
+  const payload = record(row['payload'])
+  const failed = payload['status'] === 'failed' ? '❌ ' : ''
+  const short = (text: string) => { const first = text.trim().split('\n')[0] ?? ''; return first.length > 160 ? first.slice(0, 159) + '…' : first }
+  if (row['type'] === 'command.completed') return failed + '💻 ' + short(str(payload['command'], 'command'))
+  if (row['type'] === 'file_change.completed') {
+    const paths = (Array.isArray(payload['changes']) ? payload['changes'] : []).map(change => str(record(change)['path'])).filter(Boolean)
+    return failed + '✏️ ' + (paths.length ? paths.join(', ') : str(payload['summary'], 'file change'))
+  }
+  if (row['type'] === 'task.started') return '🤖 ' + short(taskLabel(payload)) + ' · 开始'
+  if (row['type'] === 'task.completed') {
+    const status = str(payload['status'])
+    return (status === 'completed' ? '' : '❌ ') + '🤖 ' + short(taskLabel(payload)) + ' · ' + (TASK_ENDINGS[status] ?? status)
+  }
+  return failed + '🔧 ' + short(str(payload['summary'], str(payload['name'], 'tool')))
+}
+
 /** Only assistant text goes to the loop. Remote tools have already executed. */
 export function projectStreamChunks(event: JsonObject, index = 0): StreamChunk[] {
   const payload = record(event['payload'])
@@ -67,6 +97,11 @@ export function projectNativeEvents(rows: readonly JsonObject[], existing: reado
   const claimed = new Set(acknowledgements.map(e => str(e.data['localMessageId'])).filter(Boolean))
   const localPrompts = existing.filter(e => e.type === 'user/message' && record(e.data['source'])['kind'] === 'user'
     && !str(e.data['id']).startsWith('bridge:') && !claimed.has(str(e.data['id'])))
+  // A subagent's steps arrive before its end, possibly in an earlier sync. Each
+  // is acknowledged with its one-line summary, which its task card lists once it ends.
+  const steps = new Map<string, string[]>()
+  const addStep = (parent: string, line: string) => { const lines = steps.get(parent); if (lines) lines.push(line); else steps.set(parent, [line]) }
+  for (const e of acknowledgements) if (str(e.data['parentItemId']) && str(e.data['step'])) addStep(str(e.data['parentItemId']), str(e.data['step']))
   let turn = existing.reduce((n, e) => Math.max(n, Number(e.data['turn']) || 0), 0)
   const output: NativeEvent[] = []
   const add = (type: string, data: JsonObject, time: number, surface = false) => {
@@ -94,7 +129,15 @@ export function projectNativeEvents(rows: readonly JsonObject[], existing: reado
       }
     }
     const isMessage = type === 'message.completed' && ['user', 'assistant'].includes(str(payload['role']))
-    const isTool = ['command.completed', 'file_change.completed', 'tool.completed'].includes(type)
+    const isTask = type === 'task.completed'
+    const isTool = TOOL_EVENT_TYPES.includes(type) || isTask
+    const parent = parentItemId(row)
+    if (isTool && parent && !isTask) {
+      const line = toolProgressLine(row)
+      addStep(parent, line)
+      add(ACK_EVENT, { eventId: id, turnId: str(row['turnId']), parentItemId: parent, step: line }, time)
+      continue
+    }
     if (isMessage || isTool) {
       turn++
       add('turn/start', { turn }, time)
@@ -104,16 +147,20 @@ export function projectNativeEvents(rows: readonly JsonObject[], existing: reado
         add('user/message', { id: 'bridge:' + id, role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: (recovered ? '【恢复的首条用户消息】\n' : '') + str(payload['text']) }] }, time, true)
       } else {
         const callId = 'bridge:' + id
-        const name = type === 'command.completed' ? 'agent-bridge:command' : type === 'file_change.completed' ? 'agent-bridge:files' : 'agent-bridge:tool'
-        const args = JSON.stringify(type === 'command.completed' ? { command: payload['command'], cwd: payload['cwd'] } : payload)
+        // DSH counts a `subagent` call as a subagent in the turn summary.
+        const name = type === 'command.completed' ? 'agent-bridge:command' : type === 'file_change.completed' ? 'agent-bridge:files'
+          : isTask ? (payload['kind'] === 'agent' ? 'subagent' : 'agent-bridge:task') : 'agent-bridge:tool'
+        const args = JSON.stringify(type === 'command.completed' ? { command: payload['command'], cwd: payload['cwd'] }
+          : isTask ? { description: payload['description'] ?? '', ...(payload['subagentType'] ? { subagentType: payload['subagentType'] } : {}), kind: payload['kind'] ?? 'other' } : payload)
         const text = str(payload['text'])
         const content: JsonValue[] = isTool ? [{ type: 'tool-call', id: callId, name, arguments: args }] : [{ type: 'text', text }]
         add('assistant/message', { turn, step: 1, message: { id: 'bridge:' + id + ':assistant', role: 'assistant', source: { kind: 'model', provider: PROVIDER, model }, content }, stream: [] }, time, true)
         if (isTool) {
           add('tool/call', { turn, step: 1, callId, name, arguments: args }, time)
           // The seed validator's tool/result shape depends on the DSH release; see ToolResultShape.
-          const output = str(payload['output'], JSON.stringify(payload))
-          const isError = payload['status'] === 'failed'
+          const taskSteps = isTask ? steps.get(str(row['itemId'])) ?? [] : []
+          const output = isTask ? taskOutput(payload, taskSteps) : str(payload['output'], JSON.stringify(payload))
+          const isError = isTask ? payload['status'] !== 'completed' : payload['status'] === 'failed'
           add('tool/result', { turn, step: 1, message: toolResultMessage('bridge:' + id + ':result', callId, output, isError, toolResult) }, time, true)
         }
       }
@@ -123,6 +170,12 @@ export function projectNativeEvents(rows: readonly JsonObject[], existing: reado
     add(ACK_EVENT, { eventId: id, turnId: str(row['turnId']) }, time)
   }
   return output
+}
+
+/** A task card's result: what the task reported, then the steps it took. */
+function taskOutput(payload: JsonObject, steps: readonly string[]): string {
+  const report = str(payload['result'], str(payload['summary'], TASK_ENDINGS[str(payload['status'])] ?? str(payload['status'])))
+  return steps.length ? report + '\n\n' + steps.length + ' 个步骤：\n' + steps.join('\n') : report
 }
 
 function messageText(content: unknown): string {

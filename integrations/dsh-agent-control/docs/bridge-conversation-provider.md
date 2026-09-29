@@ -136,6 +136,23 @@ recover a missed or late item from `turn/completed`. Remote commands are never
 emitted as executable DSH tool-call chunks; completed commands remain display-only
 tool cards.
 
+A remote subagent or background task (`task.completed`) becomes one display-only
+card: `subagent` for an agent, which DSH counts in its turn summary, and
+`agent-bridge:task` otherwise. Its own tool calls (events with `parentItemId`)
+are not cards. Each is acknowledged with a one-line `step`, and the card lists
+those steps under the task's report, even when they arrived in earlier syncs.
+They are not nested DSH dispatch events, because the dispatch event type differs
+between the DSH releases this plugin supports.
+
+What a remote session is doing right now is shown outside the log. The
+`conversation.input.dock` activity bar folds the session's recent `turn.*`,
+`progress`, `tool.*`, `task.*` and completion events, which it reads via a type
+filter and follows on the realtime stream. It shows the current phase and how
+long it has lasted, running subagents and background tasks, and a warning once a
+running turn has been silent for 90 seconds. A header button lists running and
+recently finished tasks. Neither uses DSH jobs, whose completion can start a
+local turn.
+
 The compatibility module isolates the session/store/persistence interfaces.
 Both preview lines are checked using real Session replay. The deployed build
 uses logical Session format 2; the pinned development build uses format 0.

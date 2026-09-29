@@ -24,6 +24,8 @@ function query(args: JsonObject, keys: readonly string[]): URLSearchParams {
     const value = args[key]
     if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
       output.set(key, String(value))
+    } else if (Array.isArray(value)) {
+      for (const item of value) if (typeof item === 'string') output.append(key, item)
     }
   }
   return output

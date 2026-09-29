@@ -7,24 +7,12 @@ import type { AgentControlService } from '../service.js'
 import type { JsonObject } from '../types.js'
 import type { AgentBridgeImportTarget } from './import-target.js'
 import { readHistory } from './import-target.js'
-import { lastUserMessageId, lastUserText, PROVIDER, record, sameUserText, str } from './mapping.js'
+import { lastUserMessageId, lastUserText, parentItemId, PROVIDER, record, sameUserText, str, TOOL_EVENT_TYPES, toolProgressLine } from './mapping.js'
 import { relayPendingInteractions } from './approval-bridge.js'
 import { uploadPromptImages } from './attachments.js'
 
 export const AGENT_BRIDGE_PROVIDER = PROVIDER
-
-/** One recognisable line per remote tool: an icon for its kind, then what it touched. */
-export function toolProgressLine(row: JsonObject): string {
-  const payload = record(row['payload'])
-  const failed = payload['status'] === 'failed' ? '❌ ' : ''
-  const short = (text: string) => { const first = text.trim().split('\n')[0] ?? ''; return first.length > 160 ? first.slice(0, 159) + '…' : first }
-  if (row['type'] === 'command.completed') return failed + '💻 ' + short(str(payload['command'], 'command'))
-  if (row['type'] === 'file_change.completed') {
-    const paths = (Array.isArray(payload['changes']) ? payload['changes'] : []).map(change => str(record(change)['path'])).filter(Boolean)
-    return failed + '✏️ ' + (paths.length ? paths.join(', ') : str(payload['summary'], 'file change'))
-  }
-  return failed + '🔧 ' + short(str(payload['name'], str(payload['summary'], 'tool')))
-}
+export { toolProgressLine }
 /**
  * Whether an aborted local turn was stopped by someone (Stop, a cancelling
  * parent) rather than torn down with the Host. A Desktop restart or plugin
@@ -139,9 +127,15 @@ export class AgentBridgeLlmAdapter extends LlmAdapter {
             // already executed, so finalizeNativeTurn appends display-only tool events
             // after the local turn closes instead of returning executable tool chunks.
             const rendered = row['type'] === 'message.completed' && payload['role'] === 'assistant' ? str(payload['text']) : ''
-            if (['command.completed', 'file_change.completed', 'tool.completed'].includes(str(row['type']))) {
+            const type = str(row['type'])
+            const card = TOOL_EVENT_TYPES.includes(type) || type === 'task.completed'
+            if (card) {
               presentingInOrder = true
               presentationRows.push(row)
+            }
+            // A subagent's own steps are folded into its card; the live block names
+            // only what the main conversation does and when its subagents start and end.
+            if ((card || type === 'task.started') && !parentItemId(row)) {
               if (progressIndex < 0) {
                 progressIndex = nextBlockIndex++
                 yield { type: 'block-start', index: progressIndex, blockType: 'reasoning' }

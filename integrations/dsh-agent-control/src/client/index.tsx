@@ -12,6 +12,8 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import type { FormEvent, ReactNode } from 'react'
 import css from './workspace.module.css'
 import { openBridgeStream } from './bridge-stream.js'
+import { ActivityStore } from './activity.js'
+import { ActivityDock, ActivityTasksButton } from './activity-dock.js'
 
 import { SessionStore, type BridgeRpc } from './session-store.js'
 import { SessionCreationController, SessionSourcePicker, type CreationSessions, type CreationWorkspaces, type CreationNavigation } from './session-creation.js'
@@ -283,6 +285,17 @@ export function apply(ctx: ClientContext): void {
     inject: (sessionId: string) => ({ catalog, sessionId }),
   }, SessionSourceMetadata))
   ctx.slots.inject('shell.overlay', () => ctx.slots.register({ name: 'shell.overlay', id: 'agent-control-delete-session', order: 12, inject: () => ({ catalog }) }, DeleteNativeSession))
+  // What a remote session is doing right now, above the composer and in the header.
+  const activity = new ActivityStore((operation, args) => call('bridge', operation, args), openBridgeStream)
+  ctx.effect(() => () => activity.dispose())
+  ctx.slots.inject('conversation.input.dock', () => ctx.slots.register({
+    name: 'conversation.input.dock', id: 'agent-control-remote-activity', order: 10,
+    inject: (sessionId: string) => ({ store: activity, catalog, sessionId }),
+  }, ActivityDock))
+  ctx.slots.inject('conversation.session.header.actions', () => ctx.slots.register({
+    name: 'conversation.session.header.actions', id: 'agent-control-remote-tasks', order: 5,
+    inject: (sessionId: string) => ({ store: activity, catalog, sessionId }),
+  }, ActivityTasksButton))
   ctx.effect(() => {
     let disposed = false
     let uninstall: (() => void) | undefined

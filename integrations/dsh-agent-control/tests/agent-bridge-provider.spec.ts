@@ -98,6 +98,25 @@ describe('native history projection', () => {
     expect(session.snapshotEvents().filter(e => e.type === 'assistant/message')).toHaveLength(4)
     expect(projectStreamChunks(rows[2]!)).toEqual([])
   })
+  it('folds a subagent\'s steps from earlier syncs into its card once it ends', () => {
+    const first = projectNativeEvents([
+      { ...row('start', 'task.started', { kind: 'agent', description: 'Map' }), itemId: 'spawn' },
+      row('grep', 'tool.completed', { name: 'Grep', summary: 'Grep "x"', parentItemId: 'spawn' }),
+    ], [])
+    expect(first.filter(e => e.type === 'tool/call')).toEqual([])
+    const second = projectNativeEvents([
+      row('edit', 'file_change.completed', { changes: [{ path: 'a.ts' }], status: 'failed', parentItemId: 'spawn' }),
+      { ...row('done', 'task.completed', { kind: 'agent', description: 'Map', status: 'failed', summary: 'Gave up' }), itemId: 'spawn' },
+      { ...row('bash', 'task.completed', { kind: 'bash', description: 'sleep 1', status: 'completed', summary: 'done' }), itemId: 'bg' },
+    ], first)
+    expect(second.filter(e => e.type === 'tool/call').map(e => [e.data['name'], e.data['arguments']])).toEqual([
+      ['subagent', JSON.stringify({ description: 'Map', kind: 'agent' })],
+      ['agent-bridge:task', JSON.stringify({ description: 'sleep 1', kind: 'bash' })],
+    ])
+    const [agentResult, bashResult] = second.filter(e => e.type === 'tool/result').map(e => e.data['message'] as JsonObject)
+    expect(agentResult).toMatchObject({ isError: true, content: [{ type: 'text', text: 'Gave up\n\n2 个步骤：\n🔧 Grep "x"\n❌ ✏️ a.ts' }] })
+    expect(bashResult).toMatchObject({ content: [{ type: 'text', text: 'done' }] })
+  })
   it('emits the tool/result seed shape of each DSH contract generation', () => {
     const rows = [row('cmd', 'command.completed', { command: 'pwd', output: '/repo', exitCode: 0 })]
     const result = (shape: ToolResultShape) => projectNativeEvents(rows, [], 'remote', shape).find(e => e.type === 'tool/result')?.data['message']
@@ -729,6 +748,39 @@ describe('Bridge native turn', () => {
     expect(toolProgressLine(row('f', 'file_change.completed', { changes: [{ path: 'src/a.ts' }, { path: 'src/b.ts' }] }))).toBe('✏️ src/a.ts, src/b.ts')
     expect(toolProgressLine(row('x', 'command.completed', { command: 'false', status: 'failed' }))).toBe('❌ 💻 false')
     expect(toolProgressLine(row('t', 'tool.completed', { name: 'WebFetch' }))).toBe('🔧 WebFetch')
+    expect(toolProgressLine(row('s', 'task.started', { kind: 'agent', subagentType: 'Explore', description: 'Map the repo' }))).toBe('🤖 子代理 Explore：Map the repo · 开始')
+    expect(toolProgressLine(row('e', 'task.completed', { kind: 'bash', description: 'sleep 120', status: 'killed' }))).toBe('❌ 🤖 后台任务：sleep 120 · 已终止')
+  })
+  it('keeps a subagent\'s steps out of the live progress block and lists them on its card', async () => {
+    const f = await fixture([])
+    const agent = await f.target.ensure(summary)
+    let submitted = false
+    f.bridge.call.mockImplementation(async request => {
+      if (request.operation === 'session_events') return page(submitted ? [
+        { ...row('start', 'task.started', { kind: 'agent', subagentType: 'Explore', description: 'Map the repo' }), itemId: 'spawn' },
+        row('read', 'tool.completed', { name: 'Read', summary: 'Read a.ts', parentItemId: 'spawn' }),
+        row('ls', 'command.completed', { command: 'ls', parentItemId: 'spawn' }),
+        { ...row('done', 'task.completed', { kind: 'agent', subagentType: 'Explore', description: 'Map the repo', status: 'completed', summary: 'Found two modules' }), itemId: 'spawn' },
+        row('answer', 'message.completed', { role: 'assistant', text: 'done' }),
+        row('end', 'turn.completed', { status: 'completed' }),
+      ] : [])
+      if (request.operation === 'session') return summary
+      if (request.operation === 'submit_turn') { submitted = true; return { actionId: 'action', status: 'succeeded', turnId: 't1' } }
+      return page([])
+    })
+    const adapter = new AgentBridgeLlmAdapter({ bridge: f.bridge } as unknown as AgentControlService, f.target, 1)
+    const chunks = []
+    for await (const chunk of adapter.stream({ sessionId: agent.id, provider: 'agent-bridge', model: 'remote',
+      messages: [{ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'go' }] }] } as GenerateOptions)) chunks.push(chunk)
+    expect(chunks.filter(c => c.type === 'reasoning-delta').map(c => c.type === 'reasoning-delta' && c.text))
+      .toEqual(['🤖 子代理 Explore：Map the repo · 开始', '\n🤖 子代理 Explore：Map the repo · 完成'])
+    adapter.commitAcks(String(agent.id))
+    const events = sessionEvents(nativeSession(agent))
+    expect(events.filter(e => e.type === 'tool/call').map(e => e.data['name'])).toEqual(['subagent'])
+    const result = JSON.stringify(events.find(e => e.type === 'tool/result')?.data['message'])
+    expect(result).toContain('Found two modules')
+    expect(result).toContain('2 个步骤：\\n🔧 Read a.ts\\n💻 ls')
+    await f.target.dispose()
   })
   it('presents assistant text after a remote tool below that tool, not above it', async () => {
     const f = await fixture([])

@@ -56,7 +56,7 @@ describe('NativeModels', () => {
 
 describe('modelsForWorker', () => {
   it('keeps what each agent transport can reach, by declared endpoint rather than by name', () => {
-    const all = relayModels.map(model => ({ ...model, endpoints: model.endpoints ? [...model.endpoints] : undefined }))
+    const all = relayModels.map(model => ({ ...model, ...(model.endpoints ? { endpoints: [...model.endpoints] } : {}) }))
     // Claude is not restricted to claude-named models: the relay serves every
     // model over the anthropic wire.
     expect(modelsForWorker(claudeEntry, all).map(m => m.id)).toEqual(['gpt-5.6-sol', 'claude-opus-5', 'deepseek-v4-pro', 'legacy-chat'])
