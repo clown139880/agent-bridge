@@ -33,6 +33,7 @@ export function promptTitle(row: JsonObject, events: readonly NativeEvent[]): st
   return prompt ? Array.from(prompt).slice(0, 64).join('') + (Array.from(prompt).length > 64 ? '…' : '') : 'Bridge · ' + str(row['sessionId']).slice(0, 8)
 }
 /** Catalog fields that follow the whole page rather than the session's own version. */
+const STALE_SESSION_MS = 2 * 24 * 60 * 60 * 1000
 const PLACEMENT_FIELDS = ['presentationOrder', 'groupId', 'groupTitle', 'groupUpdatedAt', 'executionLocations', 'updatedAt', 'lastResponseAt'] as const
 /** Sidebar recency: the agent's last reply. Tool progress and status changes do
  * not reorder the list; a session without a reply yet ranks by its creation. */
@@ -78,6 +79,8 @@ export class AgentBridgeImportTarget {
   private refreshJob: Promise<void> | undefined
   private presetDisposer: (() => Promise<void>) | undefined
   private readonly versions = new Map<string, number>()
+  /** Last running state published per native id; DSH rebuilds its whole session list on every status event. */
+  private readonly published = new Map<string, boolean>()
   private readonly placementOverrides = new Map<string, string>()
   private readonly presentationPlacements = new Map<string, string>()
   private readonly presentationGroups = new Map<string, JsonObject>()
@@ -236,6 +239,7 @@ export class AgentBridgeImportTarget {
     catch (error) { warnings.push('dispose: ' + String(error)) }
     this.handles.delete(nativeId)
     this.versions.delete(nativeId)
+    this.published.delete(nativeId)
     if (warnings.length) this.host.logger.warn(`Agent Bridge local cleanup for "${nativeId}" was incomplete after remote deletion: ${warnings.join('; ')}`)
     return warnings.join('; ')
   }
@@ -507,11 +511,21 @@ export class AgentBridgeImportTarget {
         try {
           this.abort.signal.throwIfAborted()
           const current = this.host.agents.get(id)
-          if (!current || this.versions.get(id) !== Number(row['updatedAt']) || ['active', 'waiting_for_approval', 'waiting_for_input'].includes(str(row['status']))) {
+          const running = ['active', 'waiting_for_approval', 'waiting_for_input'].includes(str(row['status']))
+          const unchanged = !!current && this.versions.get(id) === Number(row['updatedAt'])
+          // Backstop: an idle, already-materialized session untouched for two days needs no per-poll work.
+          if (unchanged && !running && !this.interactions.has(id) && !this.published.get(id)
+            && Number(row['updatedAt']) < Date.now() - STALE_SESSION_MS) continue
+          if (!unchanged || running) {
             await this.ensure(row)
             if (!this.isBusy(id)) this.versions.set(id, Number(row['updatedAt']))
           }
-          this.host.emit('api-session/status', id, row['status'] === 'active' || row['status'] === 'waiting_for_approval' || row['status'] === 'waiting_for_input')
+          // Publish transitions only: each status event makes DSH rebuild its whole session list,
+          // and republishing every session on every poll saturated the Desktop renderer.
+          if (this.published.get(id) !== running) {
+            this.published.set(id, running)
+            this.host.emit('api-session/status', id, running)
+          }
           if ((['waiting_for_approval', 'waiting_for_input'].includes(str(row['status'])) || this.interactions.has(id)) && !this.isBusy(id)) {
             const agent = this.host.agents.get(id)
             if (agent) {

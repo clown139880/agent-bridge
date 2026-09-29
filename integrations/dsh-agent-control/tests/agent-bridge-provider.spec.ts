@@ -267,6 +267,32 @@ describe('native session catalog', () => {
     await f.target.refresh()
     expect(sessions().find(item => item['nativeId'] === a)).toMatchObject({ activityAt: 20 })
   })
+  it('publishes a running state only when it changes and skips idle sessions older than two days', async () => {
+    const f = await fixture()
+    let current: JsonObject = { ...summary, updatedAt: Date.now() }
+    const stale: JsonObject = { ...summary, sessionId: 'remote-old', updatedAt: 10 }
+    f.bridge.call.mockImplementation(async request => {
+      if (request.operation === 'workers') return { workers: [{ id: 'w', machineId: 'dev-wsl', name: 'Codex', status: 'online' }] }
+      if (request.operation === 'session_groups') return groupPage([current, stale])
+      if (request.operation === 'session_events') return page([])
+      return page([])
+    })
+    const statuses = () => (f.host.emit as ReturnType<typeof vi.fn>).mock.calls.filter(call => call[0] === 'api-session/status').map(call => [call[1], call[2]])
+    const [id, old] = ['remote-1', 'remote-old'].map(remote => nativeSessionId('http://bridge.test', remote))
+    await f.target.refresh()
+    expect(statuses()).toEqual(expect.arrayContaining([[id, false], [old, false]]))
+    f.bridge.call.mockClear(); await f.target.refresh(); await f.target.refresh()
+    // DSH rebuilds its whole session list per status event: unchanged states are not republished.
+    expect(statuses()).toHaveLength(2)
+    expect(f.bridge.call.mock.calls.some(([request]) => request.operation === 'session_events')).toBe(false)
+    current = { ...current, status: 'active', updatedAt: Date.now() }
+    await f.target.refresh()
+    expect(statuses().slice(2)).toEqual([[id, true]])
+    current = { ...current, status: 'idle', updatedAt: Date.now() }
+    await f.target.refresh()
+    expect(statuses().slice(3)).toEqual([[id, false]])
+    await f.target.dispose()
+  })
   it('does not report remote deletion as failed when stale local cleanup rejects', async () => {
     const f = await fixture()
     await f.target.refresh()

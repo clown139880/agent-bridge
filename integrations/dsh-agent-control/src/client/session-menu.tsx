@@ -85,6 +85,9 @@ export function extendSessionMenu(Component: ComponentType<any>, useWorkspaces?:
     projections.set(state, { activity, value })
     return value
   }
+  // DSH calls every store selector on each render and store notification. Reuse one
+  // projected view per input set, so selections stay identical and nothing re-sorts.
+  let viewMemo: { state: ViewState; workspaces: unknown; list: unknown; archived: unknown; value: ViewState } | undefined
   return (props: Props) => {
     const workspaces = useWorkspaces?.(snapshot => snapshot.items)
     const archived = useWorkspaces?.(snapshot => snapshot.archivedSessionIds)
@@ -99,14 +102,14 @@ export function extendSessionMenu(Component: ComponentType<any>, useWorkspaces?:
       : rawUseSessions
     const list = useSessions?.(state => state) as SessionList | undefined
     const byId = list?.byId
-    const projectedUseStore = workspaces && useStore ? (selector: (state: ViewState) => unknown) => useStore(state => {
-      if (state.orderBy !== 'updated') return selector(state)
+    const project = (state: ViewState): ViewState => {
+      if (viewMemo && viewMemo.state === state && viewMemo.workspaces === workspaces && viewMemo.list === list && viewMemo.archived === archived) return viewMemo.value
       // DSH 0.1.5 keeps a persisted order per account and only promotes rows,
       // so a stale order never sinks. Project the complete recency order.
       // Its order-sync effect only accounts for ids it has loaded. Projecting any
       // other id (e.g. a just-deleted Bridge session) makes every sync look stale,
       // so it rewrites the store forever: React #185 and a blank sidebar.
-      const projected: Record<string, string[]> = Object.fromEntries(workspaces.map(workspace => [workspace.workspaceId,
+      const projected: Record<string, string[]> = Object.fromEntries(workspaces!.map(workspace => [workspace.workspaceId,
         byId ? workspace.sessionIds.filter(id => byId[id] !== undefined) : [...workspace.sessionIds]]))
       if (list?.ids && byId) {
         // Exactly DSH's flat membership (visible, non-subagent rows), or the same loop applies.
@@ -116,8 +119,13 @@ export function extendSessionMenu(Component: ComponentType<any>, useWorkspaces?:
           return summary !== undefined && summary.origin !== 'subagent' && !hidden.has(id) && (!summary.blank || id === list.current)
         }).sort((left, right) => (byId[right]!.updatedAt ?? 0) - (byId[left]!.updatedAt ?? 0) || (left < right ? -1 : 1))
       }
-      return selector({ ...state, sessionOrderByAccount: { ...state.sessionOrderByAccount, ...projected } })
-    }) : useStore
+      const value = { ...state, sessionOrderByAccount: { ...state.sessionOrderByAccount, ...projected } }
+      viewMemo = { state, workspaces, list, archived, value }
+      return value
+    }
+    const projectedUseStore = workspaces && useStore
+      ? (selector: (state: ViewState) => unknown) => useStore(state => selector(state.orderBy === 'updated' ? project(state) : state))
+      : useStore
     const overrides = { ...(useWorkspaces ? { useWorkspaces } : {}), ...(projectedUseStore ? { useStore: projectedUseStore } : {}), ...(useSessions !== rawUseSessions ? { useSessions } : {}) }
     return visit((Component as (props: Props) => ReactNode)({ ...props, ...overrides }))
   }

@@ -97,6 +97,20 @@ it('ranks Bridge rows by agent activity instead of the DSH import time', () => {
   expect(seen.size).toBe(1)
 })
 
+it('reuses one projected store view while its inputs are unchanged', () => {
+  const snapshot = { items: [{ workspaceId: 'repo', path: '/repo', title: 'repo', sessionIds: ['a', 'b'], createdAt: '', updatedAt: '' }], archivedSessionIds: [] }
+  const useWorkspaces = (selector: any) => selector(snapshot)
+  const list = { ids: ['a', 'b'], byId: { a: { updatedAt: 1 }, b: { updatedAt: 2 } } }
+  const state = { orderBy: 'updated', sessionOrderByAccount: {} }
+  const seen = new Set<unknown>()
+  // DSH selects sessionOrderByAccount on every render; a fresh object each time re-renders and re-sorts.
+  const Browser = ({ useStore }: any) => { seen.add(useStore((s: any) => s.sessionOrderByAccount)); seen.add(useStore((s: any) => s.sessionOrderByAccount)); return null }
+  const render = extendSessionMenu(Browser, useWorkspaces) as (props: any) => any
+  const props = { useStore: (selector: any) => selector(state), useSessions: (selector: any) => selector(list) }
+  render(props); render(props)
+  expect(seen.size).toBe(1)
+})
+
 it('projects the complete flat recency order over the stored promotion order', () => {
   const snapshot = { items: [], archivedSessionIds: ['archived'] }
   const useWorkspaces = (selector: any) => selector(snapshot)
