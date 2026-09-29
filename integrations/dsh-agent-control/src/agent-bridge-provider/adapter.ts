@@ -25,6 +25,15 @@ export function toolProgressLine(row: JsonObject): string {
   }
   return failed + '🔧 ' + short(str(payload['name'], str(payload['summary'], 'tool')))
 }
+/**
+ * Whether an aborted local turn was stopped by someone (Stop, a cancelling
+ * parent) rather than torn down with the Host. A Desktop restart or plugin
+ * reload must leave the remote turn running; the next sync shows its output.
+ */
+export function stoppedByUser(reason: unknown): boolean {
+  if (record(reason)['kind'] === 'disposed') return false
+  return !(reason instanceof Error && /lifecycle disposed|agent loop is not active/.test(reason.message))
+}
 interface PendingTurn {
   acknowledgements: JsonObject[]
   presentations: JsonObject[]
@@ -178,7 +187,7 @@ export class AgentBridgeLlmAdapter extends LlmAdapter {
       interactionAbort.abort()
       await Promise.allSettled(pending.values())
       this.target.setBusy(nativeId, false)
-      if (signal.aborted && turnId) {
+      if (signal.aborted && turnId && stoppedByUser(signal.reason)) {
         try { await this.service.bridge.call({ operation: 'interrupt_turn', args: { sessionId: remoteId, expectedTurnId: turnId } }) }
         catch (error) { this.target.host.logger.warn('Bridge cancellation could not be confirmed: ' + String(error)) }
       }

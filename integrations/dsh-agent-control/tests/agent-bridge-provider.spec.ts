@@ -6,7 +6,7 @@ import type { JsonObject, JsonValue } from '../src/types.js'
 import { AgentBridgeImportTarget, nativeSessionId, readHistory } from '../src/agent-bridge-provider/import-target.js'
 import { ACK_EVENT, BINDING_EVENT, projectNativeEvents, projectStreamChunks, sameUserText } from '../src/agent-bridge-provider/mapping.js'
 import { nativeSession, sessionEvents, appendSessionEvent, guardImportedTurnNumbers, toolResultShape, conformToolResult, type NativeHost, type ToolResultShape, type NativeEvent } from '../src/agent-bridge-provider/dsh-compat.js'
-import { AgentBridgeLlmAdapter, toolProgressLine } from '../src/agent-bridge-provider/adapter.js'
+import { AgentBridgeLlmAdapter, stoppedByUser, toolProgressLine } from '../src/agent-bridge-provider/adapter.js'
 import { uploadPromptImages } from '../src/agent-bridge-provider/attachments.js'
 import type { AgentControlService } from '../src/service.js'
 import type { BridgeClient } from '../src/bridge-client.js'
@@ -914,5 +914,16 @@ describe('remote echoes of prompts typed in DSH', () => {
   it('still shows a prompt typed in another CLI long after an identical DSH prompt', () => {
     const events = projectNativeEvents([echo('e1', '继续', T + 7 * 60 * 60 * 1000)], [local('m1', '继续')])
     expect(shown(events)).toBe(1)
+  })
+})
+
+describe('remote turn cancellation', () => {
+  it('interrupts the remote turn for Stop but not when the Host tears the agent down', () => {
+    expect(stoppedByUser({ kind: 'user' })).toBe(true)
+    expect(stoppedByUser({ kind: 'parent' })).toBe(true)
+    expect(stoppedByUser(undefined)).toBe(true)
+    expect(stoppedByUser({ kind: 'disposed' })).toBe(false)
+    expect(stoppedByUser(new Error('agent "a" lifecycle disposed'))).toBe(false)
+    expect(stoppedByUser(new Error('agent loop is not active'))).toBe(false)
   })
 })
