@@ -277,7 +277,7 @@ export function apply(ctx: ClientContext): void {
   ctx.effect(() => catalog.install(ctx.get('workspaces') as unknown as Parameters<NativeCatalog['install']>[0]))
   // TokensCowork creates its root workspace hook before third-party plugins load.
   // Override that captured hook on the native slot while retaining its component.
-  ctx.effect(() => installSessionMenu(ctx.slots, catalog.useWorkspaces, sidebarDecor(catalog)))
+  ctx.effect(() => installSessionMenu(ctx.slots, catalog.useWorkspaces, sidebarDecor(catalog), catalog.activity))
   ctx.slots.inject('conversation.session.header.utilities', () => ctx.slots.register({
     name: 'conversation.session.header.utilities', id: 'agent-control-session-source-metadata', order: 5,
     inject: (sessionId: string) => ({ catalog, sessionId }),

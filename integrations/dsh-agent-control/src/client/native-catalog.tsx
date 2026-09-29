@@ -5,7 +5,7 @@ import type { SidebarDecor } from './session-menu.js'
 import css from './workspace.module.css'
 
 export type ExecutionLocation = { workerId: string; workerName: string; agent?: string; machineId: string; machineName: string; workspace: string; online: boolean; available: boolean; local?: boolean }
-export type NativeEntry = { nativeId: string; sessionId: string; workerId: string; model?: string; groupId: string; groupTitle: string; groupUpdatedAt: number; executionLocations: ExecutionLocation[]; machineId: string; workspace: string; projectIdentity?: string; presentationPath?: string; title: string; status: string; worker: string; updatedAt: number; lastUsedAt?: number }
+export type NativeEntry = { nativeId: string; sessionId: string; workerId: string; model?: string; groupId: string; groupTitle: string; groupUpdatedAt: number; executionLocations: ExecutionLocation[]; machineId: string; workspace: string; projectIdentity?: string; presentationPath?: string; title: string; status: string; worker: string; updatedAt: number; activityAt: number; lastUsedAt?: number }
 export type WorkspaceRow = { workspaceId: string; path: string; title: string; sessionIds: readonly string[]; createdAt: string; updatedAt: string }
 type WorkspaceSnapshot = { items: readonly WorkspaceRow[]; archivedSessionIds: readonly string[] }
 type Source<T> = { getSnapshot(): T; subscribe(listener: () => void): () => void }
@@ -17,6 +17,13 @@ export const DELETE_SESSION_EVENT = 'agent-control:delete-session'
 type Rpc = (operation: string, args?: Record<string, string | string[]>) => Promise<unknown>
 
 const canonicalPath = (value: string) => value.replace(/\\/g, '/').replace(/\/$/, '').toLocaleLowerCase()
+
+/** Sidebar recency of one row. Bridge sessions use the catalog's agent-reply
+ * time: DSH stamps imported prompts with their sync time, so its own
+ * `updatedAt` is not a real activity time for them. Local DSH sessions keep it. */
+export function sessionActivity(id: string, entries: ReadonlyMap<string, Pick<NativeEntry, 'activityAt'>>, sessions: SessionSnapshot = {}): number {
+  return entries.get(id)?.activityAt ?? sessions.byId?.[id]?.updatedAt ?? Number.NEGATIVE_INFINITY
+}
 
 /** Adapt server-owned groups to DSH workspaces and only fuse path-matching local DSH sessions. */
 export function mergeWorkspaces(rows: readonly WorkspaceRow[], catalog: readonly NativeEntry[], catalogReady = true, sessions: SessionSnapshot = {}): WorkspaceRow[] {
@@ -37,7 +44,8 @@ export function mergeWorkspaces(rows: readonly WorkspaceRow[], catalog: readonly
   const consumed = new Set<WorkspaceRow>()
   const result: WorkspaceRow[] = []
   const activity = new Map<WorkspaceRow, number>()
-  const updatedAt = (id: string) => entries.get(id)?.updatedAt ?? sessions.byId?.[id]?.updatedAt ?? Number.NEGATIVE_INFINITY
+  const updatedAt = (id: string) => sessionActivity(id, entries, sessions)
+  const newestFirst = (left: string, right: string) => updatedAt(right) - updatedAt(left)
   for (const members of groups.values()) {
     const ids = new Set(members.map(entry => entry.nativeId))
     const localPaths = new Set(members.flatMap(entry => entry.executionLocations).filter(location => location.local).map(location => canonicalPath(location.workspace)))
@@ -48,34 +56,25 @@ export function mergeWorkspaces(rows: readonly WorkspaceRow[], catalog: readonly
     const owner = localRows[0] ?? bridgeRows[0]
     if (!owner) continue
     for (const row of related) consumed.add(row)
-    const bridgeIds = members.map(entry => entry.nativeId)
     const nativeIds = [...new Set(localRows.flatMap(row => row.sessionIds).filter(id => !entries.has(id) && !isBridgeId(id)))]
-      .sort((left, right) => updatedAt(right) - updatedAt(left))
-    // The server already owns Bridge ordering. Merge local DSH rows into that
-    // order by activity without independently re-sorting Bridge members.
-    const sessionIds: string[] = []
-    let bridgeIndex = 0, nativeIndex = 0
-    while (bridgeIndex < bridgeIds.length || nativeIndex < nativeIds.length) {
-      const bridge = bridgeIds[bridgeIndex], native = nativeIds[nativeIndex]
-      if (native !== undefined && (bridge === undefined || updatedAt(native) > updatedAt(bridge))) { sessionIds.push(native); nativeIndex++ }
-      else if (bridge !== undefined) { sessionIds.push(bridge); bridgeIndex++ }
-    }
+    // One clock for every member: never trust the arrival order, which can lag
+    // behind the activity it was derived from. The sort is stable for ties.
+    const sessionIds = [...members.map(entry => entry.nativeId), ...nativeIds].sort(newestFirst)
+    const latest = Math.max(...sessionIds.map(updatedAt))
     const merged = { ...owner, title: members[0]!.groupTitle, sessionIds,
-      updatedAt: new Date(Math.max(members[0]!.groupUpdatedAt, ...nativeIds.map(updatedAt))).toISOString() }
+      updatedAt: Number.isFinite(latest) ? new Date(latest).toISOString() : owner.updatedAt }
     result.push(merged)
-    activity.set(merged, Math.max(members[0]!.groupUpdatedAt, ...nativeIds.map(updatedAt)))
+    activity.set(merged, latest)
   }
   for (const source of rows.filter(row => !consumed.has(row) && !row.sessionIds.some(id => entries.has(id)))) {
     const row = source.sessionIds.some(isBridgeId) ? { ...source, sessionIds: source.sessionIds.filter(id => !isBridgeId(id)) } : source
     if (!row.sessionIds.length && source.sessionIds.length) continue
-    const ordered = sessions.byId ? { ...row, sessionIds: [...row.sessionIds].sort((left, right) => updatedAt(right) - updatedAt(left)) } : row
+    const ordered = sessions.byId ? { ...row, sessionIds: [...row.sessionIds].sort(newestFirst) } : row
     result.push(ordered)
     const latest = Math.max(...row.sessionIds.map(updatedAt))
     if (Number.isFinite(latest)) activity.set(ordered, latest)
   }
-  // Server groups arrive newest-first. A stable activity sort preserves that
-  // authority while allowing native-only or locally-fused directories to take
-  // their correct place in the combined DSH list.
+  // A group ranks by its newest member on the same clock as the rows inside it.
   return result.sort((left, right) => (activity.get(right) ?? Number.NEGATIVE_INFINITY) - (activity.get(left) ?? Number.NEGATIVE_INFINITY))
 }
 
@@ -88,7 +87,13 @@ export class NativeCatalog {
   snapshot = () => this.entries
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener) } }
   entry(nativeId: string): NativeEntry | undefined { return this.entries.find(row => row.nativeId === nativeId) }
-  useWorkspaces: WorkspaceHook = <T,>(selector: (snapshot: WorkspaceSnapshot) => T): T => {
+  private activityCache: { entries: NativeEntry[]; value: ReadonlyMap<string, number> } | undefined
+  /** Bridge session recency by native id; one Map identity per catalog snapshot. */
+  activity = (): ReadonlyMap<string, number> => {
+    if (this.activityCache?.entries !== this.entries) this.activityCache = { entries: this.entries, value: new Map(this.entries.map(entry => [entry.nativeId, entry.activityAt])) }
+    return this.activityCache.value
+  }
+  useWorkspaces: WorkspaceHook =<T,>(selector: (snapshot: WorkspaceSnapshot) => T): T => {
     if (!this.workspaceSource) throw new Error('工作区目录尚未安装')
     const snapshot = useSyncExternalStore(this.workspaceSource.subscribe, this.workspaceSource.getSnapshot, this.workspaceSource.getSnapshot)
     return selector(snapshot)
@@ -246,7 +251,7 @@ export function DeleteNativeSession({ catalog }: { catalog: NativeCatalog }) {
     const request = (event: Event) => {
       const detail = (event as CustomEvent<{ nativeId: string; title: string }>).detail
       if (!detail || typeof detail.nativeId !== 'string' || busy) return
-      setError(''); setPending(entries.find(row => row.nativeId === detail.nativeId) ?? { nativeId: detail.nativeId, sessionId: detail.nativeId.startsWith('agent-bridge-') ? '?' : '', workerId: '', groupId: '', groupTitle: '', groupUpdatedAt: 0, executionLocations: [], machineId: '', workspace: '', title: detail.title || 'DSH 对话', status: '', worker: 'DSH', updatedAt: 0 })
+      setError(''); setPending(entries.find(row => row.nativeId === detail.nativeId) ?? { nativeId: detail.nativeId, sessionId: detail.nativeId.startsWith('agent-bridge-') ? '?' : '', workerId: '', groupId: '', groupTitle: '', groupUpdatedAt: 0, executionLocations: [], machineId: '', workspace: '', title: detail.title || 'DSH 对话', status: '', worker: 'DSH', updatedAt: 0, activityAt: 0 })
     }
     window.addEventListener(DELETE_SESSION_EVENT, request)
     return () => window.removeEventListener(DELETE_SESSION_EVENT, request)

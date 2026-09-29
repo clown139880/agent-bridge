@@ -3,7 +3,7 @@ import { mergeWorkspaces, NativeCatalog, sourceLabel, type NativeEntry, type Wor
 import { promptTitle } from '../src/agent-bridge-provider/import-target.js'
 import type { NativeEvent } from '../src/agent-bridge-provider/dsh-compat.js'
 
-const entry = (nativeId: string, machineId = 'dev-wsl', workspace = '/work/agent-bridge', lastUsedAt?: number, projectIdentity?: string, updatedAt = 0): NativeEntry => ({ nativeId, machineId, workspace, sessionId: nativeId, workerId: 'worker', groupId: projectIdentity ? `repo:${projectIdentity}` : `loc:${machineId}:${workspace}`, groupTitle: projectIdentity ? 'agent-bridge' : `agent-bridge @ ${machineId}`, groupUpdatedAt: updatedAt, executionLocations: [{ workerId: 'worker', workerName: 'worker', machineId, machineName: machineId, workspace, online: true, available: true }], title: 'test', status: 'idle', worker: 'worker', updatedAt, ...(lastUsedAt === undefined ? {} : { lastUsedAt }), ...(projectIdentity ? { projectIdentity } : {}) })
+const entry = (nativeId: string, machineId = 'dev-wsl', workspace = '/work/agent-bridge', lastUsedAt?: number, projectIdentity?: string, updatedAt = 0): NativeEntry => ({ nativeId, machineId, workspace, sessionId: nativeId, workerId: 'worker', groupId: projectIdentity ? `repo:${projectIdentity}` : `loc:${machineId}:${workspace}`, groupTitle: projectIdentity ? 'agent-bridge' : `agent-bridge @ ${machineId}`, groupUpdatedAt: updatedAt, executionLocations: [{ workerId: 'worker', workerName: 'worker', machineId, machineName: machineId, workspace, online: true, available: true }], title: 'test', status: 'idle', worker: 'worker', updatedAt, activityAt: updatedAt, ...(lastUsedAt === undefined ? {} : { lastUsedAt }), ...(projectIdentity ? { projectIdentity } : {}) })
 const workspace = (id: string): WorkspaceRow => ({ workspaceId: id, path: '/presentation/' + id, title: 'agent-bridge · Codex @ dev-wsl', sessionIds: [id], createdAt: '2026-01-01', updatedAt: '2026-01-01' })
 describe('native catalog', () => {
   it('does not flash ungrouped Bridge workspaces before the first catalog fetch', () => {
@@ -105,7 +105,7 @@ describe('native catalog', () => {
     expect(merged.map(row => row.workspaceId)).toEqual(['first', 'other'])
     expect(merged[0]?.sessionIds).toEqual(['first', 'second'])
   })
-  it('orders merged Bridge sessions globally by their own update time', () => {
+  it('orders merged Bridge sessions newest-first by agent activity, not arrival order', () => {
     const local = { ...workspace('local'), sessionIds: ['native-a', 'older', 'native-b', 'newest'] }
     const remote = { ...workspace('remote'), sessionIds: ['middle'] }
     const merged = mergeWorkspaces([local, remote], [
@@ -113,7 +113,7 @@ describe('native catalog', () => {
       entry('newest', 'windows', 'C:\\repo', 10, 'repo', 300),
       entry('middle', 'hal', '/repo', 10, 'repo', 200),
     ])
-    expect(merged[0]?.sessionIds).toEqual(['older', 'newest', 'middle'])
+    expect(merged[0]?.sessionIds).toEqual(['newest', 'middle', 'older'])
   })
   it('fills an empty unified presentation workspace with catalog sessions', () => {
     const row = { ...workspace('project'), path: 'C:\\data\\projects\\repo', title: 'repo', sessionIds: [] }
@@ -121,7 +121,7 @@ describe('native catalog', () => {
       { ...entry('old', 'hal', '/repo', 10, 'repo', 100), presentationPath: row.path },
       { ...entry('new', 'windows', 'D:\\repo', 10, 'repo', 200), presentationPath: row.path },
     ]
-    expect(mergeWorkspaces([row], catalog)[0]?.sessionIds).toEqual(['old', 'new'])
+    expect(mergeWorkspaces([row], catalog)[0]?.sessionIds).toEqual(['new', 'old'])
   })
   it('projects current catalog sessions out of the durable archive set', async () => {
     const row = { ...workspace('project'), path: 'C:\\data\\projects\\repo', sessionIds: [] }

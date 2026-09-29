@@ -32,6 +32,13 @@ export function promptTitle(row: JsonObject, events: readonly NativeEvent[]): st
   const prompt = (text || str(row['promptSummary'])).replace(/^【恢复的首条用户消息】\s*/, '').replace(/\s+/g, ' ').trim()
   return prompt ? Array.from(prompt).slice(0, 64).join('') + (Array.from(prompt).length > 64 ? '…' : '') : 'Bridge · ' + str(row['sessionId']).slice(0, 8)
 }
+/** Catalog fields that follow the whole page rather than the session's own version. */
+const PLACEMENT_FIELDS = ['presentationOrder', 'groupId', 'groupTitle', 'groupUpdatedAt', 'executionLocations', 'updatedAt', 'lastResponseAt'] as const
+/** Sidebar recency: the agent's last reply. Tool progress and status changes do
+ * not reorder the list; a session without a reply yet ranks by its creation. */
+export function activityAt(binding: JsonObject): number {
+  return Number(binding['lastResponseAt']) || Number(binding['createdAt']) || Number(binding['updatedAt']) || 0
+}
 export function nativeSessionId(origin: string, sessionId: string): string {
   return 'agent-bridge-' + hash(new URL(origin).origin + '\0' + sessionId)
 }
@@ -148,7 +155,7 @@ export class AgentBridgeImportTarget {
         ...(this.presentationPlacements.get(placementKey) ? { presentationPath: this.presentationPlacements.get(placementKey)! } : {}),
         title: agent ? promptTitle(binding, sessionEvents(nativeSession(agent))) : str(binding['title']),
         status: str(binding['status']), worker: str(worker?.['name'], str(binding['workerId'])),
-        updatedAt: Number(binding['updatedAt']) || 0, ...(lastUsedAt === undefined ? {} : { lastUsedAt }) }
+        updatedAt: Number(binding['updatedAt']) || 0, activityAt: activityAt(binding), ...(lastUsedAt === undefined ? {} : { lastUsedAt }) }
     }) }
   }
   async deleteNative(nativeId: string, signal?: AbortSignal): Promise<JsonObject> {
@@ -464,6 +471,13 @@ export class AgentBridgeImportTarget {
       if (!next || cursors.has(next)) throw new Error('Bridge session cursor did not advance')
       cursors.add(next); cursor = next
     } while (true)
+    // A binding is only re-materialized when its own session changes, but its
+    // catalog position and group move whenever any sibling does. Refresh the
+    // placement fields of every known binding from this complete page.
+    for (const row of summaries) {
+      const id = this.nativeIdFor(str(row['sessionId'])), binding = this.bindings.get(id)
+      if (binding) this.bindings.set(id, { ...binding, ...Object.fromEntries(PLACEMENT_FIELDS.filter(key => key in row).map(key => [key, row[key]!])) })
+    }
     this.presentationPlacements.clear()
     this.presentationGroups.clear()
     for (const group of groups) this.presentationGroups.set(str(group['groupId']), group)

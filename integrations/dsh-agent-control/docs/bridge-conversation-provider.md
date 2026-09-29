@@ -72,12 +72,20 @@ The Host revalidates the selected source, creates the remote session, materializ
 it, and the client refreshes its native list before returning the new identity.
 Cancel creates nothing. Offline sources remain visible but cannot be selected.
 
-The client catalog does not infer Bridge groups or independently reorder Bridge sessions. It projects the
-server's `groupId` and order, and only fuses native DSH sessions from a real local workspace
-whose canonical path matches a server-declared local execution location. Unmatched native
-sessions remain in their original DSH groups. Native activity is merged into the server order
-so local sessions and native-only directories retain recency ordering. In DSH's `updated` view,
-that live merged order supersedes stale persisted drag order; the `manual` view remains user-owned.
+The client catalog does not infer Bridge groups. It projects the server's `groupId`, and only
+fuses native DSH sessions from a real local workspace whose canonical path matches a
+server-declared local execution location. Unmatched native sessions remain in their original
+DSH groups. Every poll refreshes the catalog position and group fields of all known bindings,
+not only of sessions whose own version changed.
+
+Recency uses one clock everywhere: a Bridge session's `activityAt` is its last agent reply
+(`lastResponseAt`, else `createdAt`); tool progress and status changes do not reorder it. DSH
+stamps imported prompts with their sync time, so the sidebar wrapper substitutes `activityAt`
+for Bridge rows' `updatedAt` in the Session list DSH sorts by, while native DSH sessions keep
+their own `updatedAt`. Rows within a group, groups (by their newest row) and the flat list all
+rank on that clock. In DSH's `updated` view, the projected order also supersedes DSH 0.1.5's
+persisted promotion order (per workspace and `__flat_session_order__`); the `manual` view
+remains user-owned.
 Rename, delete and drag operations are mapped
 back to their original Host workspaces.
 Every native session id, original cwd and execution binding is preserved.

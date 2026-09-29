@@ -77,6 +77,40 @@ it('uses projected recency for updated mode without overriding manual order', ()
   expect(render({ useStore: (selector: any) => selector(state) }).props.children).toBe('old,new')
 })
 
+it('ranks Bridge rows by agent activity instead of the DSH import time', () => {
+  // DSH stamps imported prompts with their sync time, so its own updatedAt ranks the just-synced row first.
+  const list = { ids: ['agent-bridge-replied', 'agent-bridge-synced', 'local'], byId: {
+    'agent-bridge-replied': { updatedAt: 1 }, 'agent-bridge-synced': { updatedAt: 900 }, local: { updatedAt: 250 },
+  } as Record<string, { updatedAt: number }> }
+  const activity = new Map([['agent-bridge-replied', 300], ['agent-bridge-synced', 200]])
+  const Browser = ({ useSessions }: any) => {
+    const byId = useSessions((s: any) => s.byId)
+    return <>{Object.keys(byId).sort((a, b) => byId[b].updatedAt - byId[a].updatedAt).join(',')}</>
+  }
+  const render = extendSessionMenu(Browser, undefined, undefined, () => activity) as (props: any) => any
+  const useSessions = (selector: any) => selector(list)
+  expect(render({ useSessions }).props.children).toBe('agent-bridge-replied,local,agent-bridge-synced')
+  // A whole-list selector keeps one snapshot identity per DSH list and catalog.
+  const seen = new Set<unknown>()
+  const Identity = ({ useSessions }: any) => { seen.add(useSessions((s: any) => s)); seen.add(useSessions((s: any) => s)); return null }
+  ;(extendSessionMenu(Identity, undefined, undefined, () => activity) as (props: any) => any)({ useSessions })
+  expect(seen.size).toBe(1)
+})
+
+it('projects the complete flat recency order over the stored promotion order', () => {
+  const snapshot = { items: [], archivedSessionIds: ['archived'] }
+  const useWorkspaces = (selector: any) => selector(snapshot)
+  const list = { ids: ['a', 'b', 'c', 'archived', 'child', 'blank'], current: 'a', byId: {
+    a: { updatedAt: 1 }, b: { updatedAt: 3 }, c: { updatedAt: 2 }, archived: { updatedAt: 9 },
+    child: { updatedAt: 9, origin: 'subagent' }, blank: { updatedAt: 9, blank: true },
+  } }
+  // DSH 0.1.5 only promotes rows whose updatedAt grew, so a stale stored order never sinks.
+  const state = { orderBy: 'updated', sessionOrderByAccount: { __flat_session_order__: ['a', 'c', 'b'] } }
+  const Browser = ({ useStore }: any) => <>{useStore((value: any) => value.sessionOrderByAccount.__flat_session_order__.join(','))}</>
+  const render = extendSessionMenu(Browser, useWorkspaces) as (props: any) => any
+  expect(render({ useStore: (selector: any) => selector(state), useSessions: (selector: any) => selector(list) }).props.children).toBe('b,c,a')
+})
+
 it('does not loop DSH order sync when a workspace lists a session DSH has not loaded', async () => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
   // A just-deleted Bridge session lingers in the workspace row but is gone from the session list.
@@ -113,7 +147,7 @@ it('overrides the sidebar workspace hook and refreshes an existing subscriber', 
   const snapshot = { items: rows, archivedSessionIds: [] }
   const rawListeners = new Set<() => void>()
   const source = { getSnapshot: () => snapshot, subscribe: (listener: () => void) => { rawListeners.add(listener); return () => rawListeners.delete(listener) } }
-  const sessions = (identity: string) => rows.map(row => ({ nativeId: row.workspaceId, sessionId: row.workspaceId, groupId: `repo:${identity}`, groupTitle: 'agent-bridge', groupUpdatedAt: 1, executionLocations: [], machineId: row.workspaceId, workspace: '/work/agent-bridge', projectIdentity: identity, title: row.title, status: 'idle', worker: row.workspaceId, updatedAt: 1 }))
+  const sessions = (identity: string) => rows.map(row => ({ nativeId: row.workspaceId, sessionId: row.workspaceId, groupId: `repo:${identity}`, groupTitle: 'agent-bridge', groupUpdatedAt: 1, executionLocations: [], machineId: row.workspaceId, workspace: '/work/agent-bridge', projectIdentity: identity, title: row.title, status: 'idle', worker: row.workspaceId, updatedAt: 1, activityAt: 1 }))
   let catalogRows = sessions('github.com/example/agent-bridge')
   const catalog = new NativeCatalog(async () => ({ sessions: catalogRows }), { list: { getSnapshot: () => ({}), subscribe: () => () => {} }, clear: vi.fn(), refresh: vi.fn(async () => {}) })
   await catalog.refresh()

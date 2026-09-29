@@ -243,6 +243,30 @@ describe('native session catalog', () => {
     expect(f.bridge.call.mock.calls.filter(([request]) => request.operation === 'delete_session').map(([request]) => request.args?.['sessionId'])).toEqual(['remote-1', 'remote-2'])
     expect(f.host.workspaceRegistry.archiveSession).toHaveBeenCalledTimes(2)
   })
+  it('moves unchanged sessions in the catalog when a sibling replies', async () => {
+    const f = await fixture()
+    let summaries = [{ ...summary, sessionId: 'remote-a', updatedAt: 20, lastResponseAt: 20 }, { ...summary, sessionId: 'remote-b', updatedAt: 10, lastResponseAt: 10 }]
+    f.bridge.call.mockImplementation(async request => {
+      if (request.operation === 'workers') return { workers: [{ id: 'w', machineId: 'dev-wsl', name: 'Codex', status: 'online' }] }
+      if (request.operation === 'session_groups') return groupPage(summaries)
+      if (request.operation === 'session_events') return page([])
+      return page([])
+    })
+    const [a, b] = ['remote-a', 'remote-b'].map(id => nativeSessionId('http://bridge.test', id))
+    const sessions = () => f.target.catalog()['sessions'] as JsonObject[]
+    await f.target.refresh()
+    expect(sessions().map(item => item['nativeId'])).toEqual([a, b])
+    // Only B changed; A keeps its version and is not re-materialized, yet its position and group moved.
+    summaries = [{ ...summaries[1]!, updatedAt: 30, lastResponseAt: 30 }, summaries[0]!]
+    await f.target.refresh()
+    expect(sessions().map(item => item['nativeId'])).toEqual([b, a])
+    expect(sessions().map(item => item['activityAt'])).toEqual([30, 20])
+    expect(sessions().find(item => item['nativeId'] === a)).toMatchObject({ groupUpdatedAt: 30 })
+    // Tool progress bumps updatedAt, not the reply clock the sidebar ranks by.
+    summaries = [{ ...summaries[1]!, updatedAt: 40 }, summaries[0]!]
+    await f.target.refresh()
+    expect(sessions().find(item => item['nativeId'] === a)).toMatchObject({ activityAt: 20 })
+  })
   it('does not report remote deletion as failed when stale local cleanup rejects', async () => {
     const f = await fixture()
     await f.target.refresh()
