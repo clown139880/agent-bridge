@@ -304,7 +304,9 @@ export class AgentControlStore {
       if (!inserted.changes) return false;
       const id = Number(inserted.lastInsertRowid);
       indexEvent(this.db, { id, session_id: message.sessionId, type: message.eventType, turn_id: message.turnId ?? null }, payload);
-      const isReply = (message.eventType === "message.completed" && payload.role === "assistant")
+      // A prompt counts too: a long turn that only runs tools must not sink below
+      // idle sessions until its first reply. Tool progress still never reorders.
+      const isReply = (message.eventType === "message.completed" && (payload.role === "assistant" || payload.role === "user"))
         || (message.eventType === "turn.completed" && typeof payload.summary === "string" && payload.summary.trim().length > 0);
       if (isReply && this.db.prepare(`UPDATE sessions SET last_response_at=?,updated_at=?
         WHERE id=? AND (last_response_at IS NULL OR last_response_at<?)`)

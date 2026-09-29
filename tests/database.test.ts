@@ -276,6 +276,10 @@ test("tool progress touches a session's updated_at without counting as a reply",
   control.appendSessionEvent({ type: "session.event", eventType: "command.completed", eventId: "old", sessionId: "thread-1",
     turnId: "turn-0", timestamp: 3, payload: { command: "pwd", status: "completed" } });
   assert.equal(row().updated_at, 7);
+  // A prompt is activity: a turn that only runs tools ranks from when it was asked.
+  control.appendSessionEvent({ type: "session.event", eventType: "message.completed", eventId: "prompt", sessionId: "thread-1",
+    turnId: "turn-2", timestamp: 9, payload: { role: "user", text: "review" } });
+  assert.deepEqual({ ...row() }, { updated_at: 9, last_response_at: 9 });
   store.db.close();
   rmSync(path, { force: true });
 });
