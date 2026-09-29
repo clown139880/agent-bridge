@@ -25,6 +25,7 @@ export function registerAgentBridgeProvider(ctx: Context, service: AgentControlS
       agent.options.provider = PROVIDER
       agent.options.model = 'remote'
       installModelSelection(agent.ctx, { current: { provider: PROVIDER, model: 'remote' }, assembled: undefined })
+      target.adopt(String(agent.id))
     }
     scoped.on('llm/stream', (options: GenerateOptions, next: () => AsyncIterable<StreamChunk>) => {
       if (options.purpose || !options.sessionId) return next()

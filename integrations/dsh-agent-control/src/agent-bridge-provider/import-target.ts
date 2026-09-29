@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { mkdir, realpath, readFile, writeFile, readdir } from 'node:fs/promises'
+import { mkdir, realpath, readFile, rename, writeFile, readdir } from 'node:fs/promises'
 import { homedir, hostname as osHostname } from 'node:os'
 import { isAbsolute, join, basename, relative } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
@@ -37,6 +37,9 @@ const STALE_SESSION_MS = 2 * 24 * 60 * 60 * 1000
 let cachedHostname: string | undefined
 const hostname = (): string => cachedHostname ??= osHostname()
 const FULL_SYNC_MS = 60_000
+/** Sessions kept loaded: running or waiting ones, plus the most recent of the last day. */
+const HOT_MS = 24 * 60 * 60 * 1000
+const HOT_LIMIT = 20
 /** Catalog fields that follow the whole page rather than the session's own version. */
 const PLACEMENT_FIELDS = ['presentationOrder', 'groupId', 'groupTitle', 'groupUpdatedAt', 'executionLocations', 'updatedAt', 'lastResponseAt'] as const
 const VOLATILE_BINDING_FIELDS = new Set<string>([...PLACEMENT_FIELDS, 'status'])
@@ -99,6 +102,9 @@ export class AgentBridgeImportTarget {
   /** Remote id → native id for drafts, whose native id predates (so is not derived from) their remote id. */
   private readonly aliases = new Map<string, string>()
   private aliasesLoaded: Promise<void> | undefined
+  private versionsLoaded: Promise<void> | undefined
+  private versionsDirty = false
+  private started = false
   /** Drafts whose remote session is being created; its id is not known until the action settles. */
   private readonly drafting = new Set<string>()
   constructor(readonly host: NativeHost, readonly bridge: Pick<BridgeClient, 'call'>, readonly origin: string,
@@ -134,6 +140,34 @@ export class AgentBridgeImportTarget {
       }
     })()
     return this.aliasesLoaded
+  }
+  /** Catalog version each stored Session was last synchronized to; 0 means stored at an unknown version. */
+  private loadVersions(): Promise<void> {
+    this.versionsLoaded ??= readFile(join(this.dataRoot, 'synced-versions.json'), 'utf8').then(text => {
+      for (const [id, version] of Object.entries(record(JSON.parse(text)))) if (!this.versions.has(id)) this.versions.set(id, Number(version) || 0)
+    }, (error: NodeJS.ErrnoException) => { if (error.code !== 'ENOENT') this.host.logger.warn('Agent Bridge synced versions: ' + String(error)) })
+    return this.versionsLoaded
+  }
+  private async saveVersions(): Promise<void> {
+    if (!this.versionsDirty) return
+    this.versionsDirty = false
+    const path = join(this.dataRoot, 'synced-versions.json')
+    await mkdir(this.dataRoot, { recursive: true })
+    await writeFile(path + '.tmp', JSON.stringify(Object.fromEntries(this.versions)))
+    await rename(path + '.tmp', path)
+  }
+  private synchronized(id: string, version: number): void {
+    if (this.versions.get(id) === version) return
+    this.versions.set(id, version); this.versionsDirty = true
+  }
+  /** DSH loaded a cold Bridge session (the user opened it): bring its log up to the catalog. */
+  adopt(nativeId: string): void {
+    const binding = this.bindings.get(nativeId)
+    if (!this.started || !binding || !str(binding['sessionId']) || this.jobs.has(nativeId) || this.deleted.has(nativeId)) return
+    const version = Number(binding['updatedAt'])
+    if (this.versions.get(nativeId) === version) return
+    void this.ensure(binding).then(() => { if (!this.isBusy(nativeId)) this.synchronized(nativeId, version) })
+      .catch((error: unknown) => { if (!this.abort.signal.aborted) this.host.logger.warn(`Agent Bridge could not sync opened session "${nativeId}": ${String(error)}`) })
   }
   status(): JsonObject {
     const counts: Record<string, number> = {}
@@ -246,7 +280,7 @@ export class AgentBridgeImportTarget {
     try { await this.handles.get(nativeId)?.dispose() }
     catch (error) { warnings.push('dispose: ' + String(error)) }
     this.handles.delete(nativeId)
-    this.versions.delete(nativeId)
+    if (this.versions.delete(nativeId)) this.versionsDirty = true
     this.published.delete(nativeId)
     if (warnings.length) this.host.logger.warn(`Agent Bridge local cleanup for "${nativeId}" was incomplete after remote deletion: ${warnings.join('; ')}`)
     return warnings.join('; ')
@@ -435,6 +469,7 @@ export class AgentBridgeImportTarget {
     }
   }
   start(): void {
+    this.started = true
     const tick = async () => {
       try { await this.refresh() }
       catch (error) { if (!this.abort.signal.aborted) { this.error = String(error); this.host.logger.warn('Agent Bridge session sync: ' + this.error) } }
@@ -460,6 +495,7 @@ export class AgentBridgeImportTarget {
   }
   private async refreshAll(): Promise<void> {
     await this.loadAliases()
+    await this.loadVersions()
     const workerPage = record(await this.bridge.call({ operation: 'workers' }, this.abort.signal))
     if (!Array.isArray(workerPage['workers'])) throw new Error('Invalid Bridge worker page')
     for (const worker of workerPage['workers']) { const row = record(worker); this.workers.set(str(row['id']), row) }
@@ -513,6 +549,10 @@ export class AgentBridgeImportTarget {
       await this.cleanupDeletedNative(id)
     }
     const failures: string[] = []
+    // Only recent sessions stay loaded. DSH lists every stored log and loads a cold one when it is opened.
+    const hot = new Set(summaries.filter(row => Number(row['updatedAt']) > Date.now() - HOT_MS)
+      .sort((left, right) => Number(right['updatedAt']) - Number(left['updatedAt'])).slice(0, HOT_LIMIT)
+      .map(row => this.nativeIdFor(str(row['sessionId']))))
     // Bounded concurrent hydration. A single broken/offline session cannot hide all other sessions.
     let index = 0
     await Promise.all(Array.from({ length: Math.min(4, summaries.length) }, async () => {
@@ -533,9 +573,15 @@ export class AgentBridgeImportTarget {
           // Backstop: an idle, already-materialized session untouched for two days needs no per-poll work.
           if (unchanged && !running && !this.interactions.has(id) && !this.published.get(id)
             && Number(row['updatedAt']) < Date.now() - STALE_SESSION_MS) continue
-          if (!unchanged || running) {
+          const cold = !current && !running && !this.interactions.has(id) && !hot.has(id)
+          if (cold && (this.versions.has(id) || await this.host.sessionPersistence.stat(id))) {
+            // Stored and not loaded: keep only its catalog binding until it is opened or turns hot.
+            this.bindings.set(id, { ...row, origin: new URL(this.origin).origin })
+            if (!this.versions.has(id)) this.synchronized(id, 0)
+          }
+          else if (!unchanged || running) {
             await this.ensure(row)
-            if (!this.isBusy(id)) this.versions.set(id, Number(row['updatedAt']))
+            if (!this.isBusy(id)) this.synchronized(id, Number(row['updatedAt']))
             else deferred = true
           }
           // Publish transitions only: each status event makes DSH rebuild its whole session list,
@@ -557,6 +603,7 @@ export class AgentBridgeImportTarget {
       }
     }))
     await this.reconcilePresentationWorkspaces(groups)
+    await this.saveVersions().catch((error: unknown) => { this.host.logger.warn('Agent Bridge synced versions: ' + String(error)) })
     this.error = failures.join('\n')
     this.lastSyncAt = Date.now()
     if (stream && !failures.length && !deferred) this.synced = { cursor: stream, at: this.lastSyncAt }

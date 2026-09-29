@@ -317,6 +317,41 @@ describe('native session catalog', () => {
     expect(bindings()).toBe(before)
     await f.target.dispose()
   })
+  it('keeps old stored sessions unloaded across a restart and syncs one when it is opened', async () => {
+    const f = await fixture()
+    let current: JsonObject = { ...summary }
+    f.bridge.call.mockImplementation(async request => {
+      if (request.operation === 'workers') return { workers: [{ id: 'w', machineId: 'dev-wsl', name: 'Codex', status: 'online' }] }
+      if (request.operation === 'session_groups') return groupPage([current])
+      if (request.operation === 'session_events') return page(request.args?.['after'] ? [] : [row('u', 'message.completed', { role: 'user', text: 'hello' })])
+      return page([])
+    })
+    const id = nativeSessionId('http://bridge.test', 'remote-1')
+    await f.target.refresh()
+    expect(f.agents.has(id)).toBe(true)
+    const dataRoot = (f.target as unknown as { dataRoot: string }).dataRoot
+    await f.target.dispose(); f.agents.delete(id)
+    // A restart does not resume an old idle session, and does not re-sync it while it changes.
+    const restarted = new AgentBridgeImportTarget(f.host, f.bridge, 'http://bridge.test', dataRoot)
+    restarted.start()
+    await restarted.refresh()
+    expect(f.agents.has(id)).toBe(false)
+    expect(restarted.binding(id)?.['title']).toBe('Remote conversation')
+    current = { ...current, title: 'Changed while cold', updatedAt: 20 }
+    f.resume.mockClear()
+    await restarted.refresh()
+    expect(f.resume).not.toHaveBeenCalled()
+    // Opening it in DSH loads it; the provider hands the loaded agent over for a catch-up sync.
+    await f.host.agents.resume({ resumeSessionId: id, agentOptions: { provider: 'agent-bridge', model: 'remote' } })
+    restarted.adopt(id)
+    await vi.waitFor(() => expect(f.stored.get(id)?.events.some(event => event.type === 'session/title' && event.data['title'] === 'Changed while cold')).toBe(true))
+    // Activity makes it hot again, and hot sessions are loaded and synchronized.
+    f.agents.delete(id)
+    current = { ...current, updatedAt: Date.now() }
+    await restarted.refresh()
+    expect(f.agents.has(id)).toBe(true)
+    await restarted.dispose()
+  })
   it('does not report remote deletion as failed when stale local cleanup rejects', async () => {
     const f = await fixture()
     await f.target.refresh()
@@ -419,7 +454,8 @@ describe('native session catalog', () => {
     const restarted = new AgentBridgeImportTarget(f.host, f.bridge, 'http://bridge.test', (f.target as unknown as { dataRoot: string }).dataRoot)
     f.agents.delete(draftId)
     await restarted.refresh()
-    expect(f.agents.has(draftId)).toBe(true)
+    // An old stored session stays unloaded after a restart, still bound to the draft.
+    expect(restarted.binding(draftId)?.['sessionId']).toBe('remote-new')
     expect(f.agents.has(nativeSessionId('http://bridge.test', 'remote-new'))).toBe(false)
     await f.target.dispose(); await restarted.dispose()
   })
