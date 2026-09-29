@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { mkdir, realpath, readFile, writeFile, readdir } from 'node:fs/promises'
-import { homedir, hostname } from 'node:os'
+import { homedir, hostname as osHostname } from 'node:os'
 import { isAbsolute, join, basename, relative } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -33,6 +33,9 @@ export function promptTitle(row: JsonObject, events: readonly NativeEvent[]): st
   return prompt ? Array.from(prompt).slice(0, 64).join('') + (Array.from(prompt).length > 64 ? '…' : '') : 'Bridge · ' + str(row['sessionId']).slice(0, 8)
 }
 const STALE_SESSION_MS = 2 * 24 * 60 * 60 * 1000
+// os.hostname() is a syscall; the catalog asks once per session on every client poll.
+let cachedHostname: string | undefined
+const hostname = (): string => cachedHostname ??= osHostname()
 const FULL_SYNC_MS = 60_000
 /** Catalog fields that follow the whole page rather than the session's own version. */
 const PLACEMENT_FIELDS = ['presentationOrder', 'groupId', 'groupTitle', 'groupUpdatedAt', 'executionLocations', 'updatedAt', 'lastResponseAt'] as const
@@ -537,7 +540,8 @@ export class AgentBridgeImportTarget {
           }
           // Publish transitions only: each status event makes DSH rebuild its whole session list,
           // and republishing every session on every poll saturated the Desktop renderer.
-          if (this.published.get(id) !== running) {
+          // Unpublished counts as idle, so a restart does not announce every idle session.
+          if ((this.published.get(id) ?? false) !== running) {
             this.published.set(id, running)
             this.host.emit('api-session/status', id, running)
           }

@@ -280,17 +280,17 @@ describe('native session catalog', () => {
     const statuses = () => (f.host.emit as ReturnType<typeof vi.fn>).mock.calls.filter(call => call[0] === 'api-session/status').map(call => [call[1], call[2]])
     const [id, old] = ['remote-1', 'remote-old'].map(remote => nativeSessionId('http://bridge.test', remote))
     await f.target.refresh()
-    expect(statuses()).toEqual(expect.arrayContaining([[id, false], [old, false]]))
+    expect(statuses()).toEqual([])
     f.bridge.call.mockClear(); await f.target.refresh(); await f.target.refresh()
     // DSH rebuilds its whole session list per status event: unchanged states are not republished.
-    expect(statuses()).toHaveLength(2)
+    expect(statuses()).toHaveLength(0)
     expect(f.bridge.call.mock.calls.some(([request]) => request.operation === 'session_events')).toBe(false)
     current = { ...current, status: 'active', updatedAt: Date.now() }
     await f.target.refresh()
-    expect(statuses().slice(2)).toEqual([[id, true]])
+    expect(statuses()).toEqual([[id, true]])
     current = { ...current, status: 'idle', updatedAt: Date.now() }
     await f.target.refresh()
-    expect(statuses().slice(3)).toEqual([[id, false]])
+    expect(statuses().slice(1)).toEqual([[id, false]])
     await f.target.dispose()
   })
   it('skips the catalog while the control-plane stream cursor has not moved', async () => {
