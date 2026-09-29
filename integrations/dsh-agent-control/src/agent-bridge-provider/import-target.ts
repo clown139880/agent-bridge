@@ -32,7 +32,6 @@ export function promptTitle(row: JsonObject, events: readonly NativeEvent[]): st
   const prompt = (text || str(row['promptSummary'])).replace(/^【恢复的首条用户消息】\s*/, '').replace(/\s+/g, ' ').trim()
   return prompt ? Array.from(prompt).slice(0, 64).join('') + (Array.from(prompt).length > 64 ? '…' : '') : 'Bridge · ' + str(row['sessionId']).slice(0, 8)
 }
-const STALE_SESSION_MS = 2 * 24 * 60 * 60 * 1000
 // os.hostname() is a syscall; the catalog asks once per session on every client poll.
 let cachedHostname: string | undefined
 const hostname = (): string => cachedHostname ??= osHostname()
@@ -570,9 +569,6 @@ export class AgentBridgeImportTarget {
           const current = this.host.agents.get(id)
           const running = ['active', 'waiting_for_approval', 'waiting_for_input'].includes(str(row['status']))
           const unchanged = !!current && this.versions.get(id) === Number(row['updatedAt'])
-          // Backstop: an idle, already-materialized session untouched for two days needs no per-poll work.
-          if (unchanged && !running && !this.interactions.has(id) && !this.published.get(id)
-            && Number(row['updatedAt']) < Date.now() - STALE_SESSION_MS) continue
           const cold = !current && !running && !this.interactions.has(id) && !hot.has(id)
           if (cold && (this.versions.has(id) || await this.host.sessionPersistence.stat(id))) {
             // Stored and not loaded: keep only its catalog binding until it is opened or turns hot.

@@ -267,7 +267,7 @@ describe('native session catalog', () => {
     await f.target.refresh()
     expect(sessions().find(item => item['nativeId'] === a)).toMatchObject({ activityAt: 20 })
   })
-  it('publishes a running state only when it changes and skips idle sessions older than two days', async () => {
+  it('publishes a running state only when it changes and leaves unchanged idle sessions alone', async () => {
     const f = await fixture()
     let current: JsonObject = { ...summary, updatedAt: Date.now() }
     const stale: JsonObject = { ...summary, sessionId: 'remote-old', updatedAt: 10 }
@@ -278,7 +278,7 @@ describe('native session catalog', () => {
       return page([])
     })
     const statuses = () => (f.host.emit as ReturnType<typeof vi.fn>).mock.calls.filter(call => call[0] === 'api-session/status').map(call => [call[1], call[2]])
-    const [id, old] = ['remote-1', 'remote-old'].map(remote => nativeSessionId('http://bridge.test', remote))
+    const id = nativeSessionId('http://bridge.test', 'remote-1')
     await f.target.refresh()
     expect(statuses()).toEqual([])
     f.bridge.call.mockClear(); await f.target.refresh(); await f.target.refresh()
