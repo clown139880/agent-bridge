@@ -3,7 +3,7 @@ import test from 'node:test';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ClaudeCodeAdapter, readSessionMeta } from '../apps/bridge/src/claude/claude-adapter.js';
+import { ClaudeCodeAdapter, readSessionMeta, readTranscriptMessages } from '../apps/bridge/src/claude/claude-adapter.js';
 import type { BridgeToControlMessage } from '../packages/protocol/src/index.js';
 
 test('Claude turn ids survive adapter restarts and message events inherit their active turn', () => {
@@ -156,4 +156,86 @@ test('a Claude result with a summary or an error closes the turn immediately', (
   seam.startTurnEvents(session);
   seam.handleMessage(session, {type:'result',subtype:'error_during_execution',is_error:true,result:''});
   assert.equal(session.activeTurnId, undefined);
+});
+
+function transcriptFixture(rows: Record<string, unknown>[]) {
+  const root = mkdtempSync(join(tmpdir(), 'claude-transcript-'));
+  const nativeId = '6f1d2c3b-4a5e-4f60-8b7c-9d0e1f2a3b4c';
+  mkdirSync(join(root, 'projects', 'work'), { recursive: true });
+  const file = join(root, 'projects', 'work', `${nativeId}.jsonl`);
+  writeFileSync(file, rows.map(row => JSON.stringify(row)).join('\n'));
+  return { root, nativeId, file };
+}
+const at = (second: number) => new Date(Date.UTC(2026, 8, 29, 12, 0, second)).toISOString();
+const CLI_ROWS: Record<string, unknown>[] = [
+  {type:'user',uuid:'u0',timestamp:at(0),message:{content:'relayed prompt'}},
+  {type:'assistant',uuid:'a0',timestamp:at(1),message:{content:[{type:'text',text:'relayed reply'}]}},
+  {type:'user',uuid:'u1',timestamp:at(10),message:{content:'cli prompt'}},
+  {type:'assistant',uuid:'a1',timestamp:at(11),message:{content:[{type:'text',text:'checking'},{type:'tool_use',id:'t',name:'Bash',input:{}}]}},
+  {type:'user',uuid:'r1',timestamp:at(12),message:{content:[{type:'tool_result',tool_use_id:'t',content:'ok'}]}},
+  {type:'assistant',uuid:'a2',timestamp:at(13),message:{content:[{type:'text',text:'final answer'}]}},
+  {type:'user',uuid:'s1',timestamp:at(14),isSidechain:true,message:{content:'subagent prompt'}},
+  {type:'user',uuid:'c1',timestamp:at(15),isCompactSummary:true,isVisibleInTranscriptOnly:true,message:{content:'This session is being continued'}},
+  {type:'user',uuid:'m1',timestamp:at(16),message:{content:'<command-name>/model</command-name>'}},
+  {type:'user',uuid:'i1',timestamp:at(17),message:{content:[{type:'text',text:'[Request interrupted by user]'}]}},
+  {type:'user',uuid:'u2',timestamp:at(18),message:{content:'second cli prompt'}},
+];
+
+test('a transcript catch-up keeps typed prompts and the final reply to each', () => {
+  const { root, file } = transcriptFixture(CLI_ROWS);
+  try {
+    const messages = readTranscriptMessages(file, Date.parse(at(5)));
+    assert.deepEqual(messages.map(m => [m.uuid, m.role, m.text]), [
+      ['u1', 'user', 'cli prompt'], ['a2', 'assistant', 'final answer'], ['u2', 'user', 'second cli prompt']]);
+  } finally { rmSync(root, {recursive:true,force:true}); }
+});
+
+test('reviving a Claude session relays what the transcript gained after the last stored event', async () => {
+  const { root, nativeId } = transcriptFixture(CLI_ROWS);
+  try {
+    const events: BridgeToControlMessage[] = [];
+    const adapter = new ClaudeCodeAdapter({command:'',claudeHome:root,allowedRoots:[]}, event => events.push(event));
+    const sessions = (adapter as unknown as { sessions: Map<string, unknown> }).sessions;
+    (adapter as unknown as { launch(params: { publicSessionId: string; resumeNativeId?: string }): Promise<string> }).launch = async params => {
+      sessions.set(params.publicSessionId, {sessionId:params.publicSessionId,nativeSessionId:params.resumeNativeId,turnSeq:0,logs:[]});
+      return params.publicSessionId;
+    };
+    await adapter.resumeSession('claude-public', '/work', nativeId, undefined, Date.parse(at(5)));
+    const relayed = events.flatMap(event => event.type === 'session.event' ? [event] : []);
+    assert.deepEqual(relayed.map(event => [event.eventId, event.payload.role, event.timestamp]), [
+      [`claude:${nativeId}:transcript:u1`, 'user', Date.parse(at(10))],
+      [`claude:${nativeId}:transcript:a2`, 'assistant', Date.parse(at(13))],
+      [`claude:${nativeId}:transcript:u2`, 'user', Date.parse(at(18))]]);
+  } finally { rmSync(root, {recursive:true,force:true}); }
+});
+
+test('a held idle Claude session continued in a CLI is relaunched and caught up before the next turn', async () => {
+  const { root, nativeId, file } = transcriptFixture(CLI_ROWS.slice(0, 2));
+  try {
+    const events: BridgeToControlMessage[] = [];
+    const adapter = new ClaudeCodeAdapter({command:'',claudeHome:root,allowedRoots:[]}, event => events.push(event));
+    const sessions = (adapter as unknown as { sessions: Map<string, Record<string, unknown>> }).sessions;
+    const launches: string[] = [];
+    const seam = adapter as unknown as {
+      launch(params: { publicSessionId: string; resumeNativeId?: string }): Promise<string>;
+      reloadIfContinuedElsewhere(session: unknown): Promise<Record<string, unknown>>;
+    };
+    seam.launch = async params => {
+      launches.push(String(params.resumeNativeId));
+      sessions.set(params.publicSessionId, {sessionId:params.publicSessionId,nativeSessionId:params.resumeNativeId,turnSeq:0,logs:[],pendingApprovals:new Map()});
+      return params.publicSessionId;
+    };
+    const held = {sessionId:'claude-public',nativeSessionId:nativeId,projectPath:'/work',settledAt:Date.parse(at(2)),turnSeq:0,logs:[],
+      pendingApprovals:new Map(),input:{end() {}},abort:new AbortController(),ended:false};
+    sessions.set('claude-public', held);
+    // Only the subprocess's own writes: nothing to reload.
+    assert.equal(await seam.reloadIfContinuedElsewhere(held), held);
+    writeFileSync(file, CLI_ROWS.map(row => JSON.stringify(row)).join('\n'));
+    const relaunched = await seam.reloadIfContinuedElsewhere(held);
+    assert.notEqual(relaunched, held);
+    assert.equal(held.ended, true);
+    assert.deepEqual(launches, [nativeId]);
+    assert.deepEqual(events.flatMap(event => event.type === 'session.event' ? [event.eventId] : []),
+      ['u1', 'a2', 'u2'].map(uuid => `claude:${nativeId}:transcript:${uuid}`));
+  } finally { rmSync(root, {recursive:true,force:true}); }
 });

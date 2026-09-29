@@ -910,11 +910,11 @@ export class ControlPlane {
   // Resume hint for submit_turn: lets the bridge revive a session it no longer
   // holds in memory (e.g. a Claude subprocess killed by a bridge restart/self-update)
   // by relaunching the agent in the session's workspace and resuming its native id.
-  private resumeContext(sessionId: string): { agentType: AgentType; workspace: string; nativeSessionId?: string } | undefined {
+  private resumeContext(sessionId: string): { agentType: AgentType; workspace: string; nativeSessionId?: string; syncedAt?: number } | undefined {
     const session = this.store.getSession(sessionId);
     if (!session || !session.projectPath) return undefined;
     return { agentType: session.agentType, workspace: session.projectPath,
-      nativeSessionId: session.nativeSessionId ?? undefined };
+      nativeSessionId: session.nativeSessionId ?? undefined, syncedAt: this.controlStore.lastEventAt(sessionId) };
   }
 
   private replayControlActions(machineId: string): void {

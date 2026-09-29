@@ -638,6 +638,12 @@ export class AgentControlStore {
     });
   }
 
+  /** Time of the newest stored event of a session, if any. */
+  lastEventAt(sessionId: string): number | undefined {
+    const row = this.db.prepare("SELECT MAX(created_at) AS at FROM events WHERE session_id=?").get(sessionId) as { at: number | null } | undefined;
+    return row?.at ?? undefined;
+  }
+
   resetTransientSessionActivity(): void {
     this.db.prepare("UPDATE sessions SET activity_status='offline' WHERE activity_status IN ('creating','active','waiting_for_approval','waiting_for_input')").run();
   }

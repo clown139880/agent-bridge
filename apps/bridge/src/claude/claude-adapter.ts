@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import { homedir } from "node:os";
 import pino from "pino";
@@ -38,6 +38,10 @@ const LOG_LIMIT = 2_000;
 /** A success result with no summary this soon after its turn started is the stray empty
  *  result a revived Claude emits before working on the prompt; it must not close the turn. */
 const STRAY_RESULT_WINDOW_MS = 2_000;
+/** Most messages one catch-up relays: a long CLI stint shows its recent part. */
+const TRANSCRIPT_BACKFILL_LIMIT = 200;
+/** Transcript writes this soon after a turn settles are the subprocess's own bookkeeping. */
+const TRANSCRIPT_SETTLE_MS = 5_000;
 const CLAUDE_SESSION_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 interface PendingApproval {
@@ -201,10 +205,84 @@ export class ClaudeCodeAdapter implements AgentAdapter {
    * turn with "No conversation found", so it starts fresh instead and init
    * re-announces the real uuid.
    */
-  async resumeSession(sessionId: string, projectPath: string, nativeSessionId?: string, model?: string): Promise<void> {
+  async resumeSession(sessionId: string, projectPath: string, nativeSessionId?: string, model?: string, syncedAt?: number): Promise<void> {
     if (this.sessions.has(sessionId)) return;
     const resumeNativeId = nativeSessionId && CLAUDE_SESSION_UUID.test(nativeSessionId) ? nativeSessionId : undefined;
     await this.launch({ publicSessionId: sessionId, requestId: sessionId, projectPath, resumeNativeId, model });
+    if (resumeNativeId && syncedAt !== undefined) this.backfillTranscript(this.require(sessionId), syncedAt);
+  }
+
+  private transcriptPath(nativeId: string): string | undefined {
+    const projectsDir = join(this.options.claudeHome, "projects");
+    let dirs: string[];
+    try {
+      dirs = readdirSync(projectsDir);
+    } catch {
+      return undefined;
+    }
+    for (const dir of dirs) {
+      const path = join(projectsDir, dir, `${nativeId}.jsonl`);
+      if (existsSync(path)) return path;
+    }
+    return undefined;
+  }
+
+  /**
+   * Relay the prompts and final replies a transcript gained after `since` outside this
+   * bridge (the session was resumed in a CLI). A one-shot catch-up, not live tailing:
+   * tool steps are not replayed, and event ids derive from transcript uuids, so a
+   * repeated catch-up stores nothing twice.
+   */
+  private backfillTranscript(session: ClaudeSession, since: number): void {
+    const nativeId = session.nativeSessionId;
+    const path = nativeId ? this.transcriptPath(nativeId) : undefined;
+    if (!nativeId || !path) return;
+    const messages = readTranscriptMessages(path, since).slice(-TRANSCRIPT_BACKFILL_LIMIT);
+    for (const message of messages) this.emit({
+      type: "session.event", sessionId: session.sessionId, eventType: "message.completed",
+      eventId: `claude:${nativeId}:transcript:${message.uuid}`, timestamp: message.timestamp,
+      payload: { role: message.role, text: truncate(message.text), backfilled: true },
+    });
+    if (messages.length) log.info({ sessionId: session.sessionId, count: messages.length }, "backfilled transcript messages written outside the bridge");
+  }
+
+  /**
+   * A held, idle session whose transcript gained messages since it settled was
+   * continued elsewhere (e.g. a CLI resume). Its subprocess still holds the old
+   * conversation, so the next turn would fork the transcript: relaunch it from the
+   * transcript and catch up first.
+   */
+  private async reloadIfContinuedElsewhere(session: ClaudeSession): Promise<ClaudeSession> {
+    const nativeId = session.nativeSessionId;
+    if (!nativeId || session.activeTurnId || session.pendingUserInput || [...session.pendingApprovals.values()].some((a) => !a.answered)) return session;
+    const path = this.transcriptPath(nativeId);
+    const settled = Math.max(session.settledAt ?? 0, session.lastMessageAt ?? 0);
+    let modified: number;
+    try {
+      modified = statSync(path ?? "").mtimeMs;
+    } catch {
+      return session;
+    }
+    // The subprocess itself appends bookkeeping lines just after a turn settles.
+    if (!path || modified <= settled + TRANSCRIPT_SETTLE_MS || !readTranscriptMessages(path, settled).length) return session;
+    log.info({ sessionId: session.sessionId }, "transcript continued outside the bridge; relaunching session");
+    this.close(session);
+    await this.launch({ publicSessionId: session.sessionId, requestId: session.sessionId, projectPath: session.projectPath,
+      resumeNativeId: nativeId, ...(session.model ? { model: session.model } : {}) });
+    const relaunched = this.require(session.sessionId);
+    this.backfillTranscript(relaunched, settled);
+    return relaunched;
+  }
+
+  private close(session: ClaudeSession): void {
+    session.ended = true;
+    session.abort.abort();
+    try {
+      session.input.end();
+    } catch {
+      /* already ended */
+    }
+    this.sessions.delete(session.sessionId);
   }
 
   private async launch(params: { publicSessionId: string; requestId: string; projectPath: string; prompt?: string; resumeNativeId?: string; model?: string; attachments?: AttachmentRef[] }): Promise<string> {
@@ -551,7 +629,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     _reasoningEffort?: string,
     attachments?: AttachmentRef[],
   ): Promise<{ sessionId: string; turnId?: string; resolvedAction: "steer" | "start_turn" }> {
-    const session = this.require(sessionId);
+    const session = await this.reloadIfContinuedElsewhere(this.require(sessionId));
     if (session.pendingUserInput) throw domainError("user_input_pending", "structured user input is pending");
     if ([...session.pendingApprovals.values()].some((a) => !a.answered)) throw domainError("approval_pending", "approval is pending");
     const activeTurnId = session.activeTurnId;
@@ -680,14 +758,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       if (session.settledAt === undefined) continue;
       const idleFor = now - Math.max(session.settledAt, session.lastMessageAt ?? 0);
       if (idleFor < idleMs) continue;
-      session.ended = true;
-      session.abort.abort();
-      try {
-        session.input.end();
-      } catch {
-        /* already ended */
-      }
-      this.sessions.delete(id);
+      this.close(session);
       reaped.push(id);
       log.info({ sessionId: id, idleMs: idleFor }, "reaped idle claude session; subprocess closed");
     }
@@ -1025,6 +1096,57 @@ interface SessionMeta {
   createdAt?: number;
   firstUserText?: string;
   firstUserAt?: number;
+}
+
+export interface TranscriptMessage { uuid: string; role: "user" | "assistant"; text: string; timestamp: number }
+
+/**
+ * Main-conversation messages of a Claude transcript written after `since`: each
+ * typed prompt and the last assistant text before the next one (its final reply).
+ * Tool results, sidechains, compaction summaries, interruptions and command
+ * wrappers are not conversation messages.
+ */
+export function readTranscriptMessages(path: string, since: number): TranscriptMessage[] {
+  let text: string;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch {
+    return [];
+  }
+  const messages: TranscriptMessage[] = [];
+  let reply: TranscriptMessage | undefined;
+  const flush = () => {
+    if (reply && reply.timestamp > since) messages.push(reply);
+    reply = undefined;
+  };
+  for (const line of text.split("\n")) {
+    if (!line.trim()) continue;
+    let row: Record<string, unknown>;
+    try {
+      row = JSON.parse(line) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    if ((row.type !== "user" && row.type !== "assistant") || row.isSidechain === true || row.isMeta === true
+      || row.isCompactSummary === true || row.isVisibleInTranscriptOnly === true || typeof row.uuid !== "string") continue;
+    const timestamp = typeof row.timestamp === "string" ? Date.parse(row.timestamp) : NaN;
+    if (!Number.isFinite(timestamp)) continue;
+    const content = (row.message as { content?: unknown } | undefined)?.content;
+    const body = typeof content === "string" ? content : Array.isArray(content)
+      ? content.filter((block): block is { type: "text"; text: string } => block?.type === "text" && typeof block.text === "string")
+        .map(block => block.text).join("\n")
+      : "";
+    if (!body.trim()) continue;
+    if (row.type === "assistant") {
+      reply = { uuid: row.uuid, role: "assistant", text: body, timestamp };
+      continue;
+    }
+    if (body.startsWith("<") || body.startsWith("[Request interrupted")) continue;
+    flush();
+    if (timestamp > since) messages.push({ uuid: row.uuid, role: "user", text: body, timestamp });
+  }
+  flush();
+  return messages;
 }
 
 /** Read cwd / first user prompt from the head of a Claude transcript .jsonl. */

@@ -46,11 +46,11 @@ function pendingJson(row: PendingRow): Record<string,unknown> {
 // (Claude subprocess killed by a restart). workspace is the cwd to relaunch in;
 // nativeSessionId is the agent's own resumable id. Only emitted when both the
 // agent type and workspace are known.
-function resumeContext(session:Record<string,unknown>):{agentType:AgentType;workspace:string;nativeSessionId?:string}|undefined{
+function resumeContext(session:Record<string,unknown>,syncedAt?:number):{agentType:AgentType;workspace:string;nativeSessionId?:string;syncedAt?:number}|undefined{
   const agent=session.agent,workspace=session.workspace;
   if((agent!=="codex-cli"&&agent!=="claude-code"&&agent!=="pi")||typeof workspace!=="string"||!workspace)return undefined;
   const nativeSessionId=typeof session.nativeSessionId==="string"?session.nativeSessionId:undefined;
-  return {agentType:agent,workspace,nativeSessionId};
+  return {agentType:agent,workspace,nativeSessionId,syncedAt};
 }
 function queryScope(name:string,url:URL):string{const entries=[...url.searchParams.entries()].filter(([key])=>key!=="cursor"&&key!=="limit").sort();return `${name}:${createHash("sha256").update(JSON.stringify(entries)).digest("hex").slice(0,16)}`;}
 function pageCursor(scope:string,time:number,id:string):string{return Buffer.from(JSON.stringify({scope,time,id})).toString("base64url");}
@@ -308,7 +308,7 @@ export class AgentControlApi {
     const created=this.createAction(principal,key,path,body,"submit_turn",machineId,String(session.sessionId));
     if(!created.existing)this.dispatch(created.action,{type:"action.submit_turn",actionId:created.action.actionId,
       sessionId:String(session.sessionId),input,delivery:delivery as "auto"|"steer"|"start_turn",expectedTurnId:expected,model,reasoningEffort,attachments,
-      resume:resumeContext(session)});
+      resume:resumeContext(session,this.store.lastEventAt(String(session.sessionId)))});
     this.ok(response,actionJson(this.store.action(created.action.actionId)!),202);
   }
 

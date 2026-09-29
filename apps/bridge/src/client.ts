@@ -222,7 +222,7 @@ export class BridgeClient {
     if (resume && adapter?.resumeSession) {
       log.info({ sessionId: message.sessionId, agentType: resume.agentType, workspace: resume.workspace },
         "Reviving session before turn — bridge no longer held it");
-      await adapter.resumeSession(message.sessionId, resume.workspace, resume.nativeSessionId, message.model);
+      await adapter.resumeSession(message.sessionId, resume.workspace, resume.nativeSessionId, message.model, resume.syncedAt);
       this.sessionOwner.set(message.sessionId, resume.agentType);
       return adapter;
     }

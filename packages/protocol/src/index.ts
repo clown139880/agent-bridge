@@ -374,9 +374,11 @@ export interface SubmitTurnActionMessage {
    * Claude subprocess that died on a bridge restart/self-update). When the bridge
    * has no adapter for `sessionId`, it resumes the session on the named agent in
    * `workspace` using `nativeSessionId` (the agent's own resumable id) before
-   * applying this turn — so conversations survive bridge restarts.
+   * applying this turn — so conversations survive bridge restarts. `syncedAt` is
+   * the time of the newest stored event: transcript entries after it were written
+   * outside the bridge (e.g. the session was resumed in a CLI) and are backfilled.
    */
-  resume?: { agentType: AgentType; workspace: string; nativeSessionId?: string };
+  resume?: { agentType: AgentType; workspace: string; nativeSessionId?: string; syncedAt?: number };
 }
 export interface InterruptTurnActionMessage {
   type: "action.interrupt_turn";

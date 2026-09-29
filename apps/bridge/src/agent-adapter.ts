@@ -20,7 +20,7 @@ export interface AgentAdapter {
    * subsequent turn continues the conversation. Optional: adapters that cannot resume
    * simply omit it and unknown sessions keep failing as before.
    */
-  resumeSession?(sessionId: string, projectPath: string, nativeSessionId?: string, model?: string): Promise<void>;
+  resumeSession?(sessionId: string, projectPath: string, nativeSessionId?: string, model?: string, syncedAt?: number): Promise<void>;
   /** Deliver free-form text to a session (answers pending input, steers an active turn, or starts a new turn). */
   input(sessionId: string, text: string, model?: string, attachments?: AttachmentRef[]): Promise<void>;
 
