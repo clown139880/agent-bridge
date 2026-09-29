@@ -16,7 +16,10 @@ export type CatalogSessions = { list: Source<SessionSnapshot>; clear(): void; re
 export const DELETE_SESSION_EVENT = 'agent-control:delete-session'
 type Rpc = (operation: string, args?: Record<string, string | string[]>) => Promise<unknown>
 
-const canonicalPath = (value: string) => value.replace(/\\/g, '/').replace(/\/$/, '').toLocaleLowerCase()
+const EMPTY_SNAPSHOT: WorkspaceSnapshot = { items: [], archivedSessionIds: [] }
+const EMPTY_WORKSPACES: Source<WorkspaceSnapshot> = { getSnapshot: () => EMPTY_SNAPSHOT, subscribe: () => () => {} }
+
+const canonicalPath =(value: string) => value.replace(/\\/g, '/').replace(/\/$/, '').toLocaleLowerCase()
 
 /** Sidebar recency of one row. Bridge sessions use the catalog's agent-reply
  * time: DSH stamps imported prompts with their sync time, so its own
@@ -93,9 +96,11 @@ export class NativeCatalog {
     if (this.activityCache?.entries !== this.entries) this.activityCache = { entries: this.entries, value: new Map(this.entries.map(entry => [entry.nativeId, entry.activityAt])) }
     return this.activityCache.value
   }
+  /** Never throws: a hot reload disposes this plugin while DSH may still render
+   * its patched sidebar, and a throw there crashes the slot into a blank list. */
   useWorkspaces: WorkspaceHook =<T,>(selector: (snapshot: WorkspaceSnapshot) => T): T => {
-    if (!this.workspaceSource) throw new Error('工作区目录尚未安装')
-    const snapshot = useSyncExternalStore(this.workspaceSource.subscribe, this.workspaceSource.getSnapshot, this.workspaceSource.getSnapshot)
+    const source = this.workspaceSource ?? EMPTY_WORKSPACES
+    const snapshot = useSyncExternalStore(source.subscribe, source.getSnapshot, source.getSnapshot)
     return selector(snapshot)
   }
   private emit() { for (const listener of this.listeners) listener() }
@@ -196,7 +201,8 @@ export class NativeCatalog {
     let timer: ReturnType<typeof setTimeout>
     const tick = async () => { try { await this.refresh() } catch { /* retry transient Host startup/transport failures */ } finally { if (!disposed) timer = setTimeout(() => { void tick() }, 5000) } }
     void tick()
-    return () => { disposed = true; clearTimeout(timer); this.workspaceSource = undefined; source.getSnapshot = original; source.subscribe = subscribe; workspaces.rename = rename; workspaces.delete = remove; workspaces.insertSessionBefore = move }
+    // Keep serving DSH's own rows until the reloaded plugin installs again.
+    return () => { disposed = true; clearTimeout(timer); this.workspaceSource = { getSnapshot: () => original.call(source), subscribe: listener => subscribe.call(source, listener) }; source.getSnapshot = original; source.subscribe = subscribe; workspaces.rename = rename; workspaces.delete = remove; workspaces.insertSessionBefore = move }
   }
 }
 

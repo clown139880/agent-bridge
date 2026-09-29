@@ -1,6 +1,6 @@
 {
   "name": "dsh-agent-control-plugin",
-  "version": "0.1.71",
+  "version": "0.1.72",
   "description": "Out-of-tree DeepSeek Harness Agent Bridge and Hermes Kanban control workspace",
   "type": "module",
   "main": "lib/index.js",

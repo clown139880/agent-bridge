@@ -180,3 +180,23 @@ it('overrides the sidebar workspace hook and refreshes an existing subscriber', 
     await act(async () => root.unmount()); div.remove(); disposeMenu(); disposeCatalog()
   }
 })
+
+it('keeps rendering the native workspaces while a hot reload has disposed the catalog', async () => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
+  const snapshot = { items: [{ workspaceId: 'local', path: '/work', title: 'local', sessionIds: ['dsh-1'], createdAt: '2026-01-01', updatedAt: '2026-01-01' }], archivedSessionIds: [] }
+  const source = { getSnapshot: () => snapshot, subscribe: () => () => {} }
+  const catalog = new NativeCatalog(async () => ({ sessions: [] }), { list: { getSnapshot: () => ({}), subscribe: () => () => {} }, clear: vi.fn(), refresh: vi.fn(async () => {}) })
+  const Browser = ({ useWorkspaces }: { useWorkspaces: any }) => <div>{useWorkspaces((value: typeof snapshot) => value.items).map((row: any) => row.title).join('|')}</div>
+  const Patched = extendSessionMenu(Browser, catalog.useWorkspaces)
+  const div = document.createElement('div'); document.body.append(div); const root = createRoot(div)
+  try {
+    await act(async () => root.render(createElement(Patched as any, {})))
+    expect(div.textContent).toBe('')
+    const dispose = catalog.install({ list: source, rename: vi.fn(), delete: vi.fn(), insertSessionBefore: vi.fn() })
+    dispose()
+    await act(async () => root.render(createElement(Patched as any, { key: 'after' })))
+    expect(div.textContent).toBe('local')
+  } finally {
+    await act(async () => root.unmount()); div.remove()
+  }
+})
