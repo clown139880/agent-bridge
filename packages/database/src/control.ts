@@ -8,6 +8,9 @@ import {
 import { decodeEventBody, encodeEventBody, EVENT_COLUMNS, eventWire, indexEvent, type EventRow } from "./events.js";
 import { markChanged, signalStream, type StreamKind } from "./stream.js";
 
+/** Settled tool and task work that counts as session activity. Starts and ticks do not, to keep the feed quiet. */
+const TOOL_PROGRESS_TYPES = new Set(["command.completed", "file_change.completed", "tool.completed", "task.started", "task.completed"]);
+
 export interface RetentionOptions {
   actionsMs: number;
   attachmentsMs: number;
@@ -313,7 +316,7 @@ export class AgentControlStore {
         .run(message.timestamp, message.timestamp, message.sessionId, message.timestamp).changes) markChanged(this.db, "session", message.sessionId);
       // Tool progress is activity too: without this the updatedAfter background sync
       // cannot see a turn's tool calls until its next reply.
-      const isToolProgress = message.eventType === "command.completed" || message.eventType === "file_change.completed";
+      const isToolProgress = TOOL_PROGRESS_TYPES.has(message.eventType);
       if (isToolProgress && this.db.prepare("UPDATE sessions SET updated_at=? WHERE id=? AND updated_at<?")
         .run(message.timestamp, message.sessionId, message.timestamp).changes) markChanged(this.db, "session", message.sessionId);
       signalStream();

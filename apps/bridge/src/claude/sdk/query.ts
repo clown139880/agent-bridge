@@ -248,7 +248,8 @@ export function query(config: { prompt: QueryPrompt; options?: QueryOptions }): 
     process.env.CLAUDE_CODE_ENTRYPOINT = "sdk-ts";
   }
 
-  const args = ["--output-format", "stream-json", "--verbose"];
+  // Partial messages mark when the model starts thinking or writing, so a long silent stretch is visible.
+  const args = ["--output-format", "stream-json", "--verbose", "--include-partial-messages"];
 
   if (customSystemPrompt) args.push("--system-prompt", stripNewlinesForWindowsShellArg(customSystemPrompt));
   if (appendSystemPrompt) args.push("--append-system-prompt", stripNewlinesForWindowsShellArg(appendSystemPrompt));

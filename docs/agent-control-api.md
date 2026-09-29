@@ -255,7 +255,8 @@ export type SessionEventType =
   | "turn.started" | "turn.completed" | "turn.failed" | "turn.interrupted"
   | "message.completed" | "command.completed" | "file_change.completed"
   | "progress" | "approval.requested" | "approval.resolved"
-  | "user_input.requested" | "user_input.resolved" | "error";
+  | "user_input.requested" | "user_input.resolved" | "error"
+  | "tool.started" | "tool.completed" | "task.started" | "task.progress" | "task.completed";
 
 export interface SessionEvent {
   cursor: Cursor;
@@ -285,11 +286,31 @@ export interface CommandCompletedPayload {
   status: string;
   exitCode: number | null;
   output?: string;
+  parentItemId?: string;
 }
-export interface FileChangeCompletedPayload { changes: unknown[]; summary?: string; }
+export interface FileChangeCompletedPayload { changes: unknown[]; summary?: string; parentItemId?: string; }
 export interface ApprovalEventPayload { approval: Approval; }
 export interface UserInputEventPayload { request: UserInputRequest; }
-export interface ProgressPayload { summary: string; }
+// Emitted when the model switches between thinking and writing; the phase lasts until the next event.
+export interface ProgressPayload { summary: string; phase?: "thinking" | "writing"; }
+// itemId is the tool call id. parentItemId names the subagent's tool call when a subagent ran it.
+export interface ToolStartedPayload { name: string; summary: string; parentItemId?: string; }
+export interface ToolCompletedPayload { name: string; summary: string; status: "completed" | "failed"; output?: string; parentItemId?: string; }
+// itemId is the spawning tool call id, so a subagent's steps (parentItemId) attach to its task.
+export interface TaskStartedPayload {
+  taskId: string; kind: "agent" | "bash" | "monitor" | "other"; description: string;
+  subagentType?: string; background: boolean;
+  parentItemId?: string; // set when a subagent spawned this task
+}
+// Throttled per task. description is the task's own live summary of its current step.
+export interface TaskProgressPayload { taskId: string; description?: string; toolUses?: number; totalTokens?: number; lastToolName?: string; }
+export interface TaskCompletedPayload {
+  taskId: string; kind: "agent" | "bash" | "monitor" | "other"; description: string;
+  subagentType?: string;
+  // lost: the agent process exited before the task reported an end
+  status: "completed" | "failed" | "killed" | "stopped" | "lost"; summary: string;
+  toolUses?: number; durationMs?: number;
+}
 
 // Optional stricter helper for reducers; unknown future events still fall back to SessionEvent.
 export type KnownSessionEvent =
@@ -299,7 +320,12 @@ export type KnownSessionEvent =
   | (SessionEvent & { type: "file_change.completed"; payload: FileChangeCompletedPayload })
   | (SessionEvent & { type: "approval.requested"|"approval.resolved"; payload: ApprovalEventPayload })
   | (SessionEvent & { type: "user_input.requested"|"user_input.resolved"; payload: UserInputEventPayload })
-  | (SessionEvent & { type: "progress"; payload: ProgressPayload });
+  | (SessionEvent & { type: "progress"; payload: ProgressPayload })
+  | (SessionEvent & { type: "tool.started"; payload: ToolStartedPayload })
+  | (SessionEvent & { type: "tool.completed"; payload: ToolCompletedPayload })
+  | (SessionEvent & { type: "task.started"; payload: TaskStartedPayload })
+  | (SessionEvent & { type: "task.progress"; payload: TaskProgressPayload })
+  | (SessionEvent & { type: "task.completed"; payload: TaskCompletedPayload });
 
 export type ActionKind = "create_session" | "submit_turn" | "interrupt_turn"
   | "resolve_approval" | "resolve_user_input" | "delete_session";

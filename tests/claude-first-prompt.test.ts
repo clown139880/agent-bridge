@@ -66,7 +66,7 @@ test('a Claude session whose subprocess exits is forgotten so the next turn revi
   const adapter = new ClaudeCodeAdapter({command:'',allowedRoots:[]}, event => events.push(event));
   const sessions = (adapter as unknown as { sessions: Map<string, unknown> }).sessions;
   const seam = adapter as unknown as { consume(session: unknown): Promise<void> };
-  const session = {sessionId:'claude-public',turnSeq:0,logs:[],ended:false,query:(async function* () { throw new Error('Claude Code process exited with code 1'); })()};
+  const session = {sessionId:'claude-public',turnSeq:0,logs:[],tasks:new Map(),ended:false,query:(async function* () { throw new Error('Claude Code process exited with code 1'); })()};
   sessions.set('claude-public', session);
   await seam.consume(session);
   assert.equal(sessions.has('claude-public'), false);
@@ -105,7 +105,7 @@ function autonomousFixture() {
     startTurnEvents(session: unknown): string;
   };
   const session: Record<string, unknown> = {sessionId:'claude-public',cwd:'/work',discovered:true,turnSeq:0,logs:[],
-    toolUses:new Map(),pendingApprovals:new Map()};
+    toolUses:new Map(),tasks:new Map(),pendingApprovals:new Map()};
   const structured = () => events.flatMap(event => event.type === 'session.event' ? [event] : []);
   return { adapter, seam, session, structured };
 }
@@ -115,7 +115,7 @@ test('Claude work streamed outside any turn opens an autonomous turn that its ev
   seam.handleMessage(session, {type:'assistant',message:{content:[{type:'tool_use',id:'tool-1',name:'Bash',input:{command:'ls'}}]}});
   const turnId = session.activeTurnId as string;
   assert.ok(turnId, 'an assistant message outside a turn opens one');
-  assert.equal(structured().at(-1)?.eventType, 'turn.started');
+  assert.deepEqual(structured().map(event => event.eventType), ['turn.started', 'tool.started']);
   seam.handleMessage(session, {type:'user',message:{role:'user',content:[{type:'tool_result',tool_use_id:'tool-1',content:'a.txt'}]}});
   const command = structured().at(-1);
   assert.equal(command?.eventType, 'command.completed');
@@ -127,7 +127,7 @@ test('a Claude tool result outside any turn also opens an autonomous turn', () =
   const { seam, session, structured } = autonomousFixture();
   seam.handleMessage(session, {type:'user',message:{role:'user',content:[{type:'tool_result',tool_use_id:'x',content:'ok'}]}});
   assert.ok(session.activeTurnId);
-  assert.equal(structured().at(-1)?.eventType, 'turn.started');
+  assert.deepEqual(structured().map(event => event.eventType), ['turn.started', 'tool.completed']);
 });
 
 test('Claude stragglers after an interrupt do not open an autonomous turn', () => {

@@ -8,14 +8,18 @@ import type {
   ApprovalKind,
   AttachmentRef,
   CodexModelInfo,
+  ProgressPhase,
   SessionState,
   StructuredSessionEventType,
+  TaskKind,
+  TaskStatus,
   UserInputQuestion,
 } from "@agent-bridge/protocol";
 import type { AgentAdapter, AdapterEmit } from "../agent-adapter.js";
 import type { AttachmentFetcher, FetchedAttachment } from "../attachments.js";
 import { resolveProjectPath, summarizePrompt } from "../app-server.js";
 import { deriveProjectIdentity } from "../path-utils.js";
+import { SUBAGENT_TOOLS, taskKind, taskStatus, toolSummary } from "./activity.js";
 import { fetchClaudeRelayModels, resolveClaudeRelay } from "./model-catalog.js";
 import { PushableAsyncIterable, query, type Query } from "./sdk/index.js";
 import type {
@@ -43,6 +47,28 @@ const TRANSCRIPT_BACKFILL_LIMIT = 200;
 /** Transcript writes this soon after a turn settles are the subprocess's own bookkeeping. */
 const TRANSCRIPT_SETTLE_MS = 5_000;
 const CLAUDE_SESSION_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** Fewest milliseconds between two stored progress reports of one task; the latest report wins. */
+const TASK_PROGRESS_INTERVAL_MS = 10_000;
+/** How long a task marked finished may wait for its notification before it is closed without one. */
+const TASK_NOTIFICATION_GRACE_MS = 3_000;
+/** Result and output text kept on tool and task events; the full text stays in Claude's transcript. */
+const ACTIVITY_OUTPUT_LIMIT = 2_000;
+
+/** A subagent, background shell or monitor Claude runs beside its turn, open until it reports an end. */
+interface OpenTask {
+  taskId: string;
+  /** The tool call that spawned the task; its id is the task's item id. */
+  toolUseId?: string;
+  kind: TaskKind;
+  description: string;
+  subagentType?: string;
+  startedAt: number;
+  pendingProgress?: Record<string, unknown>;
+  progressAt?: number;
+  progressSeq: number;
+  progressTimer?: ReturnType<typeof setTimeout>;
+  completionTimer?: ReturnType<typeof setTimeout>;
+}
 
 interface PendingApproval {
   approvalId: string;
@@ -92,7 +118,12 @@ interface ClaudeSession {
   pendingTurnStart: boolean;
   lastTurnStatus?: "completed" | "failed" | "interrupted";
   logs: string[];
-  toolUses: Map<string, { name: string; input: Record<string, unknown> }>;
+  /** Tool calls awaiting their result; a subagent's calls carry the spawning call as parentItemId. */
+  toolUses: Map<string, { name: string; input: Record<string, unknown>; parentItemId?: string }>;
+  /** Running tasks. A session with any is kept alive: its subprocess owns them. */
+  tasks: Map<string, OpenTask>;
+  /** What the main thread was last reported producing; cleared by a tool call or a turn boundary. */
+  phase?: ProgressPhase;
   pendingApprovals: Map<string, PendingApproval>;
   pendingUserInput?: PendingUserInput;
   sessionAllowedTools: Set<string>;
@@ -310,6 +341,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       pendingTurnStart: false,
       logs: [],
       toolUses: new Map(),
+      tasks: new Map(),
       pendingApprovals: new Map(),
       sessionAllowedTools: new Set(),
       ended: false,
@@ -389,6 +421,10 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       // Any still-open turn is terminal: failed if the stream errored, else completed
       // (e.g. process exit without a final result).
       if (session.activeTurnId) this.finishTurn(session, streamError ? "failed" : "completed", streamError);
+      // Its tasks died with the subprocess; close them so nothing shows them running forever.
+      for (const taskId of [...session.tasks.keys()]) {
+        this.completeTask(session, taskId, "lost", "The Claude process exited before this task reported an end.");
+      }
       // The subprocess is gone. Forget the session so the next turn revives it;
       // kept, that turn would be pushed into a dead stdin and never finish.
       if (!session.ended) {
@@ -411,6 +447,9 @@ export class ClaudeCodeAdapter implements AgentAdapter {
         break;
       case "result":
         this.handleResult(session, message as SDKResultMessage);
+        break;
+      case "stream_event":
+        this.handleStreamEvent(session, message);
         break;
       default:
         break;
@@ -440,7 +479,24 @@ export class ClaudeCodeAdapter implements AgentAdapter {
   }
 
   private handleSystem(session: ClaudeSession, message: SDKSystemMessage): void {
-    if (message.subtype !== "init" || !message.session_id) return;
+    switch (message.subtype) {
+      case "init": this.handleInit(session, message); break;
+      case "task_started": this.handleTaskStarted(session, message); break;
+      case "task_progress": this.handleTaskProgress(session, message); break;
+      case "task_updated": this.handleTaskUpdated(session, message); break;
+      case "task_notification": {
+        const taskId = String(message.task_id ?? "");
+        const usage = record(message.usage);
+        this.completeTask(session, taskId, taskStatus(message.status) ?? "completed",
+          typeof message.summary === "string" ? message.summary : "", numberOrUndefined(usage.tool_uses));
+        break;
+      }
+      default: break;
+    }
+  }
+
+  private handleInit(session: ClaudeSession, message: SDKSystemMessage): void {
+    if (!message.session_id) return;
     // Learn Claude's own uuid for resume, but keep the stable public id as the
     // session key — never rename it out from under the control-plane.
     // A session created without a prompt was announced before Claude had a uuid,
@@ -459,20 +515,143 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     session.resolveInit = undefined;
   }
 
+  // ---- tasks ---------------------------------------------------------------
+
+  private handleTaskStarted(session: ClaudeSession, message: SDKSystemMessage): void {
+    const taskId = String(message.task_id ?? "");
+    if (!taskId || session.tasks.has(taskId)) return;
+    session.lastMessageAt = Date.now();
+    const toolUseId = typeof message.tool_use_id === "string" ? message.tool_use_id : undefined;
+    const spawner = toolUseId ? session.toolUses.get(toolUseId) : undefined;
+    const task: OpenTask = {
+      taskId,
+      toolUseId,
+      kind: taskKind(message.task_type, spawner?.name),
+      description: String(message.description ?? "") || "Task",
+      ...(typeof message.subagent_type === "string" ? { subagentType: message.subagent_type } : {}),
+      startedAt: Date.now(),
+      progressSeq: 0,
+    };
+    session.tasks.set(taskId, task);
+    this.appendLog(session, `Task started: ${task.description}`);
+    this.emitSessionEvent(session, "task.started", `claude:${session.sessionId}:task:${taskId}:started`, {
+      taskId,
+      kind: task.kind,
+      description: task.description,
+      ...(task.subagentType ? { subagentType: task.subagentType } : {}),
+      background: message.is_backgrounded === true,
+      ...(spawner?.parentItemId ? { parentItemId: spawner.parentItemId } : {}),
+    }, session.activeTurnId, toolUseId ?? taskId);
+  }
+
+  /** Keep the latest report and store at most one per interval, so a busy subagent stays a trickle. */
+  private handleTaskProgress(session: ClaudeSession, message: SDKSystemMessage): void {
+    const task = session.tasks.get(String(message.task_id ?? ""));
+    if (!task) return;
+    session.lastMessageAt = Date.now();
+    const usage = record(message.usage);
+    task.pendingProgress = {
+      taskId: task.taskId,
+      ...(typeof message.description === "string" && message.description ? { description: message.description } : {}),
+      ...optionalNumber("toolUses", usage.tool_uses),
+      ...optionalNumber("totalTokens", usage.total_tokens),
+      ...(typeof message.last_tool_name === "string" ? { lastToolName: message.last_tool_name } : {}),
+    };
+    const wait = task.progressAt === undefined ? 0 : TASK_PROGRESS_INTERVAL_MS - (Date.now() - task.progressAt);
+    if (wait <= 0) this.flushTaskProgress(session, task);
+    else task.progressTimer ??= unrefTimer(setTimeout(() => this.flushTaskProgress(session, task), wait));
+  }
+
+  private flushTaskProgress(session: ClaudeSession, task: OpenTask): void {
+    task.progressTimer = undefined;
+    const payload = task.pendingProgress;
+    if (!payload || session.tasks.get(task.taskId) !== task) return;
+    task.pendingProgress = undefined;
+    task.progressAt = Date.now();
+    this.emitSessionEvent(session, "task.progress", `claude:${session.sessionId}:task:${task.taskId}:progress:${++task.progressSeq}`,
+      payload, session.activeTurnId, task.toolUseId ?? task.taskId);
+  }
+
+  /** A finished task normally reports its result in a notification; close it anyway if none follows. */
+  private handleTaskUpdated(session: ClaudeSession, message: SDKSystemMessage): void {
+    const task = session.tasks.get(String(message.task_id ?? ""));
+    const status = taskStatus(record(message.patch).status);
+    if (!task || !status || task.completionTimer) return;
+    task.completionTimer = unrefTimer(setTimeout(() => this.completeTask(session, task.taskId, status, ""), TASK_NOTIFICATION_GRACE_MS));
+  }
+
+  private completeTask(session: ClaudeSession, taskId: string, status: TaskStatus, summary: string, toolUses?: number): void {
+    const task = session.tasks.get(taskId);
+    if (!task) return;
+    session.tasks.delete(taskId);
+    clearTimeout(task.progressTimer);
+    clearTimeout(task.completionTimer);
+    // Idle time counts from the end of the last task, not from the turn that launched it.
+    session.lastMessageAt = Date.now();
+    this.appendLog(session, `Task ${status}: ${task.description}`);
+    this.emitSessionEvent(session, "task.completed", `claude:${session.sessionId}:task:${taskId}:completed`, {
+      taskId,
+      kind: task.kind,
+      description: task.description,
+      ...(task.subagentType ? { subagentType: task.subagentType } : {}),
+      status,
+      summary: truncate(summary.trim() || `${task.description} ${status}`, ACTIVITY_OUTPUT_LIMIT),
+      ...(toolUses !== undefined ? { toolUses } : {}),
+      durationMs: Date.now() - task.startedAt,
+    }, session.activeTurnId, task.toolUseId ?? taskId);
+  }
+
+  // ---- streamed content ----------------------------------------------------
+
+  /** Partial messages only mark phase switches of the main thread; their text arrives whole later. */
+  private handleStreamEvent(session: ClaudeSession, message: SDKMessage): void {
+    if (message.parent_tool_use_id) return;
+    const event = record(message.event);
+    if (event.type !== "content_block_start") return;
+    session.lastMessageAt = Date.now();
+    const blockType = record(event.content_block).type;
+    const phase: ProgressPhase | undefined = blockType === "thinking" || blockType === "redacted_thinking" ? "thinking"
+      : blockType === "text" ? "writing" : undefined;
+    if (!phase) {
+      session.phase = undefined;
+      return;
+    }
+    if (session.phase === phase) return;
+    this.ensureTurn(session);
+    if (!session.activeTurnId) return;
+    session.phase = phase;
+    const eventKey = typeof message.uuid === "string" ? message.uuid : randomUUID();
+    this.emitSessionEvent(session, "progress", `claude:${session.sessionId}:${eventKey}:progress`,
+      { phase, summary: phase === "thinking" ? "Thinking" : "Writing a reply" });
+  }
+
   private handleAssistant(session: ClaudeSession, message: SDKAssistantMessage): void {
     session.updatedAt = Date.now();
     session.lastMessageAt = session.updatedAt;
-    this.ensureTurn(session);
+    // A subagent's messages are steps of the call that spawned it, never the main conversation.
+    const parentItemId = message.parent_tool_use_id || undefined;
+    if (!parentItemId) this.ensureTurn(session);
     for (const block of message.message.content ?? []) {
-      if (block.type === "text" && block.text) {
+      if (block.type === "tool_use" && typeof block.id === "string") {
+        const name = block.name ?? "tool";
+        const input = (block.input as Record<string, unknown>) ?? {};
+        session.toolUses.set(block.id, { name, input, ...(parentItemId ? { parentItemId } : {}) });
+        if (!parentItemId) session.phase = undefined;
+        if (SUBAGENT_TOOLS.has(name)) continue;
+        this.emitSessionEvent(session, "tool.started", `claude:${session.sessionId}:${block.id}:tool-started`, {
+          name,
+          summary: toolSummary(name, input),
+          ...(parentItemId ? { parentItemId } : {}),
+        }, session.activeTurnId, block.id);
+      } else if (parentItemId) {
+        continue;
+      } else if (block.type === "text" && block.text) {
         this.appendLog(session, block.text);
         this.emit({ type: "agent.output", sessionId: session.sessionId, timestamp: Date.now(), text: block.text });
         this.emitSessionEvent(session, "message.completed", `claude:${session.sessionId}:${blockId(block)}:message`, {
           role: "assistant",
           text: truncate(block.text),
         });
-      } else if (block.type === "tool_use" && typeof block.id === "string") {
-        session.toolUses.set(block.id, { name: block.name ?? "tool", input: (block.input as Record<string, unknown>) ?? {} });
       }
     }
   }
@@ -481,36 +660,54 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     session.lastMessageAt = Date.now();
     const content = message.message.content;
     if (!Array.isArray(content)) return;
-    if (content.some((block) => block.type === "tool_result")) this.ensureTurn(session);
+    const sidechainParent = message.parent_tool_use_id || undefined;
+    if (!sidechainParent && content.some((block) => block.type === "tool_result")) this.ensureTurn(session);
     for (const block of content) {
       if (block.type !== "tool_result" || typeof block.tool_use_id !== "string") continue;
       const tool = session.toolUses.get(block.tool_use_id);
       session.toolUses.delete(block.tool_use_id);
       const name = tool?.name ?? "tool";
+      // A subagent's hand-back or launch receipt; its task events carry the report instead.
+      if (SUBAGENT_TOOLS.has(name)) continue;
+      const parentItemId = sidechainParent ?? tool?.parentItemId;
+      const nested = parentItemId ? { parentItemId } : {};
       const output = extractToolResultText(block.content);
       const isError = block.is_error === true;
+      const status = isError ? "failed" : "completed";
       if (name === "Bash") {
         const command = String(tool?.input?.command ?? "command");
         const summary = `$ ${command}`;
         this.appendLog(session, `${summary}${output ? `\n${output}` : ""}`);
-        if (isError) this.emit({ type: "agent.progress", sessionId: session.sessionId, timestamp: Date.now(), summary });
+        if (isError && !parentItemId) this.emit({ type: "agent.progress", sessionId: session.sessionId, timestamp: Date.now(), summary });
         this.emitSessionEvent(session, "command.completed", `claude:${session.sessionId}:${block.tool_use_id}:command`, {
           command,
           cwd: session.cwd,
-          status: isError ? "failed" : "completed",
+          status,
           exitCode: null,
           output: truncate(output),
-        });
+          ...nested,
+        }, session.activeTurnId, block.tool_use_id);
       } else if (FILE_CHANGE_TOOLS.has(name)) {
         const filePath = String(tool?.input?.file_path ?? tool?.input?.notebook_path ?? "");
         const summary = filePath ? `Edited ${basename(filePath)}` : "File change applied";
         this.appendLog(session, summary);
-        this.emit({ type: "agent.progress", sessionId: session.sessionId, timestamp: Date.now(), summary });
+        if (!parentItemId) this.emit({ type: "agent.progress", sessionId: session.sessionId, timestamp: Date.now(), summary });
         this.emitSessionEvent(session, "file_change.completed", `claude:${session.sessionId}:${block.tool_use_id}:file-change`, {
           changes: filePath ? [{ path: filePath }] : [],
           summary,
-          status: isError ? "failed" : "completed",
-        });
+          status,
+          ...nested,
+        }, session.activeTurnId, block.tool_use_id);
+      } else {
+        const summary = toolSummary(name, tool?.input ?? {});
+        this.appendLog(session, summary);
+        this.emitSessionEvent(session, "tool.completed", `claude:${session.sessionId}:${block.tool_use_id}:tool`, {
+          name,
+          summary,
+          status,
+          ...(output ? { output: truncate(output, ACTIVITY_OUTPUT_LIMIT) } : {}),
+          ...nested,
+        }, session.activeTurnId, block.tool_use_id);
       }
     }
   }
@@ -559,6 +756,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     session.activeTurnId = turnId;
     session.turnStartedAt = Date.now();
     session.settledAt = undefined;
+    session.phase = undefined;
     this.appendLog(session, "Turn started");
     this.emit({ type: "agent.started", sessionId: session.sessionId, timestamp: Date.now(), summary: "New turn started" });
     this.emitSessionEvent(session, "turn.started", `claude:${session.sessionId}:${turnId}:started`, { status: "in_progress" });
@@ -571,6 +769,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     session.turnStartedAt = undefined;
     session.settledAt = Date.now();
     session.lastTurnStatus = status;
+    session.phase = undefined;
     if (!turnId) return;
     const eventId = `claude:${session.sessionId}:${turnId}:terminal`;
     if (status === "failed") {
@@ -746,14 +945,15 @@ export class ClaudeCodeAdapter implements AgentAdapter {
    *
    * Idle time counts from the later of settledAt and the last streamed message:
    * a process still working after its turn was (wrongly) closed keeps streaming,
-   * and must not be killed mid-task.
+   * and must not be killed mid-task. A session with running background tasks is
+   * never idle: killing its subprocess would kill them too.
    */
   reapIdleSessions(idleMs: number): string[] {
     if (idleMs <= 0) return [];
     const now = Date.now();
     const reaped: string[] = [];
     for (const [id, session] of this.sessions) {
-      if (session.ended || session.activeTurnId || session.pendingUserInput) continue;
+      if (session.ended || session.activeTurnId || session.pendingUserInput || session.tasks.size) continue;
       if ([...session.pendingApprovals.values()].some((a) => !a.answered)) continue;
       if (session.settledAt === undefined) continue;
       const idleFor = now - Math.max(session.settledAt, session.lastMessageAt ?? 0);
@@ -1016,8 +1216,9 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     if (session.logs.length > LOG_LIMIT) session.logs.splice(0, session.logs.length - LOG_LIMIT);
   }
 
-  private emitSessionEvent(session: ClaudeSession, eventType: StructuredSessionEventType, eventId: string, payload: Record<string, unknown>, turnId = session.activeTurnId): void {
-    this.emit({ type: "session.event", eventType, sessionId: session.sessionId, eventId, timestamp: Date.now(), turnId, payload });
+  private emitSessionEvent(session: ClaudeSession, eventType: StructuredSessionEventType, eventId: string, payload: Record<string, unknown>, turnId = session.activeTurnId, itemId?: string): void {
+    this.emit({ type: "session.event", eventType, sessionId: session.sessionId, eventId, timestamp: Date.now(), turnId,
+      ...(itemId ? { itemId } : {}), payload });
   }
 }
 
@@ -1045,6 +1246,25 @@ function approvalSummaryForTool(toolName: string, input: Record<string, unknown>
   if (toolName === "Bash") return `$ ${String(input.command ?? "")}`.trim();
   if (FILE_CHANGE_TOOLS.has(toolName)) return `${toolName} ${String(input.file_path ?? input.notebook_path ?? "")}`.trim();
   return `${toolName} requested`;
+}
+
+function record(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function numberOrUndefined(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function optionalNumber(key: string, value: unknown): Record<string, number> {
+  const number = numberOrUndefined(value);
+  return number === undefined ? {} : { [key]: number };
+}
+
+/** A timer that never holds the bridge process open on its own. */
+function unrefTimer(timer: ReturnType<typeof setTimeout>): ReturnType<typeof setTimeout> {
+  timer.unref?.();
+  return timer;
 }
 
 function truncate(text: string, limit = 4_000): string {

@@ -337,7 +337,14 @@ export type StructuredSessionEventType =
   | "session.discovered" | "session.updated" | "turn.started" | "turn.completed"
   | "turn.failed" | "turn.interrupted" | "message.completed" | "command.completed"
   | "file_change.completed" | "progress" | "approval.requested" | "approval.resolved"
-  | "user_input.requested" | "user_input.resolved" | "model.rerouted" | "context.updated" | "error";
+  | "user_input.requested" | "user_input.resolved" | "model.rerouted" | "context.updated" | "error"
+  | "tool.started" | "tool.completed" | "task.started" | "task.progress" | "task.completed";
+
+/** What the model is producing right now; a `progress` event marks each switch. */
+export type ProgressPhase = "thinking" | "writing";
+/** Work the agent runs beside its turn: a subagent, a background shell, or a monitor. */
+export type TaskKind = "agent" | "bash" | "monitor" | "other";
+export type TaskStatus = "completed" | "failed" | "killed" | "stopped" | "lost";
 
 export interface StructuredSessionEventMessage {
   type: "session.event";

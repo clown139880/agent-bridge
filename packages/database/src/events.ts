@@ -2,7 +2,7 @@ import { gunzipSync, gzipSync } from "node:zlib";
 import type { DatabaseSync } from "node:sqlite";
 
 /** Bulky tool bodies are gzip BLOBs; every other body stays JSON text so SQL can inspect it. */
-const COMPRESSED_TYPES = new Set(["command.completed", "file_change.completed"]);
+const COMPRESSED_TYPES = new Set(["command.completed", "file_change.completed", "tool.completed", "task.completed"]);
 const COMPRESS_MIN_BYTES = 1024;
 
 export function encodeEventBody(type: string, payload: unknown): string | Uint8Array {
