@@ -34,6 +34,10 @@ export interface ActivityTask {
 export interface Activity {
   turn?: { id: string; startedAt: number }
   phase?: ActivityPhase
+  /** Whether this turn reports its phases; a Bridge before 0.6.77 reports only finished steps. */
+  phased?: boolean
+  /** The turn's latest main-line step, the only sign of life an unphased turn gives. */
+  lastStep?: { label: string; at: number }
   tasks: ActivityTask[]
   finished: ActivityTask[]
   lastEventAt: number
@@ -42,8 +46,14 @@ export const IDLE_ACTIVITY: Activity = { tasks: [], finished: [], lastEventAt: 0
 
 const str = (value: JsonValue | undefined, fallback = ''): string => typeof value === 'string' ? value : fallback
 const time = (row: JsonObject) => typeof row['timestamp'] === 'number' ? row['timestamp'] : 0
-const toolLabel = (row: JsonObject, payload: JsonObject) => row['type'] === 'command.completed' ? '$ ' + str(payload['command'])
-  : str(payload['summary'], str(payload['name'], '工具'))
+function toolLabel(row: JsonObject, payload: JsonObject): string {
+  if (row['type'] === 'command.completed') return '$ ' + str(payload['command'])
+  if (row['type'] === 'file_change.completed') {
+    const paths = (Array.isArray(payload['changes']) ? payload['changes'] : []).map(change => str(asRecord(change)['path'])).filter(Boolean)
+    if (paths.length) return '修改 ' + paths.join(', ')
+  }
+  return str(payload['summary'], str(payload['name'], '工具'))
+}
 
 /**
  * What a remote session is doing now, from its recent activity events. The
@@ -53,6 +63,8 @@ const toolLabel = (row: JsonObject, payload: JsonObject) => row['type'] === 'com
 export function foldActivity(events: readonly JsonObject[]): Activity {
   let turn: Activity['turn']
   let phase: ActivityPhase | undefined
+  let phased = false
+  let lastStep: Activity['lastStep']
   const tools = new Map<string, ActivityPhase>()
   const tasks = new Map<string, ActivityTask>()
   const stepsSeen = new Map<string, number>()
@@ -70,19 +82,26 @@ export function foldActivity(events: readonly JsonObject[]): Activity {
       turn = { id: str(row['turnId']), startedAt: at }
       tools.clear()
       phase = { kind: 'waiting', label: '', since: at }
+      phased = false
+      lastStep = undefined
     } else if (type === 'turn.completed' || type === 'turn.interrupted' || type === 'turn.failed') {
-      if (!turn || turn.id === str(row['turnId'])) { turn = undefined; phase = undefined; tools.clear() }
+      if (!turn || turn.id === str(row['turnId'])) { turn = undefined; phase = undefined; lastStep = undefined; tools.clear() }
     } else if (type === 'progress') {
+      phased = true
       const kind = payload['phase'] === 'writing' ? 'writing' : 'thinking'
       if (!tools.size) phase = { kind, label: str(payload['summary']), since: at }
     } else if (type === 'tool.started') {
+      phased = true
       const task = parent ? tasks.get(parent) : undefined
       if (task) { task.step = toolLabel(row, payload); task.lastToolName = str(payload['name'], task.lastToolName) }
       else if (!parent && itemId) { phase = { kind: 'tool', label: toolLabel(row, payload), since: at }; tools.set(itemId, phase) }
     } else if (COMPLETIONS.has(type)) {
       const task = parent ? tasks.get(parent) : undefined
       if (task) { const seen = (stepsSeen.get(parent) ?? 0) + 1; stepsSeen.set(parent, seen); task.toolUses = Math.max(task.toolUses, seen) }
-      else if (!parent && tools.delete(itemId)) phase = [...tools.values()].at(-1) ?? { kind: 'waiting', label: '', since: at }
+      else if (!parent) {
+        lastStep = { label: toolLabel(row, payload), at }
+        if (tools.delete(itemId)) phase = [...tools.values()].at(-1) ?? { kind: 'waiting', label: '', since: at }
+      }
     } else if (type === 'task.started' && itemId) {
       tasks.set(itemId, { itemId, kind: str(payload['kind'], 'other'), description: str(payload['description'], '后台任务'),
         ...(str(payload['subagentType']) ? { subagentType: str(payload['subagentType']) } : {}),
@@ -103,7 +122,7 @@ export function foldActivity(events: readonly JsonObject[]): Activity {
       finished.unshift({ ...task, status: str(payload['status'], 'completed'), summary: str(payload['summary']), endedAt: at })
     }
   }
-  return { ...(turn ? { turn } : {}), ...(turn && phase ? { phase } : {}), tasks: [...tasks.values()], finished: finished.slice(0, KEEP_FINISHED), lastEventAt }
+  return { ...(turn ? { turn, phased } : {}), ...(turn && phase ? { phase } : {}), ...(turn && lastStep ? { lastStep } : {}), tasks: [...tasks.values()], finished: finished.slice(0, KEEP_FINISHED), lastEventAt }
 }
 
 interface Watched { count: number; events: JsonObject[]; activity: Activity; loading: boolean }

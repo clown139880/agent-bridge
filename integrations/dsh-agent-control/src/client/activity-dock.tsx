@@ -32,19 +32,35 @@ const PHASE_TEXT = { waiting: '⏳ 等待模型响应', thinking: '🧠 思考�
 
 export interface DockLine { tone: 'normal' | 'warn'; text: string }
 
-/** The dock's status line; exported so its wording is checked without rendering. */
-export function phaseLine(activity: Activity, now: number, status: string, online: boolean): DockLine | undefined {
+/**
+ * The dock's status line; exported so its wording is checked without rendering.
+ * `nativeRunning` means DSH is streaming this turn itself and already shows a
+ * thinking indicator with its own clock, so only what it cannot show is added.
+ */
+export function phaseLine(activity: Activity, now: number, status: string, online: boolean, nativeRunning = false): DockLine | undefined {
   if (!activity.turn) return undefined
   const phase = activity.phase ?? { kind: 'waiting' as const, label: '', since: activity.turn.startedAt }
-  const head = phase.kind === 'tool' ? (phase.label.startsWith('$ ') ? '💻 ' + phase.label.slice(2) : '🔧 ' + phase.label) : PHASE_TEXT[phase.kind]
-  const line = `${head} · ${elapsed(now - phase.since)}`
-  if (status === 'waiting_for_approval') return { tone: 'warn', text: `${line} · 等待你的审批` }
-  if (status === 'waiting_for_input') return { tone: 'warn', text: `${line} · 等待你的回复` }
-  if (!online) return { tone: 'warn', text: `${line} · 执行端离线` }
-  const quiet = now - Math.max(activity.lastEventAt, phase.since)
-  // Background tasks report on their own; their silence is not the turn's.
-  if (quiet >= STALL_MS && !activity.tasks.length) return { tone: 'warn', text: `${line} · ${Math.floor(quiet / 60_000) || 1} 分钟无新输出` }
-  return { tone: 'normal', text: line }
+  let head: string | undefined
+  if (!activity.phased) {
+    // An older Bridge reports no phases: say only that it runs, and its latest step.
+    const step = activity.lastStep ? ` · 上一步：${activity.lastStep.label} · ${elapsed(now - activity.lastStep.at)}前` : ''
+    if (!nativeRunning) head = `⏳ 运行中 · ${elapsed(now - activity.turn.startedAt)}${step}`
+  } else if (phase.kind === 'tool') {
+    head = `${phase.label.startsWith('$ ') ? '💻 ' + phase.label.slice(2) : '🔧 ' + phase.label} · ${elapsed(now - phase.since)}`
+  } else if (!nativeRunning) {
+    head = `${PHASE_TEXT[phase.kind]} · ${elapsed(now - phase.since)}`
+  }
+  let warning: string | undefined
+  if (status === 'waiting_for_approval') warning = '等待你的审批'
+  else if (status === 'waiting_for_input') warning = '等待你的回复'
+  else if (!online) warning = '执行端离线'
+  else {
+    const quiet = now - Math.max(activity.lastEventAt, phase.since)
+    // Background tasks report on their own; their silence is not the turn's.
+    if (quiet >= STALL_MS && !activity.tasks.length) warning = `${Math.floor(quiet / 60_000) || 1} 分钟无新输出`
+  }
+  if (warning) return { tone: 'warn', text: head ? `${head} · ${warning}` : `⚠️ ${warning}` }
+  return head ? { tone: 'normal', text: head } : undefined
 }
 
 function useActivity(store: ActivityStore, catalog: NativeCatalog, nativeId: string) {
@@ -69,22 +85,26 @@ function useClock(running: boolean): number {
   return running ? now : Date.now()
 }
 
-export function ActivityDock({ store, catalog, sessionId }: { store: ActivityStore; catalog: NativeCatalog; sessionId: string }) {
+/** DSH passes the dock's owner zone; only whether it streams the turn itself is read. */
+interface DockZone { session?: { running?: boolean } }
+
+export function ActivityDock({ store, catalog, sessionId, session }: { store: ActivityStore; catalog: NativeCatalog; sessionId: string } & DockZone) {
   const { activity, status, online, remote } = useActivity(store, catalog, sessionId)
   // A turn the catalog has long seen end must not keep counting.
   const turnOpen = !!activity.turn && (RUNNING_STATUSES.has(status) || Date.now() - activity.lastEventAt < 15_000)
   const running = turnOpen || activity.tasks.length > 0
   const now = useClock(running)
   if (!remote || !running) return null
-  const line = turnOpen ? phaseLine(activity, now, status, online) : undefined
-  return <div className={css.activityDock} role="status" aria-live="polite" data-agent-activity>
+  const line = turnOpen ? phaseLine(activity, now, status, online, session?.running === true) : undefined
+  if (!line && !activity.tasks.length) return null
+  return <div className={css.activityDock} role="status" aria-live="polite" data-agent-activity><div className={css.activityBody}>
     {line && <div className={`${css.activityLine} ${line.tone === 'warn' ? css.activityWarn : ''}`}>{line.text}</div>}
     {!turnOpen && <div className={css.activityNote}>回合已结束，后台仍在运行</div>}
     {activity.tasks.map(task => <div className={css.activityTask} key={task.itemId}>
       <span className={css.activityTaskTitle}>{taskTitle(task)}</span>
       <span className={css.activityTaskMeta}>{[taskDetail(task), elapsed(now - task.startedAt)].filter(Boolean).join(' · ')}</span>
     </div>)}
-  </div>
+  </div></div>
 }
 
 const ENDINGS: Record<string, string> = { completed: '完成', failed: '失败', killed: '已终止', stopped: '已停止', lost: '中断' }

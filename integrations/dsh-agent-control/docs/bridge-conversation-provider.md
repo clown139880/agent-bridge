@@ -149,7 +149,12 @@ What a remote session is doing right now is shown outside the log. The
 `progress`, `tool.*`, `task.*` and completion events, which it reads via a type
 filter and follows on the realtime stream. It shows the current phase and how
 long it has lasted, running subagents and background tasks, and a warning once a
-running turn has been silent for 90 seconds. A header button lists running and
+running turn has been silent for 90 seconds. While DSH streams the turn itself
+it already shows a thinking indicator with its own clock, so the bar then adds
+only the running tool, tasks and warnings. A Bridge before 0.6.77 reports no
+phases; the bar then shows the turn's total time and its latest finished step
+rather than claiming it waits for the model. It uses the metrics of DSH's own
+todo panel. A header button lists running and
 recently finished tasks. Neither uses DSH jobs, whose completion can start a
 local turn.
 

@@ -67,6 +67,23 @@ describe('activity dock wording', () => {
     expect(phaseLine(tool, 72_000, 'active', true)?.text).toBe('💻 pnpm test · 1m12s')
     expect(phaseLine(foldActivity([]), 0, 'idle', true)).toBeUndefined()
   })
+  it('says only that an older Bridge runs, with its latest step, instead of claiming it waits', () => {
+    const old = foldActivity([event('turn.started', 0),
+      event('command.completed', 300_000, { command: 'pnpm test' }, 'b'),
+      event('file_change.completed', 320_000, { changes: [{ path: 'src/a.ts' }] }, 'f')])
+    expect(old.phased).toBe(false)
+    expect(phaseLine(old, 339_000, 'active', true)).toEqual({ tone: 'normal', text: '⏳ 运行中 · 5m39s · 上一步：修改 src/a.ts · 19s前' })
+    expect(phaseLine(foldActivity([event('turn.started', 0)]), 5000, 'active', true)?.text).toBe('⏳ 运行中 · 5s')
+  })
+  it('leaves the thinking clock to DSH while it streams the turn itself', () => {
+    expect(phaseLine(running, 43_000, 'active', true, true)).toBeUndefined()
+    expect(phaseLine(running, 1000 + STALL_MS, 'active', true, true)).toEqual({ tone: 'warn', text: '⚠️ 1 分钟无新输出' })
+    const old = foldActivity([event('turn.started', 0)])
+    expect(phaseLine(old, 5000, 'waiting_for_approval', true, true)?.text).toBe('⚠️ 等待你的审批')
+    // Which tool runs is something DSH does not show.
+    const tool = foldActivity([event('turn.started', 0), event('tool.started', 0, { name: 'Grep', summary: 'Grep "foo"' }, 'g')])
+    expect(phaseLine(tool, 3000, 'active', true, true)?.text).toBe('🔧 Grep "foo" · 3s')
+  })
   it('names tasks by kind and progress', () => {
     const [task] = foldActivity([event('task.started', 0, { kind: 'agent', subagentType: 'Explore', description: 'Map' }, 'a'),
       event('task.progress', 1, { toolUses: 3, lastToolName: 'Grep' }, 'a')]).tasks
