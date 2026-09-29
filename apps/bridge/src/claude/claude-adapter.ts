@@ -816,12 +816,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     session.pendingUserInput = undefined;
     // Inject the chosen answers back into the AskUserQuestion tool input so
     // Claude receives them as the tool result and continues the turn.
-    const answered = pending.questions.map((q) => ({
-      header: q.header,
-      question: q.question,
-      answer: (answers[q.id]?.answers ?? []).join(", "),
-    }));
-    pending.resolve({ behavior: "allow", updatedInput: { ...pending.originalInput, answers: answered } });
+    pending.resolve({ behavior: "allow", updatedInput: { ...pending.originalInput, answers: askUserQuestionAnswers(pending.questions, answers) } });
     this.emit({ type: "user_input_resolved", sessionId: session.sessionId, requestId: publicId, resolvedAt: Date.now() });
     this.emitSessionEvent(session, "user_input.resolved", `user-input:${publicId}:resolved`, { requestId: publicId }, pending.turnId);
   }
@@ -999,6 +994,20 @@ function extractToolResultText(content: unknown): string {
       .join("\n");
   }
   return "";
+}
+
+// Claude Code validates AskUserQuestion's `answers` as Record<questionText, answer>
+// (multi-select joined with ", "); any other shape fails the tool's input schema.
+export function askUserQuestionAnswers(
+  questions: UserInputQuestion[],
+  answers: Record<string, { answers: string[] }>,
+): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const q of questions) {
+    const selected = answers[q.id]?.answers ?? [];
+    if (selected.length > 0) result[q.question] = selected.join(", ");
+  }
+  return result;
 }
 
 function mapFreeTextAnswer(questions: UserInputQuestion[], text: string): Record<string, { answers: string[] }> {

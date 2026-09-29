@@ -7,6 +7,7 @@ import {
   formatUserInputRequest,
   parseUserInputAnswers,
 } from "../apps/bridge/src/app-server.js";
+import { askUserQuestionAnswers } from "../apps/bridge/src/claude/claude-adapter.js";
 
 const questions = [
   {
@@ -101,4 +102,14 @@ test("approvalSummary shows network targets instead of relying on a command", ()
     networkApprovalContext: { protocol: "https", host: "example.com" },
     reason: "Download metadata",
   }), /Network: https:\/\/example\.com/);
+});
+
+test("askUserQuestionAnswers keys Claude answers by question text", () => {
+  assert.deepEqual(
+    askUserQuestionAnswers(questions, {
+      mode: { answers: ["Fast", "Safe"] },
+      note: { answers: [] },
+    }),
+    { "How should Codex proceed?": "Fast, Safe" },
+  );
 });
