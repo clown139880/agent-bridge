@@ -29,11 +29,14 @@ const duration = (name: string, fallback: number): number => {
   if (!Number.isFinite(value) || value <= 0) throw new Error(`${name} must be a positive number of milliseconds`);
   return value;
 };
-const bridgeLatestVersion = process.env.BRIDGE_LATEST_VERSION;
 const bridgeUpdateSource = process.env.BRIDGE_UPDATE_SOURCE;
-if (Boolean(bridgeLatestVersion) !== Boolean(bridgeUpdateSource)) {
-  throw new Error("BRIDGE_LATEST_VERSION and BRIDGE_UPDATE_SOURCE must be configured together");
+// The fleet is offered the version this control-plane was deployed from, so a deploy
+// never needs an .env edit. BRIDGE_LATEST_VERSION remains as an explicit override.
+if (process.env.BRIDGE_LATEST_VERSION && !bridgeUpdateSource) {
+  throw new Error("BRIDGE_LATEST_VERSION requires BRIDGE_UPDATE_SOURCE");
 }
+const bridgeLatestVersion = process.env.BRIDGE_LATEST_VERSION
+  || (bridgeUpdateSource && controlPlaneVersion !== "unknown" ? controlPlaneVersion : undefined);
 if (bridgeLatestVersion && !/^v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(bridgeLatestVersion)) {
   throw new Error("BRIDGE_LATEST_VERSION must be a semantic version");
 }

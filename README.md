@@ -8,11 +8,11 @@
 
 ## 任务完成定义
 
-涉及 Agent Bridge 代码或发布的任务，只有在改动已推送到远程，且 Control Plane 的版本登记已更新、
-bridge 自更新流程已被触发后，才算真正完成。发布时必须按语义化版本规范 bump 版本（当前为 `0.6.40`），
-并在 Control Plane 中将 `BRIDGE_LATEST_VERSION` 登记为该版本；各主机的 bridge 再自行发现、拉取、校验和重启。
-“本地已提交但未推送”或“远程已推送但 Control Plane 尚未登记/通告新版本”都只是中间态，
-不能作为任务的完成结论。若自更新因 active turn、待审批或待输入而延后，任务报告必须记录原因和后续触发路径。
+涉及 Agent Bridge 代码或发布的任务，只有在改动已推送到远程，且已在 HAL 上执行
+`deploy/hal/deploy.sh` 后，才算真正完成。发布时必须按语义化版本规范 bump 根 `package.json` 的版本；
+Control Plane 启动时直接通告自身版本（无需编辑 `.env`），各主机的 bridge 再自行发现、拉取、校验和重启。
+部署成功的标志是 Matrix 房间出现 “Control Plane <版本> 已启动”。
+“本地已提交但未推送”或“已推送但尚未部署到 HAL”都只是中间态，不能作为任务的完成结论。若自更新因 active turn、待审批或待输入而延后，任务报告必须记录原因和后续触发路径。
 
 ## 能做什么
 
@@ -99,7 +99,7 @@ Control Plane 主要变量：
 | `CONTROL_ATTACHMENT_RETENTION_MS` | 内容寻址图片附件保留期，默认 7 天 |
 | `CONTROL_ACTION_TIMEOUT_MS` | Bridge action ack 超时，默认 30 秒 |
 | `CONTROL_SSE_KEEPALIVE_MS` / `CONTROL_SSE_POLL_MS` | SSE keepalive 与漏唤醒兜底轮询间隔（写入即唤醒，轮询默认 2 秒） |
-| `BRIDGE_LATEST_VERSION` | 可选的 bridge 最新版本注册表；与 `BRIDGE_UPDATE_SOURCE` 一起配置 |
+| `BRIDGE_LATEST_VERSION` | 可选覆盖；默认通告 Control Plane 自身版本（根 `package.json`）。需配置 `BRIDGE_UPDATE_SOURCE` 才会通告 |
 | `BRIDGE_UPDATE_SOURCE` | 通告中的推荐获取源；Control Plane 只广播字符串，不访问该源 |
 
 Bridge 主要变量：
@@ -147,8 +147,7 @@ Control Plane 也没有拉取、写文件、执行命令或重启远端
 每台机器在自己的 `.env.bridge` 中独立决定是否更新以及信任哪个源。通告中的 `source` 仅供审计；实际传给
 `git clone` 的始终是本机 `BRIDGE_UPDATE_SOURCE`，因此 Control Plane 不能改变拉取目标。启用前需把当前稳定
 release 放在 `BRIDGE_UPDATE_INSTALL_ROOT/releases/`，让 `BRIDGE_UPDATE_CURRENT_LINK` 指向它，并让 systemd
-从该软链接启动（HAL 可直接安装 `deploy/systemd/agent-bridge-hal.service`；通用示例见
-`deploy/systemd/agent-bridge-self-update.service`）。典型本机配置：
+从该软链接启动（通用示例见 `deploy/systemd/agent-bridge-self-update.service`；HAL 不走自更新，见下文）。典型本机配置：
 
 ```dotenv
 BRIDGE_AUTO_UPDATE=true
@@ -159,31 +158,20 @@ BRIDGE_UPDATE_RESTART_EXECUTABLE=systemctl
 BRIDGE_UPDATE_RESTART_ARGS=["--no-block","restart","agent-bridge-hal.service"]
 ```
 
-HAL 的完整环境模板见 [`deploy/hal.env.example`](deploy/hal.env.example)。生产部署统一使用
-[`deploy/hal/deploy-bridge.sh`](deploy/hal/deploy-bridge.sh)：它在固定 checkout 中
-fetch/ff-only，使用共享 pnpm store/node_modules 执行检查和构建，把 `dist` 与运行时链接放入轻量
-artifact，然后完成 drain、空闲检查、`current` 原子切换、启动验证和旧 artifact 清理。调用方无需判断
-是否有活动 session、审批请求或仅有 DSH 插件变更：脚本会安全处理这些情况。运行中的 `current` 目录不会被
-直接构建或覆盖。先安装并启用 HAL unit：
+HAL 的完整环境模板见 [`deploy/hal.env.example`](deploy/hal.env.example)。HAL 本机不走自更新
+（`BRIDGE_AUTO_UPDATE` 保持关闭），Control Plane 与 Bridge 都直接从 `/root/agent-bridge` 运行编译产物，
+由 [`deploy/hal/deploy.sh`](deploy/hal/deploy.sh) 统一部署：
 
 ```bash
-sudo install -Dm644 deploy/systemd/agent-bridge-hal.service /etc/systemd/system/agent-bridge-hal.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now agent-bridge-hal.service
+/root/agent-bridge/deploy/hal/deploy.sh          # 已是最新则直接退出；--force 强制重启
 ```
 
-之后每次部署只需在 HAL 上执行：
-
-```bash
-sudo /root/agent-bridge/deploy/hal/deploy-bridge.sh
-```
-
-脚本默认保留当前 artifact 和一个旧 artifact 用于回滚；可通过
-`AGENT_BRIDGE_RELEASE_RETENTION` 调整保留数量。部署时如果仍有活动 turn、审批或输入，脚本会等待：默认
-两分钟后通过 `AGENT_BRIDGE_DEPLOY_NOTIFY_COMMAND` 通知 Hermes，四分钟后通过 Control Plane interrupt API
-中断活动 turn 并强制激活新版本。通知命令接收 `AGENT_BRIDGE_DEPLOY_EVENT`、`AGENT_BRIDGE_DEPLOY_ACTIVE`、
-`AGENT_BRIDGE_DEPLOY_VERSION`、`AGENT_BRIDGE_DEPLOY_COMMIT` 和 `AGENT_BRIDGE_DEPLOY_MACHINE` 环境变量。
-等待和强制时间可分别用 `AGENT_BRIDGE_DEPLOY_NOTIFY_AFTER` 与 `AGENT_BRIDGE_DEPLOY_FORCE_AFTER` 调整。
+脚本 fetch/ff-only 到 `origin/main`，仅在 lockfile 变化时 `pnpm install`，然后 `tsc -b` 编译服务
+（HAL 不需要 DSH 插件，不构建它）；编译失败会回退到原 commit 并重新编译，服务不重启。成功后安装仓库中的
+`deploy/systemd/agent-control-plane.service` 与 `agent-bridge-hal.service`（有变化时），最后用
+`systemctl restart --no-block` 同时重启两者。重启由 systemd 执行，所以任何 agent 都能无人值守地运行它——
+包括由本机 Bridge 托管、会被这次重启结束会话的 agent。Control Plane 起来后会在 Matrix 房间发送
+“Control Plane <版本> 已启动”；从 Bridge 之外调用时，脚本还会等待服务健康并报告结果。
 
 发现新版本后的本机流程为：先关闭本地 start admission 并进入 `draining_for_update`，再检查 active Codex
 turn/待审批/待输入；繁忙则报告 `deferred`，直到最后一项活动结束时主动发送 `bridge.idle`；
@@ -356,7 +344,7 @@ AGENT_BRIDGE_WORKER_API_TOKEN=<与 WORKER_API_TOKEN 相同的值>
 
 ## 本地启动
 
-启动 Control Plane：
+启动 Control Plane（运行编译产物，先 `pnpm exec tsc -b`；开发时用 `pnpm dev:control` 直接跑源码）：
 
 ```bash
 pnpm start:control

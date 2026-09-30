@@ -1,11 +1,11 @@
 [Unit]
-Description=HAL Agent Bridge (immutable releases)
+Description=HAL Agent Bridge
 After=network-online.target agent-control-plane.service
 Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/opt/agent-bridge/current
+WorkingDirectory=/root/agent-bridge
 EnvironmentFile=/etc/agent-bridge/bridge.env
 ExecStart=/usr/bin/node apps/bridge/dist/index.js
 Restart=always

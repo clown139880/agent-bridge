@@ -1,6 +1,6 @@
 {
   "name": "agent-bridge",
-  "version": "0.6.77",
+  "version": "0.6.78",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@11.3.0",
@@ -10,14 +10,14 @@
   "scripts": {
     "build": "tsc -b && pnpm --filter dsh-agent-control-plugin build",
     "check": "tsc -b --pretty false",
-    "dev:control": "tsx watch apps/control-plane/src/index.ts",
-    "dev:bridge": "tsx watch apps/bridge/src/index.ts",
-    "start:control": "node --import tsx apps/control-plane/src/index.ts",
+    "dev:control": "tsx watch --conditions=source apps/control-plane/src/index.ts",
+    "dev:bridge": "tsx watch --conditions=source apps/bridge/src/index.ts",
+    "start:control": "node apps/control-plane/dist/index.js",
     "start:bridge": "node apps/bridge/dist/index.js",
-    "dev:bridge:source": "node --import tsx apps/bridge/src/index.ts",
-    "test": "node --import tsx --test tests/**/*.test.ts && pnpm --filter dsh-agent-control-plugin test",
-    "memory:audit": "node --import tsx scripts/conversation-memory-audit.ts",
-    "skills:manifest": "node --import tsx scripts/shared-skills-manifest.ts",
+    "dev:bridge:source": "node --conditions=source --import tsx apps/bridge/src/index.ts",
+    "test": "node --conditions=source --import tsx --test tests/**/*.test.ts && pnpm --filter dsh-agent-control-plugin test",
+    "memory:audit": "node --conditions=source --import tsx scripts/conversation-memory-audit.ts",
+    "skills:manifest": "node --conditions=source --import tsx scripts/shared-skills-manifest.ts",
     "plugin:lint": "pnpm --filter dsh-agent-control-plugin lint"
   },
   "dependencies": {

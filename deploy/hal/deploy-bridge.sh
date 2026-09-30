@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Seeds/updates an immutable-release Bridge install (e.g. the WSL unit). HAL itself
+# is deployed with deploy/hal/deploy.sh, so the target service must be named.
 set -euo pipefail
 
 env_file=${AGENT_BRIDGE_ENV_FILE:-/etc/agent-bridge/bridge.env}
@@ -11,7 +13,7 @@ fi
 
 repo=${AGENT_BRIDGE_REPO:-/root/agent-bridge}
 install_root=${AGENT_BRIDGE_INSTALL_ROOT:-/opt/agent-bridge}
-service=${AGENT_BRIDGE_SERVICE:-agent-bridge-hal.service}
+service=${AGENT_BRIDGE_SERVICE:?set AGENT_BRIDGE_SERVICE; HAL deploys use deploy/hal/deploy.sh}
 machine_id=${AGENT_BRIDGE_MACHINE_ID:-hal}
 database=${AGENT_BRIDGE_DATABASE:-/root/agent-bridge/data/control-plane.sqlite}
 drain_file=${AGENT_BRIDGE_DRAIN_FILE:-/run/agent-bridge-${machine_id}.drain}
