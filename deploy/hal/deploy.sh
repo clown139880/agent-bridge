@@ -5,8 +5,8 @@
 # Any agent may run this unattended, including one hosted by the Bridge it is about
 # to restart: every step before the restart is non-disruptive, and the restart is
 # queued in systemd (--no-block), so it completes even though it ends the caller's
-# session. The Control Plane announces "Control Plane <version> 已启动" in the Matrix
-# room once it is up, and advertises that same version to the rest of the fleet.
+# session. Once up, the Control Plane sends its control_plane.up webhook (relayed to
+# the notification room) and advertises its version to the rest of the fleet.
 #
 # Usage: deploy/hal/deploy.sh [--force]   (--force restarts even when up to date)
 set -euo pipefail

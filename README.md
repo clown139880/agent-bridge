@@ -11,7 +11,7 @@
 涉及 Agent Bridge 代码或发布的任务，只有在改动已推送到远程，且已在 HAL 上执行
 `deploy/hal/deploy.sh` 后，才算真正完成。发布时必须按语义化版本规范 bump 根 `package.json` 的版本；
 Control Plane 启动时直接通告自身版本（无需编辑 `.env`），各主机的 bridge 再自行发现、拉取、校验和重启。
-部署成功的标志是 Matrix 房间出现 “Control Plane <版本> 已启动”。
+部署成功的标志是 Dorothy 的通知房间出现 “🟢 控制面已启动 · 版本 <版本>”（来自 `control_plane.up` webhook）。
 “本地已提交但未推送”或“已推送但尚未部署到 HAL”都只是中间态，不能作为任务的完成结论。若自更新因 active turn、待审批或待输入而延后，任务报告必须记录原因和后续触发路径。
 
 ## 能做什么
@@ -170,8 +170,9 @@ HAL 的完整环境模板见 [`deploy/hal.env.example`](deploy/hal.env.example)�
 （HAL 不需要 DSH 插件，不构建它）；编译失败会回退到原 commit 并重新编译，服务不重启。成功后安装仓库中的
 `deploy/systemd/agent-control-plane.service` 与 `agent-bridge-hal.service`（有变化时），最后用
 `systemctl restart --no-block` 同时重启两者。重启由 systemd 执行，所以任何 agent 都能无人值守地运行它——
-包括由本机 Bridge 托管、会被这次重启结束会话的 agent。Control Plane 起来后会在 Matrix 房间发送
-“Control Plane <版本> 已启动”；从 Bridge 之外调用时，脚本还会等待服务健康并报告结果。
+包括由本机 Bridge 托管、会被这次重启结束会话的 agent。Control Plane 起来后发出 `control_plane.up`
+webhook，由 Dorothy 转发为通知房间里的 “🟢 控制面已启动 · 版本 <版本>”；从 Bridge 之外调用时，
+脚本还会等待服务健康并报告结果。
 
 发现新版本后的本机流程为：先关闭本地 start admission 并进入 `draining_for_update`，再检查 active Codex
 turn/待审批/待输入；繁忙则报告 `deferred`，直到最后一项活动结束时主动发送 `bridge.idle`；

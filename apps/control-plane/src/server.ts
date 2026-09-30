@@ -218,10 +218,6 @@ export class ControlPlane {
       update_source: this.options.bridgeUpdate?.source ?? null,
       update_published_at: this.options.bridgeUpdate?.publishedAt ?? null,
     });
-    // Deploys run unattended, so the room itself confirms which version came up.
-    this.matrix.sendNotice(`Control Plane ${this.options.version ?? "unknown"} 已启动`,
-      { kind: "control_plane.up", version: this.options.version })
-      .catch((error: unknown) => log.warn({ error }, "Unable to announce control-plane start"));
   }
 
   async stop(): Promise<void> {
