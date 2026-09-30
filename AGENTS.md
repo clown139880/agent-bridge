@@ -16,19 +16,17 @@
 
 ## DSH Agent Control plugin deployment
 
-- For changes under `integrations/dsh-agent-control`, run its checks/build and install the compiled plugin with `deploy/windows-native/update-dsh-client.ps1` (Windows Desktop) or `deploy/hal/sync-dsh-agent-control.sh` (Linux/HAL web console) after pushing.
-- On HAL the plugin is installed into the DSH profile at `/root/.dsh/profiles/agent-control`; `pnpm --filter dsh-agent-control-plugin sync:hal` builds and installs it, then restarts `dsh-agent-control.service`. This restart is the DSH web console only — never the Bridge or Control Plane. See `deploy/hal/README-dsh-sync.md`.
+- For changes under `integrations/dsh-agent-control`, run its checks/build and install the compiled plugin with `deploy/windows-native/update-dsh-client.ps1` after pushing. The plugin is used only by the Windows TokensCowork Desktop.
+- Never install DSH or the plugin on HAL: do not run `sync:hal` / `deploy/hal/sync-dsh-agent-control.sh` there and do not create a `dsh-agent-control.service`.
 - Plugin-only changes do not trigger or restart either Bridge or the Control Plane.
 - Update the installed Host and browser bundles directly even while TokensCowork is running. Restart TokensCowork when needed to activate the installed plugin; deployment may interrupt in-flight plugin calls.
 - Verify source and installed bundle hashes. Verify the served hash when the Desktop endpoint permits it; an authenticated endpoint may be reported as not externally hash-verifiable.
 
 ## HAL deployment
 
-- A Codex running behind the HAL Bridge must never activate a HAL release or restart the HAL Bridge or Control Plane that hosts it. Its delivery boundary is: finish the requested changes, run the appropriate checks, bump the root version when required, commit, and push the exact target commit.
-- Hand HAL activation to Hermes after the target commit is pushed. Report a deployment handoff containing the branch, full commit SHA, release version, checks run, and affected components. Hermes owns the clean HAL fetch/fast-forward, staging, activation, service restarts, verification, and rollback. Do not report the HAL deployment complete until Hermes reports those checks succeeded.
-- Do not route the deployment back to another worker behind the HAL Bridge. The deployment operator must be outside the HAL Bridge failure domain.
-- HAL updates are agent-triggered, never Bridge auto-updates. Fetch and fast-forward the clean HAL checkout from the pushed remote commit, validate in a staged immutable release, and atomically switch the release link.
-- Never continue from a dirty HAL checkout. Do not create source-copy `.deploy-backup-*` directories and do not stash local edits. Stop and investigate unexpected changes.
-- Stage and validate while sessions are active. Use the deployment script to drain admission and activate the release; active turns, approvals, or user input do not prohibit deployment, and the script may interrupt sessions after its configured timeout.
-- Keep SQLite data and secrets outside the Git checkout. Database backups must use SQLite's online backup mechanism and live outside the repository; Git and the prior immutable release provide source rollback.
-- Restarting the Control Plane and restarting the HAL Bridge are separate operations. The HAL Bridge owns its Codex App Server; deployment may restart it even when sessions have not drained.
+- After the versioned commit is pushed, deploy HAL yourself by running `deploy/hal/deploy.sh` in `/root/agent-bridge`. Do not hand the deployment to Hermes/Dorothy or another agent, and do not open a kanban card for it.
+- The script fast-forwards to `origin/main`, compiles the services (`tsc -b`, no DSH plugin), installs the unit files and queues a `systemctl restart --no-block` of the Control Plane and HAL Bridge. systemd performs the restart, so it completes even when you run behind the HAL Bridge; your session ends with that restart and resumes afterwards. A failed build restores the previous commit and restarts nothing.
+- Never edit `.env` to register a version: the Control Plane advertises its own `package.json` version. Never restart the services by hand, deploy with `deploy/hal/deploy-bridge.sh`, or enable Bridge auto-update on HAL.
+- Deployment is confirmed by the notification room message “🟢 控制面已启动 · 版本 <version>”. If the script reports a failure before the restart, report its output.
+- Never continue from a dirty HAL checkout, never stash, and never copy source into the checkout. Stop and investigate unexpected changes.
+- Keep SQLite data and secrets outside the Git checkout. Database backups must use SQLite's online backup mechanism and live outside the repository.
