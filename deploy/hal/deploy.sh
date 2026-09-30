@@ -14,7 +14,6 @@ set -euo pipefail
 repo=$(cd "$(dirname "$0")/../.." && pwd)
 branch=main
 units=(agent-control-plane.service agent-bridge-hal.service)
-store_dir=${AGENT_BRIDGE_STORE_DIR:-/opt/agent-bridge/pnpm-store}
 marker=${AGENT_BRIDGE_DEPLOYED_MARKER:-/var/lib/agent-bridge/deployed-commit}
 health_url=${AGENT_BRIDGE_HEALTH_URL:-http://127.0.0.1:8787/health}
 # Drop-in left by the retired release-symlink deploy; it pins the Bridge to /opt.
@@ -44,10 +43,10 @@ if ! "$force" && [ "$(cat "$marker" 2>/dev/null)" = "$target" ]; then
   exit 0
 fi
 
-# Only the services are compiled; the DSH plugin is not used on HAL.
+# Only the services are installed and compiled; the DSH plugin is not used on HAL.
 build() {
   if [ ! -d node_modules ] || ! git diff --quiet "$1" "$2" -- pnpm-lock.yaml; then
-    CI=true pnpm install --frozen-lockfile --store-dir "$store_dir"
+    CI=true pnpm install --frozen-lockfile --filter '!dsh-agent-control-plugin'
   fi
   pnpm exec tsc -b --pretty false
 }
