@@ -198,6 +198,41 @@ test("complete worker inventory clears a vanished live turn and its approval", a
   } finally { await f.close(); }
 });
 
+test("complete worker inventory closes runs whose session the restarted worker no longer holds", async () => {
+  const f = await fixture();
+  try {
+    const run=(id:string,sessionId:string|null,status:"starting"|"working"|"blocked"|"waiting"|"completed"|"update_failed")=>f.store.createWorkerRun({id,
+      taskId:id,conversationId:null,machineId:"dev",agentType:"codex-cli",projectPath:"/work/repo",sessionId,status,error:null,
+      createdAt:1000,updatedAt:1000});
+    run("interrupted","thread-older","working");
+    run("held","thread-1","working");
+    run("never-started",null,"starting");
+    run("lost-update",null,"update_failed");
+    run("waiting-input",null,"waiting");
+    run("done",null,"completed");
+    await f.internals.handleBridgeMessage("dev",{type:"state.snapshot",generation:"before",complete:false,approvals:[],userInputs:[],
+      sessions:[{sessionId:"thread-queued",nativeSessionId:"thread-queued",agentType:"codex-cli",projectPath:"/work/repo",projectName:"repo",
+        activityStatus:"idle",createdAt:1000,updatedAt:1000,source:"app-server",historyCompleteness:"full"}]});
+    run("queued-turn","thread-queued","blocked");
+    const queued=await fetch(`${f.base}/sessions/thread-queued/turns`,{method:"POST",
+      headers:{...f.headers,"idempotency-key":"post-deploy-turn"},body:JSON.stringify({input:"continue"})});
+    assert.equal(queued.status,202,await queued.text());
+    f.internals.bridges.get("dev")!.registeredAt=Date.now();
+    await f.internals.handleBridgeMessage("dev",{type:"state.snapshot",generation:"restart",complete:true,approvals:[],userInputs:[],
+      sessions:[{sessionId:"thread-1",nativeSessionId:"thread-1",agentType:"codex-cli",projectPath:"/work/repo",projectName:"repo",
+        activityStatus:"idle",createdAt:1000,updatedAt:2000,source:"app-server",historyCompleteness:"full"}]});
+    const status=(id:string)=>f.store.getWorkerRun(id)?.status;
+    assert.equal(status("interrupted"),"failed");
+    assert.match(f.store.getWorkerRun("interrupted")?.error??"",/no longer holds/);
+    assert.equal(status("never-started"),"failed");
+    assert.equal(status("lost-update"),"failed");
+    assert.equal(status("held"),"working");
+    assert.equal(status("queued-turn"),"blocked");
+    assert.equal(status("waiting-input"),"waiting");
+    assert.equal(status("done"),"completed");
+  } finally { await f.close(); }
+});
+
 test("a session snapshot repairs a replay timestamp newer than the real thread activity", async () => {
   const f = await fixture();
   try {

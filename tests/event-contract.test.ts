@@ -278,3 +278,38 @@ test("the Control Plane tells a replay from a reused event id", () => {
   cp.ingest(terminal(1_000, "t2"));
   assert.deepEqual(cp.conflicts, ["pi:s:t1:assistant", "app-server:s:t1:terminal:structured"], "the same id in another turn is another event");
 });
+
+test("a replay carrying upstream's revised view of an event updates it; a reused id for another kind of event does not", () => {
+  const dir = mkdtempSync(join(tmpdir(), "event-replay-"));
+  const store = new Store(join(dir, "control.sqlite"));
+  cleanups.push(() => { store.db.close(); rmSync(dir, { recursive: true, force: true }); });
+  store.upsertMachine({ id: "hal", name: "hal", platform: "linux", hostname: "hal", capabilities: [] });
+  store.createSession({ id: "s", machineId: "hal", agentType: "codex-cli", projectName: "p", projectPath: "/work",
+    matrixRoomId: "", matrixThreadId: null, nativeSessionId: null as never, status: "completed", createdAt: 1, updatedAt: 1 });
+  const control = new AgentControlStore(store.db, { actionsMs: 1_000, attachmentsMs: 1_000 });
+  const event = (eventId: string, eventType: string, turnId: string | undefined, payload: JsonObject) =>
+    ({ type: "session.event", sessionId: "s", eventId, eventType, turnId, timestamp: 1, payload }) as StructuredSessionEventMessage;
+  const ingest = (message: StructuredSessionEventMessage) =>
+    control.appendSessionEvent(message) === false ? control.reconcileReplayedEvent(message) : undefined;
+  const row = (eventId: string) => store.db.prepare("SELECT type,turn_id,body FROM events WHERE session_id='s' AND event_id=?")
+    .get(eventId) as { type: string; turn_id: string | null; body: string };
+
+  // A command the live stream saw after its turn ended, which history attributes to its turn.
+  ingest(event("cmd", "command.completed", undefined, { command: "ls", status: "completed" }));
+  assert.equal(ingest(event("cmd", "command.completed", "t1", { command: "ls", status: "completed" })), undefined);
+  assert.equal(row("cmd").turn_id, "t1");
+  // History keeps a message's final text.
+  ingest(event("msg", "message.completed", "t1", { role: "assistant", text: "draft" }));
+  assert.equal(ingest(event("msg", "message.completed", "t1", { role: "assistant", text: "final" })), undefined);
+  assert.equal(JSON.parse(row("msg").body).text, "final");
+  // A turn first read as interrupted that upstream now reports completed.
+  ingest(event("end", "turn.interrupted", "t1", { status: "interrupted" }));
+  assert.equal(ingest(event("end", "turn.completed", "t1", { status: "completed", summary: "done" })), undefined);
+  assert.equal(row("end").type, "turn.completed");
+  // Settled: the next replay matches.
+  assert.equal(control.duplicateEventConflict(event("end", "turn.completed", "t1", { status: "completed", summary: "done" })), undefined);
+  // An id reused for another kind of event is a collision and stays as stored.
+  ingest(event("reused", "message.completed", "t1", { role: "assistant", text: "hello" }));
+  assert.deepEqual(ingest(event("reused", "turn.completed", "t1", { status: "completed" })), { storedType: "message.completed", storedTurnId: "t1" });
+  assert.equal(row("reused").type, "message.completed");
+});

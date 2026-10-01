@@ -10,6 +10,7 @@ import { markChanged, signalStream, type StreamKind } from "./stream.js";
 
 /** Settled tool and task work that counts as session activity. Starts and ticks do not, to keep the feed quiet. */
 const TOOL_PROGRESS_TYPES = new Set(["command.completed", "file_change.completed", "tool.completed", "task.started", "task.completed"]);
+const TERMINAL_TURN_TYPES = new Set(["turn.completed", "turn.failed", "turn.interrupted"]);
 
 export interface RetentionOptions {
   actionsMs: number;
@@ -315,6 +316,35 @@ export class AgentControlStore {
     const same = row.type === message.eventType && (row.turn_id ?? null) === (message.turnId ?? null)
       && (message.eventType !== "message.completed" || (stored.role === payload.role && stored.text === payload.text));
     return same ? undefined : { storedType: row.type, storedTurnId: row.turn_id };
+  }
+
+  /**
+   * Settle a replay that disagrees with its stored row. When both name the same
+   * upstream event (same type, or a turn whose terminal status upstream later
+   * revised), the upstream's current view wins: Codex re-reading its history
+   * attributes a late item to its real turn, keeps the final message text, and
+   * reports the turn's final status. The row keeps its position and time.
+   * Returns the conflict when the id names a different kind of event, which
+   * stays as stored.
+   */
+  reconcileReplayedEvent(message: StructuredSessionEventMessage): { storedType: string; storedTurnId: string | null } | undefined {
+    const conflict = this.duplicateEventConflict(message);
+    if (!conflict) return undefined;
+    if (conflict.storedType !== message.eventType
+      && !(TERMINAL_TURN_TYPES.has(conflict.storedType) && TERMINAL_TURN_TYPES.has(message.eventType))) return conflict;
+    const payload = message.payload && typeof message.payload === "object" && !Array.isArray(message.payload)
+      ? message.payload as Record<string, unknown> : {};
+    this.transaction(() => {
+      const row = this.db.prepare("SELECT id FROM events WHERE session_id=? AND event_id=?")
+        .get(message.sessionId, message.eventId) as { id: number };
+      const turnId = message.turnId ?? conflict.storedTurnId;
+      this.db.prepare("UPDATE events SET type=?,turn_id=?,body=? WHERE id=?")
+        .run(message.eventType, turnId, encodeEventBody(message.eventType, payload), row.id);
+      this.db.prepare("DELETE FROM event_search WHERE rowid=?").run(row.id);
+      indexEvent(this.db, { id: row.id, session_id: message.sessionId, type: message.eventType, turn_id: turnId }, payload);
+      markChanged(this.db, "session", message.sessionId);
+    });
+    return undefined;
   }
 
   /** Store one upstream event, once. Returns the new event id, or false for a replayed or unwanted event. */

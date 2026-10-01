@@ -192,7 +192,7 @@ test("a 0.4.2 database upgrades transactionally to the Agent Control schema", ()
   `);legacy.close();
   const store=new Store(path);
   const version=store.db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get() as {version:number};
-  assert.equal(version.version,9);
+  assert.equal(version.version,10);
   const tables=(store.db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{name:string}>).map(row=>row.name);
   for(const table of ["pending_requests","actions","idempotency_keys","stream_changes","event_search","deleted_sessions","attachments",
     "deleted_workers","conversation_collection_gaps"])
@@ -203,15 +203,15 @@ test("a 0.4.2 database upgrades transactionally to the Agent Control schema", ()
   assert.equal(session.activity_status,"idle");assert.equal(session.source,"app-server");
   assert.equal(session.last_response_at,null);assert.equal(session.updated_at,1);
   // Reopening proves the versioned migration is idempotent.
-  store.db.close();const reopened=new Store(path);assert.equal((reopened.db.prepare("SELECT COUNT(*) AS n FROM schema_migrations").get() as any).n,10);
+  store.db.close();const reopened=new Store(path);assert.equal((reopened.db.prepare("SELECT COUNT(*) AS n FROM schema_migrations").get() as any).n,11);
   reopened.db.close();rmSync(path,{force:true});
 });
 
 test("version 8 folds every retained copy into one event row per upstream event", () => {
   const path=join(tmpdir(),`agent-bridge-v8-${randomUUID()}.sqlite`);
-  // Build a version-7 database: mark 8 applied, fill v7 tables, then unmark it and reopen.
+  // Build a version-7 database: mark 8 (and 10, which reads the v8 schema) applied, fill v7 tables, then unmark 8 and reopen.
   const seed=new DatabaseSync(path);
-  seed.exec("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL); INSERT INTO schema_migrations VALUES (8,0)");
+  seed.exec("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL); INSERT INTO schema_migrations VALUES (8,0),(10,0)");
   seed.close();
   const v7=new Store(path);
   v7.upsertMachine({id:"dev",name:"dev",platform:"linux",hostname:"dev",capabilities:[]});
@@ -302,6 +302,27 @@ test("a Claude/pi public id recorded as the native id is forgotten; real native 
   const reopened = new Store(path);
   assert.deepEqual(sessions.map(([id]) => reopened.getSession(id)?.nativeSessionId), [
     null, null, "38a014a3-0c4d-47c7-83de-a3c47b2bd743", "6f1d2c3b-4a5e-4f60-8b7c-9d0e1f2a3b4c", "thread-1",
+  ]);
+  reopened.db.close();
+  rmSync(path, { force: true });
+});
+
+test("version 10 turns a legacy terminal summary stored as a message into the turn end it names", () => {
+  const path = join(tmpdir(), `agent-bridge-v10-${randomUUID()}.sqlite`);
+  const store = new Store(path);
+  store.upsertMachine({ id: "dev", name: "dev", platform: "linux", hostname: "dev", capabilities: [] });
+  store.createSession({ id: "thread", machineId: "dev", agentType: "codex-cli", projectName: "repo", projectPath: "/work/repo",
+    matrixRoomId: "", matrixThreadId: null, nativeSessionId: "thread", status: "completed", createdAt: 1, updatedAt: 1 });
+  const insert = store.db.prepare("INSERT INTO events(session_id,event_id,type,turn_id,created_at,body) VALUES ('thread',?,?,'rollout-84',1,?)");
+  insert.run("app-server:thread:item-7:message", "message.completed", JSON.stringify({ role: "assistant", text: "Done." }));
+  insert.run("app-server:thread:rollout-84:terminal:structured", "message.completed", JSON.stringify({ role: "assistant", text: "Done." }));
+  store.db.prepare("DELETE FROM schema_migrations WHERE version=10").run();
+  store.db.close();
+  const reopened = new Store(path);
+  const rows = reopened.db.prepare("SELECT event_id,type,body FROM events ORDER BY id").all() as Array<{ event_id: string; type: string; body: string }>;
+  assert.deepEqual(rows.map((row) => [row.type, JSON.parse(row.body)]), [
+    ["message.completed", { role: "assistant", text: "Done." }],
+    ["turn.completed", { status: "completed", summary: "Done." }],
   ]);
   reopened.db.close();
   rmSync(path, { force: true });

@@ -98,6 +98,7 @@ const APPROVAL_REACTIONS: ReadonlyArray<{ key: string; choice: ApprovalChoice; l
 const NUMBER_REACTIONS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣"] as const;
 const RECLAIMABLE_BLOCKED_AGE_MS = 300_000;
 const RECLAIM_REASON = "Reclaimed stale reasonless blocked run; bridge reported no actionable approval";
+const ORPHANED_RUN_REASON = "The worker's Bridge restarted and no longer holds this run's session; its turn was interrupted";
 
 export class ControlPlane {
   private readonly http: HttpServer;
@@ -649,6 +650,7 @@ export class ControlPlane {
           protocolVersion: message.protocolVersion,
           bridgeVersion: message.bridgeVersion,
           socket,
+          registeredAt: Date.now(),
         });
         this.store.upsertMachine({
           id: registeredId, name: message.name || registeredId, platform: message.platform,
@@ -732,6 +734,7 @@ export class ControlPlane {
           });
           this.controlStore.updateSessionActivity(session.id, "offline", undefined, "interrupted");
         }
+        this.reclaimOrphanedRuns(machineId, present);
         const pendingIds = new Set([...message.approvals.map((item) => item.approvalId),
           ...message.userInputs.map((item) => item.requestId)]);
         const rows = this.store.db.prepare("SELECT id FROM pending_requests WHERE machine_id=? AND status='pending'")
@@ -764,7 +767,7 @@ export class ControlPlane {
       }
       const inserted = this.controlStore.appendSessionEvent(message);
       if (inserted === false) {
-        const conflict = this.controlStore.duplicateEventConflict(message);
+        const conflict = this.controlStore.reconcileReplayedEvent(message);
         if (conflict) log.warn({ machineId, sessionId: message.sessionId, eventId: message.eventId, eventType: message.eventType,
           turnId: message.turnId, ...conflict }, "Dropped a session event whose id is already stored with different content");
       }
@@ -1016,6 +1019,31 @@ export class ControlPlane {
         this.store.updateSessionStatus(sessionId, "working");
         this.store.updateWorkerRun(run.id, "working");
       }
+    }
+  }
+
+  /**
+   * A run is driven by its session's live turn. When a worker's complete
+   * inventory no longer holds that session (its Bridge restarted mid-turn), no
+   * terminal agent event will ever arrive, so the run would stay "working"
+   * forever and its Kanban card with it. Close such runs, and launches that
+   * waited on an update queue lost with a restarted Control Plane. A run this connection
+   * started, one waiting for a Bridge update, or one whose session has a queued
+   * turn (e.g. a post-deploy continuation that revives it) is still owned.
+   */
+  private reclaimOrphanedRuns(machineId: string, present: Set<string>): void {
+    const registeredAt = this.bridges.get(machineId)?.registeredAt ?? Date.now();
+    const queued = new Set(this.controlStore.pendingActions(machineId)
+      .map(({ action }) => action.sessionId).filter(Boolean));
+    const runs = this.store.db.prepare(`SELECT id,session_id FROM worker_runs WHERE machine_id=?
+      AND status IN ('starting','working','blocked','update_waiting','update_required','update_failed') AND updated_at<?`)
+      .all(machineId, registeredAt) as Array<{ id: string; session_id: string | null }>;
+    for (const run of runs) {
+      if (this.pendingRunLaunches.has(run.id)) continue;
+      if (run.session_id && (present.has(run.session_id) || queued.has(run.session_id))) continue;
+      this.store.updateWorkerRun(run.id, "failed", ORPHANED_RUN_REASON);
+      if (run.session_id) this.store.updateSessionStatus(run.session_id, "failed");
+      log.info({ machineId, runId: run.id, sessionId: run.session_id }, "Closed a run its restarted worker no longer holds");
     }
   }
 

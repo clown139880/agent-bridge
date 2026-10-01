@@ -9,6 +9,8 @@ export interface BridgeConnection {
   protocolVersion?: number;
   bridgeVersion?: string;
   socket: WebSocket;
+  /** When this connection registered; runs touched since then belong to it. */
+  registeredAt?: number;
 }
 
 export class BridgeRegistry {

@@ -312,6 +312,30 @@ export function migrateDatabase(db: DatabaseSync): void {
       db.exec("COMMIT");
     } catch (error) { try { db.exec("ROLLBACK"); } catch {} throw error; }
   }
+
+  // Early Codex history hydration stored a turn's closing summary as an
+  // assistant message under the turn's terminal id. It repeats the turn's real
+  // closing message, and every later replay of that id (the turn.completed it
+  // names) was refused as a different event. Make each the turn end it was.
+  if (!db.prepare("SELECT 1 FROM schema_migrations WHERE version=10").get()) {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      const rows = db.prepare(`SELECT id,session_id,turn_id,body FROM events
+        WHERE type='message.completed' AND event_id LIKE 'app-server:%:terminal:structured'`)
+        .all() as Array<{ id: number; session_id: string; turn_id: string | null; body: unknown }>;
+      const update = db.prepare("UPDATE events SET type='turn.completed',body=? WHERE id=?");
+      const unindex = db.prepare("DELETE FROM event_search WHERE rowid=?");
+      for (const row of rows) {
+        const text = decodeEventBody(row.body).text;
+        const payload = { status: "completed", ...(typeof text === "string" && text ? { summary: text } : {}) };
+        update.run(encodeEventBody("turn.completed", payload), row.id);
+        unindex.run(row.id);
+        indexEvent(db, { id: row.id, session_id: row.session_id, type: "turn.completed", turn_id: row.turn_id }, payload);
+      }
+      db.prepare("INSERT INTO schema_migrations(version,applied_at) VALUES (10,?)").run(Date.now());
+      db.exec("COMMIT");
+    } catch (error) { try { db.exec("ROLLBACK"); } catch {} throw error; }
+  }
 }
 
 /**
