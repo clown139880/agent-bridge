@@ -2,6 +2,19 @@ import { describe, expect, it, vi } from 'vitest'
 import { SessionCreationController } from '../src/client/session-creation.js'
 
 describe('native directory creation', () => {
+  it('resolves a split sidebar group back to its physical workspace for native creation and restoration', async () => {
+    const controller = new SessionCreationController(async () => ({ sources: [{ id: 'dsh' }] }))
+    const original = vi.fn(async (_options?: { workspaceId?: string }) => 'local')
+    const sessions = { create: original, refresh: vi.fn(async () => {}) }
+    const connect = vi.fn(async (_workspaceId: string) => 'restored')
+    const navigation = { connectWorkspace: connect, startSession: vi.fn() }
+    const dispose = controller.install(sessions, { list: { getSnapshot: () => ({ items: [{ workspaceId: 'group', sourceWorkspaceId: 'physical', path: '/repo' }] }) } }, navigation)
+    await sessions.create({ workspaceId: 'group' })
+    expect(original).toHaveBeenCalledWith({ workspaceId: 'physical' })
+    await navigation.connectWorkspace('group')
+    expect(connect).toHaveBeenCalledWith('physical')
+    dispose()
+  })
   it('lets the original action select a source and refreshes before returning its native identity', async () => {
     const source = {id:'remote',name:'Claude',workerId:'claude@machine',machineId:'machine',workspace:'/repo',available:true}
     const rpc = vi.fn(async (op: string) => op === 'creation_sources' ? {sources:[source]} : {nativeSessionId:'native-remote'})

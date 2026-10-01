@@ -73,7 +73,8 @@ describe('management UI interactions', () => {
     await expect(creation).resolves.toBe('created')
     await act(async () => { creation = sessions.create({cwd:'/repo'}) })
     expect(container.querySelector<HTMLInputElement>('input[aria-label="Pi @ hal.local"]')!.checked).toBe(true)
-    await act(async () => controller.cancel()); await creation.catch(() => {})
+    const cancelled = creation.catch(() => {})
+    await act(async () => controller.cancel()); await cancelled
     dispose(); vi.unstubAllGlobals()
   })
 

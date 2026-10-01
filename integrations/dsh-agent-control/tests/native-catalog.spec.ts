@@ -6,6 +6,21 @@ import type { NativeEvent } from '../src/agent-bridge-provider/dsh-compat.js'
 const entry = (nativeId: string, machineId = 'dev-wsl', workspace = '/work/agent-bridge', lastUsedAt?: number, projectIdentity?: string, updatedAt = 0): NativeEntry => ({ nativeId, machineId, workspace, sessionId: nativeId, workerId: 'worker', groupId: projectIdentity ? `repo:${projectIdentity}` : `loc:${machineId}:${workspace}`, groupTitle: projectIdentity ? 'agent-bridge' : `agent-bridge @ ${machineId}`, groupUpdatedAt: updatedAt, executionLocations: [{ workerId: 'worker', workerName: 'worker', machineId, machineName: machineId, workspace, online: true, available: true }], title: 'test', status: 'idle', worker: 'worker', updatedAt, activityAt: updatedAt, ...(lastUsedAt === undefined ? {} : { lastUsedAt }), ...(projectIdentity ? { projectIdentity } : {}) })
 const workspace = (id: string): WorkspaceRow => ({ workspaceId: id, path: '/presentation/' + id, title: 'agent-bridge · Codex @ dev-wsl', sessionIds: [id], createdAt: '2026-01-01', updatedAt: '2026-01-01' })
 describe('native catalog', () => {
+  it('uses distinct order accounts when different server groups share a local directory', () => {
+    const local = { ...workspace('local'), path: 'C:\\repo', sessionIds: ['session-native'] }
+    const one = entry('one', 'windows', local.path, 0, 'one', 200)
+    const two = entry('two', 'windows', local.path, 0, 'two', 100)
+    for (const item of [one, two]) item.executionLocations[0]!.local = true
+    const merged = mergeWorkspaces([local, workspace('one'), workspace('two')], [one, two])
+    expect(merged.map(row => row.workspaceId)).toEqual(['local', 'two'])
+    expect(merged.map(row => row.sessionIds)).toEqual([['one', 'session-native'], ['two']])
+  })
+  it('keeps server groups distinct even when they share a physical presentation row', () => {
+    const row = { ...workspace('shared'), sessionIds: ['one', 'two'] }
+    const merged = mergeWorkspaces([row], [entry('one', 'hal', '/one'), entry('two', 'hal', '/two')])
+    expect(new Set(merged.map(item => item.workspaceId)).size).toBe(2)
+    expect(merged.map(item => item.sessionIds)).toEqual([['one'], ['two']])
+  })
   it('does not flash ungrouped Bridge workspaces before the first catalog fetch', () => {
     const bridgeOnly = { ...workspace('bridge'), sessionIds: ['agent-bridge-one', 'agent-bridge-two'] }
     const mixed = { ...workspace('mixed'), sessionIds: ['session-native', 'agent-bridge-three'] }

@@ -6,7 +6,7 @@ import css from './workspace.module.css'
 
 export type ExecutionLocation = { workerId: string; workerName: string; agent?: string; machineId: string; machineName: string; workspace: string; online: boolean; available: boolean; local?: boolean }
 export type NativeEntry = { nativeId: string; sessionId: string; workerId: string; model?: string; groupId: string; groupTitle: string; groupUpdatedAt: number; executionLocations: ExecutionLocation[]; machineId: string; workspace: string; projectIdentity?: string; presentationPath?: string; title: string; status: string; worker: string; updatedAt: number; activityAt: number; lastUsedAt?: number }
-export type WorkspaceRow = { workspaceId: string; path: string; title: string; sessionIds: readonly string[]; createdAt: string; updatedAt: string }
+export type WorkspaceRow = { workspaceId: string; sourceWorkspaceId?: string; path: string; title: string; sessionIds: readonly string[]; createdAt: string; updatedAt: string }
 type WorkspaceSnapshot = { items: readonly WorkspaceRow[]; archivedSessionIds: readonly string[] }
 type Source<T> = { getSnapshot(): T; subscribe(listener: () => void): () => void }
 export type WorkspaceHook = <T>(selector: (snapshot: WorkspaceSnapshot) => T) => T
@@ -53,10 +53,10 @@ export function mergeWorkspaces(rows: readonly WorkspaceRow[], catalog: readonly
     const ids = new Set(members.map(entry => entry.nativeId))
     const localPaths = new Set(members.flatMap(entry => entry.executionLocations).filter(location => location.local).map(location => canonicalPath(location.workspace)))
     const bridgeRows = rows.filter(row => row.sessionIds.some(id => ids.has(id)) || members.some(entry => entry.presentationPath === row.path))
-    const localRows = rows.filter(row => localPaths.has(canonicalPath(row.path))
+    const localRows = rows.filter(row => !consumed.has(row) && localPaths.has(canonicalPath(row.path))
       && row.sessionIds.filter(id => entries.has(id)).every(id => ids.has(id)))
     const related = [...new Set([...bridgeRows, ...localRows])]
-    const owner = localRows[0] ?? bridgeRows[0]
+    const owner = localRows[0] ?? bridgeRows.find(row => !consumed.has(row)) ?? bridgeRows[0]
     if (!owner) continue
     for (const row of related) consumed.add(row)
     const nativeIds = [...new Set(localRows.flatMap(row => row.sessionIds).filter(id => !entries.has(id) && !isBridgeId(id)))]
@@ -64,7 +64,11 @@ export function mergeWorkspaces(rows: readonly WorkspaceRow[], catalog: readonly
     // behind the activity it was derived from. The sort is stable for ties.
     const sessionIds = [...members.map(entry => entry.nativeId), ...nativeIds].sort(newestFirst)
     const latest = Math.max(...sessionIds.map(updatedAt))
-    const merged = { ...owner, title: members[0]!.groupTitle, sessionIds,
+    // Separate server groups may share one physical presentation workspace.
+    // Their editable order accounts and React keys must still be distinct.
+    const workspaceId = result.some(row => row.workspaceId === owner.workspaceId)
+      ? `agent-bridge-group:${members[0]!.groupId}` : owner.workspaceId
+    const merged = { ...owner, workspaceId, ...(workspaceId === owner.workspaceId ? {} : { sourceWorkspaceId: owner.workspaceId }), title: members[0]!.groupTitle, sessionIds,
       updatedAt: Number.isFinite(latest) ? new Date(latest).toISOString() : owner.updatedAt }
     result.push(merged)
     activity.set(merged, latest)
