@@ -58,7 +58,8 @@ test('a Claude session created without a prompt is re-announced under its native
   seam.handleSystem(session, {type:'system',subtype:'init',session_id:'native-uuid'});
   seam.handleSystem(session, {type:'system',subtype:'init',session_id:'native-uuid'});
   const announced = events.filter(event => event.type === 'session.discovered').map(event => event.type === 'session.discovered' ? event.nativeSessionId : '');
-  assert.deepEqual(announced, ['claude-public', 'native-uuid']);
+  // Announced first without a native id: the public id is never offered as one.
+  assert.deepEqual(announced, [undefined, 'native-uuid']);
 });
 
 test('a Claude session whose subprocess exits is forgotten so the next turn revives it', async () => {
@@ -94,7 +95,7 @@ test('reviving a Claude session that never ran a turn starts fresh instead of re
   seam.emitDiscovered(session);
   seam.handleSystem(session, {type:'system',subtype:'init',session_id:nativeId});
   const announced = events.filter(event => event.type === 'session.discovered').map(event => event.type === 'session.discovered' ? event.nativeSessionId : '');
-  assert.deepEqual(announced, [publicId, nativeId]);
+  assert.deepEqual(announced, [undefined, nativeId]);
 });
 
 function autonomousFixture() {
@@ -238,4 +239,62 @@ test('a held idle Claude session continued in a CLI is relaunched and caught up 
     assert.deepEqual(events.flatMap(event => event.type === 'session.event' ? [event.eventId] : []),
       ['u1', 'a2', 'u2'].map(uuid => `claude:${nativeId}:transcript:${uuid}`));
   } finally { rmSync(root, {recursive:true,force:true}); }
+});
+
+test('a worker-API resume runs Claude on its own uuid under the public id, never on the public id', async () => {
+  const adapter = new ClaudeCodeAdapter({command:'',allowedRoots:[]}, () => undefined);
+  const launches: Array<{ publicSessionId: string; requestId: string; resumeNativeId?: string }> = [];
+  const seam = adapter as unknown as { launch(params: { publicSessionId: string; requestId: string; resumeNativeId?: string }): Promise<string> };
+  seam.launch = async params => { launches.push(params); return params.publicSessionId; };
+  const publicId = 'claude-2599e149-6fa5-43e6-a690-7aecf810d983';
+  const nativeId = '38a014a3-0c4d-47c7-83de-a3c47b2bd743';
+  assert.equal(await adapter.startSession('run-1', '/work', 'continue', { sessionId: publicId, nativeSessionId: nativeId }), publicId);
+  // A control-plane that only knows the public id must not have it passed to --resume.
+  await adapter.startSession('run-2', '/work', 'continue', { sessionId: publicId, nativeSessionId: publicId });
+  await adapter.startSession('run-3', '/work', 'continue', { sessionId: publicId });
+  // A session discovered from its transcript on disk is named by Claude's uuid.
+  await adapter.startSession('run-4', '/work', 'continue', { sessionId: nativeId });
+  assert.deepEqual(launches.map(launch => [launch.publicSessionId, launch.requestId, launch.resumeNativeId]), [
+    [publicId, 'run-1', nativeId], [publicId, 'run-2', undefined], [publicId, 'run-3', undefined], [nativeId, 'run-4', nativeId],
+  ]);
+});
+
+test('a worker-API resume replaces a held idle Claude process and refuses a busy one', async () => {
+  const adapter = new ClaudeCodeAdapter({command:'',allowedRoots:[]}, () => undefined);
+  const sessions = (adapter as unknown as { sessions: Map<string, Record<string, unknown>> }).sessions;
+  const launches: Array<{ resumeNativeId?: string }> = [];
+  (adapter as unknown as { launch(params: { resumeNativeId?: string }): Promise<string> }).launch = async params => { launches.push(params); return 'claude-public'; };
+  const nativeId = '38a014a3-0c4d-47c7-83de-a3c47b2bd743';
+  const abort = new AbortController();
+  const held = {sessionId:'claude-public',nativeSessionId:nativeId,pendingApprovals:new Map(),abort,input:{end() {}},ended:false};
+  sessions.set('claude-public', held);
+  await adapter.startSession('run-1', '/work', 'continue', { sessionId: 'claude-public' });
+  assert.equal(abort.signal.aborted, true, 'the held subprocess is stopped');
+  assert.equal(held.ended, true);
+  assert.deepEqual(launches.map(launch => launch.resumeNativeId), [nativeId], 'its known uuid is resumed');
+  sessions.set('claude-public', {...held, ended:false, activeTurnId:'turn-1'});
+  await assert.rejects(adapter.startSession('run-2', '/work', 'continue', { sessionId: 'claude-public' }), /busy/);
+});
+
+test('a Claude process that dies before init fails its launch with the reason instead of waiting for the timeout', async () => {
+  const adapter = new ClaudeCodeAdapter({command:'',allowedRoots:[]}, () => undefined);
+  const seam = adapter as unknown as { consume(session: unknown): Promise<void> };
+  let rejected: Error | undefined;
+  const reason = "Claude Code process exited with code 1: --resume claude-x is not a UUID and does not match any session title";
+  const session = {sessionId:'claude-public',turnSeq:0,logs:[],tasks:new Map(),ended:false,
+    resolveInit: () => assert.fail('init never arrived'), rejectInit: (error: Error) => { rejected = error; },
+    query:(async function* () { throw new Error(reason); })()};
+  await seam.consume(session);
+  assert.equal(rejected?.message, reason);
+});
+
+test('Claude text blocks with identical text in different messages keep distinct event ids', () => {
+  const events: BridgeToControlMessage[] = [];
+  const adapter = new ClaudeCodeAdapter({command:'',allowedRoots:[]}, event => events.push(event));
+  const seam = adapter as unknown as { handleAssistant(session: unknown, message: unknown): void };
+  const session = {sessionId:'claude-public',turnSeq:0,logs:[],toolUses:new Map(),tasks:new Map(),pendingApprovals:new Map(),activeTurnId:'turn-1'};
+  for (const uuid of ['m-1', 'm-2']) seam.handleAssistant(session, {type:'assistant',uuid,message:{role:'assistant',content:[{type:'text',text:'Done.'}]}});
+  const ids = events.flatMap(event => event.type === 'session.event' && event.eventType === 'message.completed' ? [event.eventId] : []);
+  assert.equal(ids.length, 2);
+  assert.notEqual(ids[0], ids[1]);
 });

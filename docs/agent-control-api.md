@@ -137,8 +137,8 @@ export interface RunLink {
 }
 
 export interface SessionSummary {
-  sessionId: string;          // Bridge canonical ID; currently equals Codex native thread ID
-  nativeSessionId: string;
+  sessionId: string;          // Bridge canonical ID; equals the native id for Codex, not for Claude/pi
+  nativeSessionId: string | null; // agent's own resumable id; null until the agent reports one
   workerId: string;
   machineId: string;
   agent: AgentType;

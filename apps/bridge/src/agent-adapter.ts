@@ -6,14 +6,28 @@ import type { ApprovalChoice, AttachmentRef, BridgeToControlMessage, CodexModelI
  * subprocess per session. Both normalize their native protocol into the same
  * `BridgeToControlMessage` stream via the `emit` callback passed at construction.
  */
+/**
+ * A session to continue. `sessionId` is the public id the control-plane and UI know
+ * it by; `nativeSessionId` is the agent's own resumable id. They differ for Claude
+ * (`claude-<uuid>` vs Claude's uuid) and pi, so an adapter must resume by the
+ * native id and keep reporting under the public one.
+ */
+export interface ResumeTarget {
+  sessionId: string;
+  nativeSessionId?: string;
+}
+
 export interface AgentAdapter {
   /** Begin connecting / spawning. Resolves once ready (or keeps retrying internally). */
   start(): Promise<void>;
   /** Tear down connections/processes. */
   stop(): void;
 
-  /** Start (or resume) a session for a project, optionally kicking off a first turn. Returns the native session id. */
-  startSession(requestId: string, projectPath: string, prompt?: string, resumeSessionId?: string, model?: string, attachments?: AttachmentRef[]): Promise<string>;
+  /**
+   * Start a session for a project, or continue `resume`, optionally kicking off a
+   * first turn. Returns the public session id the session reports under.
+   */
+  startSession(requestId: string, projectPath: string, prompt?: string, resume?: ResumeTarget, model?: string, attachments?: AttachmentRef[]): Promise<string>;
   /**
    * Revive a session this bridge no longer holds in memory (e.g. after a restart/
    * self-update killed its subprocess), keeping the same public sessionId, so a

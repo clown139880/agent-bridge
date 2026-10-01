@@ -52,6 +52,7 @@ interface PendingRunLaunch {
   projectPath: string;
   prompt: string;
   resumeSessionId?: string;
+  resumeNativeSessionId?: string;
   model?: string;
   attachments?: AttachmentRef[];
   targetVersion: string;
@@ -459,6 +460,10 @@ export class ControlPlane {
           return;
         }
       }
+      // The public id names the session to continue; the agent itself resumes by its
+      // own id. Sending the public id as the resume id is what made `claude --resume
+      // claude-<uuid>` exit at startup on every worker-API resume.
+      const resumeNativeSessionId = resumeSession?.nativeSessionId || undefined;
       const now = Date.now();
       this.store.createWorkerRun({
         id: runId, taskId: taskId ?? null, conversationId: conversationId ?? null,
@@ -469,14 +474,14 @@ export class ControlPlane {
       });
       if (this.bridgeNeedsUpdate(bridge) && !allowStaleVersion) {
         this.queueRunForUpdate({ runId, machineId, agentType, projectPath, prompt,
-          resumeSessionId: effectiveResumeSessionId, model, attachments });
+          resumeSessionId: effectiveResumeSessionId, resumeNativeSessionId, model, attachments });
         this.sendUpdateAnnouncement(bridge.socket);
       } else {
         if (allowStaleVersion && this.bridgeNeedsUpdate(bridge)) {
           log.warn({ machineId, runId, currentVersion: bridge.bridgeVersion,
             targetVersion: this.options.bridgeUpdate?.latestVersion }, "Audited stale bridge version override");
         }
-        this.sendStartAgent(bridge, runId, projectPath, prompt, effectiveResumeSessionId, model, agentType, attachments);
+        this.sendStartAgent(bridge, runId, projectPath, prompt, effectiveResumeSessionId, resumeNativeSessionId, model, agentType, attachments);
       }
       this.json(response, 202, workerRunJson(this.store.getWorkerRun(runId)!));
       return;
@@ -896,14 +901,15 @@ export class ControlPlane {
       clearTimeout(pending.timeout);
       this.pendingRunLaunches.delete(runId);
       this.store.updateWorkerRun(runId, "starting");
-      this.sendStartAgent(bridge, runId, pending.projectPath, pending.prompt, pending.resumeSessionId, pending.model, pending.agentType, pending.attachments);
+      this.sendStartAgent(bridge, runId, pending.projectPath, pending.prompt, pending.resumeSessionId,
+        pending.resumeNativeSessionId, pending.model, pending.agentType, pending.attachments);
     }
   }
 
   private sendStartAgent(bridge: BridgeConnection, runId: string, projectPath: string,
-    prompt: string, resumeSessionId?: string, model?: string, agentType: AgentType = "codex-cli",
-    attachments?: AttachmentRef[]): void {
-    this.send(bridge.socket, { type: "start_agent", sessionId: runId, resumeSessionId,
+    prompt: string, resumeSessionId?: string, resumeNativeSessionId?: string, model?: string,
+    agentType: AgentType = "codex-cli", attachments?: AttachmentRef[]): void {
+    this.send(bridge.socket, { type: "start_agent", sessionId: runId, resumeSessionId, resumeNativeSessionId,
       agentType, projectPath, prompt, model, attachments });
   }
 
@@ -914,7 +920,7 @@ export class ControlPlane {
     const session = this.store.getSession(sessionId);
     if (!session || !session.projectPath) return undefined;
     return { agentType: session.agentType, workspace: session.projectPath,
-      nativeSessionId: session.nativeSessionId ?? undefined, syncedAt: this.controlStore.lastEventAt(sessionId) };
+      nativeSessionId: session.nativeSessionId || undefined, syncedAt: this.controlStore.lastEventAt(sessionId) };
   }
 
   private replayControlActions(machineId: string): void {
@@ -1121,7 +1127,7 @@ export class ControlPlane {
     // A Claude session is re-announced once its native uuid is known; match it by
     // its stable public id so the native id is corrected rather than forked.
     const known = this.store.getSession(message.sessionId);
-    let session = this.store.getSessionByNative(machineId, message.nativeSessionId)
+    let session = (message.nativeSessionId ? this.store.getSessionByNative(machineId, message.nativeSessionId) : undefined)
       ?? (known?.machineId === machineId ? known : undefined);
     if (session) {
       this.store.updateSessionStatus(session.id, message.status);
@@ -1144,7 +1150,7 @@ export class ControlPlane {
       projectPath: message.projectPath,
       matrixRoomId: this.roomId,
       matrixThreadId: launch?.sourceEventId ?? null,
-      nativeSessionId: message.nativeSessionId,
+      nativeSessionId: message.nativeSessionId ?? null,
       status: message.status,
       createdAt: message.createdAt || now,
       updatedAt: message.createdAt || now,

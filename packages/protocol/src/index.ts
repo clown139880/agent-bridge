@@ -79,7 +79,11 @@ export interface SessionDiscoveredMessage {
   type: "session.discovered";
   requestId?: string;
   sessionId: string;
-  nativeSessionId: string;
+  /**
+   * The agent's own resumable id (Claude/pi uuid, Codex thread id). Omitted until
+   * the agent has reported one; never filled in with the public `sessionId`.
+   */
+  nativeSessionId?: string;
   agentType: AgentType;
   projectPath: string;
   projectName?: string;
@@ -182,7 +186,14 @@ export interface AttachmentRef {
 export interface StartAgentMessage {
   type: "start_agent";
   sessionId: string;
+  /** Public id of the session to continue; the run reports under this id. */
   resumeSessionId?: string;
+  /**
+   * The agent's own resumable id for `resumeSessionId` (Claude/pi uuid, Codex
+   * thread id), as recorded by the control-plane. The two ids differ for Claude
+   * and pi: passing the public id to `claude --resume` fails at startup.
+   */
+  resumeNativeSessionId?: string;
   agentType: AgentType;
   projectPath: string;
   prompt?: string;
@@ -284,7 +295,8 @@ export type SessionSource = "app-server" | "desktop-rollout" | "claude-cli" | "p
 
 export interface SessionState {
   sessionId: string;
-  nativeSessionId: string;
+  /** The agent's own resumable id; omitted until known (see SessionDiscoveredMessage). */
+  nativeSessionId?: string;
   agentType: AgentType;
   projectPath: string;
   projectName: string;

@@ -29,6 +29,7 @@ afterEach(() => {
   delete process.env.PI_MOCK_LOG;
   delete process.env.PI_MOCK_MODELS;
   delete process.env.PI_MOCK_ERROR;
+  delete process.env.PI_MOCK_MISSING_SESSION;
 });
 
 function makeAdapter(model?: string): PiAdapter {
@@ -125,4 +126,35 @@ test("a settled turn with a clean assistant stopReason is reported as completed"
   await adapter.submitTurnAction("turn-2", sessionId, "continue", "start_turn");
   await waitFor(() => emitMessages.some((m) => m.type === "agent.completed"));
   assert.ok(!emitMessages.some((m) => m.type === "agent.failed"));
+});
+
+const PI_UUID = "01a0f3d5-73e7-7749-aca6-5582af00e732";
+
+test("resuming a pi session passes pi its own uuid and keeps reporting under the public id", async () => {
+  const adapter = makeAdapter();
+  const sessionId = await adapter.startSession("run-2", tmpdir(), undefined,
+    { sessionId: "pi-public", nativeSessionId: PI_UUID });
+  assert.equal(sessionId, "pi-public");
+  const launch = readCommands().find((c) => c.type === "launch") as Record<string, unknown>;
+  assert.equal(launch.session, PI_UUID);
+  const discovered = emitMessages.find((m) => m.type === "session.discovered");
+  assert.equal(discovered?.type === "session.discovered" ? discovered.nativeSessionId : "", PI_UUID);
+});
+
+test("a pi public id is never handed to pi as the session to resume", async () => {
+  const adapter = makeAdapter();
+  await adapter.startSession("run-2", tmpdir(), undefined, { sessionId: "pi-public", nativeSessionId: "pi-public" });
+  await adapter.resumeSession("pi-other", tmpdir(), "pi-other");
+  const launches = readCommands().filter((c) => c.type === "launch");
+  assert.deepEqual(launches.map((launch) => launch.session), [undefined, undefined]);
+});
+
+test("a pi session that cannot be resumed fails the launch at once with pi's own reason", async () => {
+  process.env.PI_MOCK_MISSING_SESSION = PI_UUID;
+  const adapter = makeAdapter();
+  const started = Date.now();
+  await assert.rejects(adapter.startSession("run-2", tmpdir(), "continue", { sessionId: "pi-public", nativeSessionId: PI_UUID }),
+    /No session found matching/);
+  assert.ok(Date.now() - started < 5_000, "must not wait out the init timeout");
+  assert.equal(adapter.stateSnapshot().sessions.length, 0);
 });

@@ -298,6 +298,20 @@ export function migrateDatabase(db: DatabaseSync): void {
     // events, so we deliberately skip VACUUM here — rewriting a multi-gigabyte
     // file in the startup path stalls the control plane past its service timeout.
   }
+
+  // Bridges used to report a Claude/pi session's public id (`claude-<uuid>`,
+  // `pi-<uuid>`) as its native id until the agent announced its own. Such a value
+  // names no resumable transcript; resuming it fails at startup. Forget it so the
+  // next announcement records the real id.
+  if (!db.prepare("SELECT 1 FROM schema_migrations WHERE version=9").get()) {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      db.exec(`UPDATE sessions SET native_session_id=NULL WHERE native_session_id=id
+        AND agent_type IN ('claude-code','pi') AND (id LIKE 'claude-%' OR id LIKE 'pi-%')`);
+      db.prepare("INSERT INTO schema_migrations(version,applied_at) VALUES (9,?)").run(Date.now());
+      db.exec("COMMIT");
+    } catch (error) { try { db.exec("ROLLBACK"); } catch {} throw error; }
+  }
 }
 
 /**

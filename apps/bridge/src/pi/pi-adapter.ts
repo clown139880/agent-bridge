@@ -9,7 +9,7 @@ import type {
   SessionState,
   StructuredSessionEventType,
 } from "@agent-bridge/protocol";
-import type { AgentAdapter, AdapterEmit } from "../agent-adapter.js";
+import type { AgentAdapter, AdapterEmit, ResumeTarget } from "../agent-adapter.js";
 import type { AttachmentFetcher } from "../attachments.js";
 import { resolveProjectPath, summarizePrompt } from "../app-server.js";
 import { deriveProjectIdentity } from "../path-utils.js";
@@ -17,6 +17,12 @@ import { deriveProjectIdentity } from "../path-utils.js";
 const log = pino({ name: "pi-adapter" });
 const LOG_LIMIT = 2_000;
 const INIT_TIMEOUT_MS = 60_000;
+const PI_SESSION_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** The first candidate that is a pi session uuid; the public `pi-<uuid>` id names no pi session. */
+function piResumeId(...candidates: Array<string | undefined>): string | undefined {
+  return candidates.find((id) => id !== undefined && PI_SESSION_UUID.test(id));
+}
 
 interface PiModelInfo {
   provider: string;
@@ -53,6 +59,7 @@ interface PiSession {
   /** errorMessage of the most recent assistant message (set when stopReason is "error"). */
   lastAssistantError?: string;
   resolveInit?: () => void;
+  rejectInit?: (error: Error) => void;
   ended: boolean;
 }
 
@@ -104,15 +111,33 @@ export class PiAdapter implements AgentAdapter {
 
   // ---- session lifecycle -------------------------------------------------
 
-  async startSession(requestId: string, projectPath: string, prompt?: string, resumeSessionId?: string, model?: string, _attachments?: AttachmentRef[]): Promise<string> {
-    const publicSessionId = resumeSessionId ?? `pi-${randomUUID()}`;
-    await this.launch({ publicSessionId, requestId, projectPath, prompt, resumeNativeId: resumeSessionId, model });
-    return publicSessionId;
+  async startSession(requestId: string, projectPath: string, prompt?: string, resume?: ResumeTarget, model?: string, _attachments?: AttachmentRef[]): Promise<string> {
+    if (!resume) {
+      const publicSessionId = `pi-${randomUUID()}`;
+      await this.launch({ publicSessionId, requestId, projectPath, prompt, model });
+      return publicSessionId;
+    }
+    // Continue under the public id, resuming pi's own session uuid.
+    const held = this.sessions.get(resume.sessionId);
+    if (held?.activeTurnId) throw new Error(`pi session ${resume.sessionId} is busy`);
+    const resumeNativeId = piResumeId(resume.nativeSessionId, held?.nativeSessionId);
+    if (!resumeNativeId) {
+      log.warn({ sessionId: resume.sessionId, nativeSessionId: resume.nativeSessionId },
+        "No pi session uuid to resume; starting the session fresh");
+    }
+    // A held, idle process still owns the conversation; replace it rather than
+    // leaving two processes writing one session file.
+    if (held) {
+      this.kill(held);
+      this.sessions.delete(held.sessionId);
+    }
+    await this.launch({ publicSessionId: resume.sessionId, requestId, projectPath, prompt, resumeNativeId, model });
+    return resume.sessionId;
   }
 
   async resumeSession(sessionId: string, projectPath: string, nativeSessionId?: string, model?: string): Promise<void> {
     if (this.sessions.has(sessionId)) return;
-    await this.launch({ publicSessionId: sessionId, requestId: sessionId, projectPath, resumeNativeId: nativeSessionId, model });
+    await this.launch({ publicSessionId: sessionId, requestId: sessionId, projectPath, resumeNativeId: piResumeId(nativeSessionId), model });
   }
 
   private async launch(params: { publicSessionId: string; requestId: string; projectPath: string; prompt?: string; resumeNativeId?: string; model?: string }): Promise<string> {
@@ -134,6 +159,8 @@ export class PiAdapter implements AgentAdapter {
       if (launchModel) args.push("--model", launchModel);
     }
     if (this.options.sessionDir) { args.push("--session-dir", this.options.sessionDir); }
+    // Without --session pi starts a new session: the resume id must reach pi itself.
+    if (resumeNativeId) { args.push("--session", resumeNativeId); }
     if (prompt) {
       const title = summarizePrompt(prompt, 60);
       if (title) args.push("--name", title);
@@ -166,6 +193,7 @@ export class PiAdapter implements AgentAdapter {
     let rejectInit!: (error: Error) => void;
     const initPromise = new Promise<void>((resolve, reject) => { resolveInit = resolve; rejectInit = reject; });
     session.resolveInit = resolveInit;
+    session.rejectInit = rejectInit;
     const initTimer = setTimeout(() => {
       session.resolveInit = undefined;
       rejectInit(new Error(`Timed out waiting for pi session init: ${sessionId}`));
@@ -176,9 +204,19 @@ export class PiAdapter implements AgentAdapter {
     // lets us resume across a bridge restart. Do this immediately; it also proves
     // the RPC channel is live before the first turn.
     this.sendCommand(session, { type: "get_state" });
-    await initPromise;
-    clearTimeout(initTimer);
-    session.resolveInit = undefined;
+    try {
+      await initPromise;
+    } catch (error) {
+      log.error({ sessionId, resumeNativeId, error: error instanceof Error ? error.message : String(error) },
+        "pi session failed to initialize");
+      this.kill(session);
+      if (this.sessions.get(sessionId) === session) this.sessions.delete(sessionId);
+      throw error;
+    } finally {
+      clearTimeout(initTimer);
+      session.resolveInit = undefined;
+      session.rejectInit = undefined;
+    }
 
     if (prompt) {
       this.beginTurn(session, prompt);
@@ -371,7 +409,7 @@ export class PiAdapter implements AgentAdapter {
       type: "session.discovered",
       requestId: session.requestId,
       sessionId: session.sessionId,
-      nativeSessionId: session.nativeSessionId ?? session.sessionId,
+      nativeSessionId: session.nativeSessionId,
       agentType: "pi" as const,
       projectPath: session.projectPath,
       projectName: basename(session.projectPath),
@@ -461,6 +499,13 @@ export class PiAdapter implements AgentAdapter {
   }
 
   private onProcEnd(session: PiSession): void {
+    // pi exited before answering get_state (e.g. "No session found"): fail the launch
+    // now with what it printed instead of waiting out the init timeout.
+    if (session.resolveInit) {
+      session.resolveInit = undefined;
+      const output = session.logs.slice(-5).join("\n").trim();
+      session.rejectInit?.(new Error(`pi exited before the session initialized${output ? `: ${output}` : ""}`));
+    }
     if (session.ended) return;
     if (session.activeTurnId) {
       const text = session.assistantBuffer.join("");
@@ -661,7 +706,7 @@ export class PiAdapter implements AgentAdapter {
       .filter((s) => s.discovered)
       .map((s) => ({
         sessionId: s.sessionId,
-        nativeSessionId: s.nativeSessionId ?? s.sessionId,
+        nativeSessionId: s.nativeSessionId,
         agentType: "pi" as const,
         projectPath: s.projectPath,
         projectName: basename(s.projectPath),

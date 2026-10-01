@@ -147,7 +147,7 @@ test("Hermes worker API starts and observes a headless Codex run", async () => {
     });
     assert.equal(legacyResume.status, 202);
     assert.deepEqual(sent.at(-1), {
-      type: "start_agent", sessionId: "orphan-retry", resumeSessionId: "orphan-thread",
+      type: "start_agent", sessionId: "orphan-retry", resumeSessionId: "orphan-thread", resumeNativeSessionId: "orphan-thread",
       agentType: "codex-cli", projectPath: "/work/repo", prompt: "Continue the interrupted task",
     });
     await internals.handleBridgeMessage("dev", {
@@ -227,7 +227,7 @@ test("Hermes worker API starts and observes a headless Codex run", async () => {
     });
     assert.equal(resumeResponse.status, 202);
     assert.deepEqual(sent.at(-1), {
-      type: "start_agent", sessionId: "run-2", resumeSessionId: "thread-1",
+      type: "start_agent", sessionId: "run-2", resumeSessionId: "thread-1", resumeNativeSessionId: "thread-1",
       agentType: "codex-cli", projectPath: "/work/repo", prompt: "What did I ask you to remember?", model: "deepseek-v3",
     });
     const concurrentResume = await fetch(`${base}/runs`, {
@@ -287,6 +287,51 @@ test("Hermes worker API starts and observes a headless Codex run", async () => {
     });
     assert.equal(store.getWorkerRun("run-4")?.status, "working");
     assert.equal(store.getWorkerRun("run-4")?.error, null, "progress clears an obsolete blocked reason");
+  } finally {
+    await control.stop();
+    store.db.close();
+    rmSync(databasePath, { force: true });
+  }
+});
+
+test("a worker-API resume of a Claude session sends Claude's own uuid beside the public id", async () => {
+  const databasePath = join(tmpdir(), `agent-bridge-worker-api-${randomUUID()}.sqlite`);
+  const store = new Store(databasePath);
+  const sent: ControlToBridgeMessage[] = [];
+  const socket = {
+    readyState: WebSocket.OPEN,
+    send(value: string) { sent.push(JSON.parse(value) as ControlToBridgeMessage); },
+    close() {},
+  } as unknown as WebSocket;
+  store.upsertMachine({ id: "dev", name: "Workstation", platform: "linux", hostname: "dev.local", capabilities: ["claude-code"] });
+  const publicId = "claude-2599e149-6fa5-43e6-a690-7aecf810d983";
+  const nativeId = "38a014a3-0c4d-47c7-83de-a3c47b2bd743";
+  for (const [id, native] of [[publicId, nativeId], ["claude-unstarted", null]] as const) {
+    store.createSession({ id, machineId: "dev", agentType: "claude-code", projectName: "repo", projectPath: "/work/repo",
+      matrixRoomId: "", matrixThreadId: null, nativeSessionId: native, status: "completed", createdAt: 1, updatedAt: 1 });
+  }
+  const control = new ControlPlane(store, new HeadlessGateway(), {
+    host: "127.0.0.1", port: 0, workerApiEnabled: true, workerApiToken: "test-secret",
+  });
+  const internals = control as unknown as ControlInternals;
+  internals.bridges.set("dev", { machineId: "dev", name: "Workstation", capabilities: ["claude-code"], socket });
+  await control.start();
+  const address = internals.http.address();
+  assert.ok(address && typeof address === "object");
+  const base = `http://127.0.0.1:${address.port}/api/v1`;
+  const headers = { authorization: "Bearer test-secret", "content-type": "application/json" };
+  try {
+    for (const [runId, resumeSessionId] of [["run-1", publicId], ["run-2", "claude-unstarted"]]) {
+      const response = await fetch(`${base}/runs`, { method: "POST", headers, body: JSON.stringify({
+        runId, workerId: "claude@dev", projectPath: "/work/repo", prompt: "continue", resumeSessionId }) });
+      assert.equal(response.status, 202);
+    }
+    assert.deepEqual(sent.map((message) => message.type === "start_agent"
+      ? [message.resumeSessionId, message.resumeNativeSessionId] : []), [
+      [publicId, nativeId],
+      // No native id on record: none is invented from the public id.
+      ["claude-unstarted", undefined],
+    ]);
   } finally {
     await control.stop();
     store.db.close();

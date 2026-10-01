@@ -338,7 +338,9 @@ export class BridgeClient {
               message: this.admissionMessage() });
             break;
           }
-          void this.adapterForType(message.agentType).startSession(message.sessionId, message.projectPath, message.prompt, message.resumeSessionId, message.model, message.attachments)
+          void this.adapterForType(message.agentType).startSession(message.sessionId, message.projectPath, message.prompt,
+            message.resumeSessionId ? { sessionId: message.resumeSessionId, nativeSessionId: message.resumeNativeSessionId } : undefined,
+            message.model, message.attachments)
             .catch((error) => this.send({ type: "error", sessionId: message.sessionId, message: error instanceof Error ? error.message : String(error) }));
           break;
         case "agent_input":

@@ -17,7 +17,7 @@ import type {
 } from "@agent-bridge/protocol";
 import { CodexDesktopSessionScanner } from "./desktop-sessions.js";
 import { deriveProjectIdentity, isPathWithinRoots } from "./path-utils.js";
-import type { AgentAdapter } from "./agent-adapter.js";
+import type { AgentAdapter, ResumeTarget } from "./agent-adapter.js";
 import type { AttachmentFetcher } from "./attachments.js";
 import { CodexRuntimeResolver, type CodexRuntime } from "./codex-runtime.js";
 
@@ -236,10 +236,12 @@ export class CodexAppServerAdapter implements AgentAdapter {
     this.desktopScannerStarted = false;
   }
 
-  async startSession(requestId: string, projectPath: string, prompt?: string, resumeSessionId?: string, model?: string, attachments?: AttachmentRef[]): Promise<string> {
+  async startSession(requestId: string, projectPath: string, prompt?: string, resume?: ResumeTarget, model?: string, attachments?: AttachmentRef[]): Promise<string> {
     await this.ensureReady();
     const cwd = await resolveProjectPath(projectPath, this.options.allowedRoots);
     if (prompt) this.pendingStartPrompts.set(cwd, prompt);
+    // A Codex session's public id is its thread id, so either names the thread.
+    const resumeSessionId = resume ? resume.nativeSessionId ?? resume.sessionId : undefined;
     try {
       if (resumeSessionId) {
         const thread = await this.ensureThreadSubscribed(resumeSessionId);

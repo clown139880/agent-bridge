@@ -99,7 +99,7 @@ test("a new run can resume a persisted thread and start its prompt as the next t
     return {};
   };
 
-  await adapter.startSession("run-2", process.cwd(), "What did I ask you to remember?", "persisted-thread", "deepseek-chat");
+  await adapter.startSession("run-2", process.cwd(), "What did I ask you to remember?", { sessionId: "persisted-thread" }, "deepseek-chat");
 
   assert.deepEqual(calls.map((call) => call.method), ["thread/resume", "turn/start"]);
   assert.deepEqual(calls[1]?.params, {

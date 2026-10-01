@@ -10,8 +10,10 @@ const LOG_PATH = process.env.PI_MOCK_LOG;
 const MODELS = JSON.parse(process.env.PI_MOCK_MODELS ?? '[]');
 let provider = "";
 let modelId = "";
+let session = "";
 for (let i = 0; i < process.argv.length; i++) {
   if (process.argv[i] === "--provider" && process.argv[i + 1]) provider = process.argv[i + 1];
+  if (process.argv[i] === "--session" && process.argv[i + 1]) session = process.argv[i + 1];
   if (process.argv[i] === "--model" && process.argv[i + 1]) modelId = process.argv[i + 1].includes("/")
     ? process.argv[i + 1].slice(process.argv[i + 1].indexOf("/") + 1)
     : process.argv[i + 1];
@@ -22,7 +24,12 @@ function log(line) {
 }
 // Record the launch-time provider/model so tests can assert what pi was started
 // with (mirrors the provider-qualified model-id resolution in the adapter).
-log(JSON.stringify({ type: "launch", provider, model: modelId }));
+log(JSON.stringify({ type: "launch", provider, model: modelId, ...(session ? { session } : {}) }));
+// Like pi itself: an unknown --session prints to stderr and exits before any RPC.
+if (session && session === process.env.PI_MOCK_MISSING_SESSION) {
+  process.stderr.write(`No session found matching '${session}'\n`);
+  process.exit(0);
+}
 function out(obj) {
   process.stdout.write(JSON.stringify(obj) + "\n");
 }
@@ -50,7 +57,7 @@ function handleLine(raw) {
     case "get_state":
       respond("get_state", {
         model: modelId ? { id: modelId, provider, name: modelId } : null,
-        sessionId: "mock-session",
+        sessionId: session || "mock-session",
         sessionFile: "/tmp/mock-session.jsonl",
         thinkingLevel: "medium",
         isStreaming: false,

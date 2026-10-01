@@ -217,6 +217,8 @@ export class Query implements AsyncIterableIterator<SDKMessage> {
 }
 
 /** Spawn Claude Code and return a Query over its message stream. */
+const STDERR_TAIL_LIMIT = 2_000;
+
 export function query(config: { prompt: QueryPrompt; options?: QueryOptions }): Query {
   const {
     prompt,
@@ -323,11 +325,15 @@ export function query(config: { prompt: QueryPrompt; options?: QueryOptions }): 
     childStdin = child.stdin;
   }
 
-  if (process.env.DEBUG) {
-    child.stderr.on("data", (data) => {
-      console.error("Claude Code stderr:", data.toString());
-    });
-  }
+  // Keep the tail of stderr so an early exit says why (e.g. a --resume id Claude
+  // rejects) instead of only its exit code. Always drained, so a chatty child
+  // never blocks on a full pipe.
+  let stderrTail = "";
+  child.stderr.on("data", (data) => {
+    const text = data.toString();
+    stderrTail = (stderrTail + text).slice(-STDERR_TAIL_LIMIT);
+    if (process.env.DEBUG) console.error("Claude Code stderr:", text);
+  });
 
   let cleanupPromise: Promise<void> | null = null;
   const cleanup = (): Promise<void> => {
@@ -370,7 +376,8 @@ export function query(config: { prompt: QueryPrompt; options?: QueryOptions }): 
       queryInstance.setError(err);
       rejectExit(err);
     } else if (code !== 0) {
-      const err = new Error(`Claude Code process exited with code ${code}`);
+      const detail = stderrTail.trim();
+      const err = new Error(`Claude Code process exited with code ${code}${detail ? `: ${detail}` : ""}`);
       queryInstance.setError(err);
       rejectExit(err);
     } else {

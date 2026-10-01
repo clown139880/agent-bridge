@@ -257,14 +257,15 @@ export class AgentControlStore {
     this.transaction(() => {
       const exists = this.db.prepare("SELECT id FROM sessions WHERE id=?").get(state.sessionId);
       if (exists) {
-        // A worker that has not learned the agent's own id reports the public id
-        // instead; never let that overwrite a native id already on record.
+        // A worker that has not learned the agent's own id omits it (older bridges
+        // report the public id instead); neither may overwrite a native id on record.
         this.db.prepare(`UPDATE sessions SET machine_id=?,agent_type=?,project_name=?,project_path=?,
-          native_session_id=CASE WHEN ?=id AND COALESCE(native_session_id,'')<>'' THEN native_session_id ELSE ? END,
+          native_session_id=CASE WHEN (? IS NULL OR ?=id) AND COALESCE(native_session_id,'')<>'' THEN native_session_id ELSE ? END,
           status=?,title=COALESCE(?,title),prompt_summary=COALESCE(?,prompt_summary),source=?,history_completeness=?,
           activity_status=?,active_turn_id=?,last_turn_status=COALESCE(?,last_turn_status),inventory_seen_at=?,
           updated_at=?,last_response_at=CASE WHEN last_response_at>? THEN ? ELSE last_response_at END WHERE id=?`).run(
-          machineId, state.agentType, state.projectName, state.projectPath, state.nativeSessionId, state.nativeSessionId,
+          machineId, state.agentType, state.projectName, state.projectPath,
+          state.nativeSessionId ?? null, state.nativeSessionId ?? null, state.nativeSessionId ?? null,
           legacyStatus(state.activityStatus, state.lastTurnStatus), state.title ?? null, state.promptSummary ?? null,
           state.source, state.historyCompleteness, state.activityStatus, state.activeTurnId ?? null,
           state.lastTurnStatus ?? null, Date.now(), state.updatedAt, state.updatedAt, state.updatedAt, state.sessionId);
@@ -273,7 +274,7 @@ export class AgentControlStore {
           (id,machine_id,agent_type,project_name,project_path,matrix_room_id,matrix_thread_id,native_session_id,
            status,created_at,updated_at,title,prompt_summary,source,history_completeness,activity_status,active_turn_id,
            last_turn_status,inventory_seen_at) VALUES (?,?,?,?,?,'',NULL,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
-          state.sessionId, machineId, state.agentType, state.projectName, state.projectPath, state.nativeSessionId,
+          state.sessionId, machineId, state.agentType, state.projectName, state.projectPath, state.nativeSessionId ?? null,
           legacyStatus(state.activityStatus, state.lastTurnStatus), state.createdAt, state.updatedAt,
           state.title ?? null, state.promptSummary ?? null, state.source, state.historyCompleteness,
           state.activityStatus, state.activeTurnId ?? null, state.lastTurnStatus ?? null, Date.now());
@@ -720,7 +721,7 @@ export class AgentControlStore {
       .all(String(row.machine_id),String(row.project_path)) as Array<{project_identity:string}>;
     const projectIdentity=directProjectIdentity??(inheritedProjectIdentities.length===1
       ?String(inheritedProjectIdentities[0]!.project_identity):undefined);
-    const result:Record<string,unknown>={sessionId:String(row.id),nativeSessionId:row.native_session_id?String(row.native_session_id):String(row.id),
+    const result:Record<string,unknown>={sessionId:String(row.id),nativeSessionId:row.native_session_id?String(row.native_session_id):null,
       workerId:buildWorkerId(String(row.agent_type) as AgentType,String(row.machine_id)),machineId:String(row.machine_id),agent:String(row.agent_type),
       title:row.title?String(row.title):null,promptSummary,
       projectName:String(row.project_name),workspace:String(row.project_path),status:String(row.activity_status??"unknown"),

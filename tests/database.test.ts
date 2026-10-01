@@ -192,7 +192,7 @@ test("a 0.4.2 database upgrades transactionally to the Agent Control schema", ()
   `);legacy.close();
   const store=new Store(path);
   const version=store.db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get() as {version:number};
-  assert.equal(version.version,8);
+  assert.equal(version.version,9);
   const tables=(store.db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{name:string}>).map(row=>row.name);
   for(const table of ["pending_requests","actions","idempotency_keys","stream_changes","event_search","deleted_sessions","attachments",
     "deleted_workers","conversation_collection_gaps"])
@@ -203,7 +203,7 @@ test("a 0.4.2 database upgrades transactionally to the Agent Control schema", ()
   assert.equal(session.activity_status,"idle");assert.equal(session.source,"app-server");
   assert.equal(session.last_response_at,null);assert.equal(session.updated_at,1);
   // Reopening proves the versioned migration is idempotent.
-  store.db.close();const reopened=new Store(path);assert.equal((reopened.db.prepare("SELECT COUNT(*) AS n FROM schema_migrations").get() as any).n,9);
+  store.db.close();const reopened=new Store(path);assert.equal((reopened.db.prepare("SELECT COUNT(*) AS n FROM schema_migrations").get() as any).n,10);
   reopened.db.close();rmSync(path,{force:true});
 });
 
@@ -280,6 +280,47 @@ test("tool progress touches a session's updated_at without counting as a reply",
   control.appendSessionEvent({ type: "session.event", eventType: "message.completed", eventId: "prompt", sessionId: "thread-1",
     turnId: "turn-2", timestamp: 9, payload: { role: "user", text: "review" } });
   assert.deepEqual({ ...row() }, { updated_at: 9, last_response_at: 9 });
+  store.db.close();
+  rmSync(path, { force: true });
+});
+
+test("a Claude/pi public id recorded as the native id is forgotten; real native ids are kept", () => {
+  const path = join(tmpdir(), `agent-bridge-native-ids-${randomUUID()}.sqlite`);
+  const store = new Store(path);
+  store.upsertMachine({ id: "dev", name: "dev", platform: "linux", hostname: "dev", capabilities: [] });
+  const sessions: Array<[string, "claude-code" | "pi" | "codex-cli", string]> = [
+    ["claude-0b7e3f52-5a1c-4d8e-9f3a-2c6b1d4e8a90", "claude-code", "claude-0b7e3f52-5a1c-4d8e-9f3a-2c6b1d4e8a90"],
+    ["pi-public", "pi", "pi-public"],
+    ["claude-real", "claude-code", "38a014a3-0c4d-47c7-83de-a3c47b2bd743"],
+    ["6f1d2c3b-4a5e-4f60-8b7c-9d0e1f2a3b4c", "claude-code", "6f1d2c3b-4a5e-4f60-8b7c-9d0e1f2a3b4c"],
+    ["thread-1", "codex-cli", "thread-1"],
+  ];
+  for (const [id, agentType, native] of sessions) store.createSession({ id, machineId: "dev", agentType, projectName: "repo",
+    projectPath: "/work/repo", matrixRoomId: "", matrixThreadId: null, nativeSessionId: native, status: "completed", createdAt: 1, updatedAt: 1 });
+  store.db.prepare("DELETE FROM schema_migrations WHERE version=9").run();
+  store.db.close();
+  const reopened = new Store(path);
+  assert.deepEqual(sessions.map(([id]) => reopened.getSession(id)?.nativeSessionId), [
+    null, null, "38a014a3-0c4d-47c7-83de-a3c47b2bd743", "6f1d2c3b-4a5e-4f60-8b7c-9d0e1f2a3b4c", "thread-1",
+  ]);
+  reopened.db.close();
+  rmSync(path, { force: true });
+});
+
+test("a session state without a native id never erases the one on record", () => {
+  const path = join(tmpdir(), `agent-bridge-native-keep-${randomUUID()}.sqlite`);
+  const store = new Store(path);
+  store.upsertMachine({ id: "dev", name: "dev", platform: "linux", hostname: "dev", capabilities: [] });
+  const control = new AgentControlStore(store.db, { actionsMs: 1_000, attachmentsMs: 1_000 });
+  const state = { sessionId: "claude-public", agentType: "claude-code" as const, projectPath: "/work/repo", projectName: "repo",
+    activityStatus: "idle" as const, createdAt: 1, updatedAt: 1, source: "claude-cli" as const, historyCompleteness: "loaded-only" as const };
+  control.upsertSession("dev", state);
+  assert.equal(store.getSession("claude-public")?.nativeSessionId, null, "an unknown native id is not invented");
+  assert.equal(control.session("claude-public")?.nativeSessionId, null);
+  control.upsertSession("dev", { ...state, nativeSessionId: "38a014a3-0c4d-47c7-83de-a3c47b2bd743" });
+  control.upsertSession("dev", state);
+  control.upsertSession("dev", { ...state, nativeSessionId: "claude-public" });
+  assert.equal(store.getSession("claude-public")?.nativeSessionId, "38a014a3-0c4d-47c7-83de-a3c47b2bd743");
   store.db.close();
   rmSync(path, { force: true });
 });

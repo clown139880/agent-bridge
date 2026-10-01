@@ -15,7 +15,7 @@ import type {
   TaskStatus,
   UserInputQuestion,
 } from "@agent-bridge/protocol";
-import type { AgentAdapter, AdapterEmit } from "../agent-adapter.js";
+import type { AgentAdapter, AdapterEmit, ResumeTarget } from "../agent-adapter.js";
 import type { AttachmentFetcher, FetchedAttachment } from "../attachments.js";
 import { resolveProjectPath, summarizePrompt } from "../app-server.js";
 import { deriveProjectIdentity } from "../path-utils.js";
@@ -47,6 +47,15 @@ const TRANSCRIPT_BACKFILL_LIMIT = 200;
 /** Transcript writes this soon after a turn settles are the subprocess's own bookkeeping. */
 const TRANSCRIPT_SETTLE_MS = 5_000;
 const CLAUDE_SESSION_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const CLAUDE_INIT_TIMEOUT_MS = 60_000;
+
+/**
+ * The first candidate that is a Claude session uuid. `claude --resume` accepts only a
+ * uuid (or a session title); a public `claude-<uuid>` id makes it exit at startup.
+ */
+function claudeResumeId(...candidates: Array<string | undefined>): string | undefined {
+  return candidates.find((id) => id !== undefined && CLAUDE_SESSION_UUID.test(id));
+}
 /** Fewest milliseconds between two stored progress reports of one task; the latest report wins. */
 const TASK_PROGRESS_INTERVAL_MS = 10_000;
 /** How long a task marked finished may wait for its notification before it is closed without one. */
@@ -128,6 +137,7 @@ interface ClaudeSession {
   pendingUserInput?: PendingUserInput;
   sessionAllowedTools: Set<string>;
   resolveInit?: () => void;
+  rejectInit?: (error: Error) => void;
   ended: boolean;
 }
 
@@ -216,12 +226,27 @@ export class ClaudeCodeAdapter implements AgentAdapter {
 
   // ---- session lifecycle -------------------------------------------------
 
-  async startSession(requestId: string, projectPath: string, prompt?: string, resumeSessionId?: string, model?: string, attachments?: AttachmentRef[]): Promise<string> {
-    // Existing worker-API semantics: a supplied resumeSessionId doubles as the public
-    // id and Claude's resume id. Callers that must keep a distinct bridge-assigned
-    // public id while resuming (session revival) use resumeSession() instead.
-    return this.launch({ publicSessionId: resumeSessionId ?? `claude-${randomUUID()}`,
-      requestId, projectPath, prompt, resumeNativeId: resumeSessionId, model, attachments });
+  async startSession(requestId: string, projectPath: string, prompt?: string, resume?: ResumeTarget, model?: string, attachments?: AttachmentRef[]): Promise<string> {
+    if (!resume) {
+      return this.launch({ publicSessionId: `claude-${randomUUID()}`, requestId, projectPath, prompt, model, attachments });
+    }
+    // Continue under the public id, resuming Claude's own uuid. The public id is a
+    // uuid only for sessions discovered from a transcript on disk.
+    const held = this.sessions.get(resume.sessionId);
+    if (held && (held.activeTurnId || held.pendingUserInput || [...held.pendingApprovals.values()].some((a) => !a.answered))) {
+      throw new Error(`Claude session ${resume.sessionId} is busy`);
+    }
+    const resumeNativeId = claudeResumeId(resume.nativeSessionId, held?.nativeSessionId, resume.sessionId);
+    if (!resumeNativeId) {
+      // Without a Claude uuid the session never initialized, so there is no
+      // transcript to continue; starting fresh loses nothing (as in resumeSession).
+      log.warn({ sessionId: resume.sessionId, nativeSessionId: resume.nativeSessionId },
+        "No Claude session uuid to resume; starting the session fresh");
+    }
+    // A held, idle subprocess still owns the conversation; replace it rather than
+    // leaving two processes writing one transcript.
+    if (held) this.close(held);
+    return this.launch({ publicSessionId: resume.sessionId, requestId, projectPath, prompt, resumeNativeId, model, attachments });
   }
 
   /**
@@ -238,7 +263,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
    */
   async resumeSession(sessionId: string, projectPath: string, nativeSessionId?: string, model?: string, syncedAt?: number): Promise<void> {
     if (this.sessions.has(sessionId)) return;
-    const resumeNativeId = nativeSessionId && CLAUDE_SESSION_UUID.test(nativeSessionId) ? nativeSessionId : undefined;
+    const resumeNativeId = claudeResumeId(nativeSessionId);
     await this.launch({ publicSessionId: sessionId, requestId: sessionId, projectPath, resumeNativeId, model });
     if (resumeNativeId && syncedAt !== undefined) this.backfillTranscript(this.require(sessionId), syncedAt);
   }
@@ -348,9 +373,12 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     };
     this.sessions.set(sessionId, session);
 
-    const initPromise = new Promise<void>((resolve) => {
+    const initPromise = new Promise<void>((resolve, reject) => {
       session.resolveInit = resolve;
+      session.rejectInit = reject;
     });
+    // Rejected when Claude dies before init; only awaited when there is a first prompt.
+    initPromise.catch(() => undefined);
 
     const permissions = this.options.permissions;
     session.query = query({
@@ -385,10 +413,22 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       const images = await this.materialize(attachments);
       session.input.push(userMessage(prompt, images));
       session.pendingTurnStart = true;
-      await Promise.race([
-        initPromise,
-        new Promise<void>((_, reject) => setTimeout(() => reject(new Error("Timed out waiting for Claude session init")), 60_000)),
-      ]);
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          initPromise,
+          new Promise<void>((_, reject) => {
+            timer = setTimeout(() => reject(new Error("Timed out waiting for Claude session init")), CLAUDE_INIT_TIMEOUT_MS);
+          }),
+        ]);
+      } catch (error) {
+        log.error({ sessionId, resumeNativeId, error: error instanceof Error ? error.message : String(error) },
+          "Claude session failed to initialize");
+        if (!session.ended) this.close(session);
+        throw error;
+      } finally {
+        clearTimeout(timer);
+      }
       // Echo the user turn AFTER init — session.discovered has now created the row,
       // so the event persists (emitting it earlier would be dropped as an unknown
       // session). This is why the first prompt was previously invisible in DSH.
@@ -418,6 +458,13 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       if (session.ended) return;
       log.error({ error: streamError, sessionId: session.sessionId }, "Claude session stream failed");
     } finally {
+      // Claude died before announcing itself (e.g. a bad --resume id): fail the
+      // launch now with the reason instead of letting it wait out the init timeout.
+      if (session.resolveInit) {
+        session.rejectInit?.(new Error(streamError ?? "Claude Code exited before the session initialized"));
+        session.resolveInit = undefined;
+        session.rejectInit = undefined;
+      }
       // Any still-open turn is terminal: failed if the stream errored, else completed
       // (e.g. process exit without a final result).
       if (session.activeTurnId) this.finishTurn(session, streamError ? "failed" : "completed", streamError);
@@ -464,9 +511,8 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       type: "session.discovered",
       requestId: session.requestId,
       sessionId: session.sessionId,
-      // Fall back to the stable public id so the native key is always unique;
-      // an empty native id would make the control-plane collapse distinct sessions.
-      nativeSessionId: session.nativeSessionId ?? session.sessionId,
+      // Omitted until Claude's init reports its uuid; never the public id.
+      nativeSessionId: session.nativeSessionId,
       agentType: "claude-code",
       projectPath: session.projectPath,
       projectName: basename(session.projectPath),
@@ -513,6 +559,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     }
     session.resolveInit?.();
     session.resolveInit = undefined;
+    session.rejectInit = undefined;
   }
 
   // ---- tasks ---------------------------------------------------------------
@@ -631,7 +678,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     // A subagent's messages are steps of the call that spawned it, never the main conversation.
     const parentItemId = message.parent_tool_use_id || undefined;
     if (!parentItemId) this.ensureTurn(session);
-    for (const block of message.message.content ?? []) {
+    for (const [index, block] of (message.message.content ?? []).entries()) {
       if (block.type === "tool_use" && typeof block.id === "string") {
         const name = block.name ?? "tool";
         const input = (block.input as Record<string, unknown>) ?? {};
@@ -648,7 +695,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       } else if (block.type === "text" && block.text) {
         this.appendLog(session, block.text);
         this.emit({ type: "agent.output", sessionId: session.sessionId, timestamp: Date.now(), text: block.text });
-        this.emitSessionEvent(session, "message.completed", `claude:${session.sessionId}:${blockId(block)}:message`, {
+        this.emitSessionEvent(session, "message.completed", `claude:${session.sessionId}:${blockId(message, block, index)}:message`, {
           role: "assistant",
           text: truncate(block.text),
         });
@@ -1099,7 +1146,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       .filter((s) => s.discovered)
       .map((s) => ({
         sessionId: s.sessionId,
-        nativeSessionId: s.nativeSessionId ?? s.sessionId,
+        nativeSessionId: s.nativeSessionId,
         agentType: "claude-code" as const,
         projectPath: s.projectPath,
         projectName: basename(s.projectPath),
@@ -1271,8 +1318,14 @@ function truncate(text: string, limit = 4_000): string {
   return text.length <= limit ? text : `${text.slice(0, limit - 1)}…`;
 }
 
-function blockId(block: { id?: string; text?: string }): string {
+/**
+ * Stable id of an assistant content block. Text blocks carry no id of their own; the
+ * stream message's uuid plus position names one, where a hash of the text would make
+ * two identical replies (e.g. "Done.") collide and the second be dropped as a duplicate.
+ */
+function blockId(message: SDKAssistantMessage, block: { id?: string; text?: string }, index: number): string {
   if (block.id) return block.id;
+  if (typeof message.uuid === "string" && message.uuid) return `${message.uuid}:${index}`;
   return createHash("sha256").update(block.text ?? "").digest("hex").slice(0, 24);
 }
 
