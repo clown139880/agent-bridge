@@ -200,3 +200,49 @@ it('keeps rendering the native workspaces while a hot reload has disposed the ca
     await act(async () => root.unmount()); div.remove()
   }
 })
+
+it('gives groups sharing one physical workspace distinct order accounts, so DSH order sync settles', async () => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
+  const snapshot = { items: [{ workspaceId: 'local', path: 'C:\\repo', title: 'repo', sessionIds: ['a1', 'a2', 'b1', 'native'], createdAt: '', updatedAt: '' }], archivedSessionIds: [] }
+  const source = { getSnapshot: () => snapshot, subscribe: () => () => {} }
+  const entry = (id: string, identity: string, at: number) => ({ nativeId: id, sessionId: id, workerId: 'w', groupId: `repo:${identity}`, groupTitle: identity, groupUpdatedAt: at,
+    executionLocations: [{ workerId: 'w', workerName: 'w', machineId: 'windows', machineName: 'windows', workspace: 'C:\\repo', online: true, available: true, local: true }],
+    machineId: 'windows', workspace: 'C:\\repo', projectIdentity: identity, title: id, status: 'idle', worker: 'w', updatedAt: at, activityAt: at })
+  const list = { byId: { a1: { updatedAt: 4 }, a2: { updatedAt: 3 }, b1: { updatedAt: 5 }, native: { updatedAt: 1 } } as Record<string, { updatedAt: number }> }
+  const catalog = new NativeCatalog(async () => ({ sessions: [entry('b1', 'two', 5), entry('a1', 'one', 4), entry('a2', 'one', 3)] }),
+    { list: { getSnapshot: () => list, subscribe: () => () => {} }, clear: vi.fn(), refresh: vi.fn(async () => {}) })
+  await catalog.refresh()
+  const dispose = catalog.install({ list: source, rename: vi.fn(), delete: vi.fn(), insertSessionBefore: vi.fn() })
+  const useSessions = (selector: any) => selector(list)
+  let state = { orderBy: 'updated', sessionOrderByAccount: {} as Record<string, string[]> }
+  const listeners = new Set<() => void>()
+  const writes = { count: 0 }
+  const useStore = (selector: any) => React.useSyncExternalStore(l => { listeners.add(l); return () => listeners.delete(l) }, () => state) && selector(state)
+  const sync = (key: string, order: string[]) => { writes.count++; state = { ...state, sessionOrderByAccount: { ...state.sessionOrderByAccount, [key]: order } }; for (const l of listeners) l() }
+  const seen: Record<string, string[]> = {}
+  // Mirrors DSH SessionTree: one keyed row and one order account per workspace id.
+  const Browser = ({ useStore, useWorkspaces, useSessions }: any) => {
+    const workspaces = useWorkspaces((s: any) => s.items); const byId = useSessions((s: any) => s.byId)
+    const stored = useStore((s: any) => s.sessionOrderByAccount)
+    React.useEffect(() => { for (const w of workspaces) {
+      const ids = w.sessionIds.filter((id: string) => byId[id] !== undefined)
+      const previous = stored[w.workspaceId]
+      if (!previous || previous.length !== ids.length || previous.some((id: string, i: number) => id !== ids[i])) sync(w.workspaceId, ids)
+    } }, [workspaces, byId, stored])
+    for (const w of workspaces) seen[w.workspaceId] = stored[w.workspaceId] ?? []
+    return <>{workspaces.map((w: any) => <i key={w.workspaceId}>{w.title}</i>)}</>
+  }
+  const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+  const Wrapped = extendSessionMenu(Browser, catalog.useWorkspaces)
+  const root = createRoot(document.createElement('div'))
+  try {
+    await act(async () => { root.render(<Wrapped useStore={useStore} useSessions={useSessions} />) })
+    expect(errors.mock.calls.flat().join(' ')).not.toMatch(/same key/)
+    expect(writes.count).toBeLessThanOrEqual(3)
+    // Every sidebar row reads an account holding exactly its own sessions.
+    const rows = source.getSnapshot().items
+    expect(new Set(rows.map(row => row.workspaceId)).size).toBe(rows.length)
+    for (const row of rows) expect(seen[row.workspaceId]).toEqual(row.sessionIds)
+    expect(rows.map(row => row.sessionIds.join()).sort()).toEqual(['a1,a2', 'b1', 'native'])
+  } finally { root.unmount(); errors.mockRestore(); dispose() }
+})

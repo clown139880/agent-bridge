@@ -18,6 +18,8 @@ type Rpc = (operation: string, args?: Record<string, string | string[]>) => Prom
 
 const EMPTY_SNAPSHOT: WorkspaceSnapshot = { items: [], archivedSessionIds: [] }
 const EMPTY_WORKSPACES: Source<WorkspaceSnapshot> = { getSnapshot: () => EMPTY_SNAPSHOT, subscribe: () => () => {} }
+/** Sidebar id of a server group that shares its physical workspace with another group. */
+const SPLIT_GROUP_PREFIX = 'agent-bridge-group:'
 
 const canonicalPath =(value: string) => value.replace(/\\/g, '/').replace(/\/$/, '').toLocaleLowerCase()
 
@@ -49,7 +51,11 @@ export function mergeWorkspaces(rows: readonly WorkspaceRow[], catalog: readonly
   const activity = new Map<WorkspaceRow, number>()
   const updatedAt = (id: string) => sessionActivity(id, entries, sessions)
   const newestFirst = (left: string, right: string) => updatedAt(right) - updatedAt(left)
-  for (const members of groups.values()) {
+  // Rows are assigned in a stable group order, never the activity-ranked catalog
+  // order: which group fuses a shared directory's native sessions and which ids
+  // it shows must not flip each time another group becomes the most recent.
+  const assigned = new Map<string, { owner: WorkspaceRow; members: NativeEntry[]; sessionIds: string[]; latest: number }>()
+  for (const [groupId, members] of [...groups].sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)) {
     const ids = new Set(members.map(entry => entry.nativeId))
     const localPaths = new Set(members.flatMap(entry => entry.executionLocations).filter(location => location.local).map(location => canonicalPath(location.workspace)))
     const bridgeRows = rows.filter(row => row.sessionIds.some(id => ids.has(id)) || members.some(entry => entry.presentationPath === row.path))
@@ -63,15 +69,37 @@ export function mergeWorkspaces(rows: readonly WorkspaceRow[], catalog: readonly
     // One clock for every member: never trust the arrival order, which can lag
     // behind the activity it was derived from. The sort is stable for ties.
     const sessionIds = [...members.map(entry => entry.nativeId), ...nativeIds].sort(newestFirst)
-    const latest = Math.max(...sessionIds.map(updatedAt))
-    // Separate server groups may share one physical presentation workspace.
-    // Their editable order accounts and React keys must still be distinct.
-    const workspaceId = result.some(row => row.workspaceId === owner.workspaceId)
-      ? `agent-bridge-group:${members[0]!.groupId}` : owner.workspaceId
-    const merged = { ...owner, workspaceId, ...(workspaceId === owner.workspaceId ? {} : { sourceWorkspaceId: owner.workspaceId }), title: members[0]!.groupTitle, sessionIds,
-      updatedAt: Number.isFinite(latest) ? new Date(latest).toISOString() : owner.updatedAt }
+    assigned.set(groupId, { owner, members, sessionIds, latest: Math.max(...sessionIds.map(updatedAt)) })
+  }
+  const owners = new Map<string, number>()
+  for (const { owner } of assigned.values()) owners.set(owner.workspaceId, (owners.get(owner.workspaceId) ?? 0) + 1)
+  // Emitted in catalog order so equal activity keeps the server's order.
+  for (const groupId of groups.keys()) {
+    if (!assigned.has(groupId)) continue
+    const { owner, members, sessionIds, latest } = assigned.get(groupId)!
+    // Separate server groups may share one physical workspace. Each needs its own
+    // order account and React key, and none may borrow the physical id: whichever
+    // did would hand it, its persisted order and its view state to the others.
+    const shared = owners.get(owner.workspaceId)! > 1
+    const merged = { ...owner, ...(shared ? { workspaceId: `${SPLIT_GROUP_PREFIX}${members[0]!.groupId}`, sourceWorkspaceId: owner.workspaceId } : {}),
+      title: members[0]!.groupTitle, sessionIds, updatedAt: Number.isFinite(latest) ? new Date(latest).toISOString() : owner.updatedAt }
     result.push(merged)
     activity.set(merged, latest)
+  }
+  // A real local directory whose Bridge sessions belong to different groups fuses
+  // its native DSH sessions into none of them; they keep their own row (and the
+  // physical id) instead of vanishing with the consumed row. Presentation folders
+  // are not local directories, so their stale native blanks stay hidden.
+  const placed = new Set(result.flatMap(row => row.sessionIds))
+  const localDirectories = new Set(catalog.flatMap(entry => entry.executionLocations).filter(location => location.local).map(location => canonicalPath(location.workspace)))
+  for (const source of rows.filter(row => consumed.has(row) && localDirectories.has(canonicalPath(row.path)))) {
+    const native = source.sessionIds.filter(id => !entries.has(id) && !isBridgeId(id) && !placed.has(id))
+    if (!native.length) continue
+    for (const id of native) placed.add(id)
+    const row = { ...source, sessionIds: sessions.byId ? native.sort(newestFirst) : native }
+    result.push(row)
+    const latest = Math.max(...native.map(updatedAt))
+    if (Number.isFinite(latest)) activity.set(row, latest)
   }
   for (const source of rows.filter(row => !consumed.has(row) && !row.sessionIds.some(id => entries.has(id)))) {
     const row = source.sessionIds.some(isBridgeId) ? { ...source, sessionIds: source.sessionIds.filter(id => !isBridgeId(id)) } : source
@@ -178,11 +206,24 @@ export class NativeCatalog {
       const merged = projected().items.find(row => row.workspaceId === id)
       return original.call(source).items.filter(row => row.workspaceId === id || row.sessionIds.some(session => merged?.sessionIds.includes(session)))
     }
-    workspaces.rename = async (id, title) => { let result: unknown; for (const row of originals(id)) result = await rename.call(workspaces, row.workspaceId, title); return result }
+    // A physical row another sidebar row still shows (as its own source, or by
+    // listing its sessions) belongs to that row too: never rename or delete it
+    // on behalf of just one of them.
+    const exclusive = (id: string) => {
+      const others = projected().items.filter(row => row.workspaceId !== id)
+      return originals(id).filter(row => !others.some(other => (other.sourceWorkspaceId ?? other.workspaceId) === row.workspaceId
+        || other.sessionIds.some(session => row.sessionIds.includes(session))))
+    }
+    workspaces.rename = async (id, title) => {
+      const rows = exclusive(id)
+      if (!rows.length && originals(id).length) throw new Error('该分组与其他分组共用同一目录，不能单独重命名')
+      let result: unknown; for (const row of rows) result = await rename.call(workspaces, row.workspaceId, title); return result
+    }
     workspaces.delete = async id => {
       const merged = projected().items.find(row => row.workspaceId === id)
-      const physicalRows = originals(id)
+      const physicalRows = exclusive(id)
       const nativeIds = merged?.sessionIds.filter(session => this.entries.some(entry => entry.nativeId === session)) ?? []
+      if (!nativeIds.length && !physicalRows.length && originals(id).length) throw new Error('该目录仍被其他分组使用，不能单独删除')
       if (nativeIds.length) {
         const result = await this.rpc('delete_native_workspace', { nativeIds }) as { deleted?: boolean }
         if (!result.deleted) throw new Error('尚未确认工作区内的 Bridge 会话已删除')

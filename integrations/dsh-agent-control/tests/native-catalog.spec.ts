@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { mergeWorkspaces, NativeCatalog, sourceLabel, type NativeEntry, type WorkspaceRow } from '../src/client/native-catalog.js'
 import { promptTitle } from '../src/agent-bridge-provider/import-target.js'
 import type { NativeEvent } from '../src/agent-bridge-provider/dsh-compat.js'
@@ -20,6 +20,52 @@ describe('native catalog', () => {
     const merged = mergeWorkspaces([row], [entry('one', 'hal', '/one'), entry('two', 'hal', '/two')])
     expect(new Set(merged.map(item => item.workspaceId)).size).toBe(2)
     expect(merged.map(item => item.sessionIds)).toEqual([['one'], ['two']])
+  })
+  it('gives groups sharing one physical workspace ids that do not depend on which is most active', () => {
+    const local = { ...workspace('local'), path: 'C:\\repo', sessionIds: ['a', 'b', 'session-native'] }
+    const group = (id: string, identity: string, at: number) => {
+      const item = entry(id, 'windows', local.path, 0, identity, at); item.executionLocations[0]!.local = true; return item
+    }
+    const rowsBySessions = (catalog: NativeEntry[]) => new Map(mergeWorkspaces([local], catalog).map(row => [row.sessionIds.join(), row]))
+    const oneFirst = rowsBySessions([group('a', 'one', 200), group('b', 'two', 100)])
+    const twoFirst = rowsBySessions([group('b', 'two', 300), group('a', 'one', 200)])
+    // Each group shows only its own sessions; the native session keeps the physical row and id.
+    expect([...oneFirst.keys()].sort()).toEqual(['a', 'b', 'session-native'])
+    expect([...twoFirst.keys()].sort()).toEqual([...oneFirst.keys()].sort())
+    expect(oneFirst.get('session-native')?.workspaceId).toBe('local')
+    for (const [sessions, row] of oneFirst) expect(twoFirst.get(sessions)?.workspaceId).toBe(row.workspaceId)
+    for (const key of ['a', 'b']) {
+      expect(oneFirst.get(key)?.workspaceId).not.toBe('local')
+      expect(oneFirst.get(key)?.sourceWorkspaceId).toBe('local')
+    }
+    expect(new Set([...oneFirst.values()].map(row => row.workspaceId)).size).toBe(3)
+  })
+  it('deletes or renames one split group without touching the physical workspace the other group shows', async () => {
+    const local = { ...workspace('local'), path: 'C:\\repo', sessionIds: ['a', 'b', 'session-native'] }
+    const snapshot = { items: [local], archivedSessionIds: [] as string[] }
+    const source = { getSnapshot: () => snapshot, subscribe: () => () => {} }
+    const catalogRows = [entry('a', 'windows', local.path, 0, 'one', 200), entry('b', 'windows', local.path, 0, 'two', 100)]
+    for (const item of catalogRows) item.executionLocations[0]!.local = true
+    const calls: string[] = []
+    const rpc = async (operation: string, args?: Record<string, string | string[]>) => {
+      if (operation === 'native_catalog') return { sessions: catalogRows }
+      calls.push(operation + ':' + JSON.stringify(args)); return { deleted: true }
+    }
+    const catalog = new NativeCatalog(rpc, { list: { getSnapshot: () => ({}), subscribe: () => () => {} }, clear: () => {}, refresh: async () => {} })
+    await catalog.refresh()
+    const rename = vi.fn(async (_id: string, _title: string) => {}), remove = vi.fn(async (_id: string) => {})
+    const workspaces = { list: source, rename, delete: remove, async insertSessionBefore() {} }
+    const dispose = catalog.install(workspaces)
+    const split = source.getSnapshot().items.find(row => row.sessionIds.includes('b') && !row.sessionIds.includes('a'))!
+    await expect(workspaces.rename(split.workspaceId, 'renamed')).rejects.toThrow()
+    expect(rename).not.toHaveBeenCalled()
+    // The physical row that keeps the native session is still both groups' source.
+    await expect(workspaces.delete('local')).rejects.toThrow()
+    expect(remove).not.toHaveBeenCalled()
+    await workspaces.delete(split.workspaceId)
+    expect(calls).toEqual(['delete_native_workspace:' + JSON.stringify({ nativeIds: ['b'] })])
+    expect(remove).not.toHaveBeenCalled()
+    dispose()
   })
   it('does not flash ungrouped Bridge workspaces before the first catalog fetch', () => {
     const bridgeOnly = { ...workspace('bridge'), sessionIds: ['agent-bridge-one', 'agent-bridge-two'] }
