@@ -742,7 +742,10 @@ export class AgentBridgeImportTarget {
       }
       if (!keep.path) continue
       this.presentationPlacements.set(key, keep.path)
-      if (inside(this.dataRoot, keep.path)) await keep.setTitle?.(str(group['title'], projectName(rows[0]!)))
+      // DSH persists every setTitle (new updatedAt, an upsert to each client) even
+      // when the title is the same; a live catalog reconciles every few seconds.
+      const title = str(group['title'], projectName(rows[0]!))
+      if (inside(this.dataRoot, keep.path) && keep.title !== title) await keep.setTitle?.(title)
       for (const workspace of members) {
         if (workspace === keep || !workspace.id || !workspace.path || !inside(this.dataRoot, workspace.path)) continue
         await registry.delete(workspace.id)

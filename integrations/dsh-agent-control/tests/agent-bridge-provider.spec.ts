@@ -608,6 +608,15 @@ describe('native session catalog', () => {
     expect((f.target.catalog()['sessions'] as JsonObject[]).every(item => String(item['presentationPath']).includes('groups'))).toBe(true)
     await f.target.refresh()
     expect(createWorkspace).toHaveBeenCalledTimes(1)
+    // A pass that changes nothing writes nothing: DSH persists and broadcasts every setTitle.
+    const project = registered[0]!
+    await f.target.refresh()
+    expect(project.setTitle).not.toHaveBeenCalled()
+    summaries.forEach((row, index) => { summaries[index] = { ...row, groupTitle: 'renamed' } })
+    await f.target.refresh()
+    expect(project.setTitle).toHaveBeenCalledExactlyOnceWith('renamed')
+    await f.target.refresh()
+    expect(project.setTitle).toHaveBeenCalledTimes(1)
     await f.target.dispose()
   })
   it('converges providers sharing one machine and path even without a project identity', async () => {
