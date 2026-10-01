@@ -270,6 +270,16 @@ export interface SessionEvent {
   payload: Record<string, unknown>; // type-specific; known payloads below
 }
 
+// Every agent (Codex, Claude Code, pi) keeps the same contract:
+// - eventId is unique per event for the session's lifetime, built from the agent's own
+//   ids (message uuid, tool call id, turn id) plus a position in the turn, never from
+//   text or a per-process counter. The store keeps one row per eventId; the Control
+//   Plane logs a warning when an id arrives again with different content.
+// - each assistant message of a turn is its own message.completed, tool calls report
+//   tool.started and then command.completed / file_change.completed / tool.completed,
+//   and progress marks thinking vs writing.
+// - exactly one terminal turn.* event per turn, when the agent has really finished;
+//   its summary is the turn's last assistant message.
 export interface MessageCompletedPayload {
   role: "user" | "assistant" | "system";
   text: string;

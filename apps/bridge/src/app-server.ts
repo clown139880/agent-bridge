@@ -86,6 +86,9 @@ interface ThreadItem {
   content?: Array<{ type?: string; text?: string }>;
 }
 
+/** App Server items that are tool calls other than a shell command or a patch. */
+const TOOL_ITEM_TYPES = new Set(["mcpToolCall", "dynamicToolCall", "webSearch", "imageView"]);
+
 interface PendingRequest {
   resolve(value: unknown): void;
   reject(error: Error): void;
@@ -931,6 +934,12 @@ export class CodexAppServerAdapter implements AgentAdapter {
           inputTokens:usage.total.inputTokens??0,outputTokens:usage.total.outputTokens??0,reasoningTokens:usage.total.reasoningOutputTokens??0},this.activeTurns.get(threadId));
       return;
     }
+    if (method === "item/started") {
+      const item = params.item as ThreadItem | undefined;
+      if (item) this.handleStartedItem(threadId, item,
+        typeof params.turnId === "string" ? params.turnId : this.activeTurns.get(threadId));
+      return;
+    }
     if (method === "item/completed") {
       const item = params.item as ThreadItem | undefined;
       if (item) this.handleCompletedItem(threadId, item,
@@ -1035,6 +1044,25 @@ export class CodexAppServerAdapter implements AgentAdapter {
     return true;
   }
 
+  /**
+   * The start of a tool call, or of thinking or writing, in the same events the
+   * Claude and pi adapters report, so a client can show the work while it runs.
+   */
+  private handleStartedItem(threadId: string, item: ThreadItem, turnId=this.activeTurns.get(threadId)): void {
+    if (!item.id || !this.threadsById.has(threadId)) return;
+    if (item.type === "reasoning" || item.type === "agentMessage") {
+      const phase = item.type === "reasoning" ? "thinking" : "writing";
+      this.emitSessionEvent("progress", threadId, `app-server:${threadId}:${item.id}:progress`,
+        { phase, summary: phase === "thinking" ? "Thinking" : "Writing a reply" }, turnId);
+      return;
+    }
+    const started = item.type === "commandExecution" ? { name: "shell", summary: `$ ${item.command ?? "command"}` }
+      : item.type === "fileChange" ? { name: "apply_patch", summary: "Editing files" }
+      : TOOL_ITEM_TYPES.has(item.type) ? { name: item.tool ?? item.type, summary: [item.server, item.tool ?? item.type].filter(Boolean).join(" · ") }
+      : undefined;
+    if (started) this.emitSessionEvent("tool.started", threadId, `app-server:${threadId}:${item.id}:tool-started`, started, turnId, item.id);
+  }
+
   private handleCompletedItem(threadId: string, item: ThreadItem, turnId=this.activeTurns.get(threadId)): void {
     const itemId=item.id??createHash("sha256").update(JSON.stringify(item)).digest("hex").slice(0,24);
     const text=item.text??item.content?.map(part=>part.text??"").join("\n").trim();
@@ -1062,6 +1090,12 @@ export class CodexAppServerAdapter implements AgentAdapter {
       this.emit({ type: "agent.progress", sessionId: threadId, timestamp: Date.now(), summary });
       this.emitSessionEvent("file_change.completed", threadId, `app-server:${threadId}:${itemId}:file-change`,
         { changes: (item.changes ?? []).slice(0, 200), summary, truncated: (item.changes?.length ?? 0) > 200 }, turnId, itemId);
+    } else if (TOOL_ITEM_TYPES.has(item.type)) {
+      const name = item.tool ?? item.type;
+      const summary = [item.server, name].filter(Boolean).join(" · ");
+      this.appendLog(threadId, summary);
+      this.emitSessionEvent("tool.completed", threadId, `app-server:${threadId}:${itemId}:tool`,
+        { name, summary, status: item.status === "failed" || item.error ? "failed" : "completed" }, turnId, itemId);
     }
   }
 

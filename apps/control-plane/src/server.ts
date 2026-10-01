@@ -733,6 +733,11 @@ export class ControlPlane {
           eventId: message.eventId === `claude:${oldId}:first:user` ? `claude:${canonical.id}:first:user` : message.eventId };
       }
       const inserted = this.controlStore.appendSessionEvent(message);
+      if (inserted === false) {
+        const conflict = this.controlStore.duplicateEventConflict(message);
+        if (conflict) log.warn({ machineId, sessionId: message.sessionId, eventId: message.eventId, eventType: message.eventType,
+          turnId: message.turnId, ...conflict }, "Dropped a session event whose id is already stored with different content");
+      }
       const bridge = this.bridges.get(machineId);
       if (bridge) this.send(bridge.socket, { type: "archive.ack", eventId: message.eventId });
       // Only a first-seen event may drive the live activity state machine. The

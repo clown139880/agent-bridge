@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import { homedir } from "node:os";
@@ -123,6 +123,8 @@ interface ClaudeSession {
   activeTurnId?: string;
   turnStartedAt?: number;
   turnSeq: number;
+  /** Assistant text blocks seen in the active turn; names a block Claude gave no id. */
+  turnTextSeq: number;
   /** First-turn prompt was pushed before init; emit its turn-start events once discovered. */
   pendingTurnStart: boolean;
   lastTurnStatus?: "completed" | "failed" | "interrupted";
@@ -363,6 +365,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       input: new PushableAsyncIterable<SDKUserMessage>(),
       abort: new AbortController(),
       turnSeq: 0,
+      turnTextSeq: 0,
       pendingTurnStart: false,
       logs: [],
       toolUses: new Map(),
@@ -695,7 +698,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       } else if (block.type === "text" && block.text) {
         this.appendLog(session, block.text);
         this.emit({ type: "agent.output", sessionId: session.sessionId, timestamp: Date.now(), text: block.text });
-        this.emitSessionEvent(session, "message.completed", `claude:${session.sessionId}:${blockId(message, block, index)}:message`, {
+        this.emitSessionEvent(session, "message.completed", `claude:${session.sessionId}:${blockId(session, message, block, index)}:message`, {
           role: "assistant",
           text: truncate(block.text),
         });
@@ -802,6 +805,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     const turnId = `${session.sessionId}:t${++session.turnSeq}:${randomUUID()}`;
     session.activeTurnId = turnId;
     session.turnStartedAt = Date.now();
+    session.turnTextSeq = 0;
     session.settledAt = undefined;
     session.phase = undefined;
     this.appendLog(session, "Turn started");
@@ -1323,10 +1327,16 @@ function truncate(text: string, limit = 4_000): string {
  * stream message's uuid plus position names one, where a hash of the text would make
  * two identical replies (e.g. "Done.") collide and the second be dropped as a duplicate.
  */
-function blockId(message: SDKAssistantMessage, block: { id?: string; text?: string }, index: number): string {
+/**
+ * A text block's stable identity. Never derived from its text: two turns that
+ * say the same thing ("Done.") are two messages, and the event store keeps one
+ * row per id.
+ */
+function blockId(session: ClaudeSession, message: SDKAssistantMessage, block: { id?: string }, index: number): string {
+  session.turnTextSeq++;
   if (block.id) return block.id;
   if (typeof message.uuid === "string" && message.uuid) return `${message.uuid}:${index}`;
-  return createHash("sha256").update(block.text ?? "").digest("hex").slice(0, 24);
+  return `${session.activeTurnId ?? randomUUID()}:text-${session.turnTextSeq}`;
 }
 
 function extractToolResultText(content: unknown): string {

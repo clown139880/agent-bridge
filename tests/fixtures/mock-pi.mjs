@@ -4,7 +4,8 @@
 // PiAdapter relies on. Configured via env so each test can assert on received
 // commands and control the available-model catalog.
 import process from "node:process";
-import { appendFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 
 const LOG_PATH = process.env.PI_MOCK_LOG;
 const MODELS = JSON.parse(process.env.PI_MOCK_MODELS ?? '[]');
@@ -29,6 +30,18 @@ log(JSON.stringify({ type: "launch", provider, model: modelId, ...(session ? { s
 if (session && session === process.env.PI_MOCK_MISSING_SESSION) {
   process.stderr.write(`No session found matching '${session}'\n`);
   process.exit(0);
+}
+// PI_MOCK_STORE=<dir>: sessions live on disk like pi's own, so a new process
+// given --session continues the conversation and a fresh one starts a new uuid.
+const STORE = process.env.PI_MOCK_STORE;
+let history = [];
+if (STORE) {
+  if (session && !existsSync(`${STORE}/${session}.json`)) {
+    process.stderr.write(`No session found matching '${session}'\n`);
+    process.exit(0);
+  }
+  if (session) history = JSON.parse(readFileSync(`${STORE}/${session}.json`, "utf8"));
+  else session = randomUUID();
 }
 function out(obj) {
   process.stdout.write(JSON.stringify(obj) + "\n");
@@ -78,6 +91,9 @@ function handleLine(raw) {
     case "steer":
     case "follow_up": {
       respond(command.type, {});
+      // PI_MOCK_SCRIPT=multi: one prompt as pi really runs it — several model
+      // responses per agent run, each its own turn_start/turn_end, tools between.
+      if (process.env.PI_MOCK_SCRIPT === "multi") { runMulti(command); break; }
       out({ type: "turn_start" });
       const err = process.env.PI_MOCK_ERROR;
       if (err) {
@@ -95,4 +111,34 @@ function handleLine(raw) {
     default:
       respond(command.type, {});
   }
+}
+
+function runMulti(command) {
+  const earlier = history.at(-1);
+  history.push(command.message);
+  if (STORE) writeFileSync(`${STORE}/${session}.json`, JSON.stringify(history));
+  const images = command.images?.length ? ` with ${command.images.length} image(s)` : "";
+  out({ type: "agent_start" });
+  out({ type: "turn_start" });
+  out({ type: "message_update", assistantMessageEvent: { type: "thinking_start", contentIndex: 0 } });
+  out({ type: "message_update", assistantMessageEvent: { type: "text_start", contentIndex: 1 } });
+  out({ type: "message_end", message: { role: "assistant", stopReason: "toolUse", content: [
+    { type: "thinking", thinking: "plan" }, { type: "text", text: `Looking into "${command.message}"${images}.` },
+    { type: "toolCall", id: "call_0", name: "bash", arguments: { command: "ls" } }] } });
+  out({ type: "tool_execution_start", toolCallId: "call_0", toolName: "bash", args: { command: "ls" } });
+  out({ type: "tool_execution_end", toolCallId: "call_0", toolName: "bash", result: { content: [{ type: "text", text: "a.ts" }] }, isError: false });
+  out({ type: "turn_end", message: {}, toolResults: [] });
+  out({ type: "turn_start" });
+  out({ type: "message_end", message: { role: "assistant", stopReason: "toolUse", content: [
+    { type: "text", text: "Editing it." }, { type: "toolCall", id: "call_0", name: "edit", arguments: { path: "a.ts" } }] } });
+  out({ type: "tool_execution_start", toolCallId: "call_0", toolName: "edit", args: { path: "a.ts" } });
+  out({ type: "tool_execution_end", toolCallId: "call_0", toolName: "edit", result: { content: [{ type: "text", text: "ok" }] }, isError: false });
+  out({ type: "turn_end", message: {}, toolResults: [] });
+  out({ type: "turn_start" });
+  out({ type: "message_update", assistantMessageEvent: { type: "text_start", contentIndex: 0 } });
+  out({ type: "message_end", message: { role: "assistant", stopReason: "stop", content: [
+    { type: "text", text: `Done with "${command.message}". Before that you asked: ${earlier ? `"${earlier}"` : "nothing"}.` }] } });
+  out({ type: "turn_end", message: {}, toolResults: [] });
+  out({ type: "agent_end", messages: [] });
+  out({ type: "agent_settled" });
 }

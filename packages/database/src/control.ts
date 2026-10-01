@@ -293,6 +293,22 @@ export class AgentControlStore {
     });
   }
 
+  /**
+   * Whether an event the store refused as a duplicate repeats the stored row or
+   * reuses its id for different content. A replay (missed ack, reconnect) is
+   * harmless; a reused id means its producer named two events alike and the
+   * second was dropped.
+   */
+  duplicateEventConflict(message: StructuredSessionEventMessage): { storedType: string; storedTurnId: string | null } | undefined {
+    const row = this.db.prepare("SELECT type,turn_id,body FROM events WHERE session_id=? AND event_id=?")
+      .get(message.sessionId, message.eventId) as { type: string; turn_id: string | null; body: unknown } | undefined;
+    if (!row) return undefined;
+    const payload = message.payload && typeof message.payload === "object" && !Array.isArray(message.payload) ? message.payload : {};
+    const same = row.type === message.eventType && (row.turn_id ?? null) === (message.turnId ?? null)
+      && JSON.stringify(decodeEventBody(row.body)) === JSON.stringify(payload);
+    return same ? undefined : { storedType: row.type, storedTurnId: row.turn_id };
+  }
+
   /** Store one upstream event, once. Returns the new event id, or false for a replayed or unwanted event. */
   appendSessionEvent(message: StructuredSessionEventMessage): number | false {
     if (this.isSessionDeleted(message.sessionId)) return false;

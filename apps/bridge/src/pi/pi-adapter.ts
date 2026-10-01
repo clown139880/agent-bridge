@@ -6,11 +6,12 @@ import pino from "pino";
 import type {
   ApprovalChoice,
   AttachmentRef,
+  ProgressPhase,
   SessionState,
   StructuredSessionEventType,
 } from "@agent-bridge/protocol";
 import type { AgentAdapter, AdapterEmit, ResumeTarget } from "../agent-adapter.js";
-import type { AttachmentFetcher } from "../attachments.js";
+import type { AttachmentFetcher, FetchedAttachment } from "../attachments.js";
 import { resolveProjectPath, summarizePrompt } from "../app-server.js";
 import { deriveProjectIdentity } from "../path-utils.js";
 
@@ -53,7 +54,16 @@ interface PiSession {
   pendingTurnStart: boolean;
   lastTurnStatus?: "completed" | "failed" | "interrupted";
   logs: string[];
-  assistantBuffer: string[];
+  /** Assistant messages finished in the active turn; names each one in its event id. */
+  turnMessageSeq: number;
+  /** Text of the active turn's latest assistant message: the turn's answer. */
+  lastAssistantText?: string;
+  /** What the model was last reported producing in the active turn. */
+  phase?: ProgressPhase;
+  /** Tool calls running in the active turn, by pi toolCallId; `key` names the call in event ids. */
+  toolCalls: Map<string, { name: string; args: Record<string, unknown>; key: string }>;
+  /** Calls started in the active turn, to tell apart a toolCallId a provider reuses ("call_0"). */
+  toolCallCount: number;
   /** stopReason of the most recent assistant message, used to detect settled-failure. */
   lastAssistantStopReason?: string;
   /** errorMessage of the most recent assistant message (set when stopReason is "error"). */
@@ -111,10 +121,11 @@ export class PiAdapter implements AgentAdapter {
 
   // ---- session lifecycle -------------------------------------------------
 
-  async startSession(requestId: string, projectPath: string, prompt?: string, resume?: ResumeTarget, model?: string, _attachments?: AttachmentRef[]): Promise<string> {
+  async startSession(requestId: string, projectPath: string, prompt?: string, resume?: ResumeTarget, model?: string, attachments?: AttachmentRef[]): Promise<string> {
+    const images = await this.materialize(attachments);
     if (!resume) {
       const publicSessionId = `pi-${randomUUID()}`;
-      await this.launch({ publicSessionId, requestId, projectPath, prompt, model });
+      await this.launch({ publicSessionId, requestId, projectPath, prompt, model, images });
       return publicSessionId;
     }
     // Continue under the public id, resuming pi's own session uuid.
@@ -131,7 +142,7 @@ export class PiAdapter implements AgentAdapter {
       this.kill(held);
       this.sessions.delete(held.sessionId);
     }
-    await this.launch({ publicSessionId: resume.sessionId, requestId, projectPath, prompt, resumeNativeId, model });
+    await this.launch({ publicSessionId: resume.sessionId, requestId, projectPath, prompt, resumeNativeId, model, images });
     return resume.sessionId;
   }
 
@@ -140,8 +151,8 @@ export class PiAdapter implements AgentAdapter {
     await this.launch({ publicSessionId: sessionId, requestId: sessionId, projectPath, resumeNativeId: piResumeId(nativeSessionId), model });
   }
 
-  private async launch(params: { publicSessionId: string; requestId: string; projectPath: string; prompt?: string; resumeNativeId?: string; model?: string }): Promise<string> {
-    const { publicSessionId: sessionId, requestId, projectPath, prompt, resumeNativeId, model } = params;
+  private async launch(params: { publicSessionId: string; requestId: string; projectPath: string; prompt?: string; resumeNativeId?: string; model?: string; images?: FetchedAttachment[] }): Promise<string> {
+    const { publicSessionId: sessionId, requestId, projectPath, prompt, resumeNativeId, model, images } = params;
     const cwd = await resolveProjectPath(projectPath, this.options.allowedRoots);
 
     const args = ["--mode", "rpc"];
@@ -184,7 +195,9 @@ export class PiAdapter implements AgentAdapter {
       turnSeq: 0,
       pendingTurnStart: false,
       logs: [],
-      assistantBuffer: [],
+      turnMessageSeq: 0,
+      toolCalls: new Map(),
+      toolCallCount: 0,
       ended: false,
     };
     this.sessions.set(sessionId, session);
@@ -219,7 +232,7 @@ export class PiAdapter implements AgentAdapter {
     }
 
     if (prompt) {
-      this.beginTurn(session, prompt);
+      this.beginTurn(session, prompt, undefined, images);
       this.emitSessionEvent(session, "message.completed", `pi:${sessionId}:first:user`, { role: "user", text: summarizePrompt(prompt, 4000) ?? "" });
     }
     return sessionId;
@@ -274,11 +287,18 @@ export class PiAdapter implements AgentAdapter {
       case "turn_start":
         this.ensureTurnStarted(session);
         break;
+      case "message_update":
+        this.handleMessageUpdate(session, event);
+        break;
       case "message_end":
         this.handleMessageEnd(session, event);
         break;
       case "turn_end":
-        this.handleTurnEnd(session, event);
+        // A pi "turn" is one model response and its tool calls; the Bridge turn
+        // ends only when the agent settles.
+        break;
+      case "tool_execution_start":
+        this.handleToolStart(session, event);
         break;
       case "agent_settled":
         this.handleSettled(session);
@@ -356,21 +376,30 @@ export class PiAdapter implements AgentAdapter {
     const text = extractText(content);
     if (!text) return;
     this.appendLog(session, text);
-    session.assistantBuffer.push(text);
+    session.lastAssistantText = text;
     this.emit({ type: "agent.output", sessionId: session.sessionId, timestamp: Date.now(), text });
-    this.emitSessionEvent(session, "message.completed", `pi:${session.sessionId}:${session.turnSeq}:assistant`, {
-      role: "assistant",
-      text: truncate(text),
-    });
+    // One turn holds many assistant messages (one per model response); each is
+    // its own row, named by the turn's unique id and its place in the turn.
+    this.emitSessionEvent(session, "message.completed",
+      `pi:${session.sessionId}:${session.activeTurnId ?? randomUUID()}:m${++session.turnMessageSeq}:assistant`, {
+        role: "assistant",
+        text: truncate(text),
+      });
   }
 
-  private handleTurnEnd(session: PiSession, event: Record<string, unknown>): void {
-    this.emitSessionEvent(session, "turn.completed", `pi:${session.sessionId}:${session.turnSeq}:turn-end`, { status: "completed" });
+  /** Report each switch between thinking and writing, like the Claude adapter's `progress`. */
+  private handleMessageUpdate(session: PiSession, event: Record<string, unknown>): void {
+    const kind = (event.assistantMessageEvent as { type?: string } | undefined)?.type;
+    const phase: ProgressPhase | undefined = kind === "thinking_start" ? "thinking" : kind === "text_start" ? "writing" : undefined;
+    if (!phase || phase === session.phase || !session.activeTurnId) return;
+    session.phase = phase;
+    this.emitSessionEvent(session, "progress", `pi:${session.sessionId}:${session.activeTurnId}:progress:${randomUUID()}`,
+      { phase, summary: phase === "thinking" ? "Thinking" : "Writing a reply" });
   }
 
   private handleSettled(session: PiSession): void {
     if (session.activeTurnId) {
-      const text = session.assistantBuffer.join("");
+      const text = session.lastAssistantText ?? "";
       const error = session.lastAssistantError;
       const failed = session.lastAssistantStopReason === "error" || Boolean(error);
       if (failed) {
@@ -381,21 +410,54 @@ export class PiAdapter implements AgentAdapter {
         this.finishTurn(session, "completed", text ? truncate(text) : undefined);
       }
     }
-    session.assistantBuffer = [];
     session.lastAssistantStopReason = undefined;
     session.lastAssistantError = undefined;
   }
 
+  private handleToolStart(session: PiSession, event: Record<string, unknown>): void {
+    const callId = String(event.toolCallId ?? randomUUID());
+    const name = (event.toolName as string | undefined) ?? "tool";
+    const args = (event.args && typeof event.args === "object" ? event.args : {}) as Record<string, unknown>;
+    const key = `${callId}:${++session.toolCallCount}`;
+    session.toolCalls.set(callId, { name, args, key });
+    session.phase = undefined;
+    this.emitSessionEvent(session, "tool.started", `${this.toolEventPrefix(session, key)}:tool-started`,
+      { name, summary: piToolSummary(name, args) }, session.activeTurnId, key);
+  }
+
+  /** The tool's result in the same shape the Claude adapter reports: a command, a file change, or a tool. */
   private handleToolEnd(session: PiSession, event: Record<string, unknown>): void {
-    const toolName = (event.toolName as string | undefined) ?? "tool";
+    const callId = String(event.toolCallId ?? randomUUID());
+    const started = session.toolCalls.get(callId);
+    session.toolCalls.delete(callId);
+    const name = started?.name ?? (event.toolName as string | undefined) ?? "tool";
+    const args = started?.args ?? {};
     const result = (event.result as Record<string, unknown>) ?? {};
-    const resultContent = Array.isArray(result.content) ? extractContentText(result.content) : "";
-    const summary = `${toolName}${resultContent ? ` ${truncate(resultContent, 160)}` : ""}`;
-    this.appendLog(session, summary);
-    this.emitSessionEvent(session, "command.completed", `pi:${session.sessionId}:${event.toolCallId ?? session.turnSeq}:tool`, {
-      command: summary,
-      status: event.isError ? "failed" : "completed",
-    });
+    const output = Array.isArray(result.content) ? extractContentText(result.content) : "";
+    const status = event.isError ? "failed" : "completed";
+    const key = started?.key ?? `${callId}:${++session.toolCallCount}`;
+    const prefix = this.toolEventPrefix(session, key);
+    const summary = piToolSummary(name, args);
+    this.appendLog(session, `${summary}${output ? `\n${truncate(output, 160)}` : ""}`);
+    if (name === "bash") {
+      this.emitSessionEvent(session, "command.completed", `${prefix}:command`, {
+        command: String(args.command ?? "command"), cwd: session.cwd, status, exitCode: null, output: truncate(output),
+      }, session.activeTurnId, key);
+    } else if (FILE_CHANGE_TOOLS.has(name)) {
+      const path = String(args.path ?? args.file_path ?? "");
+      this.emitSessionEvent(session, "file_change.completed", `${prefix}:file-change`, {
+        changes: path ? [{ path }] : [], summary: path ? `Edited ${basename(path)}` : "File change applied", status,
+      }, session.activeTurnId, key);
+    } else {
+      this.emitSessionEvent(session, "tool.completed", `${prefix}:tool`, {
+        name, summary, status, ...(output ? { output: truncate(output, 2_000) } : {}),
+      }, session.activeTurnId, key);
+    }
+  }
+
+  /** Some providers number tool calls per response ("call_0"); the turn id and call count make the key unique. */
+  private toolEventPrefix(session: PiSession, key: string): string {
+    return `pi:${session.sessionId}:${session.activeTurnId ?? randomUUID()}:${key}`;
   }
 
   private ensureTurnStarted(session: PiSession): void {
@@ -428,11 +490,11 @@ export class PiAdapter implements AgentAdapter {
 
   // ---- turn management ---------------------------------------------------
 
-  private beginTurn(session: PiSession, text: string, model?: string): void {
+  private beginTurn(session: PiSession, text: string, model?: string, images?: FetchedAttachment[]): void {
     if (session.activeTurnId) {
       // Active turn: steer instead of starting a parallel prompt. Model cannot
       // change mid-turn, matching the control-plane model_not_applicable guard.
-      this.sendCommand(session, { type: "steer", message: text });
+      this.sendCommand(session, { type: "steer", message: text, ...piImages(images) });
       return;
     }
     this.applyModel(session, model);
@@ -441,7 +503,7 @@ export class PiAdapter implements AgentAdapter {
       // prompt still gets a turn id once get_state resolves.
       session.pendingTurnStart = true;
     }
-    this.sendCommand(session, { type: "prompt", message: text });
+    this.sendCommand(session, { type: "prompt", message: text, ...piImages(images) });
   }
 
   /**
@@ -473,6 +535,11 @@ export class PiAdapter implements AgentAdapter {
     session.activeTurnId = turnId;
     session.settledAt = undefined;
     session.pendingTurnStart = false;
+    session.turnMessageSeq = 0;
+    session.lastAssistantText = undefined;
+    session.phase = undefined;
+    session.toolCalls.clear();
+    session.toolCallCount = 0;
     this.appendLog(session, "Turn started");
     this.emit({ type: "agent.started", sessionId: session.sessionId, timestamp: Date.now(), summary: "New turn started" });
     this.emitSessionEvent(session, "turn.started", `pi:${session.sessionId}:${turnId}:started`, { status: "in_progress" }, turnId);
@@ -508,7 +575,7 @@ export class PiAdapter implements AgentAdapter {
     }
     if (session.ended) return;
     if (session.activeTurnId) {
-      const text = session.assistantBuffer.join("");
+      const text = session.lastAssistantText;
       this.finishTurn(session, "failed", text ? truncate(text) : "pi process exited before the turn settled");
     }
   }
@@ -529,12 +596,13 @@ export class PiAdapter implements AgentAdapter {
 
   // ---- AgentAdapter surface ----------------------------------------------
 
-  async input(sessionId: string, text: string, model?: string, _attachments?: AttachmentRef[]): Promise<void> {
-    this.beginTurn(this.require(sessionId), text, model);
+  async input(sessionId: string, text: string, model?: string, attachments?: AttachmentRef[]): Promise<void> {
+    const session = this.require(sessionId);
+    this.beginTurn(session, text, model, await this.materialize(attachments));
   }
 
-  async createSessionAction(actionId: string, projectPath: string, input?: string, model?: string, _attachments?: AttachmentRef[]): Promise<{ sessionId: string; turnId?: string }> {
-    const sessionId = await this.startSession(actionId, projectPath, input, undefined, model);
+  async createSessionAction(actionId: string, projectPath: string, input?: string, model?: string, attachments?: AttachmentRef[]): Promise<{ sessionId: string; turnId?: string }> {
+    const sessionId = await this.startSession(actionId, projectPath, input, undefined, model, attachments);
     return { sessionId, turnId: this.sessions.get(sessionId)?.activeTurnId };
   }
 
@@ -546,8 +614,9 @@ export class PiAdapter implements AgentAdapter {
     expectedTurnId?: string,
     model?: string,
     _reasoningEffort?: string,
-    _attachments?: AttachmentRef[],
+    attachments?: AttachmentRef[],
   ): Promise<{ sessionId: string; turnId?: string; resolvedAction: "steer" | "start_turn" }> {
+    const images = await this.materialize(attachments);
     const session = this.require(sessionId);
     const activeTurnId = session.activeTurnId;
     if (expectedTurnId && expectedTurnId !== activeTurnId) throw domainError("turn_changed", "active turn changed");
@@ -558,7 +627,7 @@ export class PiAdapter implements AgentAdapter {
     if (model) this.applyModel(session, model);
     if (!activeTurnId) this.startTurnEvents(session);
     const resolvedAction = activeTurnId ? "steer" : "start_turn";
-    this.sendCommand(session, { type: activeTurnId ? "steer" : "prompt", message: text });
+    this.sendCommand(session, { type: activeTurnId ? "steer" : "prompt", message: text, ...piImages(images) });
     this.emitSessionEvent(session, "message.completed", `pi:${sessionId}:action:${actionId}:user`, { role: "user", text: truncate(text) });
     return { sessionId, turnId: session.activeTurnId, resolvedAction };
   }
@@ -587,6 +656,16 @@ export class PiAdapter implements AgentAdapter {
       this.sessions.delete(sessionId);
     }
     return { sessionId };
+  }
+
+  /** Fetch the image attachments pi can read; other files stay with the control plane. */
+  private async materialize(attachments?: AttachmentRef[]): Promise<FetchedAttachment[]> {
+    if (!attachments?.length || !this.options.fetchAttachment) return [];
+    const fetched = await Promise.all(attachments.filter((ref) => ref.mimeType.toLowerCase().startsWith("image/")).map(async (ref) => {
+      try { return await this.options.fetchAttachment!(ref); }
+      catch (error) { log.warn({ error, id: ref.id }, "Unable to fetch attachment"); return undefined; }
+    }));
+    return fetched.filter((item): item is FetchedAttachment => Boolean(item));
   }
 
   async approve(_sessionId: string, _approvalId: string, _choice: ApprovalChoice): Promise<void> {
@@ -756,8 +835,8 @@ export class PiAdapter implements AgentAdapter {
     if (session.logs.length > LOG_LIMIT) session.logs.splice(0, session.logs.length - LOG_LIMIT);
   }
 
-  private emitSessionEvent(session: PiSession, eventType: StructuredSessionEventType, eventId: string, payload: Record<string, unknown>, turnId = session.activeTurnId): void {
-    this.emit({ type: "session.event", eventType, sessionId: session.sessionId, eventId, timestamp: Date.now(), turnId, payload });
+  private emitSessionEvent(session: PiSession, eventType: StructuredSessionEventType, eventId: string, payload: Record<string, unknown>, turnId = session.activeTurnId, itemId?: string): void {
+    this.emit({ type: "session.event", eventType, sessionId: session.sessionId, eventId, timestamp: Date.now(), turnId, ...(itemId ? { itemId } : {}), payload });
   }
 }
 
@@ -790,6 +869,21 @@ function extractContentText(content: unknown): string {
       .join("\n");
   }
   return "";
+}
+
+/** pi's built-in tools that write files. */
+const FILE_CHANGE_TOOLS = new Set(["edit", "write"]);
+
+/** One line naming what a pi tool call touches. */
+function piToolSummary(name: string, args: Record<string, unknown>): string {
+  if (name === "bash") return `$ ${String(args.command ?? "")}`;
+  const target = args.path ?? args.file_path ?? args.pattern ?? args.query;
+  return typeof target === "string" && target ? `${name} ${target}` : name;
+}
+
+/** pi's RPC `images` field: ImageContent blocks beside the prompt text. */
+function piImages(images?: FetchedAttachment[]): { images?: Array<{ type: "image"; data: string; mimeType: string }> } {
+  return images?.length ? { images: images.map((image) => ({ type: "image", data: image.base64, mimeType: image.mediaType })) } : {};
 }
 
 function truncate(text: string, limit = 4_000): string {
