@@ -223,6 +223,12 @@ export class AgentControlStore {
     return pending ? { type: `${pending.kind}.upserted`, sessionId: pending.sessionId, payload: this.pendingWire(pending) } : undefined;
   }
 
+  /** The Bridge version a machine last registered with. */
+  machineBridgeVersion(machineId: string): string | undefined {
+    const row = this.db.prepare("SELECT bridge_version FROM machines WHERE id=?").get(machineId) as { bridge_version: string | null } | undefined;
+    return row?.bridge_version ?? undefined;
+  }
+
   updateMachineConnection(machineId: string, bridgeVersion: string | undefined, protocolVersion: number | undefined,
     features: string[] | undefined, sharedSkills?: unknown[]): void {
     const now = Date.now();

@@ -8,7 +8,15 @@
 # session. Once up, the Control Plane sends its control_plane.up webhook (relayed to
 # the notification room) and advertises its version to the rest of the fleet.
 #
-# Usage: deploy/hal/deploy.sh [--force]   (--force restarts even when up to date)
+# An agent hosted by the HAL Bridge is continued afterwards: just before the
+# restart this leaves a post-deploy intent naming its session
+# (AGENT_BRIDGE_SESSION_ID, else CLAUDE_CODE_SESSION_ID), and once the Bridge
+# registers on the deployed version the Control Plane sends that session a turn
+# saying so, with the --note it left. That turn finishes the work and reports.
+#
+# Usage: deploy/hal/deploy.sh [--force] [--note TEXT]
+#   --force      restart even when up to date
+#   --note TEXT  what the continued session should verify or finish
 set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/../.." && pwd)
@@ -18,8 +26,18 @@ marker=${AGENT_BRIDGE_DEPLOYED_MARKER:-/var/lib/agent-bridge/deployed-commit}
 health_url=${AGENT_BRIDGE_HEALTH_URL:-http://127.0.0.1:8787/health}
 # Drop-in left by the retired release-symlink deploy; it pins the Bridge to /opt.
 legacy_dropins=(/etc/systemd/system/agent-bridge-hal.service.d/release.conf)
+intents=${AGENT_BRIDGE_POST_DEPLOY_DIR:-$(dirname "$marker")/post-deploy}
+bridge_env=/etc/agent-bridge/bridge.env
 force=false
-[ "${1:-}" = "--force" ] && force=true
+note=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --force) force=true ;;
+    --note) [ $# -ge 2 ] || { echo "[deploy] --note needs a value" >&2; exit 2; }; note=$2; shift ;;
+    *) echo "[deploy] unknown argument: $1" >&2; exit 2 ;;
+  esac
+  shift
+done
 
 log() { echo "[deploy] $*"; }
 die() { echo "[deploy] $*" >&2; exit 1; }
@@ -76,12 +94,33 @@ done
 version=$(node -p 'require("./package.json").version')
 mkdir -p "$(dirname "$marker")"
 echo "$target" > "$marker"
+
+# A caller hosted by the Bridge is terminated by the restart; it is continued by a
+# post-deploy turn instead. Anyone else waits for the services and reports.
+hosted=false
+grep -q "/agent-bridge-hal.service" /proc/self/cgroup && hosted=true
+if "$hosted"; then
+  session=${AGENT_BRIDGE_SESSION_ID:-}
+  native=${CLAUDE_CODE_SESSION_ID:-}
+  if [ -n "$session$native" ]; then
+    machine=$(sed -n 's/^MACHINE_ID=//p' "$bridge_env" 2>/dev/null | tail -n 1)
+    mkdir -p "$intents"
+    intent="$intents/$(date +%s)-$$.json"
+    SESSION="$session" NATIVE="$native" MACHINE="${machine:-$(hostname)}" VERSION="$version" COMMIT="$target" \
+      PREVIOUS="$previous" NOTE="$note" node -e '
+        const e = process.env, out = { machineId: e.MACHINE, version: e.VERSION, commit: e.COMMIT,
+          previousCommit: e.PREVIOUS, note: e.NOTE || undefined, createdAt: Date.now() };
+        if (e.SESSION) out.sessionId = e.SESSION; else out.nativeSessionId = e.NATIVE;
+        process.stdout.write(JSON.stringify(out));' > "$intent.tmp"
+    mv "$intent.tmp" "$intent"
+    log "this session (${session:-native $native}) is continued once ${machine:-the Bridge} runs $version"
+  else
+    log "no session id in the environment; nobody will be told when the deploy is up"
+  fi
+fi
 log "restarting ${units[*]} for $version ($target)"
 systemctl restart --no-block "${units[@]}"
-
-# A caller hosted by the Bridge is terminated by that restart; anyone else waits
-# for the services to come back and reports the outcome.
-grep -q "/agent-bridge-hal.service" /proc/self/cgroup && exit 0
+"$hosted" && exit 0
 for _ in $(seq 1 30); do
   sleep 2
   if systemctl is-active --quiet "${units[@]}" && curl -fsS --max-time 2 "$health_url" >/dev/null 2>&1; then

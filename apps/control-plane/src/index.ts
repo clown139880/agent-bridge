@@ -22,6 +22,7 @@ const matrix = config.matrixEnabled ? new MatrixGateway({
 }, callbacks) : new NoopMatrixGateway();
 control = new ControlPlane(store, matrix, {
   version: config.version,
+  postDeployDir: config.postDeployDir,
   host: config.host,
   port: config.port,
   bridgeToken: config.bridgeToken,

@@ -391,6 +391,8 @@ export class ClaudeCodeAdapter implements AgentAdapter {
         // Claude's own resumable id (native uuid), NOT the bridge public id.
         resume: resumeNativeId,
         model,
+        // Lets a tool the agent runs name its own Bridge session (deploy/hal/deploy.sh).
+        env: { AGENT_BRIDGE_SESSION_ID: sessionId },
         abort: session.abort.signal,
         // Native permission rules evaluated inside claude before canCallTool fires.
         // Only defined when configured so an unset deployment keeps default behavior.

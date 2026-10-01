@@ -156,6 +156,8 @@ export interface QueryOptions {
   customSystemPrompt?: string;
   cwd?: string;
   disallowedTools?: string[];
+  /** Added to the Bridge's own environment for the Claude process. */
+  env?: Record<string, string>;
   maxTurns?: number;
   mcpServers?: Record<string, unknown>;
   pathToClaudeCodeExecutable?: string;

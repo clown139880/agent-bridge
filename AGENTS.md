@@ -24,9 +24,10 @@
 
 ## HAL deployment
 
-- After the versioned commit is pushed, deploy HAL yourself by running `deploy/hal/deploy.sh` in `/root/agent-bridge`. Do not hand the deployment to Hermes/Dorothy or another agent, and do not open a kanban card for it.
-- The script fast-forwards to `origin/main`, compiles the services (`tsc -b`, no DSH plugin), installs the unit files and queues a `systemctl restart --no-block` of the Control Plane and HAL Bridge. systemd performs the restart, so it completes even when you run behind the HAL Bridge; your session ends with that restart and resumes afterwards. A failed build restores the previous commit and restarts nothing.
+- After the versioned commit is pushed, deploy HAL yourself by running `deploy/hal/deploy.sh --note "<what to verify or finish afterwards>"` in `/root/agent-bridge`. Do not hand the deployment to Hermes/Dorothy or another agent, and do not open a kanban card for it.
+- The script fast-forwards to `origin/main`, compiles the services (`tsc -b`, no DSH plugin), installs the unit files and queues a `systemctl restart --no-block` of the Control Plane and HAL Bridge. systemd performs the restart, so it completes even when you run behind the HAL Bridge. A failed build restores the previous commit and restarts nothing.
+- When you run behind the HAL Bridge, the restart ends your turn mid-task. Just before restarting, the script leaves a post-deploy intent for your session. Once the HAL Bridge registers on the deployed version, the Control Plane sends your session a `[post-deploy]` turn with the version, commit and your `--note`. Do everything that must happen after the deploy in that turn: verification, remaining steps, and the final report (it is a Kanban card's receipt). Write nothing you need to keep after the `deploy.sh` call in the interrupted turn.
 - Never edit `.env` to register a version: the Control Plane advertises its own `package.json` version. Never restart the services by hand, deploy with `deploy/hal/deploy-bridge.sh`, or enable Bridge auto-update on HAL.
-- Deployment is confirmed by the notification room message “🟢 控制面已启动 · 版本 <version>”. If the script reports a failure before the restart, report its output.
+- Deployment is confirmed by the notification room messages “🟢 控制面已启动 · 版本 <version>” and “🔄 更新完成：hal · <old> → <version>” (sent when the HAL Bridge registers on the new version). If the script reports a failure before the restart, report its output.
 - Never continue from a dirty HAL checkout, never stash, and never copy source into the checkout. Stop and investigate unexpected changes.
 - Keep SQLite data and secrets outside the Git checkout. Database backups must use SQLite's online backup mechanism and live outside the repository.

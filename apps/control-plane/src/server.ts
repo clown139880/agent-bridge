@@ -28,6 +28,8 @@ import { MAX_JSON_BODY_BYTES } from "./api/validation.js";
 import { BridgeRegistry, type BridgeConnection } from "./bridge-registry.js";
 import { WebhookNotifier, type WebhookOptions } from "./webhook.js";
 import { ConversationMcpServer } from "./memory-mcp.js";
+import { compareBridgeVersions } from "./bridge-version.js";
+import { PostDeployResumer } from "./post-deploy.js";
 
 const log = pino({ name: "control-plane" });
 
@@ -118,6 +120,9 @@ export class ControlPlane {
   private readonly launchesByRequestId = new Map<string, PendingLaunch & { machineId: string; projectPath: string }>();
   private readonly updateNotifications = new Set<string>();
   private readonly pendingRunLaunches = new Map<string, PendingRunLaunch>();
+  /** Bridge version this process already announced per machine, so a self-update's own report is not repeated. */
+  private readonly announcedBridgeVersions = new Map<string, string>();
+  private readonly postDeploy: PostDeployResumer;
   private roomId = "";
   private cleanupTimer?: NodeJS.Timeout;
 
@@ -125,6 +130,8 @@ export class ControlPlane {
     private readonly store: Store,
     private readonly matrix: ControlGateway,
     private readonly options: {
+      /** Where deploy/hal/deploy.sh leaves post-deploy intents (see PostDeployResumer). */
+      postDeployDir?: string;
       version?: string;
       host: string;
       port: number;
@@ -159,6 +166,20 @@ export class ControlPlane {
       sseKeepaliveMs: options.sse?.keepaliveMs ?? 15_000,
       ssePollMs: options.sse?.pollMs ?? 2_000, sseMaxBackpressure: options.sse?.maxBackpressure ?? 3,
       actionTimeoutMs: options.sse?.actionTimeoutMs ?? 30_000,
+    });
+    this.postDeploy = new PostDeployResumer(options.postDeployDir, {
+      resolveSession: (intent) => {
+        const session = (intent.sessionId ? this.store.getSession(intent.sessionId) : undefined)
+          ?? (intent.nativeSessionId ? this.store.getSessionByNative(intent.machineId, intent.nativeSessionId) : undefined);
+        return session ? { id: session.id, machineId: session.machineId } : undefined;
+      },
+      submitTurn: (sessionId, machineId, key, input) => {
+        const created = this.controlStore.createAction({ principal: "system:post-deploy", key, method: "POST",
+          path: `/api/v1/sessions/${sessionId}/turns`, body: { input, delivery: "auto" }, kind: "submit_turn", machineId, sessionId });
+        if (created.existing) return;
+        this.controlApi.actionsForBridge().dispatch(created.action, { type: "action.submit_turn", actionId: created.action.actionId,
+          sessionId, input, delivery: "auto", resume: this.resumeContext(sessionId) });
+      },
     });
     this.http = createServer((request, response) => {
       if (request.url === "/health") {
@@ -633,13 +654,22 @@ export class ControlPlane {
           id: registeredId, name: message.name || registeredId, platform: message.platform,
           hostname: message.hostname, capabilities: message.capabilities,
         });
+        const previousVersion = this.controlStore.machineBridgeVersion(registeredId);
         this.controlStore.updateMachineConnection(registeredId, message.bridgeVersion,
           message.protocolVersion, message.features, message.sharedSkills);
         this.send(socket, { type: "registered", machineId: registeredId });
         this.sendUpdateAnnouncement(socket);
         this.releasePendingRuns(registeredId);
         this.replayControlActions(registeredId);
+        this.postDeploy.bridgeRegistered(registeredId, message.bridgeVersion);
         log.info({ machineId: registeredId }, "Bridge registered");
+        // A Bridge deployed in place (HAL's deploy.sh) never reports a self-update;
+        // its first registration on a new version is the only sign it was updated.
+        if (previousVersion && message.bridgeVersion && previousVersion !== message.bridgeVersion) {
+          this.announcedBridgeVersions.set(registeredId, message.bridgeVersion);
+          this.webhook.notify({ type: "bridge_update.status", machine_id: registeredId, phase: "completed",
+            current_version: previousVersion, latest_version: message.bridgeVersion, updatable: true });
+        }
         // Operator-facing counterpart to bridge.offline: a bridge (re)connected. `needs_update`
         // and `latest_bridge_version` let Dorothy show whether this bridge will self-update.
         this.webhook.notify({
@@ -994,7 +1024,8 @@ export class ControlPlane {
     message: Extract<BridgeToControlMessage, { type: "bridge_update.status" }>,
   ): Promise<void> {
     // Relay operator-relevant update phases to Dorothy's bridge-events webhook.
-    if (["discovered", "completed", "failed", "rolled_back"].includes(message.phase)) {
+    const announced = message.phase === "completed" && this.announcedBridgeVersions.get(machineId) === message.currentVersion;
+    if (["discovered", "completed", "failed", "rolled_back"].includes(message.phase) && !announced) {
       this.webhook.notify({
         type: "bridge_update.status", machine_id: machineId, phase: message.phase,
         current_version: message.currentVersion, latest_version: message.latestVersion,
@@ -1368,22 +1399,6 @@ function statusIcon(status: string): string {
     working: "🔵", waiting: "🟡", blocked: "🔴", completed: "✅", failed: "❌", stopped: "⚫" } as Record<string, string>)[status] ?? "⚪";
 }
 
-function compareBridgeVersions(left: string, right: string): number {
-  const parse = (value: string): [number, number, number, string] => {
-    const match = value.trim().match(/^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/);
-    if (!match) return [-1, -1, -1, value];
-    return [Number(match[1]), Number(match[2]), Number(match[3]), match[4] ?? ""];
-  };
-  const a = parse(left);
-  const b = parse(right);
-  for (let index = 0; index < 3; index += 1) {
-    if (a[index] !== b[index]) return (a[index] as number) < (b[index] as number) ? -1 : 1;
-  }
-  if (a[3] === b[3]) return 0;
-  if (!a[3]) return 1;
-  if (!b[3]) return -1;
-  return a[3].localeCompare(b[3], undefined, { numeric: true });
-}
 
 function sessionMetadata(session: SessionRecord): Record<string, string> {
   return {

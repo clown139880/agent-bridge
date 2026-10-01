@@ -307,7 +307,7 @@ export function query(config: { prompt: QueryPrompt; options?: QueryOptions }): 
     cwd,
     stdio: ["pipe", "pipe", "pipe"],
     signal: config.options?.abort,
-    env: process.env,
+    env: { ...process.env, ...config.options?.env },
     shell: false,
   }) as ChildProcessWithoutNullStreams;
 

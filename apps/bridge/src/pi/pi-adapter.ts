@@ -177,7 +177,8 @@ export class PiAdapter implements AgentAdapter {
       if (title) args.push("--name", title);
     }
 
-    const proc = spawn(this.options.command, args, { cwd, stdio: ["pipe", "pipe", "pipe"], env: process.env });
+    // AGENT_BRIDGE_SESSION_ID lets a tool pi runs name its own Bridge session (deploy/hal/deploy.sh).
+    const proc = spawn(this.options.command, args, { cwd, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, AGENT_BRIDGE_SESSION_ID: sessionId } });
     const session: PiSession = {
       sessionId,
       nativeSessionId: resumeNativeId,

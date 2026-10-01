@@ -1,4 +1,5 @@
 import "dotenv/config";
+import { dirname, join } from "node:path";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
@@ -57,6 +58,8 @@ export const config = {
   matrixRoomName: process.env.MATRIX_ROOM_NAME ?? "Agent Control",
   matrixAllowedUserId: process.env.MATRIX_ALLOWED_USER_ID,
   databasePath,
+  // deploy/hal/deploy.sh writes post-deploy intents beside the database (outside the checkout).
+  postDeployDir: process.env.POST_DEPLOY_DIR ?? join(dirname(databasePath), "post-deploy"),
   host: process.env.CONTROL_HOST ?? "0.0.0.0",
   port: Number(process.env.CONTROL_PORT ?? "8787"),
   publicWsUrl: process.env.CONTROL_PUBLIC_WS_URL,
