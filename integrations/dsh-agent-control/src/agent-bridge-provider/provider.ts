@@ -6,7 +6,7 @@ import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { AgentControlService } from '../service.js'
 import { AgentBridgeLlmAdapter } from './adapter.js'
 import { AgentBridgeImportTarget } from './import-target.js'
-import { nativeHost, type NativeSession, type NativeEvent } from './dsh-compat.js'
+import { nativeHost } from './dsh-compat.js'
 import { ACK_EVENT, BINDING_EVENT, PROVIDER } from './mapping.js'
 
 // Retained plugin events must remain readable even during dependency reload.
@@ -33,12 +33,6 @@ export function registerAgentBridgeProvider(ctx: Context, service: AgentControlS
     }, { global: true, prepend: true })
     scoped.on('agent/created', ({ agent }: { agent: Agent }) => attach(agent), { global: true })
     scoped.on('agent/disposed', async ({ agent }: { agent: Agent }) => { adapter.detachAgent(agent.id) }, { global: true })
-    scoped.on('session/event', ((session: NativeSession, event: NativeEvent) => {
-      if (event.type === 'turn/end' && !target.isPresenting(session.id)) queueMicrotask(() => {
-        try { adapter.commitAcks(session.id) }
-        catch (error) { scoped.logger.warn('Bridge event acknowledgement: ' + String(error)) }
-      })
-    }) as never, { global: true })
     scoped.effect(() => {
       let disposed = false
       const ready = target.restoreLocalDeletions().then(() => target.ensurePreset()).then(() => { if (!disposed) target.start() }).catch(error => {

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Session, SessionId, SESSION_FORMAT_VERSION, KNOWN_SESSION_EVENT_TYPES, adoptSessionEvent } from '@deepseek-ai/dsh-session'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { JsonObject, JsonValue } from '../src/types.js'
 import { AgentBridgeImportTarget, nativeSessionId, readHistory } from '../src/agent-bridge-provider/import-target.js'
 import { ACK_EVENT, BINDING_EVENT, projectNativeEvents, projectStreamChunks, sameUserText } from '../src/agent-bridge-provider/mapping.js'
@@ -460,7 +460,6 @@ describe('native session catalog', () => {
     expect(f.bridge.call.mock.calls.some(([request]) => request.operation === 'submit_turn')).toBe(false)
     expect(chunks.filter(c => c.type === 'text-delta')).toEqual([{ type: 'text-delta', index: 0, text: 'done' }])
     expect(f.target.binding(draftId)?.['sessionId']).toBe('remote-new')
-    adapter.commitAcks(draftId)
 
     // The new remote session resolves to the draft, never to a second native session.
     await f.target.refresh()
@@ -675,21 +674,80 @@ describe('native session catalog', () => {
   })
 })
 
+/**
+ * DSH's session invariants (dsh-session `invariant.js`, identical in 0.1.5 and
+ * 0.1.7-rc.2 for these events): no turn inside a turn, and every message, call
+ * and result names the open turn and step, a result its prior call.
+ */
+function expectSessionInvariants(events: readonly NativeEvent[]): void {
+  // DSH_INVARIANT_DUMP=<dir> keeps each checked log for the real DSH validators.
+  if (process.env['DSH_INVARIANT_DUMP']) void writeFile(join(process.env['DSH_INVARIANT_DUMP'], expect.getState().currentTestName!.replace(/\W+/g, '-') + '-' + events.length + '.json'), JSON.stringify(events))
+  let openTurn: number | null = null
+  let openStep: number | null = null
+  let nextTurn = 1
+  let nextStep = 1
+  const pending = new Set<string>()
+  const where = (event: NativeEvent) => event.type + ' ' + JSON.stringify(event.data).slice(0, 80)
+  const inOpenStep = (event: NativeEvent) => expect(openTurn === event.data['turn'] && openStep === event.data['step'], 'outside the open step: ' + where(event)).toBe(true)
+  for (const event of events) {
+    switch (event.type) {
+      case 'turn/start':
+        expect(openTurn, 'turn inside a turn: ' + where(event)).toBeNull()
+        expect(event.data['turn']).toBe(nextTurn)
+        openTurn = Number(event.data['turn']); nextStep = 1; break
+      case 'turn/end':
+        expect(openTurn).toBe(event.data['turn']); expect(openStep).toBeNull()
+        openTurn = null; nextTurn++; break
+      case 'step/start':
+        expect(openTurn).toBe(event.data['turn']); expect(openStep).toBeNull(); expect(event.data['step']).toBe(nextStep)
+        openStep = Number(event.data['step']); break
+      case 'step/end':
+        inOpenStep(event); pending.clear(); openStep = null; nextStep++; break
+      case 'assistant/message': inOpenStep(event); break
+      case 'tool/call': inOpenStep(event); pending.add(String(event.data['callId'])); break
+      case 'tool/result': {
+        inOpenStep(event)
+        const callId = String(record(record(event.data['message'])['source'])['callId'])
+        expect(pending.has(callId), 'result without call: ' + callId).toBe(true)
+        pending.delete(callId); break
+      }
+    }
+  }
+}
+
+/**
+ * Run the adapter's stream the way DSH's agent loop does: open a turn and its
+ * step, append the prompt, stream, then append the streamed reply and close.
+ * `during` sees the log while the stream runs, after each remote poll.
+ */
+async function nativeTurn(agent: Agent, adapter: AgentBridgeLlmAdapter, options: Partial<GenerateOptions> & { text?: string } = {}) {
+  const session = nativeSession(agent)
+  const turn = sessionEvents(session).reduce((n, e) => Math.max(n, Number(e.data['turn']) || 0), 0) + 1
+  const prompt = { id: 'local-prompt-' + turn, role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: options.text ?? 'go' }] }
+  session.append('turn/start', { turn })
+  session.append('step/start', { turn, step: 1 })
+  session.append('user/message', prompt as never, { surfaceOp: 'append' })
+  const chunks: StreamChunk[] = []
+  let error: unknown
+  try {
+    for await (const chunk of adapter.stream({ sessionId: agent.id, provider: 'agent-bridge', model: 'remote', messages: [prompt], ...options } as GenerateOptions)) chunks.push(chunk)
+  } catch (caught) { error = caught }
+  const text = chunks.flatMap(c => c.type === 'text-delta' ? [c.text] : []).join('')
+  session.append('assistant/message', { turn, step: 1, message: { id: 'native-' + turn, role: 'assistant', source: { kind: 'model', provider: 'agent-bridge', model: 'remote' }, content: text ? [{ type: 'text', text }] : [] }, stream: [] }, { surfaceOp: 'append' })
+  session.append('step/end', { turn, step: 1 })
+  session.append('turn/end', { turn, reason: { kind: error ? 'error' : 'completed' } })
+  return { chunks, error }
+}
+const shown = (events: readonly NativeEvent[]) => events.flatMap(e => {
+  if (e.type === 'tool/call') return ['tool:' + String(e.data['callId'])]
+  if (e.type !== 'assistant/message') return []
+  const text = (record(e.data['message'])['content'] as JsonObject[]).map(block => str(block['text'])).join('')
+  return text ? ['text:' + text] : []
+})
+const str = (value: unknown) => typeof value === 'string' ? value : ''
+const record = (value: unknown): JsonObject => value && typeof value === 'object' && !Array.isArray(value) ? value as JsonObject : {}
+
 describe('Bridge native turn', () => {
-  it('commits pending acknowledgement batches in turn order', () => {
-    const finalizeNativeTurn = vi.fn()
-    const adapter = new AgentBridgeLlmAdapter({} as AgentControlService, { finalizeNativeTurn } as unknown as AgentBridgeImportTarget)
-    adapter.pendingAcks.set('native', [
-      { acknowledgements: [row('first')], presentations: [row('first-tool')] },
-      { acknowledgements: [row('second')], presentations: [row('second-tool')] },
-    ])
-    adapter.commitAcks('native')
-    adapter.commitAcks('native')
-    expect(finalizeNativeTurn.mock.calls.map(call => [call[1][0]['eventId'], call[2][0]['eventId']])).toEqual([
-      ['first', 'first-tool'], ['second', 'second-tool'],
-    ])
-    expect(adapter.pendingAcks.has('native')).toBe(false)
-  })
   it('uploads only current-message images through the native store and preserves repeated occurrences', async () => {
     const ref = {attachmentId:'sha256:fixture',mediaType:'image/png',name:'test.png'}
     const readImage = vi.fn(async () => ({ref,data:Buffer.from('image bytes')}))
@@ -721,29 +779,21 @@ describe('Bridge native turn', () => {
       return page([])
     })
     const adapter = new AgentBridgeLlmAdapter({ bridge: f.bridge } as unknown as AgentControlService, f.target, 1)
-    const chunks = []
-    for await (const chunk of adapter.stream({ sessionId: agent.id, provider: 'agent-bridge', model: 'remote',
-      messages: [{ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'go' }] }] } as GenerateOptions)) chunks.push(chunk)
+    const { chunks } = await nativeTurn(agent, adapter)
     expect(chunks.at(-1)?.type).toBe('finish')
-    expect(chunks.filter(c => c.type === 'text-delta')).toEqual([{ type: 'text-delta', index: 0, text: 'foreign' }])
-    expect(chunks.filter(c => c.type === 'block-start')).toEqual([
-      { type: 'block-start', index: 0, blockType: 'text' },
-      { type: 'block-start', index: 1, blockType: 'reasoning' }])
-    expect(chunks.filter(c => c.type === 'reasoning-delta')).toEqual([{ type: 'reasoning-delta', index: 1, text: '💻 pwd' }])
-    expect(chunks.filter(c => c.type === 'block-end').at(-1)).toEqual({ type: 'block-end', index: 1, block: { type: 'reasoning', text: '💻 pwd' } })
-    expect(chunks.some(c => c.type === 'tool-call-delta')).toBe(false)
-    adapter.commitAcks(String(agent.id))
-    expect(sessionEvents(nativeSession(agent)).some(e => e.data['eventId'] === 'foreign')).toBe(true)
+    // The turn ended on a tool: nothing is left for the stream, and no remote tool reaches the local loop.
+    expect(chunks.map(c => c.type)).toEqual(['finish'])
     const events = sessionEvents(nativeSession(agent))
-    expect(events.filter(e => e.type === 'tool/call')).toHaveLength(1)
+    expectSessionInvariants(events)
+    expect(shown(events)).toEqual(['text:foreign', 'tool:bridge:cmd'])
     expect(events.filter(e => e.type === 'tool/result')).toHaveLength(1)
-    expect(events.find(e => e.type === 'tool/call')?.data).toMatchObject({ name: 'agent-bridge:command', arguments: JSON.stringify({ command: 'pwd' }) })
+    expect(events.find(e => e.type === 'tool/call')?.data).toMatchObject({ step: 1, name: 'agent-bridge:command', arguments: JSON.stringify({ command: 'pwd' }) })
     expect(events.find(e => e.type === 'tool/result')?.data['message']).toMatchObject({ role: 'user', source: { kind: 'tool', callId: 'bridge:cmd' }, content: [{ type: 'tool-result', toolCallId: 'bridge:cmd', content: [{ type: 'text', text: '/repo' }] }] })
     expect(events.some(e => e.type === ACK_EVENT && e.data['eventId'] === 'cmd')).toBe(true)
-    expect(f.target.isPresenting(String(agent.id))).toBe(false)
+    expect(events.some(e => e.data['eventId'] === 'wrong')).toBe(false)
     await f.target.dispose()
   })
-  it('names each remote tool on one live progress line', () => {
+  it('names each remote tool on one line (activity and subagent cards)', () => {
     expect(toolProgressLine(row('c', 'command.completed', { command: 'pnpm build\n  && echo ok' }))).toBe('💻 pnpm build')
     expect(toolProgressLine(row('f', 'file_change.completed', { changes: [{ path: 'src/a.ts' }, { path: 'src/b.ts' }] }))).toBe('✏️ src/a.ts, src/b.ts')
     expect(toolProgressLine(row('x', 'command.completed', { command: 'false', status: 'failed' }))).toBe('❌ 💻 false')
@@ -751,7 +801,7 @@ describe('Bridge native turn', () => {
     expect(toolProgressLine(row('s', 'task.started', { kind: 'agent', subagentType: 'Explore', description: 'Map the repo' }))).toBe('🤖 子代理 Explore：Map the repo · 开始')
     expect(toolProgressLine(row('e', 'task.completed', { kind: 'bash', description: 'sleep 120', status: 'killed' }))).toBe('❌ 🤖 后台任务：sleep 120 · 已终止')
   })
-  it('keeps a subagent\'s steps out of the live progress block and lists them on its card', async () => {
+  it('shows a subagent as one card listing its steps, never as thinking', async () => {
     const f = await fixture([])
     const agent = await f.target.ensure(summary)
     let submitted = false
@@ -769,13 +819,11 @@ describe('Bridge native turn', () => {
       return page([])
     })
     const adapter = new AgentBridgeLlmAdapter({ bridge: f.bridge } as unknown as AgentControlService, f.target, 1)
-    const chunks = []
-    for await (const chunk of adapter.stream({ sessionId: agent.id, provider: 'agent-bridge', model: 'remote',
-      messages: [{ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'go' }] }] } as GenerateOptions)) chunks.push(chunk)
-    expect(chunks.filter(c => c.type === 'reasoning-delta').map(c => c.type === 'reasoning-delta' && c.text))
-      .toEqual(['🤖 子代理 Explore：Map the repo · 开始', '\n🤖 子代理 Explore：Map the repo · 完成'])
-    adapter.commitAcks(String(agent.id))
+    const { chunks } = await nativeTurn(agent, adapter)
+    expect(chunks.some(c => c.type.startsWith('reasoning'))).toBe(false)
+    expect(chunks.filter(c => c.type === 'text-delta')).toEqual([{ type: 'text-delta', index: 0, text: 'done' }])
     const events = sessionEvents(nativeSession(agent))
+    expectSessionInvariants(events)
     expect(events.filter(e => e.type === 'tool/call').map(e => e.data['name'])).toEqual(['subagent'])
     const result = JSON.stringify(events.find(e => e.type === 'tool/result')?.data['message'])
     expect(result).toContain('Found two modules')
@@ -798,18 +846,86 @@ describe('Bridge native turn', () => {
       return page([])
     })
     const adapter = new AgentBridgeLlmAdapter({ bridge: f.bridge } as unknown as AgentControlService, f.target, 1)
-    const chunks = []
-    for await (const chunk of adapter.stream({ sessionId: agent.id, provider: 'agent-bridge', model: 'remote',
-      messages: [{ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'go' }] }] } as GenerateOptions)) chunks.push(chunk)
-    expect(chunks.filter(c => c.type === 'text-delta')).toEqual([{ type: 'text-delta', index: 0, text: 'checking' }])
-    expect(chunks.filter(c => c.type === 'reasoning-delta').map(c => c.type === 'reasoning-delta' && c.text)).toEqual(['💻 pwd'])
-    adapter.commitAcks(String(agent.id))
+    const { chunks } = await nativeTurn(agent, adapter)
+    expect(chunks.filter(c => c.type === 'text-delta')).toEqual([{ type: 'text-delta', index: 0, text: 'done' }])
     const events = sessionEvents(nativeSession(agent))
-    const toolAt = events.findIndex(e => e.type === 'tool/call')
-    const answerAt = events.findIndex(e => e.type === 'assistant/message' && JSON.stringify(e.data['message']).includes('"done"'))
-    expect(toolAt).toBeGreaterThan(-1)
-    expect(answerAt).toBeGreaterThan(toolAt)
+    expectSessionInvariants(events)
+    expect(shown(events)).toEqual(['text:checking', 'tool:bridge:cmd', 'text:done'])
     await f.target.dispose()
+  })
+  it('shows each text and tool while the remote turn still runs, not when it ends', async () => {
+    const f = await fixture([])
+    const agent = await f.target.ensure(summary)
+    const batches = [
+      [row('plan', 'message.completed', { role: 'assistant', text: 'checking' }), row('cmd', 'command.completed', { command: 'pwd', output: '/repo' })],
+      [row('edit', 'file_change.completed', { changes: [{ path: 'a.ts' }] }), row('note', 'message.completed', { role: 'assistant', text: 'one more' })],
+      [row('grep', 'tool.completed', { name: 'Grep', summary: 'Grep foo' })],
+      [row('answer', 'message.completed', { role: 'assistant', text: 'done' }), row('end', 'turn.completed', { status: 'completed' })],
+    ]
+    let submitted = false
+    let poll = 0
+    const seenWhileRunning: string[][] = []
+    f.bridge.call.mockImplementation(async request => {
+      if (request.operation === 'session_events') {
+        if (!submitted) return page([])
+        seenWhileRunning.push(shown(sessionEvents(nativeSession(agent))))
+        return page(batches[poll++] ?? [])
+      }
+      if (request.operation === 'session') return { ...summary, status: 'active', activeTurnId: 't1' }
+      if (request.operation === 'submit_turn') { submitted = true; return { actionId: 'action', status: 'succeeded', turnId: 't1' } }
+      return page([])
+    })
+    const adapter = new AgentBridgeLlmAdapter({ bridge: f.bridge } as unknown as AgentControlService, f.target, 1)
+    await nativeTurn(agent, adapter)
+    // Each poll sees everything earlier polls returned; a trailing reply waits one poll for what follows it.
+    expect(seenWhileRunning.slice(0, 4)).toEqual([
+      [],
+      ['text:checking', 'tool:bridge:cmd'],
+      ['text:checking', 'tool:bridge:cmd', 'tool:bridge:edit'],
+      ['text:checking', 'tool:bridge:cmd', 'tool:bridge:edit', 'text:one more', 'tool:bridge:grep'],
+    ])
+    const events = sessionEvents(nativeSession(agent))
+    expectSessionInvariants(events)
+    expect(shown(events)).toEqual(['text:checking', 'tool:bridge:cmd', 'tool:bridge:edit', 'text:one more', 'tool:bridge:grep', 'text:done'])
+    await f.target.dispose()
+  })
+  it('keeps what a stopped turn showed and never shows it again after the turn or a restart', async () => {
+    const f = await fixture([])
+    const agent = await f.target.ensure(summary)
+    const rows = [row('plan', 'message.completed', { role: 'assistant', text: 'checking' }), row('cmd', 'command.completed', { command: 'pwd', output: '/repo' }),
+      row('half', 'message.completed', { role: 'assistant', text: 'half an answer' })]
+    let submitted = false
+    let polls = 0
+    const stop = new AbortController()
+    f.bridge.call.mockImplementation(async request => {
+      if (request.operation === 'session_events') {
+        if (!submitted) return page([])
+        // The remote turn keeps running; Stop arrives after its output was read.
+        if (polls++) { stop.abort(new Error('stopped')); return page([]) }
+        return page(rows)
+      }
+      if (request.operation === 'session') return { ...summary, status: 'active', activeTurnId: 't1' }
+      if (request.operation === 'submit_turn') { submitted = true; return { actionId: 'action', status: 'succeeded', turnId: 't1' } }
+      if (request.operation === 'interrupt_turn') return { sessionId: 'remote-1', turnId: 't1' }
+      return page([])
+    })
+    const adapter = new AgentBridgeLlmAdapter({ bridge: f.bridge } as unknown as AgentControlService, f.target, 1)
+    const { error } = await nativeTurn(agent, adapter, { signal: stop.signal })
+    expect(error).toBeDefined()
+    expect(f.bridge.call).toHaveBeenCalledWith({ operation: 'interrupt_turn', args: { sessionId: 'remote-1', expectedTurnId: 't1' } })
+    let events = sessionEvents(nativeSession(agent))
+    expectSessionInvariants(events)
+    expect(shown(events)).toEqual(['text:checking', 'tool:bridge:cmd', 'text:half an answer'])
+    // The background sync and a restarted plugin read the whole history again: nothing repeats.
+    f.bridge.call.mockImplementation(async request => request.operation === 'session_events' ? page([...rows, row('end', 'turn.interrupted', { status: 'interrupted' })])
+      : request.operation === 'session' ? summary : page([]))
+    await f.target.syncHistory(String(agent.id))
+    const restarted = new AgentBridgeImportTarget(f.host, f.bridge, 'http://bridge.test', (f.target as unknown as { dataRoot: string }).dataRoot)
+    await restarted.syncHistory(String(agent.id))
+    events = sessionEvents(nativeSession(agent))
+    expectSessionInvariants(events)
+    expect(shown(events)).toEqual(['text:checking', 'tool:bridge:cmd', 'text:half an answer'])
+    await f.target.dispose(); await restarted.dispose()
   })
   it('forwards a worker-scoped model selection on a new Bridge turn', async () => {
     const f = await fixture([])

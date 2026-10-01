@@ -9,7 +9,7 @@ import type { BridgeClient } from '../bridge-client.js'
 import { ControlError } from '../errors.js'
 import type { JsonObject } from '../types.js'
 import { appendSessionEvent, guardImportedTurnNumbers, nativeSession, sessionEvents, toolResultShape, type NativeHost, type NativeHandle, type NativeEvent } from './dsh-compat.js'
-import { ACK_EVENT, BINDING_EVENT, PROVIDER, projectNativeEvents, record, str } from './mapping.js'
+import { ACK_EVENT, BINDING_EVENT, PROVIDER, openStep, projectNativeEvents, record, str } from './mapping.js'
 import { isStoredSessionCorruption, repairStoredToolResults } from './session-repair.js'
 import { relayPendingInteractions } from './approval-bridge.js'
 
@@ -80,7 +80,6 @@ export class AgentBridgeImportTarget {
   private readonly workers = new Map<string, JsonObject>()
   private readonly cursors = new Map<string, string>()
   private readonly busy = new Set<string>()
-  private readonly presenting = new Set<string>()
   private readonly interactions = new Map<string, Map<string, Promise<void>>>()
   private readonly abort = new AbortController()
   private timer: ReturnType<typeof setTimeout> | undefined
@@ -410,7 +409,6 @@ export class AgentBridgeImportTarget {
     return str(worker['hostname']).toLowerCase() === hostname().toLowerCase() && (!worker['platform'] || worker['platform'] === process.platform)
   }
   isBusy(nativeId: string): boolean { return this.busy.has(nativeId) || this.host.agents.get(nativeId)?.status === 'running' }
-  isPresenting(nativeId: string): boolean { return this.presenting.has(nativeId) }
   setBusy(nativeId: string, value: boolean): void { if (value) this.busy.add(nativeId); else this.busy.delete(nativeId) }
   acknowledge(nativeId: string, rows: readonly JsonObject[]): void {
     const agent = this.host.agents.get(nativeId)
@@ -422,15 +420,19 @@ export class AgentBridgeImportTarget {
       seen.add(row['eventId'])
     }
   }
-  finalizeNativeTurn(nativeId: string, acknowledgements: readonly JsonObject[], presentations: readonly JsonObject[]): void {
+  /**
+   * Show remote output while its turn runs. Rows join the native loop's open
+   * turn and step in arrival order; they are acknowledged as they land, so the
+   * background sync and a later turn never show them again. With no turn open
+   * (the loop has already closed it) they become closed turns, as a sync would.
+   */
+  presentLive(nativeId: string, rows: readonly JsonObject[]): void {
+    if (!rows.length) return
     const agent = this.host.agents.get(nativeId)
     if (!agent) throw new Error('Native Bridge agent disappeared')
     const session = nativeSession(agent)
-    this.presenting.add(nativeId)
-    try {
-      for (const event of projectNativeEvents(presentations, sessionEvents(session), str(this.binding(nativeId)?.['model'], 'remote'), toolResultShape(this.host))) appendSessionEvent(session, event)
-      this.acknowledge(nativeId, acknowledgements)
-    } finally { this.presenting.delete(nativeId) }
+    const existing = sessionEvents(session)
+    for (const event of projectNativeEvents(rows, existing, str(this.binding(nativeId)?.['model'], 'remote'), toolResultShape(this.host), openStep(existing))) appendSessionEvent(session, event)
   }
   async ensurePreset(): Promise<void> {
     const presets = this.host.agentPresets

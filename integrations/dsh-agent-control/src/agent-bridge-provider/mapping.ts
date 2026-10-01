@@ -85,8 +85,34 @@ export function projectStreamChunks(event: JsonObject, index = 0): StreamChunk[]
   ]
 }
 
-/** Balanced presentation transactions; never put remote tool calls in the local execution queue. */
-export function projectNativeEvents(rows: readonly JsonObject[], existing: readonly NativeEvent[], model = 'remote', toolResult: ToolResultShape = 'tool-role'): NativeEvent[] {
+/** The turn and step a running native loop has open. */
+export interface OpenStep { turn: number; step: number }
+
+/**
+ * The turn and step a running native loop has open, or undefined when the log
+ * is balanced. Read back from the log, so it names the turn as written (see
+ * guardImportedTurnNumbers), which is what DSH's session invariants check.
+ */
+export function openStep(events: readonly NativeEvent[]): OpenStep | undefined {
+  let turn: number | undefined
+  let step: number | undefined
+  for (const event of events) {
+    if (event.type === 'turn/start') { turn = Number(event.data['turn']); step = undefined }
+    else if (event.type === 'turn/end') { turn = undefined; step = undefined }
+    else if (event.type === 'step/start') step = Number(event.data['step'])
+    else if (event.type === 'step/end') step = undefined
+  }
+  return turn !== undefined && step !== undefined ? { turn, step } : undefined
+}
+
+/**
+ * Balanced presentation transactions; never put remote tool calls in the local execution queue.
+ * Without `into`, each item is its own closed turn: the log must be balanced (no
+ * native turn running). With `into`, items join the running native loop's open
+ * turn and step, so they show while the turn runs; DSH's invariants forbid
+ * opening a turn inside another.
+ */
+export function projectNativeEvents(rows: readonly JsonObject[], existing: readonly NativeEvent[], model = 'remote', toolResult: ToolResultShape = 'tool-role', into?: OpenStep): NativeEvent[] {
   const acknowledgements = existing.filter(e => e.type === ACK_EVENT)
   const seen = new Set(acknowledgements.map(e => str(e.data['eventId'])))
   const seenItems = new Set([...seen].map(presentationItemKey).filter((key): key is string => !!key))
@@ -139,9 +165,12 @@ export function projectNativeEvents(rows: readonly JsonObject[], existing: reado
       continue
     }
     if (isMessage || isTool) {
-      turn++
-      add('turn/start', { turn }, time)
-      add('step/start', { turn, step: 1 }, time)
+      if (!into) {
+        turn++
+        add('turn/start', { turn }, time)
+        add('step/start', { turn, step: 1 }, time)
+      }
+      const at = into ?? { turn, step: 1 }
       if (isMessage && payload['role'] === 'user') {
         const recovered = payload['recoveredFirstPrompt'] === true && existing.some(e => e.type === 'assistant/message')
         add('user/message', { id: 'bridge:' + id, role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: (recovered ? '【恢复的首条用户消息】\n' : '') + str(payload['text']) }] }, time, true)
@@ -154,18 +183,20 @@ export function projectNativeEvents(rows: readonly JsonObject[], existing: reado
           : isTask ? { description: payload['description'] ?? '', ...(payload['subagentType'] ? { subagentType: payload['subagentType'] } : {}), kind: payload['kind'] ?? 'other' } : payload)
         const text = str(payload['text'])
         const content: JsonValue[] = isTool ? [{ type: 'tool-call', id: callId, name, arguments: args }] : [{ type: 'text', text }]
-        add('assistant/message', { turn, step: 1, message: { id: 'bridge:' + id + ':assistant', role: 'assistant', source: { kind: 'model', provider: PROVIDER, model }, content }, stream: [] }, time, true)
+        add('assistant/message', { ...at, message: { id: 'bridge:' + id + ':assistant', role: 'assistant', source: { kind: 'model', provider: PROVIDER, model }, content }, stream: [] }, time, true)
         if (isTool) {
-          add('tool/call', { turn, step: 1, callId, name, arguments: args }, time)
+          add('tool/call', { ...at, callId, name, arguments: args }, time)
           // The seed validator's tool/result shape depends on the DSH release; see ToolResultShape.
           const taskSteps = isTask ? steps.get(str(row['itemId'])) ?? [] : []
           const output = isTask ? taskOutput(payload, taskSteps) : str(payload['output'], JSON.stringify(payload))
           const isError = isTask ? payload['status'] !== 'completed' : payload['status'] === 'failed'
-          add('tool/result', { turn, step: 1, message: toolResultMessage('bridge:' + id + ':result', callId, output, isError, toolResult) }, time, true)
+          add('tool/result', { ...at, message: toolResultMessage('bridge:' + id + ':result', callId, output, isError, toolResult) }, time, true)
         }
       }
-      add('step/end', { turn, step: 1 }, time)
-      add('turn/end', { turn, reason: { kind: 'completed' } }, time)
+      if (!into) {
+        add('step/end', { turn, step: 1 }, time)
+        add('turn/end', { turn, reason: { kind: 'completed' } }, time)
+      }
     }
     add(ACK_EVENT, { eventId: id, turnId: str(row['turnId']) }, time)
   }

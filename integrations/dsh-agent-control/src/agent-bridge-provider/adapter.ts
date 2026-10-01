@@ -7,7 +7,7 @@ import type { AgentControlService } from '../service.js'
 import type { JsonObject } from '../types.js'
 import type { AgentBridgeImportTarget } from './import-target.js'
 import { readHistory } from './import-target.js'
-import { lastUserMessageId, lastUserText, parentItemId, PROVIDER, record, sameUserText, str, TOOL_EVENT_TYPES, toolProgressLine } from './mapping.js'
+import { lastUserMessageId, lastUserText, parentItemId, projectStreamChunks, PROVIDER, record, sameUserText, str, TOOL_EVENT_TYPES, toolProgressLine } from './mapping.js'
 import { relayPendingInteractions } from './approval-bridge.js'
 import { uploadPromptImages } from './attachments.js'
 
@@ -22,12 +22,7 @@ export function stoppedByUser(reason: unknown): boolean {
   if (record(reason)['kind'] === 'disposed') return false
   return !(reason instanceof Error && /lifecycle disposed|agent loop is not active/.test(reason.message))
 }
-interface PendingTurn {
-  acknowledgements: JsonObject[]
-  presentations: JsonObject[]
-}
 export class AgentBridgeLlmAdapter extends LlmAdapter {
-  readonly pendingAcks = new Map<string, PendingTurn[]>()
   constructor(private readonly service: AgentControlService, private readonly target: AgentBridgeImportTarget, private readonly pollMs = 600) { super() }
   providerInfo(provider: string): LlmProviderInfo { return { id: provider, name: 'Agent Bridge' } }
   override async listModels(): Promise<readonly LlmModelInfo[]> {
@@ -36,14 +31,15 @@ export class AgentBridgeLlmAdapter extends LlmAdapter {
   override async resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> { return { provider, id: model, name: model, inputModalities: ['text', 'image'] } }
   servesAgent(agent: Agent): boolean { return !!this.target.binding(String(agent.id)) }
   attachAgent(_agent: Agent): void {}
-  detachAgent(id: unknown): void { this.pendingAcks.delete(String(id)) }
-  commitAcks(id: string): void {
-    const batches = this.pendingAcks.get(id)
-    const batch = batches?.shift()
-    if (batch) this.target.finalizeNativeTurn(id, batch.acknowledgements, batch.presentations)
-    if (!batches?.length) this.pendingAcks.delete(id)
-  }
+  detachAgent(_id: unknown): void {}
 
+  /**
+   * One remote turn as one native turn. The remote work has already run, so
+   * nothing here is a local tool call: each batch of remote output is written
+   * into the native turn as it arrives (texts, tool cards, subagent cards), in
+   * arrival order. Only the reply that ends the turn goes through this stream,
+   * so it is the native turn's own answer and lands below everything before it.
+   */
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     if (!options.sessionId || options.purpose) throw new Error('Agent Bridge supports bound conversation turns only')
     const nativeId = String(options.sessionId)
@@ -64,6 +60,9 @@ export class AgentBridgeLlmAdapter extends LlmAdapter {
     const pending = new Map<string, Promise<void>>()
     let receipt: JsonObject = {}
     let turnId = ''
+    // The latest reply not yet followed by other output. A later item shows it
+    // first; if the turn ends on it, it is the answer this stream returns.
+    let reply: JsonObject | undefined
     try {
       let cursor: string | undefined
       const seen = new Set<string>()
@@ -89,23 +88,6 @@ export class AgentBridgeLlmAdapter extends LlmAdapter {
       }
       let finished = false
       let buffered: JsonObject[] = []
-      const ackRows: JsonObject[] = []
-      const presentationRows: JsonObject[] = []
-      const emitted = new Set<string>()
-      let nextBlockIndex = 0
-      // Tool cards can only be appended after the local turn closes. Once a tool
-      // event arrives, later assistant text joins the same ordered presentation
-      // batch instead of the live stream, so the final answer never sits above
-      // the commands that produced it.
-      let presentingInOrder = false
-      // Those cards only land when the turn closes, so a long remote turn would
-      // show nothing while it edits files. Each tool also gets a line in one live
-      // reasoning block, which the ordered cards then replace in detail.
-      let progressIndex = -1
-      let progressText = ''
-      const ackBatches = this.pendingAcks.get(nativeId) ?? []
-      ackBatches.push({ acknowledgements: ackRows, presentations: presentationRows })
-      this.pendingAcks.set(nativeId, ackBatches)
       while (!finished) {
         signal.throwIfAborted()
         if (receipt['status'] === 'accepted') receipt = record(await this.service.bridge.call({ operation: 'action', args: { actionId: str(receipt['actionId']) } }, signal))
@@ -118,47 +100,29 @@ export class AgentBridgeLlmAdapter extends LlmAdapter {
         if (turnId) {
           const ready = buffered.filter(row => row['turnId'] === turnId)
           buffered = buffered.filter(row => row['turnId'] !== turnId)
+          const batch: JsonObject[] = []
+          let failure: JsonObject | undefined
           for (const row of ready) {
             const payload = record(row['payload'])
-            if (row['type'] === 'message.completed') {
-              if (payload['role'] === 'user' && sameUserText(str(payload['text']), input)) ackRows.push(localMessageId ? { ...row, localMessageId } : row)
-            }
-            // Only assistant text goes through the native LLM stream. Remote tools have
-            // already executed, so finalizeNativeTurn appends display-only tool events
-            // after the local turn closes instead of returning executable tool chunks.
-            const rendered = row['type'] === 'message.completed' && payload['role'] === 'assistant' ? str(payload['text']) : ''
             const type = str(row['type'])
-            const card = TOOL_EVENT_TYPES.includes(type) || type === 'task.completed'
-            if (card) {
-              presentingInOrder = true
-              presentationRows.push(row)
+            if (type === 'message.completed' && payload['role'] === 'user' && sameUserText(str(payload['text']), input)) {
+              // The prompt typed here is already on screen; only its echo is recorded.
+              this.target.acknowledge(nativeId, [localMessageId ? { ...row, localMessageId } : row])
+            } else if (type === 'message.completed' && payload['role'] === 'assistant' && str(payload['text'])) {
+              if (reply) batch.push(reply)
+              reply = row
+            } else if (type === 'message.completed' || ((TOOL_EVENT_TYPES.includes(type) || type === 'task.completed') && !parentItemId(row))) {
+              if (reply) { batch.push(reply); reply = undefined }
+              batch.push(row)
+            } else if (TOOL_EVENT_TYPES.includes(type)) {
+              // A subagent's step: recorded now, listed on its card when it ends.
+              batch.push(row)
             }
-            // A subagent's own steps are folded into its card; the live block names
-            // only what the main conversation does and when its subagents start and end.
-            if ((card || type === 'task.started') && !parentItemId(row)) {
-              if (progressIndex < 0) {
-                progressIndex = nextBlockIndex++
-                yield { type: 'block-start', index: progressIndex, blockType: 'reasoning' }
-              }
-              const line = (progressText ? '\n' : '') + toolProgressLine(row)
-              progressText += line
-              yield { type: 'reasoning-delta', index: progressIndex, text: line }
-            }
-            if (rendered && presentingInOrder) presentationRows.push(row)
-            else if (rendered) {
-              const key = str(row['itemId'], str(row['eventId']))
-              if (!emitted.has(key)) {
-                emitted.add(key)
-                const index = nextBlockIndex++
-                yield { type: 'block-start', index, blockType: 'text' }
-                yield { type: 'text-delta', index, text: rendered }
-                yield { type: 'block-end', index, block: { type: 'text', text: rendered } }
-              }
-              ackRows.push(row)
-            }
-            if (row['type'] === 'turn.failed' || (row['type'] === 'turn.completed' && payload['status'] === 'failed')) throw new Error('Bridge turn failed: ' + JSON.stringify(payload))
-            if (row['type'] === 'turn.completed' || row['type'] === 'turn.interrupted') finished = true
+            if (type === 'turn.failed' || (type === 'turn.completed' && payload['status'] === 'failed')) { failure = payload; break }
+            if (type === 'turn.completed' || type === 'turn.interrupted') finished = true
           }
+          this.target.presentLive(nativeId, batch)
+          if (failure) throw new Error('Bridge turn failed: ' + JSON.stringify(failure))
           if (!finished) await relayPendingInteractions(this.service.bridge, agent, remoteId, pending, interactionSignal, this.target.host as unknown as Context)
           if (!finished && receipt['status'] === 'succeeded') {
             const current = record(await this.service.bridge.call({ operation: 'session', args: { sessionId: remoteId } }, signal))
@@ -175,9 +139,20 @@ export class AgentBridgeLlmAdapter extends LlmAdapter {
         }
         if (!finished) await delay(this.pollMs, undefined, { signal })
       }
-      if (progressIndex >= 0) yield { type: 'block-end', index: progressIndex, block: { type: 'reasoning', text: progressText } }
+      if (reply) {
+        const answer = reply
+        reply = undefined
+        this.target.acknowledge(nativeId, [answer])
+        for (const chunk of projectStreamChunks(answer)) yield chunk
+      }
       yield { type: 'finish', reason: { kind: 'stop' }, replayState: { response: { actionId: str(receipt['actionId']), turnId } } }
     } finally {
+      // Stopped or failed before the turn ended: the reply so far still shows, in
+      // the step the native loop is about to close.
+      if (reply) {
+        try { this.target.presentLive(nativeId, [reply]) }
+        catch (error) { this.target.host.logger.warn('Bridge reply could not be shown: ' + String(error)) }
+      }
       interactionAbort.abort()
       await Promise.allSettled(pending.values())
       this.target.setBusy(nativeId, false)
