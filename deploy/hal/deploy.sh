@@ -92,6 +92,9 @@ done
 "$reload" && systemctl daemon-reload
 
 version=$(node -p 'require("./package.json").version')
+# The commit the services were running, which HEAD before the fast-forward is not
+# when the release was committed in this checkout.
+running=$(cat "$marker" 2>/dev/null || echo "$previous")
 mkdir -p "$(dirname "$marker")"
 echo "$target" > "$marker"
 
@@ -107,7 +110,7 @@ if "$hosted"; then
     mkdir -p "$intents"
     intent="$intents/$(date +%s)-$$.json"
     SESSION="$session" NATIVE="$native" MACHINE="${machine:-$(hostname)}" VERSION="$version" COMMIT="$target" \
-      PREVIOUS="$previous" NOTE="$note" node -e '
+      PREVIOUS="$running" NOTE="$note" node -e '
         const e = process.env, out = { machineId: e.MACHINE, version: e.VERSION, commit: e.COMMIT,
           previousCommit: e.PREVIOUS, note: e.NOTE || undefined, createdAt: Date.now() };
         if (e.SESSION) out.sessionId = e.SESSION; else out.nativeSessionId = e.NATIVE;

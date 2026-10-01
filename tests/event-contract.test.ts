@@ -269,4 +269,12 @@ test("the Control Plane tells a replay from a reused event id", () => {
   assert.deepEqual(cp.conflicts, [], "a replay is not a conflict");
   cp.ingest(event("second"));
   assert.deepEqual(cp.conflicts, ["pi:s:t1:assistant"]);
+  // Codex re-reads its history after a restart and recomputes derived fields: still a replay.
+  const terminal = (durationMs: number, turnId = "t1") => ({ type: "session.event", eventType: "turn.completed", sessionId: "s",
+    eventId: "app-server:s:t1:terminal:structured", timestamp: 2, turnId, payload: { status: "completed", summary: "done", durationMs } }) as BridgeToControlMessage;
+  cp.ingest(terminal(1_000));
+  cp.ingest(terminal(1_250));
+  assert.deepEqual(cp.conflicts, ["pi:s:t1:assistant"]);
+  cp.ingest(terminal(1_000, "t2"));
+  assert.deepEqual(cp.conflicts, ["pi:s:t1:assistant", "app-server:s:t1:terminal:structured"], "the same id in another turn is another event");
 });

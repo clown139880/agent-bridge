@@ -300,18 +300,20 @@ export class AgentControlStore {
   }
 
   /**
-   * Whether an event the store refused as a duplicate repeats the stored row or
-   * reuses its id for different content. A replay (missed ack, reconnect) is
-   * harmless; a reused id means its producer named two events alike and the
-   * second was dropped.
+   * Whether an event the store refused as a duplicate is a replay of the stored
+   * row or a different event under the same id. Replays (a missed ack, a
+   * reconnect, Codex re-reading its history) may recompute derived fields such
+   * as a summary or a duration, so only what tells two events apart counts: the
+   * type, the turn, and a message's role and text.
    */
   duplicateEventConflict(message: StructuredSessionEventMessage): { storedType: string; storedTurnId: string | null } | undefined {
     const row = this.db.prepare("SELECT type,turn_id,body FROM events WHERE session_id=? AND event_id=?")
       .get(message.sessionId, message.eventId) as { type: string; turn_id: string | null; body: unknown } | undefined;
     if (!row) return undefined;
     const payload = message.payload && typeof message.payload === "object" && !Array.isArray(message.payload) ? message.payload : {};
+    const stored = decodeEventBody(row.body);
     const same = row.type === message.eventType && (row.turn_id ?? null) === (message.turnId ?? null)
-      && JSON.stringify(decodeEventBody(row.body)) === JSON.stringify(payload);
+      && (message.eventType !== "message.completed" || (stored.role === payload.role && stored.text === payload.text));
     return same ? undefined : { storedType: row.type, storedTurnId: row.turn_id };
   }
 
