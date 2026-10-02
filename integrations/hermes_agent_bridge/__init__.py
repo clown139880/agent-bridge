@@ -192,7 +192,10 @@ _SESSIONS_SCHEMA = {
 
 _SESSION_CONTEXT_SCHEMA = {
     "name": "agent_bridge_session_context",
-    "description": "Read one Agent Bridge session and the tail of its events without changing state.",
+    "description": (
+        "Read one Agent Bridge session and its latest turn.completed event (payload.summary holds "
+        "the turn's full final report) without changing state. Other events are not returned."
+    ),
     "parameters": {
         "type": "object",
         "properties": {
@@ -257,6 +260,6 @@ def register(ctx) -> None:
         handler=lambda args, **kw: _session_context_tool(settings, args, **kw),
         check_fn=lambda: bool(os.environ.get(_TOKEN_ENV)),
         requires_env=[_TOKEN_ENV],
-        description="Read one remote Codex session and its recent events.",
+        description="Read one remote Codex session and its latest completed turn.",
         emoji="🧵",
     )

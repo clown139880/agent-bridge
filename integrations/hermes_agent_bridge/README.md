@@ -15,7 +15,7 @@ Matching is case-insensitive. With the example above, both the default `codex@ma
 ## Read-only session tools
 
 - `agent_bridge_sessions(workerId?, workspace?, q?, taskId?, active?, limit?)` searches `GET /api/v1/sessions` for a session to resume.
-- `agent_bridge_session_context(sessionId)` reads `GET /api/v1/sessions/{id}` and the tail of `GET /api/v1/sessions/{id}/events?tail=true`.
+- `agent_bridge_session_context(sessionId)` reads `GET /api/v1/sessions/{id}` and only the latest `turn.completed` event (`GET /api/v1/sessions/{id}/events?tail=true&type=turn.completed&limit=1`), returned as `lastTurnCompleted` (`null` before the first completed turn). Its `payload.summary` is the turn's full final report; other events are omitted to keep the caller's context small.
 
 Both tools are read-only. A typical Matrix flow is to search for sessions, inspect the likely session's context, and then put its Control Plane `sessionId` into the target card body.
 

@@ -25,24 +25,32 @@ def test_sessions_forwards_supported_filters(monkeypatch):
     )]
 
 
-def test_session_context_reads_session_and_tail_events(monkeypatch):
+def test_session_context_reads_session_and_only_the_last_turn_completed(monkeypatch):
     api = WorkerApi("http://bridge", "secret")
     calls = []
+    completed = {"type": "turn.completed", "payload": {"status": "completed", "summary": "report"}}
 
     def request(method, path, body=None):
         calls.append((method, path, body))
-        return {"sessionId": "a/b"} if path.endswith("a%2Fb") else {"data": [{"type": "agent.completed"}]}
+        if path.endswith("a%2Fb"):
+            return {"sessionId": "a/b"}
+        return {"data": [completed], "hasMore": True, "nextCursor": "e:1", "streamCursor": "e:9"}
 
     monkeypatch.setattr(api, "_request", request)
 
-    assert api.session_context("a/b") == {
-        "session": {"sessionId": "a/b"},
-        "events": {"data": [{"type": "agent.completed"}]},
-    }
+    assert api.session_context("a/b") == {"session": {"sessionId": "a/b"}, "lastTurnCompleted": completed}
     assert calls == [
         ("GET", "/api/v1/sessions/a%2Fb", None),
-        ("GET", "/api/v1/sessions/a%2Fb/events?tail=true", None),
+        ("GET", "/api/v1/sessions/a%2Fb/events?tail=true&type=turn.completed&limit=1", None),
     ]
+
+
+def test_session_context_without_a_completed_turn(monkeypatch):
+    api = WorkerApi("http://bridge", "secret")
+    monkeypatch.setattr(api, "_request", lambda method, path, body=None:
+                        {"sessionId": "s"} if path.endswith("/s") else {"data": []})
+
+    assert api.session_context("s") == {"session": {"sessionId": "s"}, "lastTurnCompleted": None}
 
 
 def test_start_includes_the_model_only_when_pinned(monkeypatch):

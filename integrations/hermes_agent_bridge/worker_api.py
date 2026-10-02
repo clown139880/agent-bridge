@@ -72,8 +72,11 @@ class WorkerApi:
     def session_context(self, session_id: str) -> dict[str, Any]:
         encoded = quote(session_id, safe="")
         session = self._request("GET", f"/api/v1/sessions/{encoded}")
-        events = self._request("GET", f"/api/v1/sessions/{encoded}/events?tail=true")
-        return {"session": session, "events": events}
+        # Only the latest turn.completed: its summary is the turn's full final report, while the
+        # whole event tail (messages, tool calls) can run to hundreds of KB.
+        page = self._request("GET", f"/api/v1/sessions/{encoded}/events?tail=true&type=turn.completed&limit=1")
+        events = [item for item in page.get("data") or () if isinstance(item, dict)]
+        return {"session": session, "lastTurnCompleted": events[-1] if events else None}
 
     def start(self, *, run_id: str, task_id: str, worker_id: str, project_path: str, prompt: str,
               resume_session_id: str | None = None, conversation_id: str | None = None,
