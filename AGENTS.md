@@ -8,6 +8,14 @@
 - Never deploy source by copying files between Windows and HAL, and never use an automatic stash to make a deployment checkout appear clean. Deployments must start from pushed commits and a clean `git pull --ff-only` on HAL.
 - Maintain release versions. Changes to the Bridge, Control Plane, protocol, database, or runtime deployment code must bump the root package version. Changes confined to `integrations/dsh-agent-control` bump only that package version and must not trigger a Bridge or Control Plane deployment.
 
+## Tool approvals and permissions
+
+- Read `docs/approval-permissions.zh.md` before changing approval code or any `CLAUDE_PERMISSION_*` / `CLAUDE_AUTO_APPROVE*` setting, and before diagnosing an approval prompt or denial.
+- Claude tool calls pass through claude's native rules (`CLAUDE_PERMISSION_DENY` → `_ALLOW` → `_MODE`), then the Bridge (`CLAUDE_AUTO_APPROVE=readonly` clears only Read/Grep/Glob/LS/NotebookRead/WebSearch/WebFetch/TodoWrite; Bash, file edits outside the workspace and MCP tools always prompt), then a human. A call resolved by an earlier layer never reaches a later one.
+- `allow-session` allows the whole tool name for the rest of the session (every Bash command), not a single command. `Bash(git:*)` also matches `git push` and `git reset --hard`.
+- The Hermes approval relay maps timeout and unrecognised replies to `deny`; a "denied" result may be a timeout, not a user refusal.
+- Automatic approval triage with Jev is designed in `docs/jev-approval-triage-design.zh.md` but not implemented. Its hard boundary: irreversible or high-risk operations always go to a human, and triage failure falls back to the human prompt.
+
 ## Windows Bridge deployment
 
 - Native Windows Bridge releases update through the Bridge self-updater after the versioned commit is pushed. Do not replace its source manually when automatic update is configured.
