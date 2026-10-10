@@ -1,6 +1,6 @@
 # 设计：用 Jev 自动分诊工具审批（哪些人工、哪些放行）
 
-- 状态：**设计稿，未实现**（Kanban t_57698007）。本文不改任何代码或配置。
+- 状态：**暂缓**（clown 2026-10 决定先试纯规则档，见 [approval-permissions.zh.md](approval-permissions.zh.md) 第 6 节）。设计稿，未实现（Kanban t_57698007）。本文不改任何代码或配置。
 - 权限体系现状：[approval-permissions.zh.md](approval-permissions.zh.md)。读本文前先读它。
 - 参考实现：`/root/projects/call-bridge` 的查证路由（`search_router.py`、`hermes_delegation.py`、`config.py`）。
 

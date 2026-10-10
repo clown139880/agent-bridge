@@ -14,7 +14,8 @@
 - Claude tool calls pass through claude's native rules (`CLAUDE_PERMISSION_DENY` → `_ALLOW` → `_MODE`), then the Bridge (`CLAUDE_AUTO_APPROVE=readonly` clears only Read/Grep/Glob/LS/NotebookRead/WebSearch/WebFetch/TodoWrite; Bash, file edits outside the workspace and MCP tools always prompt), then a human. A call resolved by an earlier layer never reaches a later one.
 - `allow-session` allows the whole tool name for the rest of the session (every Bash command), not a single command. `Bash(git:*)` also matches `git push` and `git reset --hard`.
 - The Hermes approval relay maps timeout and unrecognised replies to `deny`; a "denied" result may be a timeout, not a user refusal.
-- Automatic approval triage with Jev is designed in `docs/jev-approval-triage-design.zh.md` but not implemented. Its hard boundary: irreversible or high-risk operations always go to a human, and triage failure falls back to the human prompt.
+- Approval noise is handled by the rule-only profile in `deploy/claude-permissions.env` (rationale: `docs/approval-permissions.zh.md` §6). Read-only commands and tests are allowed. Force pushes, `git reset --hard`, `git clean -f`, destructive docker commands and Bridge/Control Plane restarts are denied outright. Everything else still prompts, including `git push`. HAL's `bridge.env` allows all Bash and does not use this profile.
+- Automatic approval triage with Jev (`docs/jev-approval-triage-design.zh.md`) is on hold and not implemented. Its hard boundary: irreversible or high-risk operations always go to a human, and triage failure falls back to the human prompt.
 
 ## Windows Bridge deployment
 
