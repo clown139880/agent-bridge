@@ -60,10 +60,40 @@ test("concurrent new work shares one runtime switch and refuses an unowned serve
 
 test("managed mode refuses to attach to an unowned App Server endpoint",async()=>{
   const selected:CodexRuntime={command:"codex",directory:"runtime",version:"1.0.0",fingerprint:"one"};
-  const adapter=new CodexAppServerAdapter({command:"codex",url:"ws://127.0.0.1:4500",allowedRoots:[process.cwd()],
+  const adapter=new CodexAppServerAdapter({command:"codex",url:"ws://192.0.2.1:4500",allowedRoots:[process.cwd()],
     manageServer:true,reconnectMs:1000,runtimeResolver:{resolve:async()=>selected,healthy:()=>true}},()=>{});
   const internals=adapter as unknown as {runtime:CodexRuntime;serverReady():Promise<boolean>;startInternal():Promise<void>};
   internals.runtime=selected;internals.serverReady=async()=>true;
   await assert.rejects(internals.startInternal(),/already owned by another process/);
+  adapter.stop();
+});
+
+test("a missing runtime fails promptly and reconnect resolves the replacement",async()=>{
+  const missing:CodexRuntime={command:join(tmpdir(),`missing-codex-${randomUUID()}`),directory:"missing",fingerprint:"missing"};
+  const replacement:CodexRuntime={command:"replacement",directory:"replacement",fingerprint:"replacement"};
+  let resolutions=0;
+  const adapter=new CodexAppServerAdapter({command:missing.command,url:"ws://127.0.0.1:4500",allowedRoots:[process.cwd()],
+    manageServer:true,reconnectMs:60_000,runtimeResolver:{resolve:async()=>++resolutions===1?missing:replacement,healthy:()=>true}},()=>{});
+  const internals=adapter as unknown as {child?:unknown;runtime:CodexRuntime;serverReady():Promise<boolean>;
+    spawnServer():void;waitForServer():Promise<void>;connect():Promise<void>;restoreLoadedThreads():Promise<void>};
+  internals.serverReady=async()=>false;
+  try {
+    await assert.rejects(adapter.start(),/ENOENT/);
+    assert.equal(internals.child,undefined);
+    internals.spawnServer=()=>{};internals.waitForServer=async()=>{};
+    internals.connect=async()=>{};internals.restoreLoadedThreads=async()=>{};
+    await adapter.start();
+    assert.equal(internals.runtime.command,replacement.command);
+    assert.equal(resolutions,2);
+  } finally { adapter.stop(); }
+});
+
+test("an owned process exiting during readiness cannot be mistaken for another server",async()=>{
+  const adapter=new CodexAppServerAdapter({command:"codex",url:"ws://127.0.0.1:4500",allowedRoots:[process.cwd()],
+    manageServer:true,reconnectMs:1000},()=>{});
+  const internals=adapter as unknown as {child?:unknown;serverStartError?:Error;serverReady():Promise<boolean>;waitForServer():Promise<void>};
+  internals.child={};
+  internals.serverReady=async()=>{internals.child=undefined;internals.serverStartError=new Error("address already in use");return true;};
+  await assert.rejects(internals.waitForServer(),/address already in use/);
   adapter.stop();
 });

@@ -110,7 +110,7 @@ Bridge 主要变量：
 | `BRIDGE_TOKEN` | 必须与 Control Plane 一致 |
 | `MACHINE_ID` / `MACHINE_NAME` | Matrix 中显示的机器标识 |
 | `BRIDGE_ALLOWED_ROOTS` | Bridge 可访问的项目根目录，使用 `:` 分隔 |
-| `CODEX_APP_SERVER_URL` | 本机 App Server URL，默认 `ws://127.0.0.1:4500` |
+| `CODEX_APP_SERVER_URL` | 默认 `ws://127.0.0.1:4500`；托管本地服务器会分配独立端口，避免 Windows/WSL 冲突；非托管模式使用此 URL 原值 |
 | `CODEX_APP_SERVER_MANAGED` | 是否由 Bridge 启停 App Server |
 | `BRIDGE_ARCHIVE_OUTBOX_PATH` | 等待中心 ACK 的会话事件持久 outbox；必须位于 Git checkout 外 |
 | `BRIDGE_ARCHIVE_OUTBOX_LIMIT` | outbox 消息上限，默认 10000；溢出会向中心报告采集缺口 |

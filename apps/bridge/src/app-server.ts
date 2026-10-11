@@ -20,6 +20,7 @@ import { deriveProjectIdentity, isPathWithinRoots } from "./path-utils.js";
 import type { AgentAdapter, ResumeTarget } from "./agent-adapter.js";
 import type { AttachmentFetcher } from "./attachments.js";
 import { CodexRuntimeResolver, type CodexRuntime } from "./codex-runtime.js";
+import { managedAppServerUrl, stopManagedAppServer } from "./managed-app-server.js";
 
 const log = pino({ name: "codex-app-server" });
 
@@ -148,6 +149,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
   private runtimeSwitch?: Promise<void>;
   private rotating = false;
   private runtimeCommand: string;
+  private serverUrl: string;
+  private serverStartError?: Error;
   async models(): Promise<import('@agent-bridge/protocol').CodexModelInfo[]> {
     const rows: import('@agent-bridge/protocol').CodexModelInfo[] = [];
     let cursor: string | null = null;
@@ -174,6 +177,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
     private readonly emit: (message: BridgeToControlMessage) => void,
   ) {
     this.runtimeCommand = options.command;
+    this.serverUrl = options.url;
     this.runtimeResolver = options.runtimeResolver ?? new CodexRuntimeResolver(options.command, {
       localAppData: process.env.LOCALAPPDATA,
     });
@@ -231,7 +235,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
     this.readyForUpdate = false;
     clearTimeout(this.reconnectTimer);
     this.socket?.close(1000, "bridge shutdown");
-    if (this.child && !this.child.killed) this.child.kill("SIGTERM");
+    if (this.child) void stopManagedAppServer(this.child).catch(error => log.error({ error }, "Unable to stop owned App Server"));
     this.rejectPending(new Error("Codex App Server stopped"));
     this.pendingUserInput.clear();
     this.clearPendingApprovals();
@@ -459,14 +463,15 @@ export class CodexAppServerAdapter implements AgentAdapter {
 
   private async startInternal(): Promise<void> {
     this.readyForUpdate = false;
-    if (this.options.manageServer && !this.runtime) {
+    if (this.options.manageServer && !this.child) {
       this.runtime = await this.runtimeResolver.resolve();
       this.runtimeCommand = this.runtime.command;
       log.info({ command: this.runtime.command, version: this.runtime.version }, "Selected Codex runtime");
     }
     if (this.options.manageServer) {
+      if (!this.child) this.serverUrl = await managedAppServerUrl(this.options.url);
       const ready = await this.serverReady();
-      if (ready && !this.child) throw runtimeSwitchError(`Codex App Server endpoint is already owned by another process: ${this.options.url}`);
+      if (ready && !this.child) throw runtimeSwitchError(`Codex App Server endpoint is already owned by another process: ${this.serverUrl}`);
       if (!ready && !this.child) this.spawnServer();
       await this.waitForServer();
     }
@@ -476,6 +481,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
   }
 
   private async ensureReady(): Promise<void> {
+    if (this.runtimeSwitch) await this.runtimeSwitch;
     if (!this.readyPromise) await this.start();
     else await this.readyPromise;
     if (this.socket?.readyState !== WebSocket.OPEN) throw new Error("Codex App Server is not connected");
@@ -528,8 +534,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
         await waitForSocketClose(socket, 3_000);
         if (Number(socket.readyState) !== WebSocket.CLOSED) socket.terminate();
       }
-      if (child && !child.killed) child.kill("SIGTERM");
-      await waitForChildExit(child, 5_000);
+      if (child) await stopManagedAppServer(child);
       await this.waitForServerDown(5_000);
 
       this.runtime = candidate;
@@ -552,7 +557,10 @@ export class CodexAppServerAdapter implements AgentAdapter {
   }
 
   private spawnServer(): void {
-    const child = spawn(this.runtimeCommand, ["app-server", "--listen", this.options.url], {
+    this.serverStartError = undefined;
+    const child = spawn(this.runtimeCommand, ["app-server", "--listen", this.serverUrl], {
+      detached: process.platform !== "win32",
+      windowsHide: true,
       env: this.options.desktopHome
         ? { ...process.env, CODEX_HOME: this.options.desktopHome }
         : process.env,
@@ -561,20 +569,31 @@ export class CodexAppServerAdapter implements AgentAdapter {
     this.child = child;
     child.stdout?.on("data", (data) => log.debug({ output: data.toString().trim() }, "App Server stdout"));
     child.stderr?.on("data", (data) => log.info({ output: data.toString().trim() }, "App Server stderr"));
-    child.on("error", (error) => log.error({ error }, "Unable to start Codex App Server"));
+    child.on("error", (error) => {
+      if (this.child === child) { this.serverStartError = error; this.child = undefined; }
+      log.error({ error }, "Unable to start Codex App Server");
+    });
     child.on("exit", (code, signal) => {
       log.warn({ code, signal }, "Codex App Server exited");
-      this.child = undefined;
+      if (this.child === child) {
+        this.serverStartError = new Error(`Codex App Server exited before reconnect: ${code ?? signal}`);
+        this.child = undefined;
+      }
     });
   }
 
   private async waitForServer(): Promise<void> {
     const deadline = Date.now() + 20_000;
     while (Date.now() < deadline) {
-      if (await this.serverReady()) return;
+      if (this.serverStartError) throw this.serverStartError;
+      if (!this.child) throw runtimeSwitchError("Owned Codex App Server is no longer running");
+      if (await this.serverReady()) {
+        if (this.serverStartError) throw this.serverStartError;
+        if (this.child) return;
+      }
       await new Promise((resolve) => setTimeout(resolve, 200));
     }
-    throw new Error(`Codex App Server did not become ready: ${this.options.url}`);
+    throw new Error(`Codex App Server did not become ready: ${this.serverUrl}`);
   }
 
   private async waitForServerDown(timeoutMs: number): Promise<void> {
@@ -588,7 +607,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
 
   private async serverReady(): Promise<boolean> {
     try {
-      const url = new URL(this.options.url);
+      const url = new URL(this.serverUrl);
       url.protocol = url.protocol === "wss:" ? "https:" : "http:";
       url.pathname = "/readyz";
       const response = await fetch(url, { signal: AbortSignal.timeout(800) });
@@ -599,7 +618,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
   }
 
   private async connect(): Promise<void> {
-    const socket = new WebSocket(this.options.url);
+    const socket = new WebSocket(this.serverUrl);
     this.socket = socket;
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error("App Server WebSocket connection timeout")), 10_000);
@@ -613,7 +632,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
       clientInfo: { name: "codex_app_server", title: "Agent Bridge", version: "0.6.0" },
     });
     this.notify("initialized", {});
-    log.info({ url: this.options.url }, "Connected to Codex App Server");
+    log.info({ url: this.serverUrl }, "Connected to Codex App Server");
   }
 
   private async restoreLoadedThreads(): Promise<void> {
@@ -1374,14 +1393,6 @@ async function waitForSocketClose(socket: WebSocket, timeoutMs: number): Promise
   await new Promise<void>((resolve) => {
     const timer = setTimeout(resolve, timeoutMs);
     socket.once("close", () => { clearTimeout(timer); resolve(); });
-  });
-}
-
-async function waitForChildExit(child: ChildProcess | undefined, timeoutMs: number): Promise<void> {
-  if (!child || child.exitCode !== null || child.signalCode !== null) return;
-  await new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(() => reject(runtimeSwitchError("Old Codex App Server did not exit")), timeoutMs);
-    child.once("exit", () => { clearTimeout(timer); resolve(); });
   });
 }
 
