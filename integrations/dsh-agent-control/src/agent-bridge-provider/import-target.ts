@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { mkdir, realpath, readFile, rename, writeFile, readdir } from 'node:fs/promises'
+import { mkdir, realpath, readFile, writeFile, readdir } from 'node:fs/promises'
 import { homedir, hostname as osHostname } from 'node:os'
 import { isAbsolute, join, basename, relative } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
@@ -12,6 +12,7 @@ import { appendSessionEvent, guardImportedTurnNumbers, nativeSession, sessionEve
 import { ACK_EVENT, BINDING_EVENT, PROVIDER, openStep, projectNativeEvents, record, str } from './mapping.js'
 import { isStoredSessionCorruption, repairStoredToolResults } from './session-repair.js'
 import { relayPendingInteractions } from './approval-bridge.js'
+import { readSyncVersions, writeSyncSidecar } from './sync-version-cache.js'
 
 const hash = (value: string) => createHash('sha256').update(value).digest('hex').slice(0, 32)
 const workerAtMachine = (name: string, machineId: string) => /\s@\s/.test(name) ? name : name + ' @ ' + machineId
@@ -141,18 +142,22 @@ export class AgentBridgeImportTarget {
   }
   /** Catalog version each stored Session was last synchronized to; 0 means stored at an unknown version. */
   private loadVersions(): Promise<void> {
-    this.versionsLoaded ??= readFile(join(this.dataRoot, 'synced-versions.json'), 'utf8').then(text => {
-      for (const [id, version] of Object.entries(record(JSON.parse(text)))) if (!this.versions.has(id)) this.versions.set(id, Number(version) || 0)
-    }, (error: NodeJS.ErrnoException) => { if (error.code !== 'ENOENT') this.host.logger.warn('Agent Bridge synced versions: ' + String(error)) })
+    if (!this.versionsLoaded) {
+      const attempt = readSyncVersions(join(this.dataRoot, 'synced-versions.json'), message => this.host.logger.warn(message)).then(({ versions, recovered }) => {
+        for (const [id, version] of Object.entries(versions)) if (!this.versions.has(id)) this.versions.set(id, version)
+        if (recovered) this.versionsDirty = true
+      })
+      this.versionsLoaded = attempt
+      void attempt.catch(() => { if (this.versionsLoaded === attempt) this.versionsLoaded = undefined })
+    }
     return this.versionsLoaded
   }
   private async saveVersions(): Promise<void> {
     if (!this.versionsDirty) return
     this.versionsDirty = false
     const path = join(this.dataRoot, 'synced-versions.json')
-    await mkdir(this.dataRoot, { recursive: true })
-    await writeFile(path + '.tmp', JSON.stringify(Object.fromEntries(this.versions)))
-    await rename(path + '.tmp', path)
+    try { await writeSyncSidecar(path, Object.fromEntries(this.versions)) }
+    catch (error) { this.versionsDirty = true; throw error }
   }
   private synchronized(id: string, version: number): void {
     if (this.versions.get(id) === version) return
@@ -217,7 +222,7 @@ export class AgentBridgeImportTarget {
       // the original log intact; it may contain lineage used by forked sessions.
       const directory = join(this.dataRoot, 'deleted-native-sessions')
       await mkdir(directory, { recursive: true })
-      await writeFile(join(directory, nativeId + '.json'), JSON.stringify({ nativeId, deletedAt: Date.now() }), { flag: 'w' })
+      await writeSyncSidecar(join(directory, nativeId + '.json'), { nativeId, deletedAt: Date.now() })
       await this.host.workspaceRegistry.archiveSession(nativeId)
       return { deleted: true, nativeId }
     }
@@ -396,7 +401,7 @@ export class AgentBridgeImportTarget {
       // remote session a second time under its derived id.
       const directory = join(this.dataRoot, 'draft-aliases')
       await mkdir(directory, { recursive: true })
-      await writeFile(join(directory, nativeSessionId(this.origin, remoteId) + '.json'), JSON.stringify({ origin: binding['origin'], remoteId, nativeId }))
+      await writeSyncSidecar(join(directory, nativeSessionId(this.origin, remoteId) + '.json'), { origin: binding['origin'], remoteId, nativeId })
       this.aliases.set(remoteId, nativeId)
       const bound: JsonObject = { ...binding, sessionId: remoteId }
       this.bindings.set(nativeId, bound)

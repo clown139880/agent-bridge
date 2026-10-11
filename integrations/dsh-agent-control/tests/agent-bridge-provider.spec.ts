@@ -1104,3 +1104,41 @@ describe('remote turn cancellation', () => {
     expect(stoppedByUser(new Error('agent loop is not active'))).toBe(false)
   })
 })
+
+describe('synchronization cache recovery', () => {
+  it('continues importing conversations after preserving a corrupt cache', async () => {
+    const { target, agents, host } = await fixture()
+    const path = join(target.dataRoot, 'synced-versions.json')
+    await writeFile(path, Buffer.alloc(22219))
+    await target.refresh()
+    expect(target.error).toBe('')
+    expect(agents.size).toBe(1)
+    expect(host.logger.warn).toHaveBeenCalledWith(expect.stringContaining('original preserved'))
+    expect(JSON.parse(await readFile(path, 'utf8'))).toHaveProperty(nativeSessionId('http://bridge.test', 'remote-1'), 10)
+    await target.dispose()
+  })
+
+  it('retries a failed cache read rather than retaining a rejected promise', async () => {
+    const { target } = await fixture()
+    const path = join(target.dataRoot, 'synced-versions.json')
+    await mkdir(path)
+    await expect(target.refresh()).rejects.toThrow()
+    await rm(path, { recursive: true })
+    await writeFile(path, '{}')
+    await expect(target.refresh()).resolves.toBeUndefined()
+    expect(target.error).toBe('')
+    await target.dispose()
+  })
+
+  it('retries failed cache writes even when the conversation version is unchanged', async () => {
+    const { target } = await fixture()
+    const path = join(target.dataRoot, 'synced-versions.json')
+    await (target as unknown as { loadVersions(): Promise<void> }).loadVersions()
+    await mkdir(path)
+    await target.refresh()
+    await rm(path, { recursive: true })
+    await target.refresh()
+    expect(JSON.parse(await readFile(path, 'utf8'))).toHaveProperty(nativeSessionId('http://bridge.test', 'remote-1'), 10)
+    await target.dispose()
+  })
+})
