@@ -37,4 +37,4 @@ curl -s -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
 
 - SOUL：`_agent-hermes`、`_agent-dorothy`。各 Hermes profile 的 `SOUL.md` 是指向对应 `soul.md` 的软链接，所以 cron 和子 agent 也按原机制加载；Hermes 每条消息重读 SOUL.md，改完即生效。插件注入自身作用域时用 `include_persona: false`，避免重复。
 - 角色卡：`card-<名字>`（`discoverable: false`）。`memory_load` 返回人设加这张卡的记忆；对应的 Hermes 技能只是一句「加载 card-<名字>」。
-- deathnote 自动提交脚本在任何 `soul.md` 改动后通知 Hermes 私聊。Hermes 按用户授权可以改任何 soul.md（自己的、其他 agent 的、角色卡的）；Dorothy 没有文件写工具，人设里也写明不改。
+- 改动历史在 deathnote 的 git 里，不另做通知。
