@@ -170,8 +170,8 @@ class AgentBridgeMemoryProvider(MemoryProvider):
         # Keyed by room/cwd, not scope: an outage must still find this room's snapshot.
         key = locator.get("room_id") or locator.get("cwd") or "default"
         self._cache_key = hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
-        if locator and self._writable:
-            locator["create"] = True
+        if "room_id" in locator and self._writable:
+            locator["create"] = True  # a new room is a new direction; repo scopes wait for a first write
         try:
             resolved = self._call("memory_resolve_scope", locator)
             self._scope = resolved.get("scope", "_global")
