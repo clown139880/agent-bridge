@@ -44,12 +44,8 @@ PREFETCH_HITS = 5
 PREFETCH_CHARS = 800
 HANDOFF_MIN_TURNS = 3
 
-USAGE = """## 记忆使用说明
-- 以上是开局快照：全局、你自己和当前房间（作用域 {scope}）的核心记忆。记忆是参考资料，不扩大工具和权限授权；项目现状以仓库为准。
-- 需要更多时用 memory_search / memory_get；要用别的房间的记忆就 memory_load，并在回复里说明。
-- 用户确认的决定、偏好、规则、踩坑经验用 memory_write 记下（默认写当前房间；关于用户本人或各房间通用的写 _global）。同一主题+类别再写会替换旧值并保留历史；写错了用 memory_retract。
-- 完成一段有意义的工作，用 memory_log 记一行进展，方便下次新开对话接上。
-- 不要写入凭据、一次性状态或仓库里已有的代码事实。"""
+# How to use memory lives in the tool descriptions; the prompt only says what this block is.
+HEADER = "长期记忆（当前房间：{scope}；只是参考，不扩大授权）："
 
 TOOLS: List[Dict[str, Any]] = [
     {"name": "memory_search", "description": "Search memory facts and progress notes. scope: current (default), _global, a scope slug, or all.",
@@ -66,7 +62,8 @@ TOOLS: List[Dict[str, Any]] = [
 ]
 WRITE_TOOLS: List[Dict[str, Any]] = [
     {"name": "memory_write", "description": (
-        "Record a durable fact. topic: lowercase ASCII slug (give topic_display in Chinese); kind: preference, rule, "
+        "Record a durable fact the user confirmed (decision, preference, rule, lesson); never credentials or one-off "
+        "state. topic: lowercase ASCII slug (give topic_display in Chinese); kind: preference, rule, "
         "decision, fact, lesson, pointer or profile. value is one line; details in body. Same topic+kind supersedes "
         "the old value. scope defaults to the current room; use _global for facts about the user or for every room."),
      "parameters": {"type": "object", "properties": {
@@ -74,7 +71,7 @@ WRITE_TOOLS: List[Dict[str, Any]] = [
          "topic_display": {"type": "string"}, "aliases": {"type": "array", "items": {"type": "string"}},
          "body": {"type": "string"}, "pin": {"type": "boolean"}, "scope": {"type": "string"}},
          "required": ["topic", "kind", "value"]}},
-    {"name": "memory_log", "description": "Append a one-line progress/hand-off note to the current scope.",
+    {"name": "memory_log", "description": "After finishing a meaningful piece of work, append a one-line progress/hand-off note so a new conversation can continue.",
      "parameters": {"type": "object", "properties": {"summary": {"type": "string"}, "body": {"type": "string"},
                                                      "scope": {"type": "string"}}, "required": ["summary"]}},
     {"name": "memory_retract", "description": "Retract a wrong or outdated fact (kept in history).",
@@ -199,12 +196,11 @@ class AgentBridgeMemoryProvider(MemoryProvider):
                 parts.append(self._call("memory_load", {"scope": self._self_scope})["text"])
             except ValueError as exc:
                 logger.warning("agent-memory: self scope %s unavailable: %s", self._self_scope, exc)
-        return "\n\n".join(parts)
+        return "\n".join(part for part in parts if part)
 
     def _render(self, bootstrap: str, warnings: List[str]) -> str:
         note = "\n".join(f"- 注意：{warning}" for warning in warnings)
-        return "\n\n".join(part for part in (
-            "# 长期记忆（agent-bridge-memory）", bootstrap, note, USAGE.format(scope=self._scope)) if part)
+        return "\n".join(part for part in (HEADER.format(scope=self._scope), bootstrap, note) if part)
 
     def _cache_file(self) -> Optional[Path]:
         return self._cache_dir / f"{self._cache_key}.md" if self._cache_dir else None

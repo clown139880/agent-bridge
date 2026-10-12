@@ -71,7 +71,7 @@ def test_room_scope_bootstrap_tools_and_handoff(mcp, tmp_path):
                         hermes_home=str(tmp_path), agent_context="primary")
     assert mcp.calls[0] == ("memory_resolve_scope", {"room_id": "!velvet:x", "room_name": "天鹅绒之馆", "create": True})
     block = provider.system_prompt_block()
-    assert "# 作用域 velvet-room" in block and "# 自身 _agent-dorothy" in block and "作用域 velvet-room）" in block
+    assert "# 作用域 velvet-room" in block and "# 自身 _agent-dorothy" in block and block.startswith("长期记忆（当前房间：velvet-room；")
     assert {tool["name"] for tool in provider.get_tool_schemas()} >= {"memory_write", "memory_log", "memory_load"}
 
     json.loads(provider.handle_tool_call("memory_write", {"topic": "comfy", "kind": "fact", "value": "v"}))

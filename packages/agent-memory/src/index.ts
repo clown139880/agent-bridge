@@ -282,54 +282,35 @@ export class AgentMemory {
   }
 
   /**
-   * Deterministic core memory for one scope (OMA v4.1 bootstrap): description, pinned
-   * current facts, then recent events, stopping before the first whole item over budget.
+   * Deterministic core memory for one scope: the scope description, then pinned current facts,
+   * then recent progress, one line each and content only (no headings, topic labels or footer:
+   * every character is paid on every turn). Stops before the first whole line over budget.
    */
   bootstrap(scope: string, budget?: number): string {
     const info = this.scope(scope);
     const limit = budget ?? info.bootstrapBudget;
     const today = isoDate(this.now());
     const since = isoDate(new Date(this.now().getTime() - LOOKBACK_DAYS * 86_400_000));
-    const sections: Array<[string, string[]]> = [
-      ["置顶事实", this.facts(scope).filter((fact) => fact.pinned && !fact.validUntil
-        && (!fact.validFrom || fact.validFrom <= today))
-        .map((fact) => `- **${fact.topicDisplay}/${fact.kind}**: ${fact.value}`)],
-      ["最近进展", this.events(scope).filter((event) => event.occurredAt.slice(0, 10) >= since
-        && event.occurredAt.slice(0, 10) <= today)
-        .slice(0, RECENT_EVENTS).map((event) => `- ${event.occurredAt.slice(0, 10)}: ${event.summary}`)],
+    const entries = [
+      ...this.facts(scope).filter((fact) => fact.pinned && !fact.validUntil && (!fact.validFrom || fact.validFrom <= today))
+        .map((fact) => `- ${fact.value}`),
+      ...this.events(scope).filter((event) => event.occurredAt.slice(0, 10) >= since && event.occurredAt.slice(0, 10) <= today)
+        .slice(0, RECENT_EVENTS).map((event) => `- ${event.occurredAt.slice(5, 10)} ${event.summary}`),
     ];
-    const lines = [`# ${info.title}（记忆作用域 ${info.id}）`];
-    if (info.description) lines.push("", info.description);
-    let items = 0, full = false;
-    const footer = (count: number, size: number) => `<!-- bootstrap: ${count} items, ${size}/${limit} chars -->`;
-    const length = (candidate: string[]) => [...candidate, "", footer(items + 1, 9999)].join("\n").length;
-    for (const [title, entries] of sections) {
-      if (full || !entries.length) continue;
-      const heading = ["", `## ${title}`];
-      if (length([...lines, ...heading, entries[0]!]) > limit) { full = true; continue; }
-      lines.push(...heading);
-      for (const entry of entries) {
-        if (length([...lines, entry]) > limit) { full = true; break; }
-        lines.push(entry); items++;
-      }
+    const lines = info.description ? [info.description] : [];
+    if (lines.join("\n").length > limit) throw new MemoryError("budget_too_small", String(limit));
+    for (const entry of entries) {
+      if ([...lines, entry].join("\n").length > limit) break;
+      lines.push(entry);
     }
-    const body = lines.join("\n");
-    // The footer reports the complete length including itself (OMA bootstrap contract).
-    let size = body.length, text = "";
-    for (;;) {
-      text = `${body}\n\n${footer(items, size)}`;
-      if (text.length === size) break;
-      size = text.length;
-    }
-    if (size > limit) throw new MemoryError("budget_too_small", String(limit));
-    return text;
+    return lines.join("\n");
   }
 
   /** Session bootstrap: _global plus the room's scope (once when the room is _global). Also refreshes the cache file. */
   sessionBootstrap(scope: string): string {
     const parts = [this.bootstrap(GLOBAL)];
     if (scope !== GLOBAL) parts.push(this.bootstrap(scope));
-    const text = parts.join("\n\n");
+    const text = parts.filter(Boolean).join("\n");
     if (this.options.cacheDir) {
       try {
         mkdirSync(this.options.cacheDir, { recursive: true });

@@ -125,19 +125,14 @@ test("bootstrap is deterministic, budgeted by whole items and scoped; search hid
 
   const first = memory.sessionBootstrap("travel");
   assert.equal(first, memory.sessionBootstrap("travel"));
-  assert.match(first, /# 全局（记忆作用域 _global）\n\n关于你本人。/);
-  assert.match(first, /- \*\*altitude\/fact\*\*: 孩子在 3600m 血氧掉到 87%/);
-  assert.match(first, /- 2026-10-12: 定稿方案A\+，10\/3 出发/);
+  // Content only: description, then one line per pinned fact and recent event.
+  assert.equal(first, "关于你本人。\n- 住杭州，一家三口\n- 孩子在 3600m 血氧掉到 87%\n- 10-12 定稿方案A+，10/3 出发");
   assert.doesNotMatch(first, /未置顶的事实|叫老公/);
   assert.equal(readFileSync(join(vault, "cache/travel.md"), "utf8"), `${first}\n`);
-  const sized = memory.bootstrap("travel");
-  const reported = Number(sized.match(/(\d+)\/1500 chars -->$/)![1]);
-  assert.equal(reported, sized.length);
 
-  const tight = memory.bootstrap("travel", 90);
-  assert.ok(tight.length <= 90);
-  assert.doesNotMatch(tight, /87%/);
-  assert.throws(() => memory.bootstrap("travel", 20), /budget_too_small/);
+  // Budget counts whole lines; the description must fit.
+  assert.equal(memory.bootstrap("_global", 12), "关于你本人。");
+  assert.throws(() => memory.bootstrap("_global", 3), /budget_too_small/);
 
   assert.deepEqual(memory.search("老公", "all"), []);
   assert.equal(memory.search("老公", ["card-negumi"]).length, 1);
@@ -225,7 +220,7 @@ test("MCP exposes memory reads to the conversation token and writes only to writ
     assert.match((await call("reader-token-0123456789", "memory_resolve_scope", { room_id: "!x:example.org", create: true }))
       .error.message, /unknown_tool/);
     const boot = await call("reader-token-0123456789", "memory_bootstrap", { scope: "travel" });
-    assert.match(boot.result.structuredContent.text, /签证\/fact\*\*: 免签/);
+    assert.match(boot.result.structuredContent.text, /^- 免签$/m);
     const hits = await call("reader-token-0123456789", "memory_search", { query: "免签" });
     assert.equal(hits.result.structuredContent.hits[0].scope, "travel");
     const scopes = await call("reader-token-0123456789", "memory_scopes", {});
