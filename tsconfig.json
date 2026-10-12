@@ -2,6 +2,7 @@
   "files": [],
   "references": [
     { "path": "packages/protocol" },
+    { "path": "packages/agent-memory" },
     { "path": "packages/database" },
     { "path": "apps/control-plane" },
     { "path": "apps/bridge" }

@@ -2,5 +2,5 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": { "outDir": "dist", "rootDir": "src" },
   "include": ["src/**/*.ts"],
-  "references": [{ "path": "../../packages/protocol" }, { "path": "../../packages/database" }]
+  "references": [{ "path": "../../packages/protocol" }, { "path": "../../packages/agent-memory" }, { "path": "../../packages/database" }]
 }

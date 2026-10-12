@@ -1,0 +1,3 @@
+interface:
+  display_name: "Agent Memory"
+  short_description: "Read and update shared room/project memory"

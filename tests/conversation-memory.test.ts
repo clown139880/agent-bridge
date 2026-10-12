@@ -77,7 +77,9 @@ test("conversation MCP exposes the read-only search tool contract", () => {
   f.control.appendSessionEvent(message("design-session", "evt-mcp", "user", "中心提供 MCP，项目不持有 projectId。", f.now));
   const mcp = new ConversationMcpServer(f.memory, "memory-secret");
   try {
-    const dispatch = (mcp as unknown as { dispatch(request: unknown): unknown }).dispatch.bind(mcp);
+    const reader = { conversation: true, memory: false };
+    const dispatch = (request: unknown) =>
+      (mcp as unknown as { dispatch(request: unknown, principal: unknown): unknown }).dispatch(request, reader);
     const listed = dispatch({ jsonrpc: "2.0", id: 1, method: "tools/list" }) as
       { result: { tools: Array<{ name: string }> } };
     assert.deepEqual(listed.result.tools.map((tool) => tool.name),

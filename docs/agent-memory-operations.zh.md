@@ -1,0 +1,30 @@
+# 跨 agent 记忆运行说明
+
+设计与决策见 [agent-memory-design.zh.md](agent-memory-design.zh.md)。
+
+## 存储
+
+- 事实源是 `AGENT_MEMORY_VAULT`（HAL：`/root/deathnote`）里的 `agent-memory/`，格式为 OMA v4.1 的子集，由 `packages/agent-memory` 读写。没有数据库和索引，每次请求都直接读文件，所以在 Obsidian 里改动后立即生效。
+- 每次写入都是一次只包含该作用域目录的 git 提交，作者为 `agent-memory (<写入者>)`。提交在 `AGENT_MEMORY_LOCK`（HAL：`/run/lock/deathnote-git.lock`）下进行，这把锁与 deathnote 的自动提交 cron 共用。推送由 cron 负责。
+- bootstrap 缓存写到 `AGENT_MEMORY_CACHE_DIR/<scope>.md`，在 checkout 之外。它只是 Control Plane 不可用时的只读兜底，可以随时删除。
+
+## MCP
+
+记忆工具挂在已有的 `POST /mcp` 上，按 token 分权：
+
+| token | 工具 |
+| --- | --- |
+| `CONVERSATION_MCP_READ_TOKEN` | `conversation_*`，以及 `memory_resolve_scope/bootstrap/load/search/get/scopes` |
+| `AGENT_MEMORY_TOKENS` 中的任一项 | 上述全部工具，加上 `memory_write/log/retract`。写入者身份取自 token，不取自参数 |
+
+`agent` 角色（Hermes、Dorothy）可以写 `_global`；`project` 角色（仓库里的 Codex/Claude/pi）只能写项目作用域。没绑定的房间或仓库，可以由写入者用 `memory_resolve_scope create=true` 建一个临时作用域（`status: provisional`）。
+
+## 检查
+
+```bash
+curl -s -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"memory_scopes","arguments":{}}}' \
+  http://127.0.0.1:8787/mcp
+```
+
+文件写坏、绑定冲突、Syncthing 冲突副本，都会出现在 `memory_resolve_scope` 的 `warnings` 和 `AgentMemory.lint()` 的结果里。被跳过的文件不影响其余记忆的读取。

@@ -27,6 +27,7 @@ import { AgentControlApi } from "./api/router.js";
 import { MAX_JSON_BODY_BYTES } from "./api/validation.js";
 import { BridgeRegistry, type BridgeConnection } from "./bridge-registry.js";
 import { WebhookNotifier, type WebhookOptions } from "./webhook.js";
+import { AgentMemory, type Writer } from "@agent-bridge/agent-memory";
 import { ConversationMcpServer } from "./memory-mcp.js";
 import { compareBridgeVersions } from "./bridge-version.js";
 import { PostDeployResumer } from "./post-deploy.js";
@@ -142,6 +143,7 @@ export class ControlPlane {
       controlApiReadToken?: string;
       controlApiWriteToken?: string;
       conversationMemory?: { mcpReadToken?: string };
+      agentMemory?: { vault: string; root?: string; lockPath?: string; cacheDir?: string; writers: Array<Writer & { token: string }> };
       retention?: { actionsMs: number; attachmentsMs: number };
       sse?: { keepaliveMs: number; pollMs: number; maxBackpressure: number; actionTimeoutMs?: number };
       bridgeUpdate?: {
@@ -155,8 +157,14 @@ export class ControlPlane {
   ) {
     this.webhook = new WebhookNotifier(options.webhook);
     this.memory = new ConversationMemoryStore(store.db);
-    if (options.conversationMemory?.mcpReadToken) {
-      this.memoryMcp = new ConversationMcpServer(this.memory, options.conversationMemory.mcpReadToken);
+    let agentMemory: AgentMemory | undefined;
+    if (options.agentMemory) {
+      try { agentMemory = new AgentMemory(options.agentMemory); }
+      catch (error) { log.error({ error }, "Agent memory disabled: vault unavailable"); }
+    }
+    if (options.conversationMemory?.mcpReadToken || agentMemory) {
+      this.memoryMcp = new ConversationMcpServer(this.memory, options.conversationMemory?.mcpReadToken,
+        agentMemory && { store: agentMemory, writers: options.agentMemory!.writers });
     }
     this.controlStore = new AgentControlStore(store.db, options.retention ?? {
       actionsMs: 86_400_000, attachmentsMs: 7 * 86_400_000,

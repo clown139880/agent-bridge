@@ -94,7 +94,10 @@ Control Plane 主要变量：
 | `WORKER_API_ENABLED` | 默认 `false`；设为 `true` 才开放 Hermes worker API |
 | `WORKER_API_TOKEN` | 启用 worker API 时必填的独立 bearer token |
 | `CONTROL_API_READ_TOKEN` / `CONTROL_API_WRITE_TOKEN` | Agent Control Host 的只读/读写 token；浏览器不得持有 |
-| `CONVERSATION_MCP_READ_TOKEN` | `/mcp` 的独立只读 bearer token；不得复用 Bridge 或 Control API 写密钥 |
+| `CONVERSATION_MCP_READ_TOKEN` | `/mcp` 的独立只读 bearer token；不得复用 Bridge 或 Control API 写密钥。配置了 agent 记忆时也可调用只读的 `memory_*` 工具 |
+| `AGENT_MEMORY_VAULT` | 跨 agent 记忆所在的 Git 笔记库（如 `/root/deathnote`）；不设则关闭记忆。见 [`docs/agent-memory-operations.zh.md`](docs/agent-memory-operations.zh.md) |
+| `AGENT_MEMORY_TOKENS` | `名字:token[:agent|project]`，逗号分隔；每个客户端一枚，持有者可以写记忆。`project`（默认）不能写 `_global` |
+| `AGENT_MEMORY_ROOT` / `AGENT_MEMORY_LOCK` / `AGENT_MEMORY_CACHE_DIR` | 笔记库内的记忆目录（默认 `agent-memory`）、与笔记库自动提交共用的 flock 文件、bootstrap 缓存目录（默认数据库旁的 `memory-cache`） |
 | `CONTROL_ACTION_RETENTION_MS` | action/idempotency 保留期，默认 24 小时 |
 | `CONTROL_ATTACHMENT_RETENTION_MS` | 内容寻址图片附件保留期，默认 7 天 |
 | `CONTROL_ACTION_TIMEOUT_MS` | Bridge action ack 超时，默认 30 秒 |

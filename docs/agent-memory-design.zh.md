@@ -1,6 +1,6 @@
 # 设计：跨 Agent 的房间/项目作用域记忆
 
-- 状态：设计稿第 3 版（整合版），未实现（Kanban t_878c7584）。本文不改任何代码或配置。
+- 状态：设计稿第 3 版（整合版），Kanban t_878c7584。阶段 0 已上线；阶段 1（`packages/agent-memory` + Control Plane `memory_*` 工具 + `agent-memory` 技能）于 0.6.86 实现，运行说明见 [agent-memory-operations.zh.md](agent-memory-operations.zh.md)。
 - 关联：[conversation-memory-design.zh.md](conversation-memory-design.zh.md)、[conversation-memory-operations.zh.md](conversation-memory-operations.zh.md)。
 - 基线：agent-bridge `0.6.85`；Hermes `v2026.8.19-14230-g532f83aaf1`；笔记库 `/root/deathnote`；格式参考 OMA v4.1（`jrcruciani/obsidian-memory-for-ai@f87548a`，仅作参考，不依赖）。
 

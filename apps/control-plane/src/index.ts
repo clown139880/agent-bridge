@@ -31,6 +31,7 @@ control = new ControlPlane(store, matrix, {
   controlApiReadToken: config.controlApiReadToken,
   controlApiWriteToken: config.controlApiWriteToken,
   conversationMemory: config.conversationMemory,
+  agentMemory: config.agentMemory,
   retention: config.retention,
   sse: config.sse,
   bridgeUpdate: config.bridgeUpdate,

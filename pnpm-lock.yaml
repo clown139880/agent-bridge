@@ -42,6 +42,9 @@ importers:
 
   apps/control-plane:
     dependencies:
+      '@agent-bridge/agent-memory':
+        specifier: workspace:*
+        version: link:../../packages/agent-memory
       '@agent-bridge/database':
         specifier: workspace:*
         version: link:../../packages/database
@@ -164,6 +167,12 @@ importers:
       vitest:
         specifier: ^3.2.4
         version: 3.2.7(@types/debug@4.1.13)(@types/node@22.20.1)(jiti@2.7.0)(jsdom@26.1.0)(tsx@4.23.12)(yaml@2.9.0)
+
+  packages/agent-memory:
+    dependencies:
+      yaml:
+        specifier: ^2.9.0
+        version: 2.9.0
 
   packages/database:
     dependencies:

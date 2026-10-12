@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "dependencies": {
+    "@agent-bridge/agent-memory": "workspace:*",
     "@agent-bridge/database": "workspace:*",
     "@agent-bridge/protocol": "workspace:*",
     "marked": "^18.0.11",

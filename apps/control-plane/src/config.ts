@@ -71,6 +71,7 @@ export const config = {
   conversationMemory: {
     mcpReadToken: process.env.CONVERSATION_MCP_READ_TOKEN,
   },
+  agentMemory: agentMemoryConfig(),
   retention: {
     actionsMs: duration("CONTROL_ACTION_RETENTION_MS", 86_400_000),
     attachmentsMs: duration("CONTROL_ATTACHMENT_RETENTION_MS", 7 * 86_400_000),
@@ -93,3 +94,24 @@ export const config = {
     secret: process.env.DOROTHY_WEBHOOK_SECRET,
   } : undefined,
 };
+
+/** Cross-agent memory (docs/agent-memory-design.zh.md); disabled unless AGENT_MEMORY_VAULT is set. */
+function agentMemoryConfig() {
+  const vault = process.env.AGENT_MEMORY_VAULT;
+  if (!vault) return undefined;
+  // AGENT_MEMORY_TOKENS: comma-separated name:token[:agent|project]; repo-bound agents default to project.
+  const writers = (process.env.AGENT_MEMORY_TOKENS ?? "").split(",").map((item) => item.trim()).filter(Boolean).map((item) => {
+    const [name, token, role = "project"] = item.split(":");
+    if (!name || !token || token.length < 16 || (role !== "agent" && role !== "project")) {
+      throw new Error("AGENT_MEMORY_TOKENS entries must be name:token[:agent|project] with tokens of at least 16 characters");
+    }
+    return { name, token, role: role as "agent" | "project" };
+  });
+  return {
+    vault,
+    root: process.env.AGENT_MEMORY_ROOT ?? "agent-memory",
+    lockPath: process.env.AGENT_MEMORY_LOCK,
+    cacheDir: process.env.AGENT_MEMORY_CACHE_DIR ?? join(dirname(databasePath), "memory-cache"),
+    writers,
+  };
+}
