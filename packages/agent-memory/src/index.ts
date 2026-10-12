@@ -306,6 +306,21 @@ export class AgentMemory {
     return lines.join("\n");
   }
 
+  /**
+   * Persona (SOUL or role card): `soul.md` in the scope directory, a plain note that only humans
+   * edit. No memory tool writes it; agent-learned facts and events live beside it.
+   */
+  persona(scope: string): string {
+    this.scope(scope);
+    const file = join(this.scopesDir, scope, "soul.md");
+    return existsSync(file) ? readFileSync(file, "utf8").trim() : "";
+  }
+
+  /** What memory_load brings into a conversation: the persona (if any) then the core memory. */
+  load(scope: string, options: { persona?: boolean } = {}): string {
+    return [options.persona === false ? "" : this.persona(scope), this.bootstrap(scope)].filter(Boolean).join("\n\n");
+  }
+
   /** Session bootstrap: _global plus the room's scope (once when the room is _global). Also refreshes the cache file. */
   sessionBootstrap(scope: string): string {
     const parts = [this.bootstrap(GLOBAL)];

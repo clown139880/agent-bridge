@@ -55,7 +55,7 @@ TOOLS: List[Dict[str, Any]] = [
      "parameters": {"type": "object", "properties": {"topic": {"type": "string"}, "kind": {"type": "string"},
                                                      "scope": {"type": "string"}, "history": {"type": "boolean"},
                                                      "as_of": {"type": "string"}}, "required": ["topic", "kind"]}},
-    {"name": "memory_load", "description": "Load another scope's core memory into this conversation (like loading a skill). Tell the user you did.",
+    {"name": "memory_load", "description": "Load a scope into this conversation like a skill: a role card (card-<name>) returns its persona and memory; any room returns its core memory. Tell the user you did.",
      "parameters": {"type": "object", "properties": {"scope": {"type": "string"}}, "required": ["scope"]}},
     {"name": "memory_scope", "description": "Show the current memory scope and list the discoverable scopes.",
      "parameters": {"type": "object", "properties": {}}},
@@ -193,7 +193,8 @@ class AgentBridgeMemoryProvider(MemoryProvider):
         parts = [self._call("memory_bootstrap", {"scope": self._scope})["text"]]
         if self._self_scope:
             try:
-                parts.append(self._call("memory_load", {"scope": self._self_scope})["text"])
+                # The self scope's persona is already SOUL.md (a symlink to its soul.md); only its memory here.
+                parts.append(self._call("memory_load", {"scope": self._self_scope, "include_persona": False})["text"])
             except ValueError as exc:
                 logger.warning("agent-memory: self scope %s unavailable: %s", self._self_scope, exc)
         return "\n".join(part for part in parts if part)

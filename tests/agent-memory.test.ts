@@ -147,6 +147,12 @@ test("bootstrap is deterministic, budgeted by whole items and scoped; search hid
   assert.equal(memory.search("记得孩子血氧的事么", ["travel"])[0]!.path, "scopes/travel/facts/altitude/fact.md");
   assert.equal(memory.resolveScope({ roomId: "!travel:example.org" }).prefetch, false);
   assert.ok(memory.bootstrap("card-negumi").includes("叫老公"));
+
+  // Persona scopes: soul.md is human-edited, returned by load() ahead of the learned memory.
+  writeFileSync(join(vault, "agent-memory/scopes/card-negumi/soul.md"), "# 人设\n\n温柔。\n");
+  assert.equal(memory.load("card-negumi"), "# 人设\n\n温柔。\n\n- 叫老公");
+  assert.equal(memory.load("card-negumi", { persona: false }), "- 叫老公");
+  assert.equal(memory.persona("travel"), "");
 });
 
 test("old events fall out of the bootstrap after the lookback window", () => {

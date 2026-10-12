@@ -60,8 +60,10 @@ const MEMORY_READ_TOOLS = [
   },
   {
     name: "memory_load",
-    description: "Temporarily load another scope's core memory into this conversation (like loading a skill). Does not change the current scope; write to it only with an explicit scope.",
-    inputSchema: { type: "object", required: ["scope"], additionalProperties: false, properties: { scope: SCOPE } },
+    description: "Load a scope into this conversation (like loading a skill): its persona (soul.md, for SOUL and role-card scopes) and core memory. Does not change the current scope; write to it only with an explicit scope.",
+    inputSchema: { type: "object", required: ["scope"], additionalProperties: false, properties: {
+      scope: SCOPE, include_persona: { type: "boolean", description: "Default true; false returns only the core memory." },
+    } },
   },
   {
     name: "memory_search",
@@ -244,7 +246,7 @@ export class ConversationMcpServer {
           scopeHint: stringArg(args.scope_hint) }, create) };
       }
       case "memory_bootstrap": return { scope: scope(), text: store.sessionBootstrap(scope()) };
-      case "memory_load": return { scope: scope(), text: store.bootstrap(scope()),
+      case "memory_load": return { scope: scope(), text: store.load(scope(), { persona: args.include_persona !== false }),
         note: "Loaded for this conversation only; the current scope is unchanged." };
       case "memory_search": {
         const raw = stringArg(args.scope);

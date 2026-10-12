@@ -30,3 +30,11 @@ curl -s -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
 ```
 
 文件写坏、绑定冲突、Syncthing 冲突副本，都会出现在 `memory_resolve_scope` 的 `warnings` 和 `AgentMemory.lint()` 的结果里。被跳过的文件不影响其余记忆的读取。
+
+## 人设（SOUL 与角色卡）
+
+人设作用域在目录里有一个 `soul.md`：一篇普通笔记，只由人在 Obsidian 里改，没有任何记忆工具会写它；同一作用域里的 facts/events 仍是 agent 可写的记忆。
+
+- SOUL：`_agent-hermes`、`_agent-dorothy`。各 Hermes profile 的 `SOUL.md` 是指向对应 `soul.md` 的软链接，所以 cron 和子 agent 也按原机制加载；Hermes 每条消息重读 SOUL.md，改完即生效。插件注入自身作用域时用 `include_persona: false`，避免重复。
+- 角色卡：`card-<名字>`（`discoverable: false`）。`memory_load` 返回人设加这张卡的记忆；对应的 Hermes 技能只是一句「加载 card-<名字>」。
+- deathnote 自动提交脚本在任何 `soul.md` 改动后通知 Hermes 私聊。Hermes 有完整 shell 权限，「不改 soul.md」只能靠人设规则加这个审计；Dorothy 没有文件写工具。
