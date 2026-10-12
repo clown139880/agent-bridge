@@ -336,7 +336,7 @@ export class AgentMemory {
     return text;
   }
 
-  /** Deterministic search: exact topic/alias, then frontmatter, then body; ties by path. */
+  /** Deterministic search: per term exact topic/alias > frontmatter > body, summed; ties by path. */
   search(query: string, scopes: string[] | "all", limit = 10): SearchHit[] {
     const terms = fold(query).split(/\s+/).filter(Boolean);
     if (!terms.length) throw new MemoryError("query_required");
@@ -552,13 +552,13 @@ export class AgentMemory {
   }
 }
 
+/**
+ * Any matching term counts (agents write multi-word Chinese queries whose phrases rarely all occur);
+ * more matched terms and stronger fields rank higher.
+ */
 function scoreTerms(terms: string[], names: string[], front: string, body: string): number {
   let total = 0;
-  for (const term of terms) {
-    const score = names.includes(term) ? 3 : front.includes(term) ? 2 : body.includes(term) ? 1 : 0;
-    if (!score) return 0;
-    total += score;
-  }
+  for (const term of terms) total += names.includes(term) ? 3 : front.includes(term) ? 2 : body.includes(term) ? 1 : 0;
   return total;
 }
 

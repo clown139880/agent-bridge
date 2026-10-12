@@ -1,4 +1,4 @@
 name: agent-bridge-memory
-version: 0.1.0
+version: 0.1.1
 description: "Room/project-scoped shared memory from the Agent Bridge Control Plane (Markdown in the deathnote vault); replaces built-in MEMORY.md/USER.md."
 author: local

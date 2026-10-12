@@ -62,6 +62,8 @@ def mcp(monkeypatch):
 def test_room_scope_bootstrap_tools_and_handoff(mcp, tmp_path):
     provider = plugin.AgentBridgeMemoryProvider()
     assert provider.is_available()
+    # Hermes registers tools before initialize(); write tools must already be there.
+    assert "memory_write" in {tool["name"] for tool in provider.get_tool_schemas()}
     provider.initialize("s1", platform="matrix", chat_id="!velvet:x:$thread", chat_name="天鹅绒之馆",
                         hermes_home=str(tmp_path), agent_context="primary")
     assert mcp.calls[0] == ("memory_resolve_scope", {"room_id": "!velvet:x", "room_name": "天鹅绒之馆", "create": True})
@@ -89,6 +91,5 @@ def test_cron_is_read_only_and_outage_uses_cache(mcp, tmp_path):
     offline = plugin.AgentBridgeMemoryProvider()
     offline.initialize("s2", platform="matrix", chat_id="!velvet:x", hermes_home=str(tmp_path), agent_context="cron")
     assert "# 作用域 velvet-room" in offline.system_prompt_block() and "暂不可用" in offline.system_prompt_block()
-    assert "memory_write" not in {tool["name"] for tool in offline.get_tool_schemas()}
     assert json.loads(offline.handle_tool_call("memory_write", {"topic": "a", "kind": "fact", "value": "v"}))["error"]
     mcp.down = False

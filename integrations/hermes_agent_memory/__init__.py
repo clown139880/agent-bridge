@@ -107,7 +107,8 @@ class AgentBridgeMemoryProvider(MemoryProvider):
         self._token = ""
         self._self_scope = ""
         self._scope = "_global"
-        self._writable = False
+        # Hermes reads tool schemas before initialize(); start writable and narrow for cron/subagents.
+        self._writable = True
         self._block = ""
         self._cache_dir: Optional[Path] = None
         self._cache_key = "default"
@@ -237,7 +238,8 @@ class AgentBridgeMemoryProvider(MemoryProvider):
     # ---- tools ----
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
-        return TOOLS + (WRITE_TOOLS if self._writable else [])
+        # Always listed (schemas are read before initialize); handle_tool_call enforces read-only contexts.
+        return TOOLS + WRITE_TOOLS
 
     def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
         try:

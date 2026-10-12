@@ -142,6 +142,10 @@ test("bootstrap is deterministic, budgeted by whole items and scoped; search hid
   assert.deepEqual(memory.search("老公", "all"), []);
   assert.equal(memory.search("老公", ["card-negumi"]).length, 1);
   assert.deepEqual(memory.search("方案A+", "all").map((hit) => [hit.scope, hit.kind]), [["travel", "event"]]);
+  // Not every term has to match; the hit matching more terms ranks first.
+  const loose = memory.search("旅行安排 血氧 方案A+", ["travel"]);
+  assert.deepEqual(loose.map((hit) => hit.kind), ["fact", "event"]);
+  assert.deepEqual(memory.search("完全不相关", ["travel"]), []);
   assert.ok(memory.bootstrap("card-negumi").includes("叫老公"));
 });
 
