@@ -207,7 +207,11 @@ git push -q origin HEAD || python3 ~/.hermes/scripts/deathnote-sync-conflicts.py
 | 合并有冲突、原文件不存在、canvas/excalidraw/二进制文件 | 不动，通知你 |
 | `.trash` 里的冲突副本 | 只统计数量 |
 
-通知：新建 Hermes webhook 订阅 `deathnote-sync`（`deliver_only`，profile default，`deliver_extra.chat_id = !XuCBHkBjswAFS8Bi9V`，写法同现有的 `engine-notify`）。脚本只在有事时 POST 到 `127.0.0.1:8644`。之后你可以在 Hermes 私聊里说「保留 GQX 版」之类的话来处理。第一次运行先用 `--dry-run` 把现有冲突的处理预案发给你。
+通知：Hermes webhook 订阅 `deathnote-sync`（`deliver_only`，profile default，`deliver_extra.chat_id = !XuCBHkBjswAFS8Bi9V`，写法同现有的 `engine-notify`）。脚本用 `X-Hub-Signature-256` 签名后 POST 到 `127.0.0.1:8644`。报告内容没变就不再重发（上次发送内容的哈希存在 `~/.hermes/state/deathnote-sync-conflicts.last`）。之后你可以在 Hermes 私聊里说「保留 GQX 版」之类的话来处理。
+
+运行模式：`~/.hermes/state/deathnote-sync-conflicts.mode` 不存在时只出预案（dry run）；你确认预案后，在这个文件里写入 `--apply`，之后才真正改动文件。`.excalidraw.md` 是绘图数据，不按文本合并。查找合并基准时会跟踪改名（`git log --follow`），所以挪到 `4. 存档` 的笔记也能找到。
+
+**阶段 0 状态（2026-10-12）**：新脚本和 webhook 已上线；首次运行提交了此前积压的 73 个未跟踪文件和 `agent-memory/` 骨架，已推送到 Gitea；冲突预案已发到 Hermes 私聊。预案内容：1 个可以自动合并，9 个需要你决定，`.trash` 里另有 6 个。其中 `4. 存档/BBB-南疆亲子游` 整个目录以前从未进过 git，所以找不到合并基准。脚本的原版本备份在 `~/.hermes/backups/`。
 
 ## 9. 实施阶段
 
