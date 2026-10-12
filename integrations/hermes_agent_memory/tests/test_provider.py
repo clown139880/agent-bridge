@@ -38,7 +38,10 @@ class FakeMcp:
                 fake.calls.append((name, args))
                 result = {
                     "memory_resolve_scope": {"scope": "velvet-room" if args.get("room_id") == "!velvet:x" else "_global",
-                                             "warnings": []},
+                                             "prefetch": args.get("room_id") == "!velvet:x", "warnings": []},
+                    "memory_search": {"hits": [{"scope": "velvet-room", "text": "工作流/fact = 新值"},
+                                               {"scope": "_global", "text": "已注入/fact = 作用域 velvet-room"}]}
+                    if args.get("mode") == "recall" else {"ok": True, "args": args},
                     "memory_bootstrap": {"text": f"# 全局\n\n# 作用域 {args.get('scope')}"},
                     "memory_load": {"text": f"# 自身 {args.get('scope')}"},
                 }.get(name, {"ok": True, "args": args})
@@ -76,8 +79,15 @@ def test_room_scope_bootstrap_tools_and_handoff(mcp, tmp_path):
     provider.handle_tool_call("memory_search", {"query": "x", "scope": "all"})
     assert mcp.calls[-1][1]["scope"] == "all"
 
+    recalled = provider.prefetch("上次那个工作流怎么配的")
+    assert mcp.calls[-1] == ("memory_search", {"query": "上次那个工作流怎么配的", "scope": "velvet-room,_global",
+                                               "mode": "recall", "limit": 5})
+    assert "工作流/fact = 新值" in recalled and "已注入" not in recalled
+    assert provider.prefetch("/new") == ""
+
+    calls = len(mcp.calls)
     provider.on_session_end([{"role": "user", "content": "出一张图"}, {"role": "assistant", "content": "好"}])
-    assert mcp.calls[-1][0] == "memory_search"
+    assert len(mcp.calls) == calls
     turns = [m for i in range(3) for m in ({"role": "user", "content": f"第{i}句"}, {"role": "assistant", "content": f"回{i}"})]
     provider.on_session_end(turns)
     name, args = mcp.calls[-1]

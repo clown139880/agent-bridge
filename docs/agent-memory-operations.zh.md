@@ -17,6 +17,8 @@
 | `CONVERSATION_MCP_READ_TOKEN` | `conversation_*`，以及 `memory_resolve_scope/bootstrap/load/search/get/scopes` |
 | `AGENT_MEMORY_TOKENS` 中的任一项 | 上述全部工具，加上 `memory_write/log/retract`。写入者身份取自 token，不取自参数 |
 
+`memory_search` 先按空格分词做关键词匹配（命中词数越多越靠前）；一个都没命中时，退回整句召回：消息里出现主题名或别名得 3 分，每个共有的两字片段得 0.5 分（最多 3 分）。`mode: "recall"` 直接用整句召回，Hermes 插件的每轮召回走这个模式，只在 `scope.md` 写了 `prefetch: true` 的作用域开启。
+
 `agent` 角色（Hermes、Dorothy）可以写 `_global`；`project` 角色（仓库里的 Codex/Claude/pi）只能写项目作用域。没绑定的房间或仓库，可以由写入者用 `memory_resolve_scope create=true` 建一个临时作用域（`status: provisional`）。
 
 ## 检查

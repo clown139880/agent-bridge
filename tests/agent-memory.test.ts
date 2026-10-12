@@ -146,6 +146,11 @@ test("bootstrap is deterministic, budgeted by whole items and scoped; search hid
   const loose = memory.search("旅行安排 血氧 方案A+", ["travel"]);
   assert.deepEqual(loose.map((hit) => hit.kind), ["fact", "event"]);
   assert.deepEqual(memory.search("完全不相关", ["travel"]), []);
+  // Unsegmented Chinese sentences: alias inside the message, or shared fragments.
+  assert.equal(memory.recall("下次带孩子去西藏要注意血氧吗", ["travel"])[0]!.path, "scopes/travel/facts/altitude/fact.md");
+  assert.deepEqual(memory.recall("今天天气不错", ["travel"]), []);
+  assert.equal(memory.search("记得孩子血氧的事么", ["travel"])[0]!.path, "scopes/travel/facts/altitude/fact.md");
+  assert.equal(memory.resolveScope({ roomId: "!travel:example.org" }).prefetch, false);
   assert.ok(memory.bootstrap("card-negumi").includes("叫老公"));
 });
 

@@ -57,6 +57,8 @@ export interface ScopeResolution {
   matched: "room" | "repository" | "location" | "hint" | "global";
   created: boolean;
   revision: string;
+  /** scope.md `prefetch: true`: clients may recall relevant memory on every turn. */
+  prefetch: boolean;
   conflict?: string[];
   warnings: string[];
 }
@@ -207,7 +209,8 @@ export class AgentMemory {
   }
 
   private resolution(scope: string, matched: ScopeResolution["matched"], created: boolean): ScopeResolution {
-    return { scope, matched, created, revision: this.scope(scope).revision, warnings: this.syncConflicts(scope) };
+    const info = this.scope(scope);
+    return { scope, matched, created, revision: info.revision, prefetch: info.prefetch, warnings: this.syncConflicts(scope) };
   }
 
   private freeScopeId(base: string): string {
@@ -340,9 +343,7 @@ export class AgentMemory {
   search(query: string, scopes: string[] | "all", limit = 10): SearchHit[] {
     const terms = fold(query).split(/\s+/).filter(Boolean);
     if (!terms.length) throw new MemoryError("query_required");
-    const targets = scopes === "all"
-      ? this.scopes().filter((scope) => scope.discoverable && scope.status !== "archived").map((scope) => scope.id)
-      : scopes.map((scope) => this.scope(scope).id);
+    const targets = this.targets(scopes);
     const hits: SearchHit[] = [];
     for (const scope of targets) {
       const entities = this.entities(scope);
@@ -360,7 +361,42 @@ export class AgentMemory {
           text: `${event.occurredAt.slice(0, 10)}: ${event.summary}` });
       }
     }
-    return hits.sort((a, b) => b.score - a.score || a.path.localeCompare(b.path)).slice(0, Math.min(Math.max(limit, 1), 50));
+    // Keyword terms rarely survive unsegmented Chinese; fall back to sentence recall.
+    if (!hits.length) return this.recall(query, scopes, limit);
+    return rank(hits, limit);
+  }
+
+  /**
+   * Recall for a natural-language message (per-turn prefetch): a topic name or alias that appears in
+   * the message scores 3, plus 0.5 per shared two-character fragment (max 3); a single shared fragment is noise.
+   */
+  recall(message: string, scopes: string[] | "all", limit = 5): SearchHit[] {
+    const text = fold(message);
+    const grams = fragments(text);
+    if (!grams.size) return [];
+    const overlap = (value: string) => { let n = 0; for (const gram of grams) if (value.includes(gram)) n++; return Math.min(n, 6) * 0.5; };
+    const hits: SearchHit[] = [];
+    for (const scope of this.targets(scopes)) {
+      const entities = this.entities(scope);
+      for (const fact of this.facts(scope)) {
+        if (fact.validUntil) continue;
+        const names = [fact.topic, fact.topicDisplay, ...(entities.get(fact.topic)?.aliases ?? [])].map(fold)
+          .filter((name) => name.length >= 2);
+        const score = (names.some((name) => text.includes(name)) ? 3 : 0) + overlap(fold(`${fact.topicDisplay} ${fact.value}`));
+        if (score >= 1) hits.push({ scope, kind: "fact", path: fact.path, score, text: `${fact.topicDisplay}/${fact.kind} = ${fact.value}` });
+      }
+      for (const event of this.events(scope)) {
+        const score = overlap(fold(event.summary)) - 0.5;
+        if (score >= 1) hits.push({ scope, kind: "event", path: event.path, score, text: `${event.occurredAt.slice(0, 10)}: ${event.summary}` });
+      }
+    }
+    return rank(hits, limit);
+  }
+
+  private targets(scopes: string[] | "all"): string[] {
+    return scopes === "all"
+      ? this.scopes().filter((scope) => scope.discoverable && scope.status !== "archived").map((scope) => scope.id)
+      : scopes.map((scope) => this.scope(scope).id);
   }
 
   // ---- writes ----
@@ -556,6 +592,19 @@ export class AgentMemory {
  * Any matching term counts (agents write multi-word Chinese queries whose phrases rarely all occur);
  * more matched terms and stronger fields rank higher.
  */
+function rank(hits: SearchHit[], limit: number): SearchHit[] {
+  return hits.sort((a, b) => b.score - a.score || a.path.localeCompare(b.path)).slice(0, Math.min(Math.max(limit, 1), 50));
+}
+
+/** Two-character fragments of each letter/digit run (CJK has no word boundaries to split on). */
+function fragments(text: string): Set<string> {
+  const grams = new Set<string>();
+  for (const run of text.match(/[\p{L}\p{N}]+/gu) ?? []) {
+    for (let i = 0; i + 2 <= run.length; i++) grams.add(run.slice(i, i + 2));
+  }
+  return grams;
+}
+
 function scoreTerms(terms: string[], names: string[], front: string, body: string): number {
   let total = 0;
   for (const term of terms) total += names.includes(term) ? 3 : front.includes(term) ? 2 : body.includes(term) ? 1 : 0;

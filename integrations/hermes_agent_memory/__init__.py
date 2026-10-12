@@ -23,11 +23,14 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 try:
-    from agent.memory_provider import MemoryProvider
+    from agent.memory_provider import MemoryProvider, is_trivial_prompt
     from agent.secret_scope import get_secret
 except ImportError:  # unit tests run without the Hermes tree
     from abc import ABC as MemoryProvider  # type: ignore[assignment]
     import os
+
+    def is_trivial_prompt(text: Optional[str]) -> bool:  # type: ignore[misc]
+        return not (text or "").strip() or (text or "").strip().startswith("/")
 
     def get_secret(name: str, default: Optional[str] = None) -> Optional[str]:  # type: ignore[misc]
         return os.environ.get(name, default)
@@ -36,6 +39,9 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_URL = "http://127.0.0.1:8787/mcp"
 TIMEOUT = 5.0
+PREFETCH_TIMEOUT = 1.5
+PREFETCH_HITS = 5
+PREFETCH_CHARS = 800
 HANDOFF_MIN_TURNS = 3
 
 USAGE = """## 记忆使用说明
@@ -113,6 +119,7 @@ class AgentBridgeMemoryProvider(MemoryProvider):
         self._cache_dir: Optional[Path] = None
         self._cache_key = "default"
         self._request_id = 0
+        self._prefetch = False
 
     @property
     def name(self) -> str:
@@ -135,14 +142,14 @@ class AgentBridgeMemoryProvider(MemoryProvider):
 
     # ---- MCP transport ----
 
-    def _call(self, tool: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    def _call(self, tool: str, arguments: Dict[str, Any], timeout: float = TIMEOUT) -> Dict[str, Any]:
         self._request_id += 1
         body = json.dumps({"jsonrpc": "2.0", "id": self._request_id, "method": "tools/call",
                            "params": {"name": tool, "arguments": arguments}}).encode("utf-8")
         request = urllib.request.Request(self._url, data=body, method="POST", headers={
             "Authorization": f"Bearer {self._token}", "Content-Type": "application/json"})
         try:
-            with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
                 reply = json.loads(response.read().decode("utf-8"))
         except Exception as exc:  # network, HTTP or JSON failure
             raise MemoryUnavailable(f"memory_unavailable: {exc}") from exc
@@ -176,6 +183,7 @@ class AgentBridgeMemoryProvider(MemoryProvider):
         try:
             resolved = self._call("memory_resolve_scope", locator)
             self._scope = resolved.get("scope", "_global")
+            self._prefetch = bool(resolved.get("prefetch"))
             if resolved.get("conflict"):
                 logger.warning("agent-memory: scope binding conflict %s", resolved["conflict"])
             self._block = self._render(self._fetch_bootstrap(), resolved.get("warnings") or [])
@@ -229,6 +237,28 @@ class AgentBridgeMemoryProvider(MemoryProvider):
 
     def system_prompt_block(self) -> str:
         return self._block
+
+    def prefetch(self, query: str, *, session_id: str = "") -> str:
+        """Per-turn recall for scopes with `prefetch: true`: memory relevant to this message that the
+        fixed core block does not already contain. Fast local search; empty on any failure."""
+        if not self._prefetch or is_trivial_prompt(query):
+            return ""
+        try:
+            hits = self._call("memory_search", {"query": query[:500], "scope": f"{self._scope},_global", "mode": "recall",
+                                                "limit": PREFETCH_HITS}, timeout=PREFETCH_TIMEOUT).get("hits", [])
+        except Exception:
+            return ""
+        lines: List[str] = []
+        for hit in hits:
+            text = str(hit.get("text", ""))
+            value = text.split(" = ", 1)[-1]
+            if value and value in self._block:
+                continue
+            lines.append(f"- [{hit.get('scope')}] {text}")
+        if not lines:
+            return ""
+        out = f"与这条消息相关、开局记忆里没有的内容（作用域 {self._scope}）：\n" + "\n".join(lines)
+        return out[:PREFETCH_CHARS]
 
     def on_session_switch(self, new_session_id: str, *, parent_session_id: str = "", reset: bool = False,
                           rewound: bool = False, **kwargs) -> None:

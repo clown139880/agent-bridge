@@ -65,9 +65,10 @@ const MEMORY_READ_TOOLS = [
   },
   {
     name: "memory_search",
-    description: "Deterministic keyword/alias search over current facts and progress events. scope: a slug, a comma-separated list, or all (all excludes hidden scopes).",
+    description: "Deterministic keyword/alias search over current facts and progress events (falls back to sentence recall when no keyword matches). scope: a slug, a comma-separated list, or all (all excludes hidden scopes).",
     inputSchema: { type: "object", required: ["query"], additionalProperties: false, properties: {
       query: { type: "string" }, scope: { type: "string" }, limit: { type: "integer", minimum: 1, maximum: 50 },
+      mode: { type: "string", enum: ["keyword", "recall"], description: "recall: match a whole natural-language message (per-turn prefetch)." },
     } },
   },
   {
@@ -248,7 +249,9 @@ export class ConversationMcpServer {
       case "memory_search": {
         const raw = stringArg(args.scope);
         const scopes = !raw || raw === "all" ? "all" as const : raw.split(",").map((item) => item.trim()).filter(Boolean);
-        return { hits: store.search(required("query"), scopes, numberArg(args.limit)) };
+        return { hits: enumArg(args.mode, ["keyword", "recall"]) === "recall"
+          ? store.recall(required("query"), scopes, numberArg(args.limit))
+          : store.search(required("query"), scopes, numberArg(args.limit)) };
       }
       case "memory_get": return { facts: store.get(scope(), required("topic"), required("kind"),
         { history: args.history === true, asOf: stringArg(args.as_of) }) };

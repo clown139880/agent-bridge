@@ -5,6 +5,7 @@ Hermes MemoryProvider：用 Control Plane 的 `memory_*` MCP 工具，取代内�
 - 用网关的 `chat_id` 找到房间对应的作用域（thread 归到所在房间；没绑定的房间会自动建临时作用域）。CLI 下用 cwd 和 Git remote 找。
 - 开局注入固定的核心记忆：全局 + 当前房间，加上 `AGENT_MEMORY_SELF_SCOPE`（如 `_agent-dorothy`）。会话中途不变，所以不影响 prompt 缓存。
 - 工具：`memory_search/get/load/scope`，主会话另有 `memory_write/log/retract`。cron 和子 agent 只读。
+- 作用域 `scope.md` 写了 `prefetch: true` 时，每轮按整句召回当前房间和全局的相关记忆（最多 5 条、800 字符、1.5 秒超时），只补开局块里没有的内容。
 - 会话至少 3 轮时，结束时记一条机械交接（不用模型）。
 - Control Plane 不可用时，读取本房间缓存的快照（`$HERMES_HOME/cache/agent-memory/`），写入报错。
 
