@@ -1,385 +1,439 @@
-# 设计：跨 Agent 的房间/项目作用域记忆（OMA 格式 + deathnote 子目录）
+# 设计：跨 Agent 的房间/项目作用域记忆（OMA v4.1 + deathnote 子目录）
 
-- 状态：设计稿，未实现（Kanban t_878c7584）。本文不改任何代码或配置。
+- 状态：设计稿第 2 版，未实现（Kanban t_878c7584）。本文不改任何代码或配置。
 - 关联材料：[conversation-memory-design.zh.md](conversation-memory-design.zh.md)（中央对话检索设计）、[conversation-memory-operations.zh.md](conversation-memory-operations.zh.md)（已落地的只读 MCP）。
-- 审阅基线：agent-bridge `0.6.85`；Hermes `v2026.8.19-14230-g532f83aaf1`（`/root/.hermes/hermes-agent`）；笔记库 `/root/deathnote`。
+- 审阅基线：agent-bridge `0.6.85`；Hermes `v2026.8.19-14230-g532f83aaf1`（`/root/.hermes/hermes-agent`）；笔记库 `/root/deathnote`；OMA `jrcruciani/obsidian-memory-for-ai@f87548a`（2026-09-21，v4.1）。
 
 ## 0. 结论先行
 
-1. **自建一层薄的记忆服务，不引入第三方后端。** 记忆以 OMA 风格的 Markdown/YAML 文件为唯一事实源，放在 `/root/deathnote/agent-memory/`。Control Plane 是唯一写入方，用 MCP 工具对外提供读写。Hermes 用一个很薄的 MemoryProvider 插件接入，再关掉内置的 MEMORY.md/USER.md。
-2. **「房间」和「项目」统一成一个概念：作用域（scope）。** 一个 scope 是 `agent-memory/scopes/<slug>/` 下的一个目录。它的 `scope.md` 列出绑定了哪些 Matrix 房间（可细到 thread）、哪些仓库（即 agent-bridge 的 `project_identity`）、哪些机器目录。Hermes 用 `chat_id` 解析 scope，Bridge 会话用仓库或机器目录解析 scope，两边最后落到同一个目录。
-3. **三层分工不变，只补上中间一层。** 仓库（代码、AGENTS.md、git）仍是项目现状的权威来源。新增的 scope 记忆只存少量、长期有效的方向性事实。中央对话档案（已有的 `conversation_*` MCP）仍负责证据和精确回溯。记忆条目可以引用对话档案的 `e:<id>` 指针，但不复制原文。
-4. **全部本地运行。** 只依赖 Node（Control Plane 已有）和 Python3 + PyYAML（HAL 上已有，Python 3.13.5）。不需要模型、向量库或外部服务。唯一的网络动作是 deathnote 已有的 cron 推送到自建 Gitea。
+1. **直接使用 OMA v4.1 的格式和工具，不自己重写。** 记忆是 `/root/deathnote/agent-memory/` 下的若干个 OMA vault，每个作用域一个。读、写、检索、bootstrap、改值留史，全部调用 OMA 自带的 Python CLI（`--json` 模式）完成。agent-bridge 只补 OMA 明确不做的部分：服务端、鉴权、作用域解析、git 提交、多 vault 汇总。
+2. **作用域（scope）统一「房间」和「项目」。** 一个 scope 是一个目录，里面有 `scope.md`（绑定了哪些 Matrix 房间、仓库、机器目录）和一个 OMA `memory/`。私聊和 akasha 这类不分主题的房间落到 `_global`。
+3. **Control Plane 是唯一写入方。** 它在已有的 `/mcp` 端点上提供 `memory_*` 工具。Hermes 用一个薄的 MemoryProvider 插件接入，同时关掉内置的 MEMORY.md/USER.md。Bridge 下的 Codex/Claude/pi 通过 MCP 配置加共享技能使用同一套工具。
+4. **「新开对话也接得上」靠 OMA 的两样东西：** 置顶事实（pinned facts）放长期结论，事件（events，只追加）记录「最近做到哪里」。OMA 的 bootstrap 会按字符预算把这两样确定性地组装出来，不需要模型。
+5. **同时修好 deathnote 的同步链路：** 修 cron 自动提交脚本的两个缺陷，再加一个 Syncthing 冲突处理器。能干净三方合并的 Markdown 冲突自动合并，合并不了的发到 Matrix 由你决定。所有改动先进 git，任何一步都可以找回。
 
-需要你拍板的事项集中在 §9。
+已定的决策见 §1，待定问题见 §11。
 
-## 1. 现状审阅（事实）
+## 1. 已定决策（2026-10-12 回复）
 
-### 1.1 Hermes 记忆现状
+| # | 决定 | 对设计的影响 |
+| --- | --- | --- |
+| D1 | 用本方案。OMA 算是借用社区方案，不算重复造轮子 | §2：OMA 的工具直接调用，不重写；agent-bridge 只写接线层 |
+| D2/D3 | 按房间划分。akasha 是老房间，没有特定主题，地位和私聊一样偏全局，之后会弃用 | 私聊和 akasha 映射到 `_global`，不建房间 scope；thread 不单独成 scope（§5.2） |
+| D7 | Gitea 是自建的，笔记库是私有的，隐私不是问题，包括 Dorothy 的私密内容 | 取消 `private` 拒写和 PII 分级。秘密扫描（token/私钥）**保留**，因为那是凭据安全问题，不是隐私问题。Dorothy 私密内容能否进 vault 只剩「上下文隔离」这一个顾虑，见 Q2 |
+| D8 | 可以改 cron 脚本，最好再有机制帮忙处理 Syncthing 冲突 | §8：新脚本 + 冲突处理器 |
+| — | 允许联网查资料和 clone | 已 clone OMA 并实测，结论在 §3 |
 
-| 项 | 事实 |
-| --- | --- |
-| 默认 profile | `~/.hermes/memories/MEMORY.md`（3496 字节）和 `USER.md`（3123 字节）；`memory_enabled: true`、`user_profile_enabled: true`、`write_approval: false`、`provider: ''`，上限分别为 2200 和 1375 字符 |
-| dorothy profile | 有独立的 MEMORY/USER，`write_approval: true`。SOUL.md 规定私密、角色扮演或亲密内容**不得**写进 memory 工具，只能存进角色卡的私密文件 |
-| Provider 接口 | `agent/memory_provider.py`。查找顺序依次是：内置 `plugins/memory/<name>/`、`$HERMES_HOME/plugins/<name>/`、项目目录（需开关）、entry point。同名时内置优先 |
-| 初始化身份 | `agent_init._memory_provider_init_kwargs` 会传入 `session_id, platform, hermes_home, agent_context(primary/cron/subagent), cwd, agent_identity(profile)`，以及 `user_id, user_name, chat_id, chat_name, chat_type, thread_id, gateway_session_key`（若存在） |
-| 注入位置 | `system_prompt_block()` 在构建 agent 时进入缓存的 system prompt。`prefetch()` 的结果包在 `<memory-context>` 里，**追加到当前这轮的 user 消息**（`turn_context.compose_user_api_content`）。之后每轮原样重放，不影响 prompt 缓存前缀 |
-| 内置 provider 可参考 | mem0、honcho、hindsight 等已经在 `plugins/memory/` 下，可以照着写 |
-| 依赖 MEMORY.md 的地方 | dorothy 的 SOUL.md（Memory Classification 一节）、`hermes-agent`/`hermes-gateway-config` 等技能文字。切换时要一起改文字 |
-| 上游 `memory.authoritative_source: obsidian` | 本机版本**没有**（源码里找不到 `authoritative_source`）。本设计不依赖它 |
+## 2. 现状审阅（事实）
 
-MEMORY.md 里已经有这样的分工原则：「会话原记录留在中心数据库，项目状态留项目/AGENTS.md/git，技能版本化；用户画像按 agent 分开」。另外，USER.md 最后一条记录了你此前的倾向：「一个 profile + 社区成熟记忆后端（chat_id 作房间键），偏好 Mem0 或 Honcho，不自己造轮子；对系统提示词过大敏感」。这和本卡的需求 2（以 OMA 纯文件为事实源）有冲突，见 §9 决策 D1。
-
-### 1.2 Matrix 房间
-
-`~/.hermes/channel_directory.json` 中默认 profile 现有 4 个房间：一个未命名 DM、「旅游助手」、「管家」，以及 group 房间 `akasha`（auto_thread 开启，已有 32 个 topic thread）。所以房间粒度和 thread 粒度都需要支持，默认按房间。
-
-### 1.3 deathnote 笔记库
+### 2.1 Hermes 记忆
 
 | 项 | 事实 |
 | --- | --- |
-| 位置/远端 | `/root/deathnote`，`origin = https://gitea.zeta.uniclown.com:8443/clown139880/deathnote.git` |
-| 结构 | PARA：`0. 周期笔记`、`1. 项目`（含 `BBB-Agent Bridge`、`Hermes-私人助理` 等）、`2. 领域`、`3. 资源`、`4. 存档`、`5. 表达`，共约 1000 个 md 文件 |
-| 同步 | **Syncthing 和 git 同时在用**（有 `.stfolder`，已出现 `*.sync-conflict-*` 文件）。Obsidian 配置在 `.obsidian`（git 忽略） |
-| 自动提交 | Hermes cron `deathnote-auto-commit-push`（每 30 分钟，`~/.hermes/scripts/deathnote-auto-commit-push.sh`）执行 `git add -A && commit && push origin HEAD` |
-| ⚠ 脚本缺陷 1 | 用 `git diff --quiet && git diff --cached --quiet` 判断「无变化」，这个判断看不到**未跟踪文件**。只新增文件、没改已有文件时，永远不会提交。现在工作树里就有一批未跟踪的笔记，原因正是这个。新建的记忆文件都会落进这个坑 |
-| ⚠ 脚本缺陷 2 | `date '%Y-%m-%d %H:%M:%S'` 少了 `+`，所以提交信息只剩 `chore: auto commit` |
-| 现有约定 | MEMORY.md 写着「知识库 /root/deathnote，PARA；读写先加载 knowledge-management」 |
+| 内置记忆 | 每个 profile 一份 `memories/MEMORY.md` + `USER.md`。默认 profile 两个文件分别为 3496 和 3123 字节，上限 2200/1375 字符，`write_approval: false`。dorothy 的 `write_approval: true` |
+| Provider 接口 | `agent/memory_provider.py`。查找顺序依次是：内置 `plugins/memory/<name>/`、`$HERMES_HOME/plugins/<name>/`、项目目录、entry point。同名时内置优先 |
+| 初始化身份 | `agent_init._memory_provider_init_kwargs` 传入 `session_id, platform, hermes_home, agent_context(primary/cron/subagent), cwd, agent_identity(profile)`，以及存在时的 `user_id, chat_id, chat_name, chat_type, thread_id, gateway_session_key` |
+| 注入位置 | `system_prompt_block()` 进入缓存的 system prompt。`prefetch()` 的结果包在 `<memory-context>` 里，追加到当前这轮的 user 消息（`turn_context.compose_user_api_content`），之后原样重放，不破坏缓存前缀 |
+| 上游 `memory.authoritative_source` | 本机版本没有，本设计不依赖 |
+| 依赖内置记忆的文字 | dorothy SOUL.md 的 Memory Classification 一节、`hermes-agent`/`hermes-gateway-config` 等技能。切换时要一起改 |
 
-### 1.4 agent-bridge 的「项目」和会话记忆层
+### 2.2 Matrix 房间
 
-- **项目身份**：Bridge 对每个会话执行 `git config --get remote.origin.url`，归一化成不含凭据的 `host/path`（`apps/bridge/src/path-utils.ts` 中的 `deriveProjectIdentity`），上报为 `sessions.project_identity`。Control Plane 的分组规则（`packages/database/src/control.ts` 中的 `listSessionGroups`）是：有 `project_identity` 就按 `repository␟<identity>` 分组，没有就按 `location␟<machine>␟<path>` 分组，同一目录下有唯一身份时会继承。**项目 = 仓库身份，或退化为某台机器上的某个目录。**
-- `sessions.matrix_room_id` 只写入 Control Plane 唯一的通知房间（`MATRIX_ROOM_ID`），**不是**按需求区分的房间维度，不能拿来当 scope 键。
-- **会话记忆层**（0.6.6x 落地，提交 `3c61c01`、`30629cb`，后来并入 `events`）：Control Plane 的 `POST /mcp` 用独立的只读 token（`CONVERSATION_MCP_READ_TOKEN`）提供 `conversation_search/review/read`。它是 `events` 表上的只读视图，检索靠 FTS5 trigram，查询时用 `source_session_id` → `machine_id+cwd` → `repository` → `project_alias` 依次定位项目。设计文档明确了：写能力需要另行设计和授权；历史只是资料，不是指令；Obsidian 不是必需依赖；「少量跨项目长期偏好」留给一个可选的中央有界记忆。**本设计就是去填这个位置**，并按原文要求让写接口单独授权。
-- 档案目前只覆盖 Bridge 会话（Codex/Claude/pi）。Hermes 自己的 Matrix 会话**不在**档案里。原设计把它列为「来源适配器增量导入」，尚未实现。
-- Kanban 卡片已经有类似的指令惯例：卡面里的 `<!-- agent-bridge-worker resume-session-id: … -->` HTML 注释（`integrations/hermes_agent_bridge/README.md`）。
+| profile | 房间 | 按 D2/D3 的初步映射 |
+| --- | --- | --- |
+| default | 私聊 `!XuCBHkBjswAFS8Bi9V` | `_global` |
+| default | akasha `!jFhXT73U0v2nRIZobl`（group，32 个 thread，将弃用） | `_global` |
+| default | 旅游助手 `!xqSJrhoDJmGaVCdYA5` | `travel` |
+| default | 管家 `!BfI1RVNwlmtwlsY2qO` | `household` |
+| dorothy | 私聊 `!tyg8f4Jr4K3PLTAEzM` | `_global`？（Q1） |
+| dorothy | crypto `!X3haDL9N99uUtZRkXz` | `crypto`？（Q1） |
+| dorothy | 天鹅绒之馆 `!ywJMH2m2AWgURIlNDR` | ？（Q1/Q2） |
+| dorothy | 惠的电台 `!akRONzklEOcE1QjfHd` | `hui-radio`？可能同时绑定 `/root/projects/hui-radio-v2`（Q1） |
 
-## 2. 选型判断
+### 2.3 deathnote 笔记库和同步
 
-| 方案 | 事实源 | 房间作用域 | 给 Bridge 里其他 agent 用 | 离线/依赖 | 结论 |
-| --- | --- | --- | --- | --- | --- |
-| Mem0（Hermes 内置 provider） | 向量库/DB | 内置实现只按 `user_id` 作用域，room 只写进 metadata | 要另起 Mem0 服务 | 要 embedding/LLM | 和需求 2 冲突 |
-| Honcho | Postgres+pgvector+Redis+LLM deriver | 按 peer/session 建模 | 要另接 | 栈重、要模型 | 和需求 2 冲突，也太重 |
-| agentcairn | md vault + DuckDB 缓存 + 本地 embedding | 按项目作用域（卡面资料） | 自带跨 Claude Code/Codex/Cursor | 要安装包和 embedding 模型（沙箱无网络，需离线带入） | **最接近的备选**。但它的「项目」和 agent-bridge 的 `project_identity`、Matrix 房间不是同一个概念，而且会另起一个 MCP。本次未离线验证，细节以卡面资料为准 |
-| OMA v4.1 CLI 直接用 | md/YAML+git | 没有房间概念，要自己加 | 没有服务端 | Python3+PyYAML，离线 | 格式和理念对口，但只是一组本地工具，不解决多机器、多 agent 写入和鉴权 |
-| **自建薄服务 + OMA 格式（推荐）** | deathnote 子目录中的 md/YAML+git | scope 一等公民，映射房间、仓库、目录 | 复用 Control Plane 已有的 MCP 端点和鉴权 | Node + Python 标准件，离线 | 代码量小：一个 Control Plane 模块、一个约 300 行的 Python provider、一份共享技能 |
+| 项 | 事实 |
+| --- | --- |
+| 位置 | `/root/deathnote`，PARA 结构，约 1000 个 md；`origin` 是自建 Gitea |
+| Syncthing | HAL 上原生运行。文件夹 `DeathNote` 是 sendreceive，设备为 hal（`DJ5QH4J`）和 GQX（`OWDMNOW`），`maxConflicts=10`，没开文件版本控制，`.stignore` 排除了 `.git` |
+| 冲突现状 | vault 中现有 16 个 `*.sync-conflict-*` 文件（其中 6 个在 `.trash`），git 历史里提交过 26 个。**几乎全部带 `DJ5QH4J`（hal）后缀**。Syncthing 用设备 ID 给「输掉」的那一版命名，所以冲突基本都是：HAL 上 agent 写的版本，输给了 GQX 上 Obsidian 的编辑。GQX 经常休眠，离线期间两边各改各的，重新上线后就冲突了 |
+| 自动提交 | Hermes cron `deathnote-auto-commit-push`（每 30 分钟，no_agent 脚本 `~/.hermes/scripts/deathnote-auto-commit-push.sh`），deliver 为 `local` |
+| ⚠ 缺陷 1 | 用 `git diff --quiet && git diff --cached --quiet` 判断「没有变化」，这个判断看不到未跟踪文件。只新增文件时，脚本永远不提交。工作树里现在就有一批未跟踪的笔记 |
+| ⚠ 缺陷 2 | `date '%Y-%m-%d %H:%M:%S'` 少了 `+`，提交信息只剩 `chore: auto commit` |
+| cron 投递 | Hermes cron 支持 `deliver: "matrix:<room_id>"`（现有任务已经在用）。no_agent 脚本输出为空时不发消息 |
 
-不选 Hermes 内置 provider 的原因：需求 5 要求「每个 agent 都能用」，Bridge 下的 Codex/Claude/pi 跑在 HAL、WSL、Windows 上，Hermes 插件进不了它们的进程。真正共享的入口只能放在中心，也就是 Control Plane。Hermes 只是其中一个客户端。
+### 2.4 agent-bridge 的「项目」和会话记忆层
 
-「自建」的范围要控制住：不做 embedding，不做 LLM 抽取，不做图谱，只做文件读写、作用域解析、确定性检索和 git 提交。OMA 的边界（个人/项目记忆，几百到几千条事实）正好覆盖这里的规模。
+- **项目身份**：Bridge 把 `remote.origin.url` 归一化成不含凭据的 `host/path`（`apps/bridge/src/path-utils.ts` 中的 `deriveProjectIdentity`），存为 `sessions.project_identity`。Control Plane 在分组时，有身份就按仓库分，没有就按「机器 + 目录」分（`packages/database/src/control.ts` 中的 `listSessionGroups`）。`sessions.matrix_room_id` 只是通知房间，不能当 scope 键。
+- **会话记忆层**：`POST /mcp` 用独立的只读 token 提供 `conversation_search/review/read`，底层是 `events` 表上的视图。原设计写明了写能力要另行授权，「少量跨项目长期偏好」留给一个可选的中央有界记忆。本设计就是去填这个位置。档案目前不包含 Hermes 自己的 Matrix 会话。
+- Kanban 卡片已经有 `<!-- agent-bridge-worker resume-session-id: … -->` 这种指令惯例（`integrations/hermes_agent_bridge/README.md`）。
 
-## 3. 总览架构
+## 3. OMA v4.1 实测结论
+
+我把仓库 clone 到 `/root/scratch/memory-research/oma`，在一个临时 vault 里实际跑了写入、改值、事件、检索、bootstrap 和 lint。
+
+| 项 | 实测结果 | 对设计的影响 |
+| --- | --- | --- |
+| 运行依赖 | Python3 + PyYAML（HAL 已有）。不用模型，不连网 | 本地即可运行 |
+| 速度 | 在 46 个文件的示例 vault 上，`lint --strict` 0.16 秒，`search`/`bootstrap` 约 0.1 秒 | Control Plane 每次请求起一个子进程完全可以接受 |
+| vault 根目录 | Python 工具都以 **cwd** 为 vault 根（`root = Path.cwd()`）。`query.sh` 则用脚本自身位置推导根目录 | 共用一份工具，以 `cwd=<scope 目录>` 调用 `python3 <oma>/tools/*.py`（实测可行），不调用 `query.sh` |
+| 布局 | `memory/{entities.md, schema/, facts/<entity>/<predicate>.md, events/<date>/<id>.md, _transactions/, _proposals/, _reviews/, _staging/, _views/, _indexes/}` | 每个 scope 目录就是一个 OMA vault |
+| 实体和谓词要预先声明 | 写入未声明的实体或谓词时，事务在提交前的 lint 就失败（`unknown entity` / `unknown predicate`）。**事务不能声明实体或谓词**，那属于 schema 改动 | Control Plane 自己维护 `entities.md`（写入时自动声明本 scope 的新实体）。谓词用一套固定的小词表（§5.3） |
+| 一个槽位一个当前值 | `(entity, predicate)` 只能有一个当前事实 | 实体当「主题」，谓词当「类别」，例如 `facts/reply-style/preference.md` |
+| 改值留史 | `supersede_fact` 把旧值移到 `facts/<e>/<p>/<日期>.md`，新文件通过 `supersedes` 指回旧值；`--history` 能看到全部历史 | 直接使用 |
+| 撤回 | v4.1 拒绝 `archive_fact`（「v4.1 retains history; use supersede_fact」）。撤回只能手写墓碑：`status: retracted` + `retracted_at` + `reason`，**事务里没有对应操作** | Control Plane 自己写墓碑，再跑 lint 校验 |
+| 失败的事务 | 失败后会留下 `memory/_staging/<txn>/`，需要 `transact.py recover --yes` 清理 | Control Plane 每次写入前先执行 recover |
+| git | OMA 只读 `git rev-parse HEAD`（用于可选的 `expected_revision`），**自己从不 commit** | 提交由 Control Plane 做。不用 `expected_revision`，因为 cron 和人工提交也会移动 deathnote 的 HEAD |
+| bootstrap | 默认章节依次是 pinned_facts、recent_decisions、active_entities、recent_events，预算按 Unicode 字符计算，超出就整条截止。**没置顶的事实不会出现在 bootstrap 里** | 核心事实写入时设 `pinned`；「最近做到哪里」写成事件 |
+| 中文 | 中文子串检索（「大白话」）能命中；别名「施彬滨」能解析到实体 `simon` | 可以用 |
+| 多行值 | 能存，但 bootstrap 渲染时会断行 | 约定 `value` 只写一行，细节写进正文 |
+| 交易日志 | 每次写入都在 `_transactions/` 多出一个 md 回执 | 文件会持续增多，在 Obsidian 里排除这个目录（§5.1） |
+| 许可证 | **仓库里没有 LICENSE 文件**，GitHub API 显示 `license: null`。174 star，10 fork，单人维护，2026-03 创建 | 不把 OMA 代码放进 agent-bridge 仓库；在私有 vault 里固定一个版本供自己使用（§5.1）。见 Q9 |
+| 范围 | OMA 明确**不做**服务、daemon、MCP 服务器、多用户、分布式锁。角色和 trust 只是「本地协作约定，不是鉴权边界」 | 鉴权、单写入方和服务端由 Control Plane 负责，正好补上这一块 |
+
+## 4. 总览架构
 
 ```text
-                    Matrix 房间 / thread                 Bridge 会话（Codex / Claude / pi）
-                           │                                   │ cwd、project_identity
-                           ▼                                   ▼
-  Hermes 网关 ── agent-bridge-memory provider        MCP 客户端配置 + 共享技能 agent-memory
-   (default / dorothy profile)  │ HTTP（本机）              │ HTTP（远程 MCP）
-                                └──────────────┬────────────┘
-                                               ▼
-                              Control Plane  /mcp（同一端点，按 token 分权）
-                               ├─ conversation_*      只读（已有）
-                               ├─ memory_* 读          作用域解析 / bootstrap / 检索
-                               ├─ memory_* 写          校验 → 原子写文件 → git commit（单写入方）
-                               └─ 派生索引            内存中，按 mtime 失效，可随时重建
-                                               │
-                                               ▼
-                    /root/deathnote/agent-memory/   （OMA 风格 md/YAML，唯一事实源）
-                                               │
-                     deathnote cron：commit + push → Gitea；Syncthing → 其他设备 / Obsidian
+   Matrix 房间                                        Bridge 会话（Codex / Claude / pi）
+       │ chat_id                                             │ cwd、project_identity
+       ▼                                                     ▼
+ Hermes 网关 ── agent-bridge-memory provider          MCP 配置 + 共享技能 agent-memory
+ (default / dorothy)        │ HTTP（本机）                    │ HTTP（远程 MCP）
+                            └──────────────┬──────────────────┘
+                                           ▼
+                       Control Plane /mcp（按 token 分权）
+                        ├─ conversation_*            只读（已有）
+                        ├─ memory_* 读               作用域解析 → OMA query_impl.py
+                        ├─ memory_* 写               鉴权、声明实体、秘密扫描 → OMA transact.py
+                        │                            → flock → git commit -- <scope 路径>
+                        └─ 跨 scope 汇总             逐个 vault 查询后合并
+                                           │ 子进程，cwd = scopes/<slug>
+                                           ▼
+          /root/deathnote/agent-memory/   每个 scope 一个 OMA v4.1 vault（唯一事实源）
+                                           │
+           cron（每 30 分钟，持同一把锁）：提交 → 处理 Syncthing 冲突 → 提交 → 推送 Gitea
+           Syncthing ↔ GQX（Obsidian 中可以阅读、编辑、审批提案）
 ```
 
 | 组件 | 职责 | 不负责 |
 | --- | --- | --- |
-| `agent-memory/` 目录 | 唯一事实源：scope 绑定、事实、提案 | 运行时状态、对话原文、秘密 |
-| Control Plane memory 模块 | 唯一写入方；校验 schema、权限、秘密扫描和大小；原子写入；按路径 git commit；作用域解析；bootstrap 组装；确定性检索 | 推送远端（交给已有 cron）、调用模型 |
-| Hermes provider | 从 `chat_id/thread_id` 解析 scope，注入 bootstrap，可选按轮召回，把工具调用转发给 Control Plane | 直接写文件、自己维护索引 |
-| 共享技能 `agent-memory` | 告诉 Bridge 下的 agent 什么时候读、什么时候写、写什么、不写什么 | 凭据、MCP 注册 |
-| 对话档案（已有） | 证据和回溯；记忆条目通过 `e:<id>` 引用它 | 长期事实 |
+| OMA 工具（固定版本，不修改） | 事实、事件的读写和校验；改值留史；检索；bootstrap；提案和审阅 | 鉴权、作用域、git 提交 |
+| Control Plane memory 模块 | 唯一写入方；token → OMA `agent_id`；作用域解析；维护 `entities.md` 和墓碑；秘密扫描；按路径 git 提交；汇总 `_global` 和当前 scope；跨 scope 检索 | 推送、模型调用、重写 OMA 逻辑 |
+| Hermes provider | 用 `chat_id` 解析 scope，注入 bootstrap，转发工具调用；Control Plane 不可用时直接调本地 OMA 只读 | 写文件 |
+| 共享技能 `agent-memory` | 告诉 Bridge 下的 agent 何时读、何时写、写什么 | 凭据、MCP 注册 |
+| deathnote cron + 冲突处理器 | 提交、合并冲突、推送、通知 | 记忆语义 |
+| 对话档案（已有） | 证据和回溯；事件或事实可以在 `derived_from` 或正文里引用 `session:<id> e:<n>` | 长期事实 |
 
-### 3.1 数据流
+### 4.1 数据流
 
-**写入**：agent 调用 `memory_write` → Control Plane 用 token 确定调用方身份，从 `scope` 参数或会话上下文解析出 scope → 校验 frontmatter、作用域写权限、秘密和 PII 规则、单条大小 → 拿 vault 写锁 → 先写临时文件再 rename（改值时保留旧值，见 §5.3）→ `git commit -- agent-memory/<path>`，只提交本次涉及的路径，绝不 `add -A` → 刷新索引 → 返回事实 ID 和 commit。Control Plane 不 push，推送交给 cron。
+- **写事实**：`memory_write(topic, kind, value, pin?)` → Control Plane 用 token 映射出 `agent_id`，解析 scope，校验写权限和秘密 → 拿 vault 锁 → 在 scope 目录执行 `transact.py recover --yes` → 主题是新的就先在 `entities.md` 里声明 → `transact.py begin/add(create_fact 或 supersede_fact)/commit --json --yes` → `git commit -- agent-memory/scopes/<slug>`，只提交本 scope 的路径 → 返回路径和 commit。
+- **记进展**：`memory_log(summary, body?, topics?)` → OMA `create_event`（只追加），之后进入 bootstrap 的 recent_events。
+- **注入**：会话开始时，Control Plane 分别在 `_global` 和当前 scope 运行 `query_impl.py --json bootstrap`，各自受自己的 `bootstrap.yaml` 预算约束，拼好交给 Hermes 的 `system_prompt_block()`，或者 Bridge agent 的 `memory_bootstrap` 调用。
+- **检索**：`query_impl.py --json search <词>`，先查当前 scope，再查 `_global`。`scope=all` 时遍历所有 vault，结果标出来源 scope。
+- **跨房间**：只有显式调用才会跨，跨 scope 的内容永远不会自动注入。
 
-**注入**：会话开始时，Hermes provider 的 `initialize()` 解析 scope，再从 Control Plane 取回 `_global` 和当前 scope 的 bootstrap，拼成 `system_prompt_block()`。Bridge 会话第一阶段靠技能指示 agent 先调 `memory_bootstrap`，第三阶段可以改成 Bridge 在新会话首轮自动附带（§6.3）。
+## 5. 笔记库落地
 
-**召回**：可选。`queue_prefetch` 在后台调 `memory_search(query, scope=当前)`，下一轮由 `prefetch()` 取缓存，结果作为 `<memory-context>` 追加进 user 消息。检索是确定性的：先匹配别名/实体/谓词，再做全文关键词匹配，当前 scope 优先，然后 `_global`。
+### 5.1 目录
 
-**跨房间查询**：只能显式调用 `memory_search(scope="all" | "<slug>")`。结果都标出来源 scope，**永远不会**自动注入别的 scope 的内容。
+```text
+/root/deathnote/
+  0. 周期笔记/ … 5. 表达/           # 现有 PARA，不动
+  agent-memory/
+    README.md                         # 给人看：约定、如何绑定、如何审批
+    _oma/                             # OMA v4.1 工具，固定在 f87548a，只放 tools/ 和 SPEC，不修改
+    _template/memory/schema/          # 所有 scope 共用的 schema 母版（谓词词表、roles、bootstrap 预算）
+    scopes/
+      _global/                        # 用户画像、环境、通用经验；私聊和 akasha 写到这里
+        scope.md
+        memory/…                      # 标准 OMA vault
+      travel/
+        scope.md
+        memory/…
+      household/ …
+```
 
-## 4. Hermes 接入：完全取代内置记忆
+- **新建 scope** 时，从 `_template` 复制 schema。修改词表只改 `_template`，然后由 Control Plane 的 `memory_admin sync-schema`（人工触发）同步到各个 scope，并一次性提交。不用符号链接，因为 Syncthing 在 Windows 上处理符号链接不可靠。
+- **派生文件**：OMA 的 `_views/`、`_indexes/` 可以随时重建。为了不让 Syncthing 来回同步，也不在 git 里制造噪音，把 `agent-memory/**/_views/`、`_indexes/`、`_staging/` 加进 deathnote 的 `.gitignore` 和 `.stignore`。查询时 OMA 会在缺少派生文件时直接扫描原始文件，实测结果一致。
+- **Obsidian**：在「排除的文件」里加 `agent-memory/_oma`、`agent-memory/**/_transactions`、`_staging`。这项设置在 `.obsidian` 里，不进 git，需要在 GQX 上手动设一次。
+- **和 PARA 的关系**：`scope.md` 用 `para_note: "[[1. 项目/…]]"` 指向对应的项目笔记。agent 不写 PARA 区域，PARA 仍然是你的笔记。
 
-### 4.1 插件形态
+### 5.2 scope 绑定
 
-- 源码放在本仓库 `integrations/hermes_agent_memory/`（`plugin.yaml` + `__init__.py`，继承 `MemoryProvider`，`name = "agent-bridge-memory"`），安装到 `~/.hermes/plugins/agent-bridge-memory/` 和 `~/.hermes/profiles/dorothy/plugins/agent-bridge-memory/`。名字不能和内置 provider 重名，否则会被内置的覆盖。
-- 配置（每个 profile 单独改 `config.yaml`）：
+```yaml
+# agent-memory/scopes/travel/scope.md   （放在 scope 根目录，OMA 不会读它）
+---
+type: scope
+id: travel
+title: 旅游助手
+status: active                 # active | archived
+profiles: [default]            # 哪些 Hermes profile 可以在这里写（Bridge agent 另由 token 决定）
+bindings:
+  matrix_rooms: ["!xqSJrhoDJmGaVCdYA5:uniclown.com"]
+  repositories: []             # 与 sessions.project_identity 同一归一化规则
+  locations: []                # [{machine: hal, path: /root/projects/xxx}]
+para_note: "[[1. 项目/…]]"
+---
+这个方向在做什么（一两句，人写）。
+```
+
+**解析顺序**（Hermes 和 Bridge 共用一个函数）：Matrix 房间 → 仓库身份 → 机器 + 目录 → 卡面指令 `memory-scope:` → 落到 `_global`。
+
+- 房间键取 `chat_id` 中 `:$` 之前的部分，所以 akasha 下的 thread 都归到房间本身，也就是 `_global`。
+- `_global` 的 `scope.md` 显式列出私聊和 akasha 两个房间，表示这是有意的映射，不是漏了绑定。
+- 同一个键出现在两个 scope 里时返回 `conflict` 和候选列表，不猜，由 lint 报告给你。
+- **新房间**第一次对话时，自动建一个临时 scope `room-<8位哈希>`，`title` 取房间名，`status: provisional`。你在 Obsidian 里改名、合并，或者把房间挪进 `_global` 的绑定即可。理由是新房间通常就代表一个新方向。见 Q3。
+
+### 5.3 记忆的写法：主题 × 类别
+
+OMA 要求每个 `(实体, 谓词)` 只有一个当前值，而且两者都要预先声明。所以约定：**实体 = 主题**（ASCII 短横线 slug，同时声明中文显示名和别名），**谓词 = 下面这套固定的类别**：
+
+| 谓词 | 含义 | 例子（实体/谓词 = 值） |
+| --- | --- | --- |
+| `preference` | 偏好 | `reply-style/preference` = 默认文字回复，解释用大白话和比喻 |
+| `rule` | 必须遵守的约束 | `deletion/rule` = 任何删除须明确授权，授权不扩大 |
+| `decision` | 已经定下的决定 | `memory-backend/decision` = 用 OMA v4.1 + Control Plane 单写入方 |
+| `fact` | 环境、配置位置等客观事实 | `immich/fact` = compose 在 /root/immich，API 127.0.0.1:2283 |
+| `lesson` | 踩过的坑和修法 | `netease-imap/lesson` = SELECT 前先发 IMAP ID 命令 |
+| `pointer` | 详细内容在哪里（技能、文档、笔记） | `homelab-ops/pointer` = 见技能 homelab-services |
+| `profile` | 关于人的稳定信息 | `simon/profile` = 住杭州，一家三口 |
+
+- 想记的东西超出这些类别时，用 `memory_propose` 提议新增谓词，审批后改 `_template` 并同步。
+- 长期结论写成置顶事实。默认置顶，agent 可以传 `pin=false` 表示只供检索、不进 bootstrap。
+- 进展、交接、「这次聊到哪了」写成事件（`memory_log`）。事件只追加、不修改，会以「日期 + 一行摘要」出现在 bootstrap 的 recent_events 里。
+- `value` 只写一行，细节写进正文。可以在 `derived_from` 或正文里引用对话档案 `session:<id> e:<n>`。
+
+### 5.4 写入权限
+
+| 目标 | 谁 | 方式 |
+| --- | --- | --- |
+| 当前 scope | 在该 scope 的会话中、通过认证的 agent | 直接写（OMA 事务 + git 提交） |
+| `_global` | Hermes/Dorothy 直接写；Bridge agent 提案（Q4） | — |
+| 别的 scope | agent | 只能提案（OMA `propose.py`，进 `memory/_proposals/`） |
+| 新增谓词、`scope.md` 绑定 | 只有人可以改；agent 只能提案 | 防止 agent 把房间串到别的 scope |
+| 审批提案 | 人：用 Control Plane 的管理接口（带 `CONTROL_API_WRITE_TOKEN`），由它代表 `agent-human-…` 调用 OMA `review.py approve` 和 `propose.py apply` | OMA 本身禁止自己审批自己。agent 用的 token 没有审批权限，鉴权由 Control Plane 负责 |
+| 撤回 | 有写权限的 agent | Control Plane 写 OMA 墓碑（`status: retracted`），历史保留 |
+
+秘密扫描（token、私钥、`.env` 风格的 `KEY=…` 行）命中就拒写。D7 之后不再对隐私内容做分级或拒写。
+
+## 6. Hermes 接入：完全取代内置记忆
+
+### 6.1 形态和配置
+
+- 源码放在本仓库 `integrations/hermes_agent_memory/`（`plugin.yaml` + `__init__.py`，`name = "agent-bridge-memory"`，不和内置 provider 重名），安装到 `~/.hermes/plugins/` 和 `~/.hermes/profiles/dorothy/plugins/`。版本号在自己的 `plugin.yaml` 里单独维护，和 `hermes_agent_bridge` 一样，不升级根版本。
+- 每个 profile 的配置：
 
 ```yaml
 memory:
   provider: agent-bridge-memory
-  memory_enabled: false        # 摘掉内置的 memory 工具和 MEMORY.md 注入
-  user_profile_enabled: false  # 摘掉 USER.md 注入
+  memory_enabled: false          # 摘掉内置的 memory 工具和 MEMORY.md 注入
+  user_profile_enabled: false    # 摘掉 USER.md 注入
 ```
 
-- 连接参数放 `~/.hermes/.env`：`AGENT_MEMORY_URL=http://127.0.0.1:<CP 端口>/mcp`、`AGENT_MEMORY_TOKEN=<该 profile 专用 token>`。
+- `~/.hermes/.env`（dorothy 用它自己的 .env）：`AGENT_MEMORY_URL=http://127.0.0.1:<CP 端口>/mcp`、`AGENT_MEMORY_TOKEN=<该 profile 专用 token>`。
 
-### 4.2 各钩子的实现
+### 6.2 各钩子的实现
 
 | 钩子 | 行为 |
 | --- | --- |
-| `is_available` | 只检查 URL/token 是否配置，不连网 |
-| `initialize(**kw)` | 用 `platform`、`chat_id`、`thread_id`、`cwd`、`agent_identity`、`agent_context` 调 `memory_resolve_scope`。matrix 平台的房间键是 `chat_id` 去掉 thread 后缀后的 `!room:server`，先查 thread 绑定再查房间绑定；cli 平台按 `cwd` 推导仓库身份。`agent_context` 为 cron 或 subagent 时**只读**。结果缓存在实例上 |
-| `system_prompt_block()` | 静态块，依次是：`_global` bootstrap（预算 ≈ 现在 2200+1375 字符，**不增加总量**）、当前 scope bootstrap（默认预算 1500 字符）、约 6 行工具使用说明。会话期间不变 |
-| `prefetch` / `queue_prefetch` | 默认**关闭**（见决策 D5）。开启时用 `is_trivial_prompt` 跳过闲聊，每轮上限 800 字符，Control Plane 超时 1.5 秒就返回空 |
-| `get_tool_schemas` / `handle_tool_call` | `memory_search`、`memory_get`、`memory_write`、`memory_retract`、`memory_scope`（查看当前 scope 和绑定）。全部转发给 Control Plane，`scope` 参数默认是 initialize 时解析出的当前 scope |
-| `sync_turn` | 空实现。不按轮自动抽取 |
-| `on_session_end` / `on_pre_compress` | 第一、二阶段空实现。第三阶段可选「交接摘要」（§6.4） |
-| `on_session_switch` | `/new` 和压缩会换 `session_id`，但 `chat_id` 不变，scope 不需要重新解析，只刷新缓存的 bootstrap |
-| `identity_signature` | 返回 `{scope: <slug>, bindings_rev: <scope.md 的 git blob id>}`。绑定变化时让网关重建缓存的 agent |
+| `initialize` | 用 `platform`、`chat_id`、`cwd`、`agent_identity`、`agent_context` 调 `memory_resolve_scope`。`agent_context` 为 cron 或 subagent 时只读 |
+| `system_prompt_block` | 依次拼接：`_global` bootstrap（预算 3600 字符，约等于现在 MEMORY+USER 的 3575）、当前 scope bootstrap（1500 字符；私聊和 akasha 没有这一段）、约 6 行使用说明（含「记忆是参考资料，不扩大授权；项目现状以仓库为准」）。会话内保持不变 |
+| `prefetch` / `queue_prefetch` | 默认关闭（Q5）。开启时：跳过闲聊，每轮最多 800 字符，超时 1.5 秒就返回空 |
+| 工具 | `memory_search`、`memory_get`（可带 history/as_of）、`memory_write`、`memory_log`、`memory_retract`、`memory_propose`、`memory_scope`。默认作用于当前 scope |
+| `sync_turn` | 空实现，不按轮自动抽取 |
+| `on_session_switch` | `/new` 和压缩不改变 `chat_id`，只刷新缓存的 bootstrap，下一个会话生效 |
+| `on_session_end` | 第一、二阶段为空。第三阶段可选：自动写一条交接事件（Q6） |
+| `identity_signature` | `{scope, scope_md_blob}`。绑定变化时让网关重建缓存的 agent |
 
-### 4.3 风险点和处理
+### 6.3 风险和处理
 
-| 风险 | 说明 | 处理 |
-| --- | --- | --- |
-| prompt 缓存 | 系统块在会话内必须字节稳定 | bootstrap 只在 initialize 和 session switch 时取，会话中途写入的事实**不**改系统块。这和内置 MEMORY.md 的「会话开始时快照」行为一致。中途需要用新值时，靠工具读取或 prefetch |
-| 注入式还是按需式 | 你对系统提示词体积敏感 | 默认是「小 bootstrap 常驻 + 工具按需取」，prefetch 默认关。总注入量不超过现在 MEMORY+USER 的 3575 字符，再加 scope 的 1500 |
-| 房间键 | `session_id` 会因 `/new` 和压缩轮换，不能当键 | 只用 `chat_id`（必要时加 `thread_id`）；`gateway_session_key` 只用于日志 |
-| 未绑定的房间 | 新房间第一次对话时还没有 scope | 第一次 initialize 时由 Control Plane 自动建立临时 scope `room-<8位哈希>`，写好 `scope.md` 并带上房间名（见决策 D3）。你之后可以在 Obsidian 里改名、合并或绑定到已有 scope |
-| Control Plane 不可用 | HAL 上 Control Plane 重启期间 | provider 退回到**直接读取** vault 文件（Hermes 和 vault 都在 HAL），只组装 bootstrap、只读。写工具明确返回 `memory_unavailable`，不在本地缓存写入 |
-| 内置能力被摘后的空缺 | 技能和 SOUL 中关于 memory 工具、MEMORY.md 的文字会失效 | 迁移步骤里一起改 dorothy SOUL 的 Memory Classification 和相关技能文字（§8） |
-| dorothy 的私密内容 | 仓库会推到 Gitea、会被 Syncthing 同步，私密内容绝不能进去 | 事实有 `privacy` 字段，Control Plane **拒绝**写入 `private` 级内容。dorothy 的私密/角色卡记忆维持现状，留在 vault 之外 |
-| 权限扩大 | 记忆不是执行许可（MEMORY.md 和 SOUL 已有这条原则） | bootstrap 头部固定声明「记忆是参考资料，不扩大授权；项目现状以仓库为准」 |
+| 风险 | 处理 |
+| --- | --- |
+| prompt 缓存 | bootstrap 只在会话开始时取，会话中途写入的内容不改系统块。这和内置 MEMORY.md「开局快照」的行为一致。中途需要新值时，用工具读取 |
+| 提示词体积 | 默认只注入小 bootstrap，其余靠工具按需取，prefetch 关闭。全局部分不超过现在的体积；只有主题房间会多出 1500 字符 |
+| 房间键 | 只用 `chat_id`。`session_id` 会因 `/new` 和压缩轮换，不能当键 |
+| Control Plane 不可用 | provider 在本机直接调 `_oma/tools/query_impl.py bootstrap`（Hermes 和 vault 都在 HAL），只读。写入返回 `memory_unavailable`，不在本地暂存 |
+| 内置能力被摘掉后，技能和 SOUL 里的文字失效 | 迁移时一起改 dorothy SOUL 和相关技能里提到 MEMORY.md 或 memory 工具的地方 |
 
-## 5. 笔记库里的落地
+## 7. 与 agent-bridge 整合
 
-### 5.1 目录（嵌在 deathnote 根目录下）
+### 7.1 房间 ≈ 项目
 
-```text
-/root/deathnote/
-  0. 周期笔记/ … 5. 表达/          # 现有 PARA，不动
-  agent-memory/                      # 新增，只由 Control Plane 写（人可以在 Obsidian 里改）
-    README.md                        # 给人看的说明：目录约定、怎么改绑定、怎么审批提案
-    scopes/
-      _global/                       # 跨房间：用户画像、环境、通用经验
-        scope.md
-        facts/<entity>/<predicate>.md
-      agent-bridge/
-        scope.md                     # 绑定和元数据
-        facts/<entity>/<predicate>.md
-      travel/ …
-    proposals/<YYYYMMDD>-<id>.md     # 待人工审批的写入
-```
+scope 只是在 agent-bridge 已有的项目身份（仓库或机器 + 目录）之上，加了一层**可命名、可绑定多个键**的集合，没有发明第三套身份。比如「惠的电台」房间和 `hui-radio-v2` 仓库可以绑到同一个 scope：Dorothy 在房间里聊的方向，和 Codex 在仓库里改代码时看到的记忆是同一份。
 
-- 每个 `scopes/<slug>/` 本身就是一个 OMA 风格的根目录，包含 `facts/`。这样一来，删除、导出、只读共享都能按 scope 整目录操作。跨 scope 查询就是遍历多个根目录。
-- **派生物不进 vault**：索引、bootstrap 渲染结果都留在 Control Plane 内存里，或者放在 checkout 之外的 `/var/lib/agent-bridge/memory-cache/`，随时可以删掉重建。这样不会污染 Obsidian 图谱，也不会让 Syncthing 来回同步。
-- 目录名用 ASCII 的 `agent-memory`，因为 shell、git pathspec 和 MCP 参数都更不容易出错。如果你希望它像 PARA 编号一样排在最后，可以改成 `9. Agent记忆`（决策 D4）。不论叫什么，建议在 Obsidian 的「排除的文件」里加上 `agent-memory/scopes/*/facts`，避免干扰全局搜索。这个设置在 `.obsidian` 里，不进 git。
-- **和 PARA 笔记的关系**：`scope.md` 的 `para_note` 用 wikilink 指向对应的项目笔记，例如 `[[1. 项目/BBB-Agent Bridge/README]]`。项目笔记还是你自己的笔记，agent 不写入 PARA 区域。如果需要单向反链，可以在 PARA 笔记里手动加 `[[agent-memory/scopes/agent-bridge/scope]]`。
+Kanban：Hermes 从某个房间创建卡片时，在卡面写入 `<!-- agent-bridge-worker memory-scope: <slug> -->`。supervisor 把它放进派发参数，Control Plane 记为该会话的 scope 提示。卡面没有这条指令时，按工作目录用仓库身份解析。
 
-### 5.2 scope 的表达方式：目录为主，绑定写在 frontmatter
+### 7.2 MCP 接口
 
-```yaml
-# agent-memory/scopes/agent-bridge/scope.md
----
-type: scope
-id: agent-bridge
-title: Agent Bridge
-aliases: [ab, 桥]
-status: active            # active | archived
-bindings:
-  matrix:
-    - room: "!jFhXT73U0v2nRIZobl:uniclown.com"
-      thread: "$Y6ko9r4XNT-Av-3W85su6281Oml74KuZb-5hiV9szFs"   # 可选；不写则绑整个房间
-  repositories:
-    - gitea.zeta.uniclown.com:8443/clown139880/agent-bridge     # 与 sessions.project_identity 同一归一化规则
-  locations:
-    - { machine: hal, path: /root/agent-bridge }                # 无 git remote 的目录
-  kanban_boards: []
-para_note: "[[1. 项目/BBB-Agent Bridge/README]]"
-bootstrap_budget: 1500
----
-一两句这个方向在做什么（人写，也会进 bootstrap）。
-```
+接口挂在已有的 `POST /mcp`（`apps/control-plane/src/memory-mcp.ts`）上，`tools/list` 按 token 权限返回不同的工具集。
 
-**解析优先级**（Hermes 和 Bridge 共用一个函数）：thread 绑定 → 房间绑定 → 仓库身份 → 机器+目录 → 卡面指令 `memory-scope:` → 未绑定（Hermes 房间自动建临时 scope，其他情况只用 `_global`）。同一个键绑到多个 scope 时，`memory_resolve_scope` 返回 `conflict`，并列出候选 scope，不会猜。由 lint 报告出来，你来修。
-
-为什么不用标签：标签需要逐条维护，查询要全量扫描，删除或导出也不能按目录整体操作。目录 + 绑定文件既符合「文件系统即索引」，又只需要改一个文件就能重新绑定。
-
-### 5.3 事实文件
-
-格式跟 OMA v4.1 的「一事实一文件、frontmatter 即 schema」走。下面的字段是本设计需要的最小集合。实施第 0 步要拿到 OMA v4.1 源码，核对字段名、时序历史的写法和提案格式，**以 OMA 实际格式为准**再定稿（见 §7 阶段 0）。
-
-```yaml
-# agent-memory/scopes/agent-bridge/facts/hal-deploy/preferred-path.md
----
-entity: hal-deploy
-predicate: preferred-path
-value: "HAL 只用 deploy/hal/deploy.sh；不手动重启服务"
-valid_from: 2026-10-12
-history:                         # 改值时把旧值移到这里（时序事实）
-  - { value: "…旧值…", valid_from: 2026-09-01, valid_to: 2026-10-12, by: claude@hal }
-by: claude@hal                   # 由 token 身份决定，不信任参数
-source: "session:claude-3b9750e3 e:18234"   # 可选，指向对话档案
-privacy: normal                  # normal | sensitive（只进 bootstrap 不进 prefetch）；private 一律拒写
-confidence: confirmed            # confirmed | stated（用户口述）| inferred
----
-（可选）给人看的补充说明。
-```
-
-- **撤回不删除**：`memory_retract` 写入 `valid_to` 并保留文件，`--as-of` 查询仍然能看到当时的值。真正删除由人在 Obsidian 或 git 里做。这符合 USER.md「任何删除须明确授权」。
-- 秘密扫描：沿用常见 token 和私钥的正则，外加 `.env` 风格的 `KEY=…` 行，命中就拒写。手机号、真实姓名这类 PII 允许出现在 `_global` 的用户画像里（USER.md 现在就有），但标为 `sensitive`，不会进入 prefetch。因为整个库会推到 Gitea，这一点要你确认（决策 D7）。
-
-### 5.4 写入策略
-
-| 目标 | 谁能写 | 方式 |
-| --- | --- | --- |
-| 当前 scope 的 facts | scope 内会话中的任一已认证 agent | 直接提交（保留历史）。这是「同方向持续迭代」的主要通道 |
-| 其他 scope | agent | 生成提案，不直接写 |
-| `_global`（画像/环境） | Hermes 默认 profile（与现在 `write_approval: false` 一致）可以直接写；其他身份只能提案 | 见决策 D6 |
-| `scope.md` 的绑定 | 只有人（Obsidian 编辑或 Control Plane 管理接口）。agent 只能提案 | 防止 agent 把房间串到别的 scope |
-| 提案审批 | 人：在 Obsidian 里把提案的 `status` 改成 `approved`/`rejected`，或调用带 `CONTROL_API_WRITE_TOKEN` 的 REST 接口。Control Plane 读到后应用并提交 | 不能自己审批自己（OMA 角色策略）。agent 用的 memory token 没有审批权限 |
-
-### 5.5 和 Syncthing、cron、人工编辑并存
-
-- **单写入方加 git 锁**：Control Plane 写 vault 时拿 `flock /run/lock/deathnote-git.lock`。cron 脚本也要改成先拿同一把锁再 `git add`（脚本在 Hermes 目录下，不在本仓库，要你同意后再改；决策 D8）。即使脚本不改，Control Plane 也只提交自己的路径，并在遇到 `index.lock` 时重试，不会和 `add -A` 互相破坏，最坏情况只是同一批改动被 cron 一起提交。
-- **必须修好 cron 脚本的两个缺陷**（§1.3）。否则新的记忆文件在 Control Plane 提交之外永远不会进 git，人在 Obsidian 里新建的提案也一样。这是阶段 0 的前置条件。
-- **人工编辑也是合法写入**：Control Plane 不在内存里保存权威状态，每次读取都按 mtime 检查文件。人在 Obsidian 里改了某个事实，下一次 bootstrap 就会生效。frontmatter 写坏的文件会被跳过，并在 lint 中报告，不会拖垮整个服务。
-- **Syncthing 冲突**：对 `agent-memory/**` 下出现的 `*.sync-conflict-*`，lint 会报告，`memory_resolve_scope` 返回 `warnings`。Control Plane 不会自动合并，交给人处理。
-
-## 6. 与 agent-bridge 整合
-
-### 6.1 房间 ≈ 项目的映射
-
-agent-bridge 现在的「项目」就是 `project_identity`（或机器+目录），本设计没有发明第三套身份。scope 只是在这之上加的一层**命名的、可绑定多个键的集合**：
-
-```text
-scope "agent-bridge" ── matrix room/thread（Hermes 侧）
-                     ├─ repository gitea…/agent-bridge（Bridge 侧，跨机器）
-                     └─ location hal:/root/agent-bridge（无 remote 时）
-```
-
-于是同一个方向会自然汇合：在 Matrix「akasha / Agent Bridge thread」里和 Hermes 聊，在 HAL 上 `/root/agent-bridge` 跑 claude 卡片，在 WSL 上用 Codex 改同一个仓库，读写的都是 `scopes/agent-bridge/`。
-
-Kanban 卡片：Hermes 从某个房间创建卡片时，在卡面写入 `<!-- agent-bridge-worker memory-scope: <slug> -->`，和 `resume-session-id` 用同一种指令格式。supervisor 解析后把它放进派发参数，Control Plane 把它记成会话的 scope 提示。卡片里没有这条指令时，按 worker 的工作目录用仓库身份解析。
-
-### 6.2 MCP 接口
-
-接口挂在已有的 `POST /mcp`（`apps/control-plane/src/memory-mcp.ts`）上，`tools/list` 按 token 权限返回不同的工具集：
-
-| token | 来源 | 工具 |
-| --- | --- | --- |
-| `CONVERSATION_MCP_READ_TOKEN`（已有） | 不变 | `conversation_*`，再加只读的 `memory_resolve_scope/bootstrap/search/get` |
-| `AGENT_MEMORY_TOKENS`（新增，`name:token` 列表，例如 `hermes-default:…,dorothy:…,claude@hal:…,codex@wsl:…`） | 每个客户端一枚，放各端本机秘密配置，不进 git 和 prompt | 上面这些，加上 `memory_write/retract/propose`；`by` 字段取 token 的名字 |
-| `CONTROL_API_WRITE_TOKEN`（已有） | 人/管理端 | REST：`GET/POST /api/v1/memory/proposals/:id/{approve,reject}`、`GET /api/v1/memory/lint` |
-
-工具契约（拟议）：
+| token | 工具 |
+| --- | --- |
+| `CONVERSATION_MCP_READ_TOKEN`（已有） | `conversation_*`，加上只读的 `memory_resolve_scope/bootstrap/search/get` |
+| `AGENT_MEMORY_TOKENS`（新增，`名字:token` 列表；每个名字对应 roles.yaml 中的一个 OMA `agent_id`） | 读工具，加上 `memory_write/log/retract/propose` |
+| `CONTROL_API_WRITE_TOKEN`（已有，人用） | REST：提案列表、审批、驳回；`lint`；`sync-schema` |
 
 | 工具 | 输入 | 输出 |
 | --- | --- | --- |
-| `memory_resolve_scope` | `platform`，以及 `room_id`/`thread_id`/`source_session_id`/`machine_id+cwd`/`repository`/`scope_hint` 中的若干项 | `scope`、命中的绑定、`conflict` 候选、`warnings` |
-| `memory_bootstrap` | `scope`、`budget` | 渲染好的 `_global`+scope 核心事实（按 confidence 和最近更新时间排序截断），附截断标记，以及（第三阶段）该 scope 最近的 Bridge 会话指针 |
-| `memory_search` | `query`、`scope`（`current`/`global`/`all`/`<slug>`）、`as_of`、`limit` | 事实列表，带 scope、路径、valid 区间、来源 |
-| `memory_get` | `scope`、`entity`、`predicate`、`history?` | 单个事实，含历史 |
-| `memory_write` | `scope`、`entity`、`predicate`、`value`、`note?`、`source?`、`privacy?`、`confidence?` | 写入的路径、commit，或者在无权直写时返回 `proposal_id` |
-| `memory_retract` | `scope`、`entity`、`predicate`、`reason` | 同上 |
-| `memory_propose` | 同 write，外加 `target`（scope 绑定修改等） | `proposal_id` |
+| `memory_resolve_scope` | `platform`，加上 `room_id`/`source_session_id`/`machine_id+cwd`/`repository`/`scope_hint` 中的若干项 | `scope`、命中的绑定、`conflict` 候选、`warnings`（含 sync-conflict 文件） |
+| `memory_bootstrap` | `scope` | `_global` 和该 scope 的 OMA bootstrap 原文，以及各自的字符统计 |
+| `memory_search` | `query`、`scope`（`current`/`global`/`all`/`<slug>`）、`limit` | OMA search 结果，加上 scope 标注 |
+| `memory_get` | `scope`、`topic`、`kind`、`history?`、`as_of?` | OMA facts 结果 |
+| `memory_write` | `scope?`、`topic`、`topic_display?`、`kind`、`value`、`body?`、`pin?`、`derived_from?` | 路径和 commit；无权直写时返回 `proposal_id` |
+| `memory_log` | `scope?`、`summary`、`body?`、`topics?` | 事件路径和 commit |
+| `memory_retract` | `scope?`、`topic`、`kind`、`reason` | 同上 |
+| `memory_propose` | 同 write，或者 `{target: predicate | binding, …}` | `proposal_id` |
 
-远程 MCP 读不到调用方的 cwd，所以沿用原设计的规则：调用方自己取 cwd 和 Git remote，显式传入。共享连接上不保存「当前 scope」。
+远程 MCP 读不到调用方的 cwd，沿用原设计的规则：调用方自己取 cwd 和 remote，显式传入。共享连接上不保存「当前 scope」。
 
-### 6.3 Bridge 下各 agent 的接入
+### 7.3 Bridge 下的 agent 怎么用
 
-- **第一阶段（零代码改 Bridge）**：各端在 MCP 客户端配置中加上 `AGENT_MEMORY_TOKENS` 中属于自己的那枚 token，并通过 `shared-skills/manifest.json` 安装新的共享技能 `agent-memory`。技能约定：开始一个有实质内容的任务时，用 cwd 和 remote 调一次 `memory_bootstrap`；形成了方向性决定、偏好、已确认的约束时，写入当前 scope；**不要**写代码事实、AGENTS.md 已有的规则、一次性状态或秘密。
-- **第三阶段（可选，更可靠）**：Bridge 在**新建会话**的第一轮，把 `memory_bootstrap` 结果当作开发者说明附加进去。Bridge 知道 `project_identity`，Control Plane 能解析 scope。这需要分别确认 Codex App Server 和 Claude adapter 有没有可用的附加说明入口（`apps/bridge/src/app-server.ts`、`claude/claude-adapter.ts` 现在没有这样的参数），涉及 protocol 和 Bridge 版本升级。只对新会话生效，不改续写中的会话，以保持 prompt 缓存。
+- **阶段 1（不改 Bridge 代码）**：各端在 MCP 配置里加上自己的 memory token，并通过 `shared-skills/manifest.json` 安装 `agent-memory` 技能。技能约定：
+  - 开始实质任务时，带上 cwd 和 remote 调一次 `memory_bootstrap`。
+  - 形成决定或偏好时，用 `memory_write`。
+  - 完成一段工作时，用 `memory_log` 记一行进展。
+  - 不要写代码事实、AGENTS.md 里已有的规则、一次性状态或秘密。
+- **阶段 3（可选）**：Bridge 在新会话首轮自动附带 bootstrap。需要先确认 Codex App Server 和 Claude adapter 有没有附加说明的入口，现在的代码里没有，这会涉及 protocol 和版本升级。
 
-### 6.4 「新开对话也保持上下文」的来源
+### 7.4 「新开对话也接得上」
 
 | 来源 | 内容 | 阶段 |
 | --- | --- | --- |
-| `scope.md` 正文和核心事实 | 这个方向是什么，关键约束和偏好 | 1 |
-| 约定谓词 `<scope>/focus/current` 和 `<scope>/focus/open-questions` | 当前在推进什么、还有什么没定。由 agent 在完成一段实质工作后用 `memory_write` 更新，属于时序事实，旧值保留 | 2（靠技能和提示词约束） |
-| 最近会话指针 | 绑定到该 scope 的仓库或目录最近 N 个 Bridge 会话的标题、时间、`session_id`，从 `sessions` 表确定性查出。需要细节时用 `conversation_review` | 3 |
-| Hermes Matrix 会话 | 目前不在中央档案。scope 内的回溯先靠 Hermes 自带的 `session_search`（按 `chat_id`） | 依赖原设计中的 Hermes 来源适配器，单独立项 |
-| 交接摘要 | `on_session_end`/`on_pre_compress` 用 Hermes 辅助模型生成一段交接摘要，写进 `focus/handoff` | 3，可选；需要模型调用，见决策 D9 |
+| 置顶事实 | 方向、约束、偏好、已定决定 | 1 |
+| 事件 recent_events | 最近 N 条进展摘要（`bootstrap.yaml`：`recent_events: 10`，`lookback_days: 30`） | 1，由 agent 用 `memory_log` 写 |
+| `scope.md` 正文 | 这个方向在做什么 | 1 |
+| 最近 Bridge 会话指针 | 该 scope 绑定的仓库最近的会话标题和 `session_id`，细节用 `conversation_review` 取 | 3 |
+| Hermes 自己的 Matrix 会话 | 暂时靠 Hermes 自带的 `session_search`；导入中央档案需要单独立项 | — |
+| 自动交接事件 | `on_session_end` 用辅助模型写一条摘要 | 3，可选（Q6） |
 
-## 7. 分阶段实施
+## 8. deathnote 同步：cron 修复和 Syncthing 冲突处理
 
-每个阶段都可以单独验收和回滚。涉及 Control Plane 和 protocol 的阶段按 AGENTS.md 升级根版本，并用 `deploy/hal/deploy.sh` 部署。Hermes 插件和技能的变更不触发 Bridge 或 Control Plane 部署。
+### 8.1 新的提交脚本（替换 `~/.hermes/scripts/deathnote-auto-commit-push.sh`）
 
-**阶段 0：前置（不改运行行为）**
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+cd /root/deathnote
+exec 9>/run/lock/deathnote-git.lock
+flock -w 120 9                                     # 与 Control Plane 写记忆共用同一把锁
+commit_all() {
+  [ -n "$(git status --porcelain)" ] || return 0   # 能看到未跟踪文件（修缺陷 1）
+  git add -A
+  git diff --cached --quiet || git commit -q -m "$1"
+}
+commit_all "chore: auto commit $(date '+%F %T')"   # 修缺陷 2；冲突副本也先进 git，后面可以找回
+python3 ~/.hermes/scripts/deathnote-sync-conflicts.py --apply   # 只在有事要报告时输出
+commit_all "chore: resolve sync conflicts $(date '+%F %T')"
+git push -q origin HEAD
+```
 
-1. 修 `deathnote-auto-commit-push.sh` 的两个缺陷，加上共享 flock（需你同意，D8）。
-2. 把 OMA v4.1 源码作为离线制品带进来：在有网络的机器上 clone 到自建 Gitea 镜像，HAL 从镜像拉取，**不在运行时下载**。核对事实文件、时序历史和提案的格式，把 §5.3 定稿。OMA 的 `lint`/评测工具可以作为离线校验器使用，但不作为运行时依赖。还要确认它的许可证允许这样用。
-3. 在 deathnote 建立 `agent-memory/README.md`、`scopes/_global/scope.md`，以及几个 scope 草稿（按 4 个现有房间加 agent-bridge 仓库）。绑定先由你确认。
+cron 任务的 `deliver` 从 `local` 改成 `matrix:<通知房间>`（Q7）。脚本没输出就不发消息，有冲突报告或 push 失败时才会发。
 
-**阶段 1：Control Plane 读写服务 + Bridge agent 通过技能使用**
+### 8.2 冲突处理器 `deathnote-sync-conflicts.py`
 
-- `packages/database` 旁边新建 `packages/agent-memory`（纯文件读写、解析、索引，不碰 SQLite），由 `apps/control-plane` 挂到 `/mcp` 和 REST 上。新增 env：`AGENT_MEMORY_VAULT=/root/deathnote`、`AGENT_MEMORY_ROOT=agent-memory`、`AGENT_MEMORY_TOKENS`。未配置时整体关闭，现有行为不变。
-- 测试：解析优先级和冲突、时序改值、拒写 private 和秘密、只提交自己的路径、`index.lock` 重试、损坏的 frontmatter 会被跳过、sync-conflict 能被报告、人工编辑后按 mtime 失效。
-- 共享技能 `agent-memory` 和 MCP 客户端配置。验收：WSL 上的 Codex 和 HAL 上的 claude 对同一个仓库能读到对方写入的 scope 事实。
+处理 `*.sync-conflict-YYYYMMDD-HHMMSS-<设备>.*`，跳过 `.git`。`.trash` 中的冲突副本只统计数量，不处理。
 
-**阶段 2：Hermes provider 取代内置记忆**
+| 情况 | 动作 |
+| --- | --- |
+| 副本和原文件内容相同 | 删除副本（它已经在上一步提交进 git，可以找回） |
+| 原文件已不存在 | 不动，报告 |
+| `.md` 文本 | 三方合并：base 取 git 中「冲突时间之前最后一次提交」的原文件版本（`git log -1 --before=<时间> -- <原文件>`），ours 是当前原文件，theirs 是副本，执行 `git merge-file -p`。**干净合并**就写回原文件、删除副本，并在报告中列出；**有冲突**就两边都不动，报告里附上差异摘要 |
+| `.canvas`、`.excalidraw` 等 JSON 或二进制文件 | 不自动处理，只报告（按行合并 JSON 可能会把文件弄坏） |
+| `agent-memory/` 下的文件 | 也走上面的规则。合并后对所在 scope 跑一次 OMA lint，失败就退回合并前的版本，改为报告 |
 
-- 写 `integrations/hermes_agent_memory/`，先在 **dorothy 以外的一个测试 profile** 上试，再切默认 profile，最后切 dorothy。
-- 迁移 MEMORY/USER（§8），修改 dorothy SOUL 和相关技能文字。
-- 验收：同一个房间 `/new` 之后，bootstrap 中仍然有该 scope 的 focus；不同房间之间互相看不到对方 scope 的内容；对比切换前后的系统提示词字符数；Control Plane 停掉时 bootstrap 仍能从文件读出，写入会明确报错。
+**报告格式**（发到 Matrix）：已自动合并 N 个（列出路径），需要你决定 M 个（路径和一两行差异摘要），`.trash` 中还有 K 个。需要你决定的冲突，可以在 Matrix 里让 Hermes 处理：「保留 HAL 版 / 保留 GQX 版 / 按某某合并」。配一个小技能 `deathnote-conflicts`，提供列出、查看差异、按你的指示落地三个动作。落地后由下一次 cron 提交。
+
+**首次运行**先用 `--dry-run`，把现有 16 个冲突的处理预案发给你，你确认后再加 `--apply`。
+
+### 8.3 从源头减少冲突
+
+- 记忆写入都走 Control Plane（单写入方），而且大多是新建文件，和你在 GQX 上编辑同一个文件的机会很少。
+- 主要的冲突来源是 HAL 上的 agent 直接改 PARA 笔记，同时 GQX 离线期间你也改了同一篇。可以建议 knowledge-management 技能在改已有笔记之前先检查 Syncthing 状态。HAL 的 Syncthing REST API 在 `:8384` 上，用 `GET /rest/db/status?folder=DeathNote` 可以看到 GQX 是否在线、有没有待同步的改动。GQX 不在线时只追加、不改写，或者改成写一份「待合并」笔记。这条只是建议，不在本设计实施范围内（Q8）。
+- Syncthing 的 `maxConflicts=10` 保持不变，因为设成 0 会直接丢掉一方的修改。
+
+## 9. 分阶段实施
+
+涉及 Control Plane 和 protocol 的阶段按 AGENTS.md 升级根版本，用 `deploy/hal/deploy.sh` 部署。Hermes 插件、技能和 deathnote 脚本的改动不触发 Bridge 或 Control Plane 部署。
+
+**阶段 0：同步链路和骨架（不改 agent 行为）**
+
+1. 新 cron 脚本 + 冲突处理器。先 `--dry-run` 把现有冲突的预案发给你；确认后切到 `--apply`，并把 deliver 改为 Matrix。
+2. 在 `agent-memory/_oma/` 放入固定在 `f87548a` 的 OMA 工具。建立 `_template`（谓词词表、roles.yaml、bootstrap 预算）、`_global`、`travel`、`household`，以及 Dorothy 房间对应的 scope（按 Q1）。修改 `.gitignore` 和 `.stignore`。
+3. 验收：`lint --strict` 全部通过；手工用 OMA CLI 写一条、改一次值、记一个事件、跑一次 bootstrap；Syncthing 同步到 GQX 后能在 Obsidian 里看到。
+
+**阶段 1：Control Plane memory 模块 + Bridge agent**
+
+- 新增 `packages/agent-memory`：调用 OMA 子进程、解析 scope、维护 entities 和墓碑、做秘密扫描、在锁内 git 提交。env：`AGENT_MEMORY_VAULT=/root/deathnote`、`AGENT_MEMORY_ROOT=agent-memory`、`AGENT_MEMORY_TOKENS`、`AGENT_MEMORY_PYTHON=python3`。没配置时整体关闭。
+- 测试：解析顺序和冲突；新主题自动声明；改值留史；墓碑；失败事务被 recover；只提交本 scope 路径；锁竞争；人工编辑后立即生效（OMA 每次都读文件）；秘密拒写。
+- 共享技能 `agent-memory`。验收：WSL 上的 Codex 和 HAL 上的 claude 能读到对方在同一个仓库 scope 里写的内容。
+
+**阶段 2：Hermes provider 替换内置记忆**
+
+- 先在一个测试 profile 上试，再切 default，最后切 dorothy。
+- 迁移 MEMORY/USER（§10.1），修改 SOUL 和技能文字。
+- 验收：在旅游助手里 `/new` 之后，bootstrap 中仍有 travel 的置顶事实和最近事件；私聊里看不到 travel 的内容；对比切换前后系统提示词的字符数；Control Plane 停掉时 bootstrap 仍然能读出来，写入会明确报错。
 
 **阶段 3：增强（每项单独决定）**
 
-Bridge 新会话自动注入 bootstrap；bootstrap 附带最近会话指针；交接摘要；prefetch 召回；Hermes Matrix 会话导入中央档案。
+自动交接事件、prefetch、Bridge 新会话自动注入、最近会话指针、Hermes 会话导入中央档案、知识管理技能接入 Syncthing 状态检查。
 
-## 8. 迁移、备份与回滚
+## 10. 迁移、备份与回滚
 
-### 8.1 迁移现有 MEMORY.md / USER.md
+### 10.1 迁移 MEMORY/USER
 
-1. 先把两个 profile 的 `memories/` 原样备份到 `~/.hermes/backups/memories-pre-agent-memory-<date>/`（checkout 之外）。
-2. 一个脚本把 `§` 分隔的条目逐条读出来，生成**提案**，不直接落事实。每条都给出建议的 scope（大多数是 `_global`；Immich、call_bridge、IMAP 这类经验可能更适合放进各自领域的 scope，或者按 MEMORY.md 自己的原则移进技能 references）、entity 和 predicate。
-3. 你在 Obsidian 里批量审批。拿不准的条目保留为 `_global`。
-4. USER.md 里重复的条目（真实姓名/电话出现了两次）合并成一个事实。privacy 标记见 D7。
-5. dorothy 的 MEMORY/USER 单独迁移；任何疑似私密的内容都不迁，留在原处。
-6. 迁移后旧文件不删，在切换配置后保留至少 30 天。
+1. 原样备份两个 profile 的 `memories/` 到 `~/.hermes/backups/memories-pre-agent-memory-<日期>/`。
+2. 一个脚本把以 `§` 分隔的条目转成「主题 × 类别」的**提案**，并给出建议的 scope 和 topic：
+   - 画像类和偏好类 → `_global`。
+   - 旅行相关的条目（孩子的高原反应、一家三口出行）→ `travel`。
+   - 打针提醒相关 → `household`。
+   - Immich、IMAP、call_bridge 这类经验 → `_global/lesson`。如果技能里已经有同样内容，改成 `pointer`。
+3. USER.md 中重复的条目（姓名和电话出现了两次）合并成 `simon/profile` 一条。
+4. 你在 Obsidian 里或通过管理接口批量审批，审批通过后由 OMA 应用。
+5. dorothy 的 MEMORY/USER 单独迁移。角色卡私密记忆按 Q2 处理。
+6. 旧文件保留，切换后至少 30 天不删。
 
-### 8.2 和会话记忆层的关系
+### 10.2 会话记忆层
 
-不迁移任何数据。对话档案仍在 Control Plane 的 `events` 表里，scope 记忆通过 `source` 指针引用它。删除会话时（`30629cb` 的完全清除）不会联动删除记忆，但被引用的指针会失效：`memory_get` 返回 `source_status: gone`，不会报错。
+不迁移任何数据。对话档案仍在 Control Plane 的 `events` 表里，记忆通过 `session:<id> e:<n>` 引用它。会话被彻底删除后，引用会失效，`memory_get` 原样返回引用并标注 `source_status: gone`。
 
-### 8.3 备份
+### 10.3 备份和回滚
 
-- 事实源本来就在 git 里：每次写入是一个提交，cron 推到 Gitea，Syncthing 再同步一份到其他设备。
-- 派生缓存不需要备份。Control Plane 的 SQLite 备份规则不变（在线 backup API，放在 checkout 之外）。
-- 提案、绑定和事实都是文本文件，恢复用 `git revert` 或 checkout 某个历史版本即可。
+| 层 | 备份 | 回滚 |
+| --- | --- | --- |
+| 记忆数据 | 每次写入是一次 git 提交；cron 推到 Gitea；Syncthing 再复制一份到 GQX | `git revert` 相关提交；最坏情况删掉整个 `agent-memory/`，不影响 PARA |
+| Hermes | 旧 MEMORY/USER 原样保留 | 把 `memory.provider` 设为 `''`，两个 enabled 改回 `true`，重启网关 |
+| Bridge agent | — | 删除 MCP 配置里的 memory token，卸载技能 |
+| Control Plane | SQLite 备份规则不变 | 去掉 `AGENT_MEMORY_*` 即整体关闭；或者回退版本 |
+| cron 脚本 | 替换前备份原脚本 | 换回原脚本即可（原来的两个缺陷会回来） |
 
-### 8.4 回滚
+## 11. 待定问题
 
-| 层 | 回滚方式 |
-| --- | --- |
-| Hermes | `memory.provider: ''`，`memory_enabled`/`user_profile_enabled` 改回 `true`，重启网关，旧 MEMORY/USER 原样生效 |
-| Bridge agent | 删掉 MCP 配置里的 memory token，卸载技能 |
-| Control Plane | 去掉 `AGENT_MEMORY_*` env，模块就整体关闭；或者回退到上一个版本 |
-| 数据 | `git revert` 记忆相关的提交；最坏情况整体删除 `agent-memory/` 目录，不影响 PARA 笔记 |
+| # | 问题 | 我的建议 |
+| --- | --- | --- |
+| Q1 | Dorothy 的 4 个房间怎么映射？她的私聊按 `_global` 处理吗？「惠的电台」是否和 `/root/projects/hui-radio-v2` 仓库绑到同一个 scope？crypto 和天鹅绒之馆各自独立吗？ | 私聊 → `_global`；其余 3 个各自独立；惠的电台绑定该仓库 |
+| Q2 | `_global` 由所有 agent 共用，还是按 agent 分开？MEMORY.md 现在写的是「用户画像按 agent 分开」。另外，Dorothy 的角色卡私密记忆以前只在加载角色卡时进入上下文，迁移后怎么放？ | 用户画像（关于你的事实）全体共用一份 `_global`；每个 agent 的自我设定（例如「Hermes 自画像保持女性」）放进各自的 `_agent-hermes`、`_agent-dorothy`，只注入给自己。角色卡私密记忆建一个 `_card-<名字>` scope，只在加载角色卡时读取，不进入 bootstrap |
+| Q3 | 新房间第一次对话时自动建临时 scope `room-<哈希>`，还是先落 `_global` 等你绑定？Bridge 遇到没绑定的仓库，是在第一次写入时自动建 `repo-<名字>`，还是只读 `_global`？ | 新房间自动建；没绑定的仓库在第一次写入时自动建（只读时不建） |
+| Q4 | `_global` 谁能直接写？ | Hermes 和 Dorothy 直接写，Bridge 下的 agent 只能提案（它们写的大多是项目相关内容） |
+| Q5 | 每轮 prefetch 召回默认开还是关？ | 先关，阶段 2 之后看实际效果再决定 |
+| Q6 | 会话结束时是否用辅助模型自动写一条交接事件？ | 先不做，靠 agent 主动调用 `memory_log` |
+| Q7 | Syncthing 冲突报告和 push 失败发到哪个 Matrix 房间？ | 默认 profile 的私聊 |
+| Q8 | 冲突处理：干净三方合并的 `.md` 自动合并并删除副本（副本已在 git 中），可以吗？要不要顺便让 knowledge-management 技能在 GQX 离线时避免改写已有笔记？ | 自动合并可以，删除可以从 git 找回；技能调整放到阶段 3 |
+| Q9 | OMA 仓库没有许可证。在私有 vault 里固定一份工具自用，可以接受吗？要不要去 GitHub 开 issue 请作者补一个许可证？开 issue 是公开行为，需要你同意 | 自用可以；开 issue 由你决定 |
+| Q10 | 阶段 0（新 cron 脚本 + 冲突处理器 dry-run + vault 骨架）现在就开始做吗？ | 是。它不改变任何 agent 的行为，而且能先把冲突和未提交文件的问题解决掉 |
 
-## 9. 决策点清单
+## 12. 依赖
 
-| # | 问题 | 选项 | 建议 |
-| --- | --- | --- | --- |
-| D1 | USER.md 记录过你倾向「Mem0/Honcho，不造轮子」，本卡要求 OMA 纯文件。以哪个为准？ | a 本设计（自建薄层 + OMA 格式）／b 先离线评估 agentcairn，再决定是否用它当 Hermes provider，同时让 Control Plane 只读它的 vault ／c Mem0 | a。需要写的只是一层很薄的接线，本身不重；Mem0/Honcho 和需求 2 冲突 |
-| D2 | scope 粒度 | 默认按房间；thread 只在显式绑定后单独成 scope ／ 每个 thread 都独立成 scope | 默认按房间。akasha 有 32 个 thread，全部独立会碎片化 |
-| D3 | 未绑定的房间 | 自动建临时 scope `room-<hash>` ／ 只用 `_global`，等你绑定 | 自动建临时 scope（房间少，便于新开对话就有记忆） |
-| D4 | 子目录名 | `agent-memory/` ／ `9. Agent记忆/` ／ 其他 | `agent-memory/` |
-| D5 | 每轮 prefetch 召回 | 默认关 ／ 默认开（800 字符） | 先关，第二阶段之后看效果再开 |
-| D6 | `_global` 谁能直接写 | 只有 Hermes 默认 profile 可直写、其余提案 ／ 全部提案 ／ 全部直写 | 前者，和现在的 `write_approval` 设置一致 |
-| D7 | 真实姓名、电话这类 PII 是否允许进入会推到 Gitea 的 vault | 允许，但标 `sensitive` ／ 不进 vault，留在 Hermes 本地 | 需要你决定；本设计默认前者 |
-| D8 | 是否允许修改 Hermes 的 deathnote cron 脚本（修缺陷、加锁） | 是 ／ 否 | 是；不修的话新文件不会被提交 |
-| D9 | 交接摘要是否使用模型 | 不用（agent 自己写 focus）／ 用 Hermes 辅助模型 | 先不用 |
-| D10 | Hermes 插件的版本放在哪里 | 和 `hermes_agent_bridge` 一样在自己的 `plugin.yaml` 里单独维护，不升级根版本 ／ 跟根版本走 | 单独维护；只有 Control Plane 和 protocol 的变化才升级根版本 |
+| 部分 | 依赖 | 本地可跑 |
+| --- | --- | --- |
+| 事实源和工具 | 文件系统、git、Python3 + PyYAML、OMA 工具（固定版本，放在 vault 里） | 是 |
+| Control Plane 模块 | Node（已有）；通过子进程调用 Python；不新增 npm 依赖（YAML 读写交给 OMA，`scope.md` 只读一小段 frontmatter 子集） | 是 |
+| Hermes provider | Python 标准库 `urllib`；退回本地读取时调用 OMA | 是 |
+| 冲突处理器 | Python3、git（`merge-file`） | 是 |
+| 推送 | 自建 Gitea | 局域网 |
+| Syncthing / Obsidian | 已有 | 是，非必需 |
+| 模型、向量库、外部 SaaS | 无（只有 Q6 选「用模型」时才会用到 Hermes 已配置的辅助模型） | — |
 
-## 10. 依赖清单
+## 附：参考
 
-| 部分 | 依赖 | 本地可跑 | 说明 |
-| --- | --- | --- | --- |
-| 事实源 | 文件系统 + git | 是 | deathnote 已有 |
-| Control Plane memory 模块 | Node（已有），YAML 解析库 | 是 | workspace 目前**没有** YAML 依赖。两种做法：一是只支持本设计用到的 frontmatter 子集，自己写一个解析器，不新增依赖；二是在有网络的开发机上加依赖并提交 lockfile。不论哪种，HAL 部署都不能联网下载 |
-| Hermes provider | Python 3.13 + 标准库 `urllib` + PyYAML（HAL 已有） | 是 | 退回读文件时要用 PyYAML |
-| OMA 工具 | Python3 + PyYAML | 是 | 离线制品，可选，只用于校验和评测 |
-| 推送到 Gitea | 自建 Gitea（`gitea.zeta.uniclown.com`） | 局域网/自建 | 已有 cron 负责；推送失败不影响本地读写 |
-| Syncthing / Obsidian | 已有 | 是 | 非必需；只影响人能不能在其他设备上看和改 |
-| 模型、向量库、外部 SaaS | 无 | — | 只有决策 D9 选「用模型」时，才会用到 Hermes 已配置的辅助模型 |
+- OMA：<https://github.com/jrcruciani/obsidian-memory-for-ai>（`SPEC-v4.1.md`、`examples/v4.1-minimal-vault/`）
+- 社区中把 Obsidian/Markdown 作为 Hermes 记忆的实践，见卡面背景资料 B 节（obsidian-hermes-memory、hermes-brain-template、obsidian-memory-architecture、agent-memory-wiki），以及 agentcairn：<https://github.com/ccf/agentcairn>（Apache-2.0）
