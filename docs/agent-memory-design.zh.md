@@ -1,6 +1,6 @@
 # 设计：跨 Agent 的房间/项目作用域记忆
 
-- 状态：设计稿第 3 版（整合版），Kanban t_878c7584。阶段 0 已上线；阶段 1（`packages/agent-memory` + Control Plane `memory_*` 工具 + `agent-memory` 技能）于 0.6.86 实现，运行说明见 [agent-memory-operations.zh.md](agent-memory-operations.zh.md)。阶段 2 已在 dorothy profile 上线（插件 `integrations/hermes_agent_memory`，2026-10-12）：Dorothy 的 USER.md 迁入 `_global`，她自己的职责规则迁入隐藏作用域 `_agent-dorothy`（只注入给 Dorothy），Navi 日报规则迁入 `crypto`；dorothy-service-policy 放行 7 个 memory_* 工具。2026-10-12 default profile 也已切换：Hermes 的自我规则迁入隐藏作用域 `_agent-hermes`，其余并入 `_global`、`household`、`travel`；旅游助手房间改由 Dorothy 接管，记忆随房间继承。0.6.90 起 SOUL 与角色卡统一为「人设」作用域（`soul.md`，记忆工具不写；用户和 Hermes 可改，见运行说明）；0.6.88 增加整句召回（`mode: recall`，关键词无命中时自动退回），插件 0.2.0 在 `prefetch: true` 的作用域（目前是 travel）启用每轮召回。WSL/Windows 上 agent 的写入 token 已签发，需在各机器上安装（HAL 无法直连）。角色卡私密记忆仍留在各角色卡技能的 references 里，未迁移。
+- 状态：设计稿第 3 版（整合版），Kanban t_878c7584。阶段 0 已上线；阶段 1（`packages/agent-memory` + Control Plane `memory_*` 工具 + `agent-memory` 技能）于 0.6.86 实现，运行说明见 [agent-memory-operations.zh.md](agent-memory-operations.zh.md)。阶段 2 已在 dorothy profile 上线（插件 `integrations/hermes_agent_memory`，2026-10-12）：Dorothy 的 USER.md 迁入 `_global`，她自己的职责规则迁入隐藏作用域 `_agent-dorothy`（只注入给 Dorothy），Navi 日报规则迁入 `crypto`；dorothy-service-policy 放行 7 个 memory_* 工具。2026-10-12 default profile 也已切换：Hermes 的自我规则迁入隐藏作用域 `_agent-hermes`，其余并入 `_global`、`household`、`travel`；旅游助手房间改由 Dorothy 接管，记忆随房间继承。0.6.90 起 SOUL 与角色卡统一为「人设」作用域（`soul.md`，记忆工具不写；用户和 Hermes 可改，见运行说明）；0.6.88 增加整句召回（`mode: recall`，关键词无命中时自动退回），插件 0.2.0 在 `prefetch: true` 的作用域（目前是 travel）启用每轮召回。WSL/Windows 上的 agent 已装好写入 token 并接入。5 张角色卡（cc、kristina、megumi、negumi、rdorothy）已迁到 `card-<名字>` 作用域：原 `references/intimate-memory.md` 并入该卡的 `soul.md`（备份在 `~/.hermes/backups/`），新的私密记忆用 `memory_write` 写入该作用域；角色卡技能只剩一句加载，`character-card-skills` 已按新结构改写（2026-10-14）。
 - 关联：[conversation-memory-design.zh.md](conversation-memory-design.zh.md)、[conversation-memory-operations.zh.md](conversation-memory-operations.zh.md)。
 - 基线：agent-bridge `0.6.85`；Hermes `v2026.8.19-14230-g532f83aaf1`；笔记库 `/root/deathnote`；格式参考 OMA v4.1（`jrcruciani/obsidian-memory-for-ai@f87548a`，仅作参考，不依赖）。
 
@@ -225,7 +225,7 @@ git push -q origin HEAD || python3 ~/.hermes/scripts/deathnote-sync-conflicts.py
 ## 10. 迁移与回滚
 
 - **MEMORY/USER**：先把两个 profile 的 `memories/` 原样备份到 `~/.hermes/backups/`。脚本按 `§` 拆成条目，分配到对应作用域（画像和偏好 → `_global`；高原反应、出行 → `travel`；打针提醒 → `household`；Immich、IMAP、call_bridge → `_global/lesson`，技能里已有的改成 `pointer`），重复条目合并。直接写入，在私聊里给你一份摘要，没用的你自己删。旧文件保留 30 天。
-- **角色卡私密记忆**（`references/intimate-memory.md`）：迁到 `card-<名字>` 作用域（`discoverable: false`），并在卡对应的技能里加上加载它的那句话。
+- **角色卡私密记忆**（`references/intimate-memory.md`）：迁到 `card-<名字>` 作用域（`discoverable: false`），并在卡对应的技能里加上加载它的那句话。实际迁移时整段并入了该卡的 `soul.md`，没有拆成事实；之后的新记忆才按事实写入。
 - **会话记忆层**：不迁移。记忆只引用它。
 - **回滚**：
   - Hermes：`provider: ''`，两个 enabled 改回 `true`，重启网关。
