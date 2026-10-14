@@ -86,12 +86,9 @@ def test_room_scope_bootstrap_tools_and_handoff(mcp, tmp_path):
     assert provider.prefetch("/new") == ""
 
     calls = len(mcp.calls)
-    provider.on_session_end([{"role": "user", "content": "出一张图"}, {"role": "assistant", "content": "好"}])
-    assert len(mcp.calls) == calls
     turns = [m for i in range(3) for m in ({"role": "user", "content": f"第{i}句"}, {"role": "assistant", "content": f"回{i}"})]
-    provider.on_session_end(turns)
-    name, args = mcp.calls[-1]
-    assert name == "memory_log" and args["summary"] == "会话交接：第0句（3 轮）" and "回2" in args["body"]
+    provider.on_session_end(turns)  # base-class no-op: no automatic hand-off
+    assert len(mcp.calls) == calls
 
 
 def test_cron_is_read_only_and_outage_uses_cache(mcp, tmp_path):

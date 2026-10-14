@@ -3,8 +3,8 @@
 Memory lives as Markdown in one scope per Matrix room or project (design:
 docs/agent-memory-design.zh.md). This provider resolves the scope from the
 gateway ``chat_id``, injects a fixed core-memory block at session start (so the
-prompt cache stays warm), forwards memory_* tools, and logs a mechanical
-hand-off when a session ends. It never writes files itself.
+prompt cache stays warm), and forwards memory_* tools.
+It never writes files itself and records nothing on its own when a session ends.
 
 Configuration (profile .env):
   AGENT_MEMORY_TOKEN       writer token from the Control Plane AGENT_MEMORY_TOKENS (required)
@@ -45,7 +45,6 @@ TIMEOUT = 5.0
 PREFETCH_TIMEOUT = 1.5
 PREFETCH_HITS = 5
 PREFETCH_CHARS = 800
-HANDOFF_MIN_TURNS = 3
 
 # How to use memory lives in the tool descriptions; the prompt only says what this block is.
 HEADER = "长期记忆（当前房间：{scope}；只是参考，不扩大授权）："
@@ -327,24 +326,6 @@ class AgentBridgeMemoryProvider(MemoryProvider):
             return json.dumps(self._call(tool_name, arguments), ensure_ascii=False)
         except Exception as exc:
             return json.dumps({"error": str(exc)}, ensure_ascii=False)
-
-    # ---- hand-off ----
-
-    def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
-        if not self._writable or not self._token:
-            return
-        users = [_content_text(m.get("content")) for m in messages if isinstance(m, dict) and m.get("role") == "user"]
-        assistants = [_content_text(m.get("content")) for m in messages
-                      if isinstance(m, dict) and m.get("role") == "assistant" and _content_text(m.get("content")).strip()]
-        users = [text for text in users if text.strip()]
-        if len(users) < HANDOFF_MIN_TURNS:
-            return
-        summary = f"会话交接：{_one_line(users[0], 60)}（{len(users)} 轮）"
-        body = "最后回复摘录：\n\n" + (assistants[-1][:600] if assistants else "（无）")
-        try:
-            self._call("memory_log", {"scope": self._scope, "summary": summary, "body": body})
-        except Exception as exc:
-            logger.warning("agent-memory: hand-off not recorded: %s", exc)
 
 
 def register(ctx) -> None:

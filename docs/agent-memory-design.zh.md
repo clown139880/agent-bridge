@@ -24,7 +24,7 @@
 | 自动建作用域 | 新房间第一次对话就建；没绑定的仓库在第一次写入时建。没用的你自己删 |
 | 隐私 | 自建 Gitea + 私有库，不做隐私分级，Dorothy 的私密内容也可以入库。只拦截凭据（token、私钥） |
 | 全局记忆 | 「不管在哪个房间都该知道的事」：你是谁、通用偏好、环境、通用经验。Hermes/Dorothy 可以直接写；Bridge 下在仓库里干活的 agent 只读全局，只写自己的项目作用域 |
-| 自动行为 | 不把每轮对话写进笔记；会话结束时自动记一条机械交接事件（不用模型）；每轮自动召回先在一个房间试用 |
+| 自动行为 | 不把每轮对话写进笔记；会话结束时不自动记录（机械交接事件已于 2026-10-15 按 clown 意见去掉，进度由 agent 主动 `memory_log`）；每轮自动召回先在一个房间试用 |
 | 跨房间加载 | 支持，用法和加载技能一样，显式触发 |
 | 通知 | Syncthing 冲突和推送失败，通过 Hermes webhook 发到 Hermes 私聊 |
 | cron 脚本 | 可以改 |
@@ -51,7 +51,7 @@
 | --- | --- | --- |
 | `packages/agent-memory` | agent-bridge，TS | 格式读写、校验、bootstrap、检索、作用域解析、git 提交。纯文件，不用 SQLite |
 | Control Plane memory MCP | `apps/control-plane` | 鉴权（token → 写入者身份）、工具分发、每个作用域的 bootstrap 缓存文件（供插件在 Control Plane 不可用时读取） |
-| Hermes 插件 | `integrations/hermes_agent_memory/`（Python，单独维护版本） | 按 `chat_id` 解析作用域、注入 bootstrap、转发工具调用、会话结束时写交接事件 |
+| Hermes 插件 | `integrations/hermes_agent_memory/`（Python，单独维护版本） | 按 `chat_id` 解析作用域、注入 bootstrap、转发工具调用 |
 | 共享技能 `agent-memory` | `shared-skills/` | 告诉 Bridge 下的 agent 何时读、何时写、写什么 |
 | deathnote 脚本 | `~/.hermes/scripts/` | 提交、冲突处理、推送、webhook 通知 |
 | 对话档案 | 已有 | 证据和回溯。记忆可以引用 `session:<id> e:<n>`，但不复制原文 |
@@ -70,7 +70,7 @@ agent-memory/
       entities.md                   # 本作用域的主题声明和别名（Control Plane 自动维护，人也可以改）
       facts/<主题>/<类别>.md         # 当前值
       facts/<主题>/<类别>/<日期>.md   # 被替换的旧值
-      events/<日期>/<id>.md          # 只追加的进展和交接
+      events/<日期>/<id>.md          # 只追加的进展
     travel/  household/  crypto/  …
 ```
 
@@ -168,7 +168,7 @@ memory:
 | 工具 | `memory_search/get/write/log/retract/load/scope` |
 | `prefetch` | 默认关；先在一个房间开启试用。每轮最多 5 条、800 字符、1.5 秒超时 |
 | `sync_turn` | 空实现，不把每轮写进笔记 |
-| `on_session_end` | 至少 3 轮的会话，记一条机械交接事件：首句 + 最后一条回复的摘要，不用模型。私聊里落到 `_global` |
+| `on_session_end` | 不做任何事（2026-10-15 去掉了机械交接：首句标题信息量低，还挤占「最近进展」的名额） |
 | `identity_signature` | `{scope, scope.md 的 blob}`。绑定变化时让网关重建缓存的 agent |
 | Control Plane 不可用 | 读取缓存的 bootstrap 文件；写入报 `memory_unavailable` |
 
@@ -242,7 +242,7 @@ git push -q origin HEAD || python3 ~/.hermes/scripts/deathnote-sync-conflicts.py
 | 2 | 角色卡记忆的加载方式 | 先用「技能里写一句加载」。如果你想让「某个房间默认加载某张卡」，在 `scope.md` 里加一个 `autoload: [card-…]` 即可 |
 | 3 | `_global` 的 3600 字符预算是否够用 | 迁移后看实际的 bootstrap 再调整 |
 | 4 | prefetch 试用哪个房间 | 待定 |
-| 5 | Hermes 自己的 Matrix 会话不在中央档案里 | 不影响本方案。交接事件已经覆盖「新开对话接得上」；导入档案单独立项 |
+| 5 | Hermes 自己的 Matrix 会话不在中央档案里 | 不影响本方案。需要接续时由 agent 主动写 `memory_log`，细节用对话档案回溯；导入档案单独立项 |
 | 6 | 阶段 0 第一次提交会把当前未跟踪的文件（含冲突副本、一个 `.ps1`）一起推到 Gitea | 阶段 0 开始前确认 |
 | 7 | GQX 上 Obsidian 的排除设置 | 只能在 GQX 上手动设，可选 |
 
