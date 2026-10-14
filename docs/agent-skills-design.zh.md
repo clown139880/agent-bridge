@@ -1,6 +1,6 @@
 # 设计：按作用域组织的共享技能库（agent-skills）
 
-- 状态：设计稿第 1 版（2026-10-14）。内容整理已完成，接入尚未实现。决定和进展记录在 agent-memory 的 `repo-agent-bridge` 作用域（主题 `agent-skills`）。
+- 状态：设计稿第 1 版（2026-10-14）。内容整理已完成；阶段 1（Control Plane 技能模块与 `skill_*` MCP 工具）于 0.6.93 实现，运行说明见 [agent-memory-operations.zh.md](agent-memory-operations.zh.md)「技能库」；Hermes 接入尚未实现。决定和进展记录在 agent-memory 的 `repo-agent-bridge` 作用域（主题 `agent-skills`）。
 - 关联：[agent-memory-design.zh.md](agent-memory-design.zh.md)（作用域、写入方、Hermes 插件）、[agent-memory-operations.zh.md](agent-memory-operations.zh.md)。
 - 基线：agent-bridge `0.6.92`；Hermes `647115b12d`；技能库 `clown139880/agent-skills`（私有 Gitea，HAL checkout `/root/agent-skills`）。
 

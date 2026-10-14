@@ -113,5 +113,18 @@ function agentMemoryConfig() {
     lockPath: process.env.AGENT_MEMORY_LOCK,
     cacheDir: process.env.AGENT_MEMORY_CACHE_DIR ?? join(dirname(databasePath), "memory-cache"),
     writers,
+    skills: agentSkillsConfig(),
+  };
+}
+
+/** Shared skill library (docs/agent-skills-design.zh.md); needs agent memory (its writers) and AGENT_SKILLS_REPO. */
+function agentSkillsConfig() {
+  const repo = process.env.AGENT_SKILLS_REPO;
+  if (!repo) return undefined;
+  return {
+    repo,
+    lockPath: process.env.AGENT_SKILLS_LOCK,
+    archiveDir: process.env.AGENT_SKILLS_ARCHIVE_DIR ?? join(dirname(databasePath), "skills-archive"),
+    push: process.env.AGENT_SKILLS_PUSH !== "false",
   };
 }

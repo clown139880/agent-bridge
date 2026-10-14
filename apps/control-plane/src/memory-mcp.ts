@@ -1,6 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import type { AgentMemory, Writer } from "@agent-bridge/agent-memory";
+import type { AgentMemory, AgentSkills, Writer } from "@agent-bridge/agent-memory";
 import type { ConversationMemoryStore } from "@agent-bridge/database";
 
 interface JsonRpcRequest {
@@ -115,8 +115,76 @@ const MEMORY_WRITE_TOOLS = [
   },
 ] as const;
 
+const SKILL_SCOPES = { description: "Scopes to look in, in priority order, or \"all\" (default).",
+  oneOf: [{ type: "string", enum: ["all"] }, { type: "array", items: { type: "string" } }] };
+const SKILL_READ_TOOLS = [
+  {
+    name: "skill_index",
+    description: "List the skills in the given scopes (name, description, scope, category, path), earlier scopes winning name clashes. Used to build an agent's skill list.",
+    inputSchema: { type: "object", required: ["scopes"], additionalProperties: false, properties: {
+      scopes: { type: "array", items: { type: "string" } },
+    } },
+  },
+  {
+    name: "skill_search",
+    description: "Keyword search over skill names, descriptions and SKILL.md bodies; results carry their scope.",
+    inputSchema: { type: "object", required: ["query"], additionalProperties: false, properties: {
+      query: { type: "string" }, scopes: SKILL_SCOPES, limit: { type: "integer", minimum: 1, maximum: 50 },
+    } },
+  },
+  {
+    name: "skill_view",
+    description: "Load a skill's SKILL.md (or one of its files) by name. Returns the absolute skill directory so its scripts can run in place, and the file list.",
+    inputSchema: { type: "object", required: ["name"], additionalProperties: false, properties: {
+      name: { type: "string" }, scopes: SKILL_SCOPES, file: { type: "string", description: "Relative path inside the skill; default SKILL.md." },
+    } },
+  },
+] as const;
+
+const SKILL_WRITE_TOOLS = [
+  {
+    name: "skill_write",
+    description: "Create a skill (file SKILL.md with frontmatter name and description) or write one of its files. One commit per call. Credentials are rejected.",
+    inputSchema: { type: "object", required: ["scope", "name", "content"], additionalProperties: false, properties: {
+      scope: SCOPE, name: { type: "string" }, category: { type: "string", description: "For new skills; default general." },
+      file: { type: "string" }, content: { type: "string" },
+    } },
+  },
+  {
+    name: "skill_patch",
+    description: "Replace old_text with new_text in one skill file; old_text must occur exactly once unless replace_all.",
+    inputSchema: { type: "object", required: ["name", "old_text", "new_text"], additionalProperties: false, properties: {
+      name: { type: "string" }, scopes: SKILL_SCOPES, file: { type: "string" }, old_text: { type: "string" }, new_text: { type: "string" },
+      replace_all: { type: "boolean" },
+    } },
+  },
+  {
+    name: "skill_remove_file",
+    description: "Delete one supporting file of a skill (not SKILL.md; archive the skill instead).",
+    inputSchema: { type: "object", required: ["name", "file"], additionalProperties: false, properties: {
+      name: { type: "string" }, scopes: SKILL_SCOPES, file: { type: "string" },
+    } },
+  },
+  {
+    name: "skill_archive",
+    description: "Delete a skill by archiving it outside the library (recoverable; Git keeps the history).",
+    inputSchema: { type: "object", required: ["name", "reason"], additionalProperties: false, properties: {
+      name: { type: "string" }, scopes: SKILL_SCOPES, reason: { type: "string" },
+    } },
+  },
+  {
+    name: "skill_move",
+    description: "Move a skill to another scope (keeps its category and name).",
+    inputSchema: { type: "object", required: ["name", "to"], additionalProperties: false, properties: {
+      name: { type: "string" }, scopes: SKILL_SCOPES, to: SCOPE,
+    } },
+  },
+] as const;
+
 export interface AgentMemoryMcpOptions {
   store: AgentMemory;
+  /** Shared skill library (docs/agent-skills-design.zh.md); its tools appear only when configured. */
+  skills?: AgentSkills;
   /** One token per client; the token decides who the writer is, never a tool argument. */
   writers: Array<Writer & { token: string }>;
 }
@@ -195,7 +263,9 @@ export class ConversationMcpServer {
       else if (request.method === "ping") result = {};
       else if (request.method === "tools/list") result = { tools: [
         ...(principal.conversation ? CONVERSATION_TOOLS : []), ...(principal.memory ? MEMORY_READ_TOOLS : []),
-        ...(principal.writer ? MEMORY_WRITE_TOOLS : [])] };
+        ...(principal.writer ? MEMORY_WRITE_TOOLS : []),
+        ...(principal.memory && this.agentMemory?.skills ? SKILL_READ_TOOLS : []),
+        ...(principal.writer && this.agentMemory?.skills ? SKILL_WRITE_TOOLS : [])] };
       else if (request.method === "tools/call") result = this.callTool(request.params, principal);
       else return { jsonrpc: "2.0", id: request.id ?? null,
         error: { code: -32601, message: "method_not_found" } };
@@ -212,6 +282,7 @@ export class ConversationMcpServer {
       ? params.arguments as Record<string, unknown> : {};
     let value: Record<string, unknown>;
     if (typeof name === "string" && name.startsWith("memory_")) value = this.callMemoryTool(name, args, principal);
+    else if (typeof name === "string" && name.startsWith("skill_")) value = this.callSkillTool(name, args, principal);
     else if (name === "conversation_search") {
       if (typeof args.query !== "string") throw new Error("query_required");
       value = this.memory.search({ query: args.query, cwd: stringArg(args.cwd), machineId: stringArg(args.machine_id),
@@ -275,6 +346,31 @@ export class ConversationMcpServer {
     }
   }
 
+  private callSkillTool(name: string, args: Record<string, unknown>, principal: Principal): Record<string, unknown> {
+    const skills = principal.memory ? this.agentMemory?.skills : undefined;
+    if (!skills) throw new Error("unknown_tool");
+    const needWriter = (): Writer => { if (!principal.writer) throw new Error("unknown_tool"); return principal.writer; };
+    const required = (key: string) => { if (typeof args[key] !== "string") throw new Error(`${key}_required`); return args[key] as string; };
+    const scopes = scopesArg(args.scopes);
+    switch (name) {
+      case "skill_index": {
+        const list = stringArrayArg(args.scopes);
+        if (!list) throw new Error("scopes_required");
+        return { skills: skills.index(list) };
+      }
+      case "skill_search": return { hits: skills.search(required("query"), scopes, numberArg(args.limit)) };
+      case "skill_view": return { ...skills.view(required("name"), scopes, stringArg(args.file)) };
+      case "skill_write": return { ...skills.write(needWriter(), { scope: required("scope"), name: required("name"),
+        category: stringArg(args.category), file: stringArg(args.file), content: required("content") }) };
+      case "skill_patch": return { ...skills.patch(needWriter(), { name: required("name"), scopes, file: stringArg(args.file),
+        oldText: required("old_text"), newText: required("new_text"), replaceAll: args.replace_all === true }) };
+      case "skill_remove_file": return { ...skills.removeFile(needWriter(), { name: required("name"), scopes, file: required("file") }) };
+      case "skill_archive": return { ...skills.archive(needWriter(), { name: required("name"), scopes, reason: required("reason") }) };
+      case "skill_move": return { ...skills.move(needWriter(), { name: required("name"), scopes, to: required("to") }) };
+      default: throw new Error("unknown_tool");
+    }
+  }
+
   private send(response: ServerResponse, status: number, body: unknown): void {
     response.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store",
     });
@@ -286,6 +382,12 @@ function stringArg(value: unknown): string | undefined {
   if (value === undefined) return undefined;
   if (typeof value !== "string") throw new Error("invalid_string_argument");
   return value;
+}
+function scopesArg(value: unknown): string[] | "all" {
+  if (value === undefined || value === "all") return "all";
+  const list = stringArrayArg(value);
+  if (!list?.length) throw new Error("invalid_scopes_argument");
+  return list;
 }
 function numberArg(value: unknown): number | undefined {
   if (value === undefined) return undefined;

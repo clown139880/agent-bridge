@@ -98,6 +98,8 @@ Control Plane 主要变量：
 | `AGENT_MEMORY_VAULT` | 跨 agent 记忆所在的 Git 笔记库（如 `/root/deathnote`）；不设则关闭记忆。见 [`docs/agent-memory-operations.zh.md`](docs/agent-memory-operations.zh.md) |
 | `AGENT_MEMORY_TOKENS` | `名字:token[:agent|project]`，逗号分隔；每个客户端一枚，持有者可以写记忆。`project`（默认）不能写 `_global` |
 | `AGENT_MEMORY_ROOT` / `AGENT_MEMORY_LOCK` / `AGENT_MEMORY_CACHE_DIR` | 笔记库内的记忆目录（默认 `agent-memory`）、与笔记库自动提交共用的 flock 文件、bootstrap 缓存目录（默认数据库旁的 `memory-cache`） |
+| `AGENT_SKILLS_REPO` | 共享技能库的 Git checkout（如 `/root/agent-skills`）；需要先启用 agent 记忆，不设则关闭。见 [`docs/agent-skills-design.zh.md`](docs/agent-skills-design.zh.md) |
+| `AGENT_SKILLS_LOCK` / `AGENT_SKILLS_ARCHIVE_DIR` / `AGENT_SKILLS_PUSH` | 技能库提交用的 flock 文件、归档目录（默认数据库旁的 `skills-archive`）、每次提交后是否后台推送（默认是，设 `false` 关闭） |
 | `CONTROL_ACTION_RETENTION_MS` | action/idempotency 保留期，默认 24 小时 |
 | `CONTROL_ATTACHMENT_RETENTION_MS` | 内容寻址图片附件保留期，默认 7 天 |
 | `CONTROL_ACTION_TIMEOUT_MS` | Bridge action ack 超时，默认 30 秒 |

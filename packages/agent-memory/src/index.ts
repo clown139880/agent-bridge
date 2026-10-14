@@ -5,6 +5,7 @@ import { basename, dirname, join, posix, relative } from "node:path";
 import { containsSecret, fold, isoDate, parseDocument, renderDocument, SCOPE_SLUG, SLUG, type Document } from "./format.js";
 
 export { containsSecret, fold, parseDocument, renderDocument } from "./format.js";
+export { AgentSkills, type AgentSkillsOptions, type SkillEntry, type SkillView, type SkillWriteResult } from "./skills.js";
 
 /**
  * Cross-agent memory: one OMA v4.1-style Markdown vault per scope (room/project) under
@@ -617,7 +618,7 @@ function walk(dir: string): string[] {
   return result;
 }
 
-function writeAtomic(file: string, text: string): void {
+export function writeAtomic(file: string, text: string): void {
   const temp = join(dirname(file), `.${basename(file)}.${randomBytes(4).toString("hex")}.tmp`);
   writeFileSync(temp, text, "utf8");
   renameSync(temp, file);

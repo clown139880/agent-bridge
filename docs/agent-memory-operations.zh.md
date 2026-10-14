@@ -38,3 +38,18 @@ curl -s -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
 - SOUL：`_agent-hermes`、`_agent-dorothy`。各 Hermes profile 的 `SOUL.md` 是指向对应 `soul.md` 的软链接，所以 cron 和子 agent 也按原机制加载；Hermes 每条消息重读 SOUL.md，改完即生效。插件注入自身作用域时用 `include_persona: false`，避免重复。
 - 角色卡：`card-<名字>`（`discoverable: false`）。`memory_load` 返回人设加这张卡的记忆；对应的 Hermes 技能只是一句「加载 card-<名字>」。
 - 改动历史在 deathnote 的 git 里，不另做通知。
+
+## 技能库
+
+共享技能库（设计见 [agent-skills-design.zh.md](agent-skills-design.zh.md)）挂在同一个 `/mcp` 上，配置 `AGENT_SKILLS_REPO` 后启用：
+
+| token | 工具 |
+| --- | --- |
+| 记忆读者（`CONVERSATION_MCP_READ_TOKEN`） | `skill_index`、`skill_search`、`skill_view` |
+| `AGENT_MEMORY_TOKENS` 中的写入者 | 上述加 `skill_write`、`skill_patch`、`skill_remove_file`、`skill_archive`、`skill_move` |
+
+- 技能目录是 `scopes/<scope>/<category>/<skill>/SKILL.md`；一个技能目录里只能有一个 `SKILL.md`。
+- 每次写入是一次只含该技能目录的提交，作者为 `agent-skills (<写入者>)`，在 `AGENT_SKILLS_LOCK` 下进行，之后后台 `git push`（失败不影响写入，下一次推送会带上）。
+- `project` 写入者不能写下划线开头的作用域（`_global`、`_agent-*`）。
+- 归档会把技能目录移到 `AGENT_SKILLS_ARCHIVE_DIR`，Git 历史保留原内容。
+- 凭据扫描与记忆相同，命中就拒写。
