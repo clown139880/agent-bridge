@@ -1,4 +1,4 @@
 name: agent-bridge-skills
-version: 0.1.0
+version: 0.1.1
 description: "skills_list / skill_view / skill_manage backed by the Agent Bridge shared skill library (scope-organised Git repo via the Control Plane)."
 author: local

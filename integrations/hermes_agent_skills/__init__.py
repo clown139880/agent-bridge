@@ -250,6 +250,9 @@ def register(ctx) -> None:
     """One router per profile: the gateway loads plugins once per profile home with that home bound."""
     from tools.registry import registry  # Hermes tree only
     from hermes_constants import get_hermes_home
+    # Plugins load before the built-in tool modules; import them so their entries exist to wrap.
+    import tools.skill_manager_tool  # noqa: F401
+    import tools.skills_tool  # noqa: F401
 
     entries = {name: registry.get_entry(name) for name in TOOLS}
     if any(entry is None for entry in entries.values()):
