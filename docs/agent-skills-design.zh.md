@@ -1,6 +1,6 @@
 # 设计：按作用域组织的共享技能库（agent-skills）
 
-- 状态：设计稿第 1 版（2026-10-14）。内容整理已完成；阶段 1（Control Plane 技能模块与 `skill_*` MCP 工具）于 0.6.93 实现，运行说明见 [agent-memory-operations.zh.md](agent-memory-operations.zh.md)「技能库」；阶段 2 插件 `integrations/hermes_agent_skills`（agent-bridge-skills 0.1.1）与 agent-bridge-memory 0.5.0 已实现，按 `AGENT_SKILLS_SCOPES` 试点，首个试点房间 jmyd。决定和进展记录在 agent-memory 的 `repo-agent-bridge` 作用域（主题 `agent-skills`）。
+- 状态：已上线（2026-10-14）。Control Plane 技能模块 0.6.93–0.6.95（置顶 0.6.95）；Hermes 插件 agent-bridge-skills 0.1.1、agent-bridge-memory 0.6.1。Dorothy 和 Hermes（default）都已全面切换：`AGENT_SKILLS_SCOPES=all`，本地技能目录只剩 Hermes 自带、hub 安装的技能（Hermes 另保留 `godmode`）和 5 个角色卡加载器。阶段 5（Bridge 下的 agent）未开始。运行说明见 [agent-memory-operations.zh.md](agent-memory-operations.zh.md)「技能库」。
 - 关联：[agent-memory-design.zh.md](agent-memory-design.zh.md)（作用域、写入方、Hermes 插件）、[agent-memory-operations.zh.md](agent-memory-operations.zh.md)。
 - 基线：agent-bridge `0.6.92`；Hermes `647115b12d`；技能库 `clown139880/agent-skills`（私有 Gitea，HAL checkout `/root/agent-skills`）。
 
@@ -56,11 +56,11 @@
 
 | agent | 列进提示词 | 能加载 |
 | --- | --- | --- |
-| Dorothy | 当前作用域 + `_agent-dorothy` + `_global`（超出预算先截 `_global`） | 同左 |
-| Hermes | `_global` + `_agent-hermes` + 当前作用域 | 全部作用域 |
+| Dorothy | 当前房间的全部技能 + 三处可见作用域中置顶的技能（顺序：房间 → `_agent-dorothy` → `_global`） | 当前作用域 + `_agent-dorothy` + `_global` |
+| Hermes | 同上，自己的作用域换成 `_agent-hermes` | 全部作用域（`AGENT_SKILLS_LOAD_ALL=true`） |
 | Bridge 下的 Codex/Claude（以后） | `_global` + 项目作用域 | 同左 |
 
-- 私聊的当前作用域是 `_global`，不额外列房间技能。
+- 私聊的当前作用域是 `_global`；`_global` 和 `_agent-*` 不算房间，只列其中置顶的技能。
 - 角色卡 `card-*` 不列进提示词，只通过斜杠命令或 `memory_load` 进入。
 - **作用域管「谁能用」，置顶管「开局列不列」**（2026-10-14）：提示词里只列当前房间作用域的技能和 frontmatter 标了 `metadata.agent_skills.pinned: true` 的技能，每个一行，6000 字符以内；其余可见技能只给一行「另有 N 个技能，用 `skills_list` 查找」，照样能搜到、加载。新沉淀的技能默认不置顶。
 - 初始置顶：`_global` 的 `agent-memory`、`conversation-recall`、`deathnote-vault`、`openlist`；`_agent-dorothy` 的 `service-use-boundaries`。
@@ -118,6 +118,16 @@
 | 3 试点 | 先切 Dorothy 的一个房间（jmyd 或惠的电台） | 切换前后各量一次系统提示词 token 数；房间内能用、能沉淀、能斜杠加载 |
 | 4 全面切换 | Dorothy 全部房间，再 Hermes | 原技能目录只剩自带、hub 和跳转桩；token 对比报告 |
 | 5 Bridge agent | §7 | 另行决定 |
+
+**结果（2026-10-14，字符数；token 为粗估：中文 1 字 1 token，其余 4 字符 1 token）**
+
+| | 切换前 | 切换后 |
+| --- | --- | --- |
+| Dorothy 系统提示词（jmyd 实测） | 25,704 字符 / 约 8.3k | 15,342 字符 / 约 5.2k |
+| Dorothy 技能列表（原生 + 技能库） | 11,474 | 1,557 + 1,121 |
+| Hermes 技能列表（原生 + 技能库，离线估算） | 10,787 | 4,072 + 1,496 |
+
+Hermes 原生列表里剩 21 个自带和 hub 技能；不用的可以在 `skills.disabled` 关掉。
 
 **回滚**：去掉 `allow_tool_override` 并从备份恢复本地技能目录；Control Plane 去掉 `AGENT_SKILLS_REPO` 即关闭模块。
 
