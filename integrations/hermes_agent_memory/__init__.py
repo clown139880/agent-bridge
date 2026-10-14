@@ -11,6 +11,8 @@ Configuration (profile .env):
   AGENT_MEMORY_URL         default http://127.0.0.1:8787/mcp
   AGENT_MEMORY_SELF_SCOPE  optional hidden scope with this agent's own rules (e.g. _agent-dorothy)
   AGENT_MEMORY_MACHINE_ID  machine id for cwd-based scopes on the CLI (default hal)
+  AGENT_SKILLS_SCOPES      scopes whose skill list comes from the shared skill library (comma list or "all");
+                           pairs with the agent-bridge-skills plugin (docs/agent-skills-design.zh.md)
 """
 from __future__ import annotations
 
@@ -38,6 +40,7 @@ except ImportError:  # unit tests run without the Hermes tree
 logger = logging.getLogger(__name__)
 
 DEFAULT_URL = "http://127.0.0.1:8787/mcp"
+SKILL_INDEX_BUDGET = 6000
 TIMEOUT = 5.0
 PREFETCH_TIMEOUT = 1.5
 PREFETCH_HITS = 5
@@ -109,6 +112,7 @@ class AgentBridgeMemoryProvider(MemoryProvider):
         self._url = DEFAULT_URL
         self._token = ""
         self._self_scope = ""
+        self._skill_scopes = ""
         self._scope = "_global"
         # Hermes reads tool schemas before initialize(); start writable and narrow for cron/subagents.
         self._writable = True
@@ -129,6 +133,7 @@ class AgentBridgeMemoryProvider(MemoryProvider):
         self._token = get_secret("AGENT_MEMORY_TOKEN", "") or ""
         self._self_scope = get_secret("AGENT_MEMORY_SELF_SCOPE", "") or ""
         self._machine_id = get_secret("AGENT_MEMORY_MACHINE_ID", "") or "hal"
+        self._skill_scopes = (get_secret("AGENT_SKILLS_SCOPES", "") or "").strip()
 
     def is_available(self) -> bool:
         self._load_config()
@@ -184,6 +189,9 @@ class AgentBridgeMemoryProvider(MemoryProvider):
             if resolved.get("conflict"):
                 logger.warning("agent-memory: scope binding conflict %s", resolved["conflict"])
             self._block = self._render(self._fetch_bootstrap(), resolved.get("warnings") or [])
+            skills = self._skill_index()
+            if skills:
+                self._block = f"{self._block}\n\n{skills}"
             self._write_cache(self._block)
         except Exception as exc:
             logger.warning("agent-memory: using cached core memory (%s)", exc)
@@ -198,6 +206,35 @@ class AgentBridgeMemoryProvider(MemoryProvider):
             except ValueError as exc:
                 logger.warning("agent-memory: self scope %s unavailable: %s", self._self_scope, exc)
         return "\n".join(part for part in parts if part)
+
+    def _skill_index(self, budget: int = SKILL_INDEX_BUDGET) -> str:
+        """Skill list from the shared library for scopes in AGENT_SKILLS_SCOPES (room, own scope, then _global)."""
+        pilot = {item.strip() for item in self._skill_scopes.split(",") if item.strip()}
+        if not pilot or (self._skill_scopes != "all" and self._scope not in pilot):
+            return ""
+        scopes = list(dict.fromkeys(item for item in (self._scope, self._self_scope, "_global") if item))
+        try:
+            skills = self._call("skill_index", {"scopes": scopes})["skills"]
+        except Exception as exc:
+            logger.warning("agent-memory: skill list unavailable: %s", exc)
+            return ""
+        if not skills:
+            return ""
+        lines = ["## Skills (shared library)",
+                 "Load a skill with skill_view(name) before doing a task it covers. "
+                 "Save reusable procedures with skill_manage; new skills go to this room's scope."]
+        used = sum(len(line) + 1 for line in lines)
+        shown = 0
+        for item in skills:
+            line = f"- {item['name']}: {_one_line(item['description'], 200)}"
+            if used + len(line) + 1 > budget:
+                break
+            lines.append(line)
+            used += len(line) + 1
+            shown += 1
+        if shown < len(skills):
+            lines.append(f"- … {len(skills) - shown} more: use skills_list to find them")
+        return "\n".join(lines)
 
     def _render(self, bootstrap: str, warnings: List[str]) -> str:
         note = "\n".join(f"- 注意：{warning}" for warning in warnings)

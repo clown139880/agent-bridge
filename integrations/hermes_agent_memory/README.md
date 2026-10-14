@@ -7,6 +7,7 @@ Hermes MemoryProvider：用 Control Plane 的 `memory_*` MCP 工具，取代内�
 - 工具：`memory_search/get/load/scope`，主会话另有 `memory_write/log/retract`。cron 和子 agent 只读。
 - 作用域 `scope.md` 写了 `prefetch: true` 时，每轮按整句召回当前房间和全局的相关记忆（最多 5 条、800 字符、1.5 秒超时），只补开局块里没有的内容。
 - 会话至少 3 轮时，结束时记一条机械交接（不用模型）。
+- `AGENT_SKILLS_SCOPES` 列出的作用域（或 `all`）在核心记忆后附加共享技能库的技能列表（当前房间 → 自己的作用域 → `_global`，6000 字符以内），配合 agent-bridge-skills 插件使用。
 - Control Plane 不可用时，读取本房间缓存的快照（`$HERMES_HOME/cache/agent-memory/`），写入报错。
 
 ## 安装（以 dorothy profile 为例）
