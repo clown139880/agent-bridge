@@ -1,4 +1,5 @@
 import { execFileSync, spawn } from "node:child_process";
+import { homedir } from "node:os";
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from "node:fs";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { containsSecret, fold, isoDate, parseDocument, SCOPE_SLUG, SLUG } from "./format.js";
@@ -18,6 +19,8 @@ export interface AgentSkillsOptions {
   archiveDir: string;
   /** Push after each commit (background, best effort). */
   push?: boolean;
+  /** Called when a background push fails; the commit stays local and the next push carries it. */
+  onPushError?: (message: string) => void;
   now?: () => Date;
 }
 
@@ -240,10 +243,14 @@ export class AgentSkills {
     }
     const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim();
     if (this.options.push) {
-      const push = lock ? spawn("flock", ["-w", "120", lock, "git", "push", "-q"], { cwd: repo, stdio: "ignore", detached: true })
-        : spawn("git", ["push", "-q"], { cwd: repo, stdio: "ignore", detached: true });
-      push.on("error", () => undefined);
-      push.unref();
+      // systemd services get no HOME, and Git needs it to find the credential store.
+      const pushEnv = { ...process.env, HOME: process.env.HOME ?? homedir(), GIT_TERMINAL_PROMPT: "0" };
+      const push = lock ? spawn("flock", ["-w", "120", lock, "git", "push", "-q"], { cwd: repo, env: pushEnv, stdio: ["ignore", "ignore", "pipe"] })
+        : spawn("git", ["push", "-q"], { cwd: repo, env: pushEnv, stdio: ["ignore", "ignore", "pipe"] });
+      let stderr = "";
+      push.stderr?.on("data", (chunk: Buffer) => { stderr = (stderr + chunk.toString()).slice(-2000); });
+      push.on("error", (error) => this.options.onPushError?.(error.message));
+      push.on("close", (code) => { if (code !== 0) this.options.onPushError?.(stderr.trim() || `git push exited ${code}`); });
     }
     return head;
   }
