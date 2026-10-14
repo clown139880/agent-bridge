@@ -4,14 +4,16 @@
 
 ```
 Windows:  Chrome --remote-debugging-port=9222 --user-data-dir=C:\Tools\agent-bridge\browser\profile
-            ▲ 127.0.0.1:9222（只绑定回环）
+            ▲ 127.0.0.1:9222 或 [::1]:9222（只绑定回环）
             ├── Windows 上的 agent-browser → 127.0.0.1:9222
             └── node.exe（WSL interop 每连接启动一个，stdio 转发）
                   ▲
 WSL:      cdp-relay.mjs 监听 127.0.0.1:9222 ← WSL 里的 agent-browser
 ```
 
-WSL 保持 NAT 网络。中转不经过网络：`deploy/wsl-browser/cdp-relay.mjs` 为每个连接启动 Windows `node.exe`，由它连接 Windows 回环并通过 stdio 转发。因为 Host 头仍是 `127.0.0.1`，Chrome 返回的 `webSocketDebuggerUrl` 在两侧完全相同，工具配置可以共用。不需要管理员权限、portproxy 或防火墙规则，也不受 WSL NAT 地址变化影响。
+WSL 保持 NAT 网络。中转不经过网络：`deploy/wsl-browser/cdp-relay.mjs` 为每个连接启动 Windows `node.exe`，由它连接 Windows `localhost`（优先 IPv6，拒绝连接时回退 IPv4）并通过 stdio 转发。WSL 请求的 Host 头仍是 `127.0.0.1`，Chrome 返回的 `webSocketDebuggerUrl` 因而仍指向 WSL 中转。不需要管理员权限、portproxy 或防火墙规则，也不受 WSL NAT 地址变化影响。
+
+WSL 中转先于 Chrome 启动时，Windows 的 `wslrelay.exe` 可能占用 `127.0.0.1:9222`，Chrome 随后监听 `::1:9222`。固定连接 Windows IPv4 会经 `wslrelay.exe` 回到 WSL 中转，形成递归连接和超时。中转优先 IPv6 避开这个循环，并限制连接数量和首次响应等待时间。Windows 原生工具若访问 IPv4 超时，应检查 `http://[::1]:9222/json/version`，在每条命令上使用 `--cdp http://[::1]:9222`；WSL 仍用 `--cdp 9222`。不要把 IPv6 Windows 地址直接交给 WSL 工具。
 
 ## 组成
 
