@@ -22,7 +22,8 @@ function fixture(options: { git?: boolean } = {}) {
   const repo = mkdtempSync(join(tmpdir(), "agent-skills-"));
   put(repo, "scopes/_global/media/openlist/SKILL.md", skillMd("openlist", "OpenList 分享与外链"));
   put(repo, "scopes/_global/media/openlist/references/share-hosting.md", "链接规则\n");
-  put(repo, "scopes/_agent-dorothy/media/navidrome/SKILL.md", skillMd("navidrome", "Navidrome 歌单"));
+  put(repo, "scopes/_agent-dorothy/media/navidrome/SKILL.md", skillMd("navidrome", "Navidrome 歌单",
+    "metadata:\n  agent_skills:\n    pinned: true\n"));
   put(repo, "scopes/velvet-room/aigc/aigc-studio/SKILL.md", skillMd("aigc-studio", "AIGC 合集"));
   put(repo, "scopes/velvet-room/aigc/aigc-studio/references/h3/GUIDE.md", "H3 分区\n");
   // A SKILL.md below another skill is part of that skill, not a skill of its own.
@@ -53,6 +54,8 @@ test("index lists skills of the given scopes in order; earlier scopes win name c
   assert.equal(index[0]!.path, "scopes/velvet-room/aigc/aigc-studio");
   assert.ok(!skills.skills().some((item) => item.name === "legacy"));
   assert.equal(skills.skills().find((item) => item.name === "negumi")!.slash, true);
+  assert.deepEqual(skills.skills().filter((item) => item.pinned).map((item) => `${item.scope}/${item.name}`),
+    ["_agent-dorothy/navidrome"]);
 });
 
 test("view returns the skill directory, its files and one file's content; paths cannot escape", () => {

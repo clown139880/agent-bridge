@@ -208,7 +208,8 @@ class AgentBridgeMemoryProvider(MemoryProvider):
         return "\n".join(part for part in parts if part)
 
     def _skill_index(self, budget: int = SKILL_INDEX_BUDGET) -> str:
-        """Skill list from the shared library for scopes in AGENT_SKILLS_SCOPES (room, own scope, then _global)."""
+        """Skill list from the shared library for scopes in AGENT_SKILLS_SCOPES: the room's skills and pinned skills
+        (room, own scope, then _global); the rest are only counted."""
         pilot = {item.strip() for item in self._skill_scopes.split(",") if item.strip()}
         if not pilot or (self._skill_scopes != "all" and self._scope not in pilot):
             return ""
@@ -220,20 +221,23 @@ class AgentBridgeMemoryProvider(MemoryProvider):
             return ""
         if not skills:
             return ""
+        # Pinned skills are shown up front; the room's own skills are its specialty and count as pinned.
+        listed = [item for item in skills if item["scope"] == self._scope or item.get("pinned")]
         lines = ["## Skills (shared library)",
                  "Load a skill with skill_view(name) before doing a task it covers. "
                  "Save reusable procedures with skill_manage; new skills go to this room's scope."]
         used = sum(len(line) + 1 for line in lines)
         shown = 0
-        for item in skills:
+        for item in listed:
             line = f"- {item['name']}: {_one_line(item['description'], 200)}"
             if used + len(line) + 1 > budget:
                 break
             lines.append(line)
             used += len(line) + 1
             shown += 1
-        if shown < len(skills):
-            lines.append(f"- … {len(skills) - shown} more: use skills_list to find them")
+        rest = len(skills) - shown
+        if rest > 0:
+            lines.append(f"- {rest} more skills are available: use skills_list to find them before starting a task")
         return "\n".join(lines)
 
     def _render(self, bootstrap: str, warnings: List[str]) -> str:

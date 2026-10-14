@@ -44,6 +44,7 @@
 - 每个技能目录下只有一个 `SKILL.md`；子目录里不能再出现 `SKILL.md`（Hermes 会当成独立技能）。大的合集用 `references/<分区>/GUIDE.md`。
 - frontmatter 新增 `metadata.agent_skills`：
   - `sources`：原技能 id（迁移来源）。
+  - `pinned: true`：开局列进提示词（见 §4）。
   - `slash: true`：需要 `/名字` 斜杠命令（目前是 5 个角色卡加载器）。
   - `upstream`（可选）：外部来源和版本，供以后的安装和更新使用。
 - 脚本在 HAL 的 checkout 里原地执行，用绝对路径 `/root/agent-skills/scopes/...` 引用。
@@ -61,7 +62,8 @@
 
 - 私聊的当前作用域是 `_global`，不额外列房间技能。
 - 角色卡 `card-*` 不列进提示词，只通过斜杠命令或 `memory_load` 进入。
-- 提示词里每个技能一行（名字 + 描述），在一个字符预算内按作用域优先级截断；超出部分给一行「另有 N 个技能，用 `skills_list` 查找」。
+- **作用域管「谁能用」，置顶管「开局列不列」**（2026-10-14）：提示词里只列当前房间作用域的技能和 frontmatter 标了 `metadata.agent_skills.pinned: true` 的技能，每个一行，6000 字符以内；其余可见技能只给一行「另有 N 个技能，用 `skills_list` 查找」，照样能搜到、加载。新沉淀的技能默认不置顶。
+- 初始置顶：`_global` 的 `agent-memory`、`conversation-recall`、`deathnote-vault`、`openlist`；`_agent-dorothy` 的 `service-use-boundaries`。
 
 ## 5. Control Plane 技能模块
 

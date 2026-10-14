@@ -31,6 +31,8 @@ export interface SkillEntry {
   description: string;
   version: string;
   slash: boolean;
+  /** `metadata.agent_skills.pinned`: listed in the agent's prompt up front; other skills are found with search. */
+  pinned: boolean;
   /** Repository-relative directory, e.g. scopes/_global/media/openlist. */
   path: string;
 }
@@ -122,7 +124,7 @@ export class AgentSkills {
       if (file !== "SKILL.md") throw new MemoryError("unknown_skill", input.name);
       const category = input.category ?? "general";
       if (!category.split("/").every((part) => SLUG.test(part))) throw new MemoryError("invalid_category", category);
-      entry = { name: input.name, scope: input.scope, category, description: "", version: "", slash: false,
+      entry = { name: input.name, scope: input.scope, category, description: "", version: "", slash: false, pinned: false,
         path: ["scopes", input.scope, ...category.split("/"), input.name].join("/") };
     }
     if (file === "SKILL.md") validateSkillMd(input.content, input.name);
@@ -207,7 +209,7 @@ export class AgentSkills {
       const parts = relative(join(this.scopesDir, scope), dir).split(sep);
       return { name, scope, category: parts.slice(0, -1).join("/") || "general",
         description: typeof data.description === "string" ? data.description.trim() : "",
-        version: data.version === undefined ? "" : String(data.version), slash: own.slash === true,
+        version: data.version === undefined ? "" : String(data.version), slash: own.slash === true, pinned: own.pinned === true,
         path: relative(this.options.repo, dir).split(sep).join("/") };
     } catch { return undefined; }
   }
