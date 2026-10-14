@@ -43,6 +43,7 @@ claude 进程还会读取所在机器的 `~/.claude/settings.json`（Bridge 没�
   - `all`：全部放行。
 - `CLAUDE_AUTO_APPROVE_TOOLS`：额外按**工具名**整体放行，例如 `["Bash"]` 会放行所有 Bash 命令。
 - **Bash、Edit/Write/MultiEdit/NotebookEdit、所有 MCP 工具**在 `readonly` 模式下一律弹审批，不看命令内容。
+- 例外（2026-10-15，clown 决定）：中央记忆 MCP 服务 `conversation-memory` 的全部工具（`conversation_*`、`memory_*`、`skill_*`，含写入）由原生规则 `mcp__conversation-memory` 放行，不再弹审批。写入都是 Git 提交，可撤回或归档。HAL 写在 `/root/.claude/settings.json` 的 `permissions.allow`（新会话即生效，不必重启 Bridge）；其他机器加在各自的 `~/.claude/settings.json`，或用第 6 节的 env 规则档。
 - 审批选项是 `allow` / `deny` / `allow-session`。`allow-session` 把**工具名**加入 `session.sessionAllowedTools`：点一次之后，本会话里**所有** Bash 都不会再问，不区分具体命令。
 - Codex app-server 的审批（`apps/bridge/src/app-server.ts`）由 Codex 自己的 approval policy 决定什么时候请求，Bridge 只负责转发。
 
