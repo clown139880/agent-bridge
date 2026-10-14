@@ -222,7 +222,9 @@ class AgentBridgeMemoryProvider(MemoryProvider):
         if not skills:
             return ""
         # Pinned skills are shown up front; the room's own skills are its specialty and count as pinned.
-        listed = [item for item in skills if item["scope"] == self._scope or item.get("pinned")]
+        # _global and _agent-* are never "the room" (a DM resolves to _global): only their pinned skills show.
+        room = "" if self._scope.startswith("_") else self._scope
+        listed = [item for item in skills if (room and item["scope"] == room) or item.get("pinned")]
         lines = ["## Skills (shared library)",
                  "Load a skill with skill_view(name) before doing a task it covers. "
                  "Save reusable procedures with skill_manage; new skills go to this room's scope."]

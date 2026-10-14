@@ -103,3 +103,23 @@ def test_cron_is_read_only_and_outage_uses_cache(mcp, tmp_path):
     assert "# 作用域 velvet-room" in offline.system_prompt_block() and "暂不可用" in offline.system_prompt_block()
     assert json.loads(offline.handle_tool_call("memory_write", {"topic": "a", "kind": "fact", "value": "v"}))["error"]
     mcp.down = False
+
+
+def test_skill_index_lists_room_skills_and_pinned_only(monkeypatch):
+    skills = [
+        {"name": "room-skill", "scope": "jmyd", "description": "房间技能", "pinned": False},
+        {"name": "mine", "scope": "_agent-dorothy", "description": "自己的", "pinned": True},
+        {"name": "global-pinned", "scope": "_global", "description": "置顶", "pinned": True},
+        {"name": "global-other", "scope": "_global", "description": "不置顶", "pinned": False},
+    ]
+    provider = plugin.AgentBridgeMemoryProvider()
+    provider._skill_scopes, provider._self_scope = "all", "_agent-dorothy"
+    monkeypatch.setattr(provider, "_call", lambda tool, args: {"skills": skills})
+    provider._scope = "jmyd"
+    block = provider._skill_index()
+    assert "- room-skill:" in block and "- mine:" in block and "- global-pinned:" in block
+    assert "global-other" not in block and "1 more skills" in block
+    provider._scope = "_global"  # a DM: _global is not a room
+    block = provider._skill_index()
+    assert "- mine:" in block and "- global-pinned:" in block
+    assert "global-other" not in block and "room-skill" not in block and "2 more skills" in block
