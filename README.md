@@ -113,7 +113,7 @@ Bridge 主要变量：
 | `BRIDGE_TOKEN` | 必须与 Control Plane 一致 |
 | `MACHINE_ID` / `MACHINE_NAME` | Matrix 中显示的机器标识 |
 | `BRIDGE_ALLOWED_ROOTS` | Bridge 可访问的项目根目录，使用 `:` 分隔 |
-| `CODEX_APP_SERVER_URL` | 默认 `ws://127.0.0.1:4500`；托管本地服务器会分配独立端口，避免 Windows/WSL 冲突；非托管模式使用此 URL 原值 |
+| `CODEX_APP_SERVER_URL` | 默认 `ws://127.0.0.1:4500`；共享回环端口的 Bridge（Windows 与 WSL）必须配置不同端口，WSL 用 `ws://127.0.0.1:4501`；托管模式下端口 `0` 表示每次启动随机分配 |
 | `CODEX_APP_SERVER_MANAGED` | 是否由 Bridge 启停 App Server |
 | `BRIDGE_ARCHIVE_OUTBOX_PATH` | 等待中心 ACK 的会话事件持久 outbox；必须位于 Git checkout 外 |
 | `BRIDGE_ARCHIVE_OUTBOX_LIMIT` | outbox 消息上限，默认 10000；溢出会向中心报告采集缺口 |
@@ -360,13 +360,13 @@ pnpm start:control
 pnpm start:bridge
 ```
 
-Codex TUI 必须连接同一个 App Server：
+Codex TUI 必须连接同一个 App Server（WSL 为 4501）：
 
 ```bash
-codex --remote ws://127.0.0.1:4500
+codex --remote ws://127.0.0.1:4501
 ```
 
-也可以加载透明包装函数，之后继续输入普通的 `codex`：
+也可以加载透明包装函数，之后继续输入普通的 `codex`（默认连接 `ws://127.0.0.1:4501`，可用 `CODEX_APP_SERVER_URL` 覆盖）：
 
 ```bash
 source scripts/codex-remote.zsh
@@ -518,7 +518,7 @@ sudo systemctl status agent-bridge-wsl.service
 验证 Bridge 管理的 App Server：
 
 ```bash
-curl http://127.0.0.1:4500/readyz
+curl http://127.0.0.1:4501/readyz
 ```
 
 修改 unit 后运行 `daemon-reload` 和 `restart`。修改 `.env.bridge` 后只需重启服务：

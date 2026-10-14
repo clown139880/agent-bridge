@@ -3,7 +3,7 @@
 
 function codex() {
   local codex_real="${CODEX_REAL_COMMAND:-${commands[codex]:-codex}}"
-  local app_server_url="${CODEX_APP_SERVER_URL:-ws://127.0.0.1:4500}"
+  local app_server_url="${CODEX_APP_SERVER_URL:-ws://127.0.0.1:4501}"
   local arg
   local has_explicit_cwd=false
 

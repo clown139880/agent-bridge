@@ -5,22 +5,16 @@ import { createServer } from "node:net";
 import test from "node:test";
 import { managedAppServerUrl, stopManagedAppServer } from "../apps/bridge/src/managed-app-server.js";
 
-test("managed loopback endpoint avoids a listening foreign server and preserves unmanaged addresses", async () => {
-  const foreign = createServer();
-  foreign.listen(0, "127.0.0.1");
-  await once(foreign, "listening");
-  try {
-    const address = foreign.address();
-    assert.ok(address && typeof address !== "string");
-    const configured = `ws://127.0.0.1:${address.port}`;
-    const endpoint = await managedAppServerUrl(configured);
-    assert.match(endpoint, /^ws:\/\/127\.0\.0\.1:\d+$/);
-    const allocated = new URL(endpoint);
-    assert.notEqual(Number(allocated.port), address.port);
-    assert.equal(allocated.hostname, "127.0.0.1");
-    assert.equal(foreign.listening, true);
-    assert.equal(await managedAppServerUrl("ws://192.0.2.1:4500"), "ws://192.0.2.1:4500");
-  } finally { await new Promise<void>(resolve => foreign.close(() => resolve())); }
+test("managed loopback endpoint keeps a configured port and preserves unmanaged addresses", async () => {
+  assert.equal(await managedAppServerUrl("ws://127.0.0.1:4501/"), "ws://127.0.0.1:4501");
+  assert.equal(await managedAppServerUrl("ws://localhost:4501"), "ws://localhost:4501");
+  assert.equal(await managedAppServerUrl("ws://192.0.2.1:4500"), "ws://192.0.2.1:4500");
+});
+
+test("managed loopback port 0 allocates a free port", async () => {
+  const endpoint = await managedAppServerUrl("ws://localhost:0");
+  assert.match(endpoint, /^ws:\/\/127\.0\.0\.1:\d+$/);
+  assert.ok(Number(new URL(endpoint).port) > 0);
 });
 
 test("stopping an owned launcher also releases its native child's listener", { timeout: 15_000 }, async () => {

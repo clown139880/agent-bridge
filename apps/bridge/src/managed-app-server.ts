@@ -4,10 +4,15 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
-/** Managed loopback servers never share the configured port with WSL or another Bridge. */
+/**
+ * Managed loopback servers keep their configured port so local `codex --remote` clients can find
+ * them; give each Bridge sharing a loopback (Windows and WSL) its own port. Port 0 allocates one.
+ */
 export async function managedAppServerUrl(configured: string): Promise<string> {
   const url = new URL(configured);
   if (url.protocol !== "ws:" || !["127.0.0.1", "localhost", "[::1]"].includes(url.hostname)) return configured;
+  // Codex's --listen parser rejects the trailing slash added by URL.toString().
+  if (url.port !== "0") return `${url.protocol}//${url.host}`;
   const host = url.hostname === "[::1]" ? "::1" : "127.0.0.1";
   const server = createServer();
   await new Promise<void>((resolve, reject) => {
@@ -19,7 +24,6 @@ export async function managedAppServerUrl(configured: string): Promise<string> {
   url.hostname = host === "::1" ? "[::1]" : host;
   url.port = String(address.port);
   await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
-  // Codex's --listen parser rejects the trailing slash added by URL.toString().
   return `${url.protocol}//${url.host}`;
 }
 
