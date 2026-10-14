@@ -153,7 +153,7 @@ test("existing databases gain the upstream event ID column and unique index", ()
   rmSync(path, { force: true });
 });
 
-test("sequential worker runs can share one Codex session while keeping events separate", () => {
+test("sequential worker runs can share one Codex session", () => {
   const path = join(tmpdir(), `agent-bridge-${randomUUID()}.sqlite`);
   const store = new Store(path);
   store.upsertMachine({ id: "dev", name: "dev", platform: "linux", hostname: "dev", capabilities: [] });
@@ -169,12 +169,8 @@ test("sequential worker runs can share one Codex session while keeping events se
       createdAt, updatedAt: createdAt,
     });
   }
-  new AgentControlStore(store.db, { actionsMs: 1_000, attachmentsMs: 1_000 }).appendSessionEvent({ type: "session.event",
-    eventType: "turn.completed", eventId: "event-2", sessionId: "thread-1", timestamp: 3, payload: { summary: "second" } });
 
   assert.equal(store.getWorkerRunBySession("thread-1")?.id, "run-2");
-  assert.equal(store.listRunEvents("thread-1", "run-1").events.length, 0);
-  assert.equal((store.listRunEvents("thread-1", "run-2").events[0]?.event as { summary?: string }).summary, "second");
   store.db.close();
   rmSync(path, { force: true });
 });

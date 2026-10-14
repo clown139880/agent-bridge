@@ -51,11 +51,11 @@ claude 进程还会读取所在机器的 `~/.claude/settings.json`（Bridge 没�
 - `apps/control-plane/src/server.ts` 里的 `handleApprovalRequest` 会落库（controlStore pending），把会话标记成 `blocked`，然后发到 Matrix 线程（用表情反应作答）。DSH 和 API 的 `/api/v1/approvals` 也能作答，通过 `reservePending` 保证只被处理一次。
 - Bridge 重连时，会在 snapshot 里重新上报还没处理的审批，所以不会丢请求。
 
-## 4. Hermes 审批转发（`integrations/hermes_agent_bridge/approval_relay.py`）
+## 4. Hermes 代为审批（`abctl`）
 
-- 把 Kanban worker 的审批推到创建卡片的那个 Hermes 聊天，使用 Hermes 原生的 exec-approval 交互。
-- **等不到回复（超时）或回复无法识别，都会被映射成 `deny`**（见 `_approval_choice`）。所以 agent 看到的 "denied" 有可能只是超时，并不代表用户真的拒绝了。排查"被拒绝"时要先区分这两种情况。
-- 这里不提供 `allow_permanent`；只有请求本身提供 `allow-session` 选项时，才会显示 session 选项。
+- 0.6.96 移除了 Kanban 插件里的审批转发（`approval_relay.py`）。Hermes 现在用 `abctl wait` 盯住自己派出的 turn：审批到来时 `wait` 以退出码 10（MCP 为 `state: "approval"`）返回，Hermes 用 `abctl approve/deny` 作答，拿不准的问用户。
+- Hermes 不回答时审批保持 pending，不会超时变成 `deny`；Matrix 线程和 DSH 仍可作答，`reservePending` 保证只处理一次。
+- 旧版转发把超时和无法识别的回复映射成 `deny`，排查 0.6.96 之前的 "denied" 时要先区分是不是超时。
 
 ## 5. 已知问题
 

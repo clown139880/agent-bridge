@@ -38,7 +38,7 @@ export interface PostDeployHost {
 /**
  * Continues each deploying session once its Bridge is back on the deployed
  * version: a turn telling it the deploy is up and repeating its note, so it
- * verifies the release and finishes its report (a Kanban card's receipt).
+ * verifies the release and finishes its report.
  */
 export class PostDeployResumer {
   constructor(private readonly dir: string | undefined, private readonly host: PostDeployHost,

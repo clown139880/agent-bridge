@@ -215,7 +215,7 @@ CHANGELOG 也记录了多次 wire/runtime 假设导致的真机问题，例如 `
 3. **一个 source of truth。** Bridge 仍是 Bridge session/action/pending 的权威；DSH runtime 只持投影和 UI 生命周期。
 4. **snapshot + cursor + replay。** Bridge 的现有 REST/SSE contract 已具备正确的无竞态基线，应该由 provider 直接消费。
 5. **显式 capability。** prompt、steer、interrupt、attachments、models、approval/input 根据 Bridge worker capability 暴露，不伪造 DSH 能力。
-6. **管理 UI 与 session UI 分离。** Agent Control/Kanban overlay 可以保留；session 浏览和会话交互应归官方树与官方 conversation。
+6. **管理 UI 与 session UI 分离。** Agent Control overlay 可以保留；session 浏览和会话交互应归官方树与官方 conversation。
 7. **冲突时原子降级。** provider 注册失败时保持 DSH 本地 session 正常，不留下半注册路径。
 
 不应借鉴：旧 ApiProxy exact routes、手写 DSH stubs 作为兼容证明、直接调用 client runtime 的非扩展方法、把 Bridge events 强行伪造成某一版 DSH frames。
@@ -256,9 +256,9 @@ interface ExternalSessionSource {
 1. 新增 `BridgeSessionSource`，复用现有 `BridgeClient` 和 Agent Control Host service；
 2. 把 `SessionStore` 的 snapshot/cursor/replay/receipt 逻辑移到 Host provider，或删除已由 DSH provider runtime 承担的部分；
 3. 删除 `UnifiedSessions`、`BridgeSidebar`、`BridgeConversation`、`SessionComposer` 及 `External*` feature detection；
-4. Footer 只保留 Agent Control/Kanban 管理入口；Bridge sessions 自动出现在官方树；
+4. Footer 只保留 Agent Control 管理入口；Bridge sessions 自动出现在官方树；
 5. 由 provider contract tests 覆盖 list/history/live/prompt/cancel/pending/receipt/cursor-expiry；
-6. 用 Bridge mock transport 做全套测试，不连接真实 ModelDeck、DSH generation 或用户 Kanban。
+6. 用 Bridge mock transport 做全套测试，不连接真实 ModelDeck或 DSH generation。
 
 ### 7.3 若上游暂时不提供扩展点
 

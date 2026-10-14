@@ -49,8 +49,7 @@ then activated through the scheduled restart task.
 The DSH Agent Control plugin is installed into the existing `desktop` profile.
 Its Host token belongs in the DSH backend environment as
 `AGENT_BRIDGE_CONTROL_TOKEN`; it must not be placed in browser configuration.
-When DSH runs on HAL, keep Kanban in HAL's existing Hermes sidecar. Do not
-create a Windows Hermes database or a competing DSH Host.
+Do not create a Windows Hermes database or a competing DSH Host.
 
 ## Updating the installed DSH client
 

@@ -1,7 +1,7 @@
 {
   "name": "dsh-agent-control-plugin",
-  "version": "0.1.80",
-  "description": "Out-of-tree DeepSeek Harness Agent Bridge and Hermes Kanban control workspace",
+  "version": "0.2.0",
+  "description": "Out-of-tree DeepSeek Harness Agent Bridge control workspace",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -19,7 +19,6 @@
   },
   "files": [
     "lib",
-    "python",
     "presets",
     "fixtures",
     "cordis.patch.yml",

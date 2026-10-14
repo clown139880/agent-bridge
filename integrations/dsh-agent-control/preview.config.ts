@@ -18,7 +18,6 @@ export default defineConfig({
     configureServer(server) {
       const service = new AgentControlService({
         bridge: { mode: 'mock', origin: 'http://unused.invalid', tokenEnv: 'UNUSED', timeoutMs: 1000 },
-        kanban: { mode: 'mock', board: 'test', permissionMode: 'read-only', author: 'preview', hermesRoot: '/unused', hermesHome: '/unused', python: 'unused', timeoutMs: 1000 },
       })
       server.httpServer?.once('close', () => service.dispose())
       server.middlewares.use('/__preview/dispatch', async (request, response) => {

@@ -22,15 +22,24 @@ describe('Cordis lifecycle', () => {
     ctx.provide('webServer', { register: vi.fn(() => routeDispose) } as never)
     const fiber = await ctx.plugin(plugin, {
       bridge: { mode: 'mock', origin: 'http://unused', tokenEnv: 'UNUSED', timeoutMs: 1000 },
-      kanban: { mode: 'mock', board: 'test', permissionMode: 'read-only', author: 'test', hermesRoot: '/unused', hermesHome: '/unused', python: 'python3', timeoutMs: 1000 },
     })
-    expect(toolDisposers).toHaveLength(24)
+    expect(toolDisposers).toHaveLength(13)
     expect(register).toHaveBeenCalledOnce()
     expect(register).toHaveBeenCalledWith(expect.anything(), '/agent-control', expect.any(Function))
     expect(ctx.get('agentControl')).toBeDefined()
     await fiber.dispose()
     expect(ctx.get('agentControl')).toBeUndefined()
     expect(serviceDispose).toHaveBeenCalledOnce()
+  })
+
+  it('tolerates a legacy kanban key in an existing plugin config', () => {
+    const parsed = plugin.Config({
+      bridge: { mode: 'mock', origin: 'http://unused', tokenEnv: 'UNUSED', timeoutMs: 1000 },
+      kanban: { mode: 'sidecar', board: 'default' },
+    } as never) as unknown as Record<string, unknown>
+    // The schema neither rejects nor consumes the stale key; nothing reads it.
+    expect(parsed['bridge']).toMatchObject({ mode: 'mock' })
+    expect(() => new plugin.AgentControlService(parsed as never).dispose()).not.toThrow()
   })
 
   it('normalizes domain failures to Connection transport error codes', async () => {

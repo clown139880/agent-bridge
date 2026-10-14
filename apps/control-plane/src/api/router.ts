@@ -21,7 +21,10 @@ function capabilityForAgent(agentType: AgentType): string {
 }
 
 interface Principal { id: string; read: boolean; write: boolean; }
-interface ApiOptions { workerToken?: string; readToken?: string; writeToken?: string; bridgeToken?: string;
+interface ApiOptions {
+  /** WORKER_API_TOKEN: a full-access (read+write) API token used by Hermes (its /ab command). Not a worker-run API. */
+  workerToken?: string;
+  readToken?: string; writeToken?: string; bridgeToken?: string;
   sseKeepaliveMs: number; ssePollMs: number; sseMaxBackpressure: number; actionTimeoutMs: number; }
 
 function equalSecret(left: string, right: string): boolean {
@@ -127,6 +130,7 @@ export class AgentControlApi {
     const token=header.slice(7);
     if(this.options.writeToken&&equalSecret(token,this.options.writeToken))return{id:"control:write",read:true,write:true};
     if(this.options.readToken&&equalSecret(token,this.options.readToken))return{id:"control:read",read:true,write:false};
+    // WORKER_API_TOKEN: full-access token used by Hermes (/ab gateway command), not a worker-run API.
     if(this.options.workerToken&&equalSecret(token,this.options.workerToken))return{id:"worker:legacy",read:true,write:true};
     // The bridge authenticates with its registration token to fetch attachment bytes.
     if(this.options.bridgeToken&&equalSecret(token,this.options.bridgeToken))return{id:"bridge",read:true,write:false};

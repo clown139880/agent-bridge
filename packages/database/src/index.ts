@@ -1,8 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { type AgentEvent, type AgentStatus, type AgentType } from "@agent-bridge/protocol";
-import { decodeEventBody } from "./events.js";
+import { type AgentStatus, type AgentType } from "@agent-bridge/protocol";
 import { migrateDatabase } from "./migrations.js";
 import { markChanged } from "./stream.js";
 export * from "./control.js";
@@ -46,11 +45,6 @@ export interface WorkerRunRecord {
   error: string | null;
   createdAt: number;
   updatedAt: number;
-}
-
-export interface StoredAgentEvent {
-  sequence: number;
-  event: AgentEvent;
 }
 
 export class Store {
@@ -179,25 +173,6 @@ export class Store {
     return row ? mapWorkerRun(row) : undefined;
   }
 
-  getLatestWorkerRunByConversation(conversationId: string, machineId: string, projectPath: string): WorkerRunRecord | undefined {
-    const row = this.db.prepare(`
-      SELECT * FROM worker_runs
-      WHERE conversation_id=? AND machine_id=? AND project_path=? AND session_id IS NOT NULL
-      ORDER BY created_at DESC, rowid DESC LIMIT 1
-    `).get(conversationId, machineId, projectPath) as Record<string, unknown> | undefined;
-    return row ? mapWorkerRun(row) : undefined;
-  }
-
-  getLatestLegacyWorkerRunByTask(taskId: string, machineId: string, projectPath: string): WorkerRunRecord | undefined {
-    const row = this.db.prepare(`
-      SELECT * FROM worker_runs
-      WHERE task_id=? AND machine_id=? AND project_path=? AND session_id IS NOT NULL
-        AND conversation_id IS NULL
-      ORDER BY created_at DESC, rowid DESC LIMIT 1
-    `).get(taskId, machineId, projectPath) as Record<string, unknown> | undefined;
-    return row ? mapWorkerRun(row) : undefined;
-  }
-
   attachWorkerRun(id: string, sessionId: string, status: AgentStatus): void {
     this.db.exec("BEGIN IMMEDIATE"); try {
       this.db.prepare("UPDATE worker_runs SET session_id=?, status=?, updated_at=? WHERE id=?")
@@ -210,34 +185,6 @@ export class Store {
       this.db.prepare("UPDATE worker_runs SET status=?, error=?, updated_at=? WHERE id=?")
         .run(status, error ?? null, Date.now(), id); markChanged(this.db, "run", id); this.db.exec("COMMIT");
     } catch (caught) { try { this.db.exec("ROLLBACK"); } catch {} throw caught; }
-  }
-
-  /**
-   * The legacy run event feed, projected from the run's stored session events.
-   * `next` is the last scanned event id so a caller never rescans skipped rows.
-   */
-  listRunEvents(sessionId: string, workerRunId: string, after = 0, limit = 100): { events: StoredAgentEvent[]; next: number } {
-    const rows = this.db.prepare(`SELECT id,event_id,type,created_at,body FROM events
-      WHERE session_id=? AND worker_run_id=? AND id>? AND type IN
-        ('message.completed','turn.started','turn.completed','turn.failed','turn.interrupted')
-      ORDER BY id LIMIT ?`).all(sessionId, workerRunId, after, limit) as Array<Record<string, unknown>>;
-    const events: StoredAgentEvent[] = [];
-    for (const row of rows) {
-      const payload = decodeEventBody(row.body), timestamp = Number(row.created_at), eventId = String(row.event_id);
-      const text = (value: unknown) => typeof value === "string" && value ? value : undefined;
-      let event: AgentEvent | undefined;
-      if (row.type === "message.completed") {
-        if (payload.role === "assistant" && text(payload.text)) event = { type: "agent.output", eventId, sessionId, timestamp, text: text(payload.text) };
-      } else if (row.type === "turn.started") event = { type: "agent.started", eventId, sessionId, timestamp };
-      else if (row.type === "turn.completed") event = payload.status === "failed"
-        ? { type: "agent.failed", eventId, sessionId, timestamp, summary: text(payload.error) ?? text(payload.summary) }
-        : { type: "agent.completed", eventId, sessionId, timestamp, summary: text(payload.summary) };
-      else if (row.type === "turn.failed") event = { type: "agent.failed", eventId, sessionId, timestamp,
-        summary: text(payload.error) ?? text(payload.message) ?? text(payload.summary) };
-      else event = { type: "agent.stopped", eventId, sessionId, timestamp, summary: text(payload.reason) };
-      if (event) events.push({ sequence: Number(row.id), event });
-    }
-    return { events, next: rows.length ? Number(rows.at(-1)!.id) : after };
   }
 }
 

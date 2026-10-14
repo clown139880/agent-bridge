@@ -25,20 +25,6 @@ export const mockSnapshot: Snapshot = {
   truncated: { sessions: false },
 }
 
-export const mockBoard = {
-  columns: [
-    { name: 'triage', tasks: [] },
-    { name: 'todo', tasks: [{ id: 't_plan', title: 'Plan integration', status: 'todo', assignee: 'codex@hal', priority: 2 }] },
-    { name: 'ready', tasks: [] },
-    { name: 'running', tasks: [{ id: 't_bridge', title: 'Implement Bridge API', status: 'running', assignee: 'codex@hal', priority: 3, workspace_path: '/work/agent-bridge' }] },
-    { name: 'blocked', tasks: [] },
-    { name: 'review', tasks: [] },
-    { name: 'done', tasks: [] },
-  ],
-  assignees: ['codex@hal'],
-  latest_event_id: 1,
-}
-
 /** Real wire envelopes, including a second history page and a late item after a turn terminal. */
 export const mockSessionEvents: JsonObject[] = [
   { eventId: 'mock-context', sessionId: 'thr_active', turnId: 'turn_44', type: 'context.updated', timestamp: 1788770000450, payload: { usedTokens: 48217, contextWindow: 128000, inputTokens: 45112, outputTokens: 3105, reasoningTokens: 1840 } },

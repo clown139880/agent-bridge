@@ -16,6 +16,9 @@ export class AgentControlSse {
     const header=request.headers["last-event-id"],cursor=typeof header==="string"?header:(url.searchParams.get("cursor")??undefined);
     let position:StreamPosition;try{position=cursor?this.store.parseStreamCursor(cursor):this.store.streamPosition();}
     catch(error){if(error instanceof Error&&(error.message==="invalid_cursor"||error.message==="cursor_expired"))throw new SseCursorError(error.message);throw error;}
+    // ?sessionId= narrows the stream to one session's resources; the cursor still
+    // advances past everything else, so a resumed filtered stream stays exact.
+    const sessionFilter=url.searchParams.get("sessionId")||undefined;
     response.writeHead(200,{"content-type":"text/event-stream; charset=utf-8","cache-control":"no-cache, no-transform",
       connection:"keep-alive","x-accel-buffering":"no"});response.write("retry: 3000\n\n");
     let closed=false,busy=false,backpressure=0,lastWrite=Date.now();
@@ -25,6 +28,7 @@ export class AgentControlSse {
       for(;;){
         const batch=this.store.streamAfter(position,BATCH);
         for(const item of batch.items){
+          if(sessionFilter&&item.sessionId!==sessionFilter)continue;
           const envelope={cursor:item.cursor,eventId:item.eventId,type:item.type,timestamp:item.createdAt,
             resource:{kind:item.resourceKind,id:item.resourceId},sessionId:item.sessionId,data:item.payload};
           const writable=response.write(`id: ${item.cursor}\nevent: bridge.event\ndata: ${JSON.stringify(envelope)}\n\n`);

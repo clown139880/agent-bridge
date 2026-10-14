@@ -3,6 +3,7 @@
 > 状态：**历史实施计划，首版早已发布并继续演进。** `0.4.2` 是本文的调查基线，不是当前版本；
 > 2026-09-14 的发布版本为 `0.6.40`。当前事实见 [current-state.md](./current-state.md)，权威 wire
 > 契约见 [agent-control-api.md](./agent-control-api.md)。以下 Phase 和“后续”文字保留为实施记录。
+> 0.6.96 已移除 Hermes Worker API（`/runs` 写入口）和 `integrations/hermes_agent_bridge`，文中相关段落仅为历史。
 
 实现覆盖 Phase 1–3 及 Phase 4 的兼容性首版：versioned SQLite migration、session/pending/action/outbox
 投影、Bridge inventory 与 action ack、REST/SSE、read/write token 和 legacy Hermes 回归。Matrix 与 legacy

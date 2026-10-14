@@ -1,14 +1,13 @@
 # Agent Control API 契约（v1）
 
 > 状态：**已随 Agent Bridge 0.5.0 发布并部署**；后续 0.5.x 保持本页 v1 兼容契约。
-> 本文同时记录 Hermes Worker API；标为“现有”的行为已经过 `apps/control-plane/src/server.ts`、
-> `packages/protocol/src/index.ts`、`packages/database/src/index.ts` 与 Hermes 集成交叉核对。
+> 0.6.96 起 Hermes Worker API（`POST /runs` 与 `/runs/{runId}/*`）和 Hermes Kanban 插件已移除；
+> `GET /runs` 与 `GET /sessions/{sessionId}/runs` 只读历史 run。Hermes 改用本 API（经 `abctl`）驱动 session。
 
 ## 1. 范围与原则
 
 Agent Bridge 是外部 Codex/Claude thread/session 的唯一执行状态来源。UI 展示和操控 Bridge session，不把它复制成
-DSH 原生 Session。Hermes Kanban 仍是 task claim、lease、依赖、review 和完成状态的唯一真实来源；API 中的
-`taskId` 只是关联标识，Bridge 不修改 Kanban。
+DSH 原生 Session。API 中的 `taskId`、`conversationId` 只是关联标识。
 
 本文使用三类标签：
 
@@ -33,9 +32,8 @@ DSH 原生 Session。Hermes Kanban 仍是 task claim、lease、依赖、review �
   展示。
 
 当前工作树通过 `CONTROL_API_READ_TOKEN` 和 `CONTROL_API_WRITE_TOKEN` 提供 read/write 两档 scope：read token
-只能调用 GET（含 SSE），write token 同时拥有读写权限。`WORKER_API_ENABLED=true` 与 `WORKER_API_TOKEN`
-继续开启并认证 Hermes legacy Worker API；为保持 0.4.2 客户端兼容，该 token 也可通过共享 `/api/v1`
-鉴权。生产应给 DSH Host 使用独立 Control token，而不是复用 Worker token。
+只能调用 GET（含 SSE），write token 同时拥有读写权限。`WORKER_API_ENABLED=true` 时
+`WORKER_API_TOKEN` 也是一枚读写 token（Hermes `/ab` 命令使用）。生产应给 DSH Host 使用独立 Control token。
 DSH Host 插件保存 Control token 并代理请求/事件；浏览器 Client 不得读取 token，也不得直连 Control Plane。
 
 ## 3. Endpoint 总表
@@ -51,21 +49,14 @@ DSH Host 插件保存 Control token 并代理请求/事件；浏览器 Client �
 | 新增 | `POST` | `/sessions` | 创建 Agent session，可同时启动首个 turn |
 | 新增 | `GET` | `/sessions/{sessionId}` | session 详情和关联关系 |
 | 新增 | `DELETE` | `/sessions/{sessionId}` | 通过 owning Bridge adapter 删除/遗忘 session |
-| 新增 | `GET` | `/sessions/{sessionId}/runs` | session 关联的 Worker runs |
+| 新增 | `GET` | `/sessions/{sessionId}/runs` | session 关联的历史 Worker runs（只读） |
 | 新增 | `GET` | `/sessions/{sessionId}/events` | session 全量结构化事件/对话 |
 | 新增 | `POST` | `/sessions/{sessionId}/turns` | 自动或显式 steer/start-new-turn |
 | 新增 | `POST` | `/sessions/{sessionId}/interrupt` | interrupt 当前 turn |
 | 新增 | `GET` | `/actions/{actionId}` | 查询异步写操作结果 |
 | 新增 | `POST` | `/attachments` | 上传受限图片并取得内容寻址引用 |
 | 新增 | `GET` | `/attachments/{attachmentId}` | 读取已上传图片；Bridge 也用注册 token 读取 |
-| 新增 | `GET` | `/runs` | 按关联字段查询 runs |
-| 现有、扩展 | `POST` | `/runs` | Hermes 创建幂等 Worker run |
-| 现有、扩展 | `GET` | `/runs/{runId}` | Worker run 状态和待审批 |
-| 现有 | `GET` | `/runs/{runId}/events` | run 隔离的生命周期事件 |
-| 现有 | `POST` | `/runs/{runId}/input` | 兼容输入入口，Bridge 自动 steer/start |
-| 现有 | `POST` | `/runs/{runId}/interrupt` | 中断 run 当前 turn |
-| 现有 | `POST` | `/runs/{runId}/reclaim` | Hermes 回收特定陈旧 blocked run |
-| 现有 | `POST` | `/runs/{runId}/approvals/{approvalId}` | Hermes 兼容审批入口 |
+| 新增 | `GET` | `/runs` | 按关联字段查询历史 runs（只读） |
 | 新增 | `GET` | `/approvals` | 查询 pending/resolved approvals |
 | 新增 | `GET` | `/approvals/{approvalId}` | approval 详情 |
 | 新增 | `POST` | `/approvals/{approvalId}/decision` | 原子提交 approval 决定 |
@@ -618,46 +609,10 @@ interface InterruptRequest { expectedTurnId?: string; }
 200 返回 `ActionReceipt`。action 至少保留 24 小时；过期后返回 404 `action_not_found`。失败 action 的 HTTP
 查询仍为 200，失败细节在 `status=failed` 和 `error` 中；只有提交动作时可同步判定的校验/冲突使用 4xx。
 
-### 6.4 Runs（Hermes 兼容边界）
+### 6.4 Runs（只读历史）
 
-#### `POST /runs`（现有，保持）
-
-```ts
-interface CreateRunRequest {
-  runId?: string;            // optional; omitted => server UUID
-  taskId?: string;
-  conversationId?: string;
-  workerId?: string;         // required in documented API; codex@machine
-  machineId?: string;        // legacy alternative; if both, must agree
-  projectPath: string;       // required
-  prompt: string;            // required
-  resumeSessionId?: string;
-  allow_stale_version?: boolean;
-}
-```
-
-首次接受返回 202 `Run`；同一 `runId`、machine、projectPath、taskId、conversationId 重试返回 200 原 run。
-当前代码**没有比较重试 prompt、resumeSessionId 或 allow_stale_version**；本次为兼容性保留该行为，尚未
-新增差异审计告警。关键字段不一致返回 409 `run_id_conflict`。显式 `resumeSessionId` 优先，否则按相同
-conversation+machine+workspace 的最近 run 自动续接；Hermes legacy task fallback 继续保留。
-
-#### `GET /runs`（新增）与 `GET /runs/{runId}`（现有、扩展）
-
-列表见第 5 节。详情 200 返回 `Run`，并继续包含 0.4.2 形态的 `approvals`：
-`approvalId/kind/summary/choices`。统一状态字段通过新增 `/approvals*` 读取，旧对象未删除或改义。
-
-#### 既有 run actions（现有、保持）
-
-- `GET /runs/{runId}/events?after=<integer>&limit=1..500` 返回
-  `{runId, events: Array<{sequence:number,event:LegacyAgentEvent}>, next:number}`。这里继续使用数字游标，且只读
-  该 run 关联的事件，不能改成新 opaque cursor。
-- `POST /runs/{runId}/input` body `{text:string}`：202 `{runId,accepted:true}`。现状在 Bridge 收到后才按有无
-  active turn 选择 steer/start，HTTP 响应不能证明具体动作；为兼容 Hermes 保留。
-- `POST /runs/{runId}/interrupt` body 可为空：202 `{runId,accepted:true}`。
-- `POST /runs/{runId}/reclaim`：只有 blocked、无 error、无 pending approval、且至少 5 分钟未更新才成功；
-  200 返回 `Run`，否则 409 `run_not_reclaimable`。
-- `POST /runs/{runId}/approvals/{approvalId}` body `{choice:ApprovalChoice}`：202
-  `{runId,approvalId,accepted:true}`。保留给 Hermes approval relay。
+`POST /runs` 与 `/runs/{runId}/*` 已于 0.6.96 移除。`GET /runs`（过滤见第 5 节）和
+`GET /sessions/{sessionId}/runs` 继续返回已有的 `Run` 记录，不再产生新 run。
 
 ### 6.5 Approvals
 
@@ -723,6 +678,7 @@ DSH Host 使用可设置 Authorization header 的 fetch/HTTP client 连接 SSE�
    `worker.upserted|offline`、`run.upserted`、`approval.upserted`、`user_input.upserted`、`action.updated`）。
    资源变更日志每资源只保留一行，离线期间的多次中间状态合并为最新一次，因此游标永不因保留期过期。
    写入即唤醒所有连接，轮询仅兜底。不带 cursor 时从当前位置开始。
+   `?sessionId=<id>` 只投递该 session 的资源与事件；cursor 仍越过被过滤掉的条目，所以带过滤续读同样精确。
 6. 0.6.63 之前的 `g:N` 游标在建立流前返回 HTTP 410 `cursor_expired`；Host 丢弃局部缓存、重新 snapshot。
    格式错误或超过当前位置的游标返回 400 `invalid_cursor`。
 

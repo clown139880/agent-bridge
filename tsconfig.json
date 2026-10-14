@@ -5,6 +5,7 @@
     { "path": "packages/agent-memory" },
     { "path": "packages/database" },
     { "path": "apps/control-plane" },
-    { "path": "apps/bridge" }
+    { "path": "apps/bridge" },
+    { "path": "packages/cli" }
   ]
 }

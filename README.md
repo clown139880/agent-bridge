@@ -46,7 +46,7 @@ Claude Code ───────────── local SDK/process adapter �
                                                                     ▼
                                                          Worker Control Plane
                                                        │
-                                                       ├── authenticated Worker API ◄── Hermes
+                                                       ├── Agent Control API / SSE ◄── DSH, Hermes (abctl)
                                                        ├── SQLite
                                                        └── Matrix（可选兼容层）
 ```
@@ -91,8 +91,8 @@ Control Plane 主要变量：
 | `CONTROL_HOST` / `CONTROL_PORT` | HTTP/WebSocket 监听地址 |
 | `BRIDGE_TOKEN` | Bridge 注册密钥，跨机器部署时必须使用长随机值 |
 | `MATRIX_ENABLED` | 默认 `true`；Hermes 已接管 Matrix 时设为 `false` |
-| `WORKER_API_ENABLED` | 默认 `false`；设为 `true` 才开放 Hermes worker API |
-| `WORKER_API_TOKEN` | 启用 worker API 时必填的独立 bearer token |
+| `WORKER_API_ENABLED` | 默认 `false`；设为 `true` 才接受 `WORKER_API_TOKEN` |
+| `WORKER_API_TOKEN` | Hermes `/ab` 使用的读写 bearer token，启用时必填 |
 | `CONTROL_API_READ_TOKEN` / `CONTROL_API_WRITE_TOKEN` | Agent Control Host 的只读/读写 token；浏览器不得持有 |
 | `CONVERSATION_MCP_READ_TOKEN` | `/mcp` 的独立只读 bearer token；不得复用 Bridge 或 Control API 写密钥。配置了 agent 记忆时也可调用只读的 `memory_*` 工具 |
 | `AGENT_MEMORY_VAULT` | 跨 agent 记忆所在的 Git 笔记库（如 `/root/deathnote`）；不设则关闭记忆。见 [`docs/agent-memory-operations.zh.md`](docs/agent-memory-operations.zh.md) |
@@ -134,10 +134,6 @@ Bridge 主要变量：
 | `BRIDGE_ACTION_CACHE_RETENTION_MS` | Bridge action 去重缓存保留期，默认 24 小时 |
 | `BRIDGE_UPDATE_PACKAGE_MANAGER` | 本机包管理器可执行文件，默认 `pnpm` |
 | `BRIDGE_UPDATE_RESTART_EXECUTABLE` / `BRIDGE_UPDATE_RESTART_ARGS` | 本机重启程序及 JSON 参数数组；不经过 shell |
-
-Worker API 在 bridge 版本落后时返回 `update_waiting`，并等目标版本重新注册后才发送 `start_agent`。
-`update_required` / `update_failed` 都是可重试、非成功状态。紧急绕过只能在创建 run 时显式传
-`allow_stale_version: true`，Control Plane 会记录包含机器、run 和版本的审计警告。
 
 不要提交 `.env`、`.env.bridge`、SQLite 数据库或任何 Matrix/token 凭据；这些路径已写入 `.gitignore`。
 
@@ -194,7 +190,7 @@ release 并报告 `rolled_back`。若新进程启动但版本不吻合，它也�
 
 ## Agent Control Session API
 
-Agent Control API 与 Hermes Worker API 共用 `/api/v1`，但提供 session-oriented 的查询、控制和实时状态。
+Agent Control API 在 `/api/v1` 下提供 session-oriented 的查询、控制和实时状态。
 推荐只让 DSH Host/backend 持有 token；浏览器 Client 通过 Host RPC 使用这些能力，不直接连接 Control Plane。
 
 ```dotenv
@@ -215,7 +211,7 @@ CONTROL_API_WRITE_TOKEN=<读写长随机 token>
 | `GET/POST /api/v1/approvals*` | 查询并原子处理 approval |
 | `GET/POST /api/v1/user-input*` | 查询并提交结构化回答；secret input 必须在本机处理 |
 | `POST/GET /api/v1/attachments*` | 上传并读取受认证的内容寻址图片附件 |
-| `GET /api/v1/stream` | 带 `Last-Event-ID` 补读的 SSE 状态流 |
+| `GET /api/v1/stream` | 带 `Last-Event-ID` 补读的 SSE 状态流；`?sessionId=` 只推送该 session 的资源 |
 
 所有新增 POST 都必须发送 `Idempotency-Key`。异步响应为 ActionReceipt，可用
 `GET /api/v1/actions/:id` 或 SSE 的 `action.updated` 跟踪。先读取 snapshot 的 `streamCursor`，再连接
@@ -226,127 +222,32 @@ Bridge 会优先使用 App Server `thread/list` 枚举近期 thread，并为首�
 该方法时明确降级为 `thread/loaded/list`。Codex Desktop rollout 仍只有 terminal-only 历史，不伪装成完整
 对话。结构化 command output 截断为 64 KiB，file changes 最多 200 项。
 
-## Hermes worker API
+## abctl：从 Hermes 或 shell 驱动 session
 
-当 Hermes 已经连接 Matrix 时，建议让本项目只运行执行面：
+`packages/cli` 提供 `abctl`，是 Agent Control API 的一层薄封装；`abctl mcp` 以 stdio MCP server
+暴露同样的操作（`ab_sessions`、`ab_session`、`ab_create_session`、`ab_send`、`ab_wait`、`ab_pending`、
+`ab_decide`、`ab_answer`、`ab_interrupt`、`ab_workers`）。HAL 上 `deploy/hal/deploy.sh` 会把它链接到
+`/usr/local/bin/abctl`；其他机器用 `packages/cli/bin/abctl`（需先 `tsc -b`）。
 
-```dotenv
-MATRIX_ENABLED=false
-WORKER_API_ENABLED=true
-WORKER_API_TOKEN=<独立长随机值>
-```
-
-API 默认关闭；启用后所有 `/api/v1/*` 请求都必须携带：
-
-```http
-Authorization: Bearer <WORKER_API_TOKEN>
-```
-
-Hermes 可以先读取 worker 和最近使用过的 workspace：
-
-```http
-GET /api/v1/workers
-```
-
-确定 `agent@machine` 与目录后启动 run：
-
-```http
-POST /api/v1/runs
-Content-Type: application/json
-
-{
-  "runId": "Hermes 为本次 claim 生成的稳定 ID",
-  "taskId": "Hermes Kanban task ID",
-  "conversationId": "可选：Hermes/Matrix 逻辑会话 ID",
-  "workerId": "codex@bridge-01",
-  "projectPath": "/workspace/project",
-  "prompt": "完成卡片中的任务，并报告验证结果",
-  "model": "deepseek-chat",
-  "resumeSessionId": "可选：上一 run 返回的 sessionId"
-}
-```
-
-返回 `202` 表示 Bridge 已接受请求。相同 `runId`、task、machine 和 workspace 的重试是幂等的；真实 Codex thread 创建后会异步绑定到该 run。
-传入已完成 run 的 `sessionId` 作为 `resumeSessionId` 时，新 run 会在同一台机器、同一 workspace
-执行 `thread/resume` 和 `turn/start`，因此可以跨 `runId`、跨 `taskId` 延续上下文。目标 session 正在执行，或机器/目录不匹配时请求会被拒绝。
-也可以为连续派发传入稳定的 `conversationId`；Control Plane 会自动续接该逻辑会话在同一机器和 workspace 的最近 thread。
-两者都省略时创建新 Codex thread。
-
-### 指定模型
-
-`POST /api/v1/runs` 和 `/api/v1/runs/:runId/input` 均可在 body 中传可选 `model`。新建 thread 时该值同时传给
-`thread/start` 与首个 `turn/start`；通过 `resumeSessionId` 或 `conversationId` 续接时，它只覆盖新 turn，
-不改变历史 turn。活动 turn 的 steer 不支持切换模型，带 `model` 会返回 `model_not_applicable`。
-模型 provider 仍只由各机器的 `config.toml` 静态配置；省略该字段即使用 Codex 默认模型。
-
-一个最小的两次派发流程是：第一次正常创建 run，等待其完成并保存响应中的 `sessionId`；第二次使用新的 `runId` 和
-`taskId`，同时把保存值作为 `resumeSessionId`。`runId` 仍表示一次独立、幂等的执行，`sessionId` 表示可被多个顺序 run
-复用的真实 Codex thread；每个 run 的事件流仍彼此隔离。
-
-运行控制与观察接口：
-
-| 接口 | 用途 |
-| --- | --- |
-| `GET /api/v1/runs/:runId` | 当前状态、Codex session 以及待处理 approvals |
-| `GET /api/v1/runs/:runId/events?after=N` | 增量读取事件；使用返回的 `next` 作为下一页游标 |
-| `POST /api/v1/runs/:runId/input` | 发送 `{ "text": "...", "model": "可选" }`，继续同一 Codex thread |
-| `POST /api/v1/runs/:runId/interrupt` | 中断当前 turn |
-| `POST /api/v1/runs/:runId/reclaim` | 定向收尾已停滞至少 5 分钟、无原因且无待审批项的 blocked run |
-| `POST /api/v1/runs/:runId/approvals/:approvalId` | 提交 `{ "choice": "allow" }` 等授权决定 |
-
-当前这层 API 是 Hermes backend 的稳定边界：Hermes 保持 Kanban claim、lease、依赖与 review 的唯一状态真相；Bridge 只维护远程执行状态。不要把 Control Plane 端口直接暴露到公网，跨机器优先使用内网或 VPN。
-
-长期会话（例如小时脉冲与 Matrix bot）应为“机器 + 项目 + 逻辑会话”使用稳定 `conversationId`，或由上层持久保存最新 `sessionId`。
-Hermes 插件会自动把来源卡片的 `session_id` 作为 `conversationId`，因此同一 Hermes/Matrix 会话产生的两张卡会顺序复用 thread；
-没有来源 session 的卡则使用稳定的 board + task ID，使同一张卡的后续 claim 仍可续接。小时脉冲可使用一个固定逻辑 ID。
-不应复用 `runId`，也不应并发续接同一 session。若上下文需要重置，改用新的 `conversationId` 或省略续接字段创建新 thread。
-
-## Hermes 插件
-
-仓库内的 `integrations/hermes_agent_bridge` 是独立 Hermes 插件，不修改 Hermes core。它提供：
-
-- `agent_bridge_workers`：让 Hermes 查看在线的 `codex@machine` 与最近 workspace。
-- `on_kanban_dispatch_tick` observer：看到分配给 `codex@machine` 的卡片后启动本地 supervisor。
-- supervisor：原子 claim 卡片、启动幂等 Worker API run、续租 heartbeat，并把完成或失败回写 Kanban；对状态和事件游标均停滞 5 分钟的无理由 blocked run，会定向调用 reclaim 后释放 claim。
-- approval relay：按 Kanban 通知订阅把远端 Codex approval 送回卡片来源 profile，并复用 Hermes 原生
-  gateway queue 与 Matrix 表情审批；Hermes 不在线或路由不明确时保持阻塞，不会自动放行。
-
-开发安装可把插件目录链接到 Hermes 的用户插件目录：
+配置：`AGENT_BRIDGE_URL` / `AGENT_BRIDGE_TOKEN`，或 `~/.config/agent-bridge/cli.json`
+（`{"url":"http://127.0.0.1:8787","token":"<CONTROL_API_WRITE_TOKEN>"}`，权限 600）。
 
 ```bash
-ln -s /root/agent-bridge/integrations/hermes_agent_bridge ~/.hermes/plugins/agent-bridge-worker
+abctl ls                                  # 最近 session
+abctl show <session>                      # 状态、待处理请求、最近对话
+abctl new claude@hal agent-bridge "任务" --wait   # 新建 session；workspace 可用最近目录名
+abctl send <session> "回复 worker" --wait # 发送新 turn（或 steer 正在运行的 turn）并等待
+abctl wait <session> --turn T --cursor C  # 继续等待
+abctl pending | approve <id> [allow|deny|allow-session] | answer <id> <text>
 ```
 
-本机部署脚本会原子同步 Worker API secret；确认 Hermes 已接管 Matrix 后可同时关闭旧 UI：
+`wait` 从 send/new 返回的 cursor 重放事件，所以 turn 在两次调用之间结束也不会漏。它在需要人处理时返回，
+退出码区分原因：0 完成或空闲、10 等待审批、11 等待回答、12 失败、13 被中断、14 离线/出错/已删除、
+15 超时。处理完审批或问题后，用输出里的 `continue:` 命令继续等待。MCP 的 `ab_wait` 受 `timeout_seconds`
+（默认 240，最长 1800）限制，超时返回 `timeout` 和 cursor，再调用一次即可。
 
-```bash
-python3 scripts/deploy-hermes-plugin.py --disable-control-matrix
-```
-
-在 Hermes 的 `config.yaml` 中配置非敏感设置：
-
-```yaml
-plugins:
-  entries:
-    agent-bridge-worker:
-      enabled: true
-      settings:
-        api_url: http://127.0.0.1:8787
-        completion_mode: done
-        max_in_progress: 4
-        api_failure_timeout_seconds: 300
-```
-
-把与 Control Plane `WORKER_API_TOKEN` 相同的值作为 Hermes secret 提供给 gateway：
-
-```dotenv
-AGENT_BRIDGE_WORKER_API_TOKEN=<与 WORKER_API_TOKEN 相同的值>
-```
-
-随后在 `hermes tools` 中启用 `Agent Bridge` toolset，并重启 gateway。外部 worker 卡片必须使用
-`workspace_kind=dir`，且 `workspace_path` 是所选 Bridge 机器看到的绝对路径；插件不会在 Hermes 主机上创建或校验这个远端目录。
-
-默认 `completion_mode: done` 会在 Codex 成功结束时完成卡片；设为 `review` 会让实现任务进入 Hermes review lane，review lane 自身成功后仍会完成卡片。
+`WORKER_API_TOKEN`（`WORKER_API_ENABLED=true`）仍是一枚读写 token，Hermes 的 `/ab` 命令用它列出 session；
+旧的 `/api/v1/runs` Worker API 与 Hermes Kanban 插件已移除，`GET /api/v1/runs` 只保留历史记录查询。
 
 ## 本地启动
 
@@ -572,12 +473,12 @@ scripts              本地辅助脚本
 
 `integrations/dsh-agent-control` 是一个 out-of-tree DSH 插件。它把 Bridge conversation
 物化为 DSH 原生 Agent、Session 和 Workspace，由原生 Sessions 树、Conversation、Composer、
-approval 和 user-question 界面负责交互；Agent Control 与 Hermes Kanban 只保留为管理 overlay。
+approval 和 user-question 界面负责交互；Agent Control 只保留为管理 overlay。
 插件不维护第二套会话浏览器或输入框，也不修改 DSH 本体。它通过 `cordis.patch.yml`
-注入 Host 服务、Bridge execution provider 和 24 个 model tool，并作为 monorepo workspace
+注入 Host 服务、Bridge execution provider 和 13 个 model tool，并作为 monorepo workspace
 成员由根目录的 install/check/test/build 覆盖。
 
-当前插件版本为 `0.1.27`，目标运行时是 TokensCowork 内置 DSH `0.1.3-alpha.1`；开发依赖
+当前插件版本为 `0.2.0`，目标运行时是 TokensCowork 内置 DSH `0.1.3-alpha.1`；开发依赖
 主要固定在 npm 已发布的 `0.1.2-rc.1`，所以发布前还必须运行 installed-runtime verifier。
 现有能力包括稳定身份与分页历史投影、5 秒增量 reconciliation、原生 turn/interrupt、
 approval/question、图片转发、目录 execution source 选择、同机器同路径 workspace 合并、

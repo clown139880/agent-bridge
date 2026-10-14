@@ -115,7 +115,7 @@ bootstrap_budget: 1500          # _global 用 3600
 这个方向在做什么（一两句）。
 ```
 
-**解析顺序**：Matrix 房间（取 `chat_id` 中 `:$` 之前的部分）→ 仓库身份 → 机器 + 目录 → 卡面指令 `<!-- agent-bridge-worker memory-scope: <slug> -->` → `_global`。
+**解析顺序**：Matrix 房间（取 `chat_id` 中 `:$` 之前的部分）→ 仓库身份 → 机器 + 目录 → `_global`。
 
 - 新房间：自动建 `room-<8位哈希>`，`status: provisional`，`title` 取房间名。
 - 没绑定的仓库：第一次写入时建 `repo-<仓库名>`。
@@ -178,7 +178,7 @@ memory:
 
 - **MCP**：沿用 `POST /mcp`。新增 `AGENT_MEMORY_TOKENS`（`名字:token` 列表），持有者可以用写工具；已有的只读 token 能用读工具；人用 `CONTROL_API_WRITE_TOKEN` 调 lint 等管理接口。调用方要自己传 cwd 和 remote，共享连接上不保存「当前作用域」。
 - **技能 `agent-memory`**：开始任务时调一次 `memory_bootstrap`；形成决定或偏好时 `memory_write`；完成一段工作时 `memory_log`。不写代码事实、AGENTS.md 里已有的规则、一次性状态或秘密。
-- **Kanban**：Hermes 从房间建卡时，在卡面写入 `memory-scope` 指令；supervisor 把它放进派发参数。
+- **Hermes 派活**：Hermes 用 `abctl` 发 turn 时，在消息里写明要用的记忆作用域（0.6.96 移除了 Kanban 卡面指令）。
 - **以后可选**：Bridge 在新会话首轮自动附带 bootstrap。需要先确认 Codex App Server 和 Claude adapter 有没有附加说明的入口（现在没有）。
 
 ## 8. deathnote 同步

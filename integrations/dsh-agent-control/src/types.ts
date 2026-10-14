@@ -130,14 +130,8 @@ export interface AttachmentRef {
   size: number
 }
 
-export interface KanbanCall {
-  operation: 'list' | 'show' | 'create' | 'comment' | 'link' | 'request_review' |
-    'request_changes' | 'unblock' | 'reassign' | 'reclaim' | 'assignees'
-  args?: JsonObject
-}
-
 export interface DashboardRequest {
-  domain: 'overview' | 'bridge' | 'kanban'
+  domain: 'overview' | 'bridge'
   operation: string
   args?: JsonObject
 }

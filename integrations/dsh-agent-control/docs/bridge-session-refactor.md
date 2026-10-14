@@ -54,7 +54,6 @@ being consumed from the system that owns it.**
   all. It talks to the Agent Bridge control-plane over a stable HTTP/SSE contract.
   It does not need a rewrite. The README non-goal ("do not copy external threads
   into the DSH session store") remains correct and should stay.
-- The Kanban half is orthogonal.
 
 So "refactor the bridge session logic" should be read narrowly as **"stop
 reconstructing DSH-owned presentation on the client"**, not "rebuild the store".
@@ -194,8 +193,7 @@ While verifying, several suites were found red *independent of these changes*:
 `tests/sessions-ui.spec.tsx` fail to even collect because `src/client` imports
 `dsh-client-ui-{approval,user-questions,layout,sidebar,renderer}/client` browser
 bundles (`window.__ModuleLoader__.load(...)`) that have **no vitest shim/alias**
-(only conversation/chat/model-selection/workspace are shimmed). `kanban-sidecar`
-needs a real Python/Hermes environment, and one `session-store` deletion test
+(only conversation/chat/model-selection/workspace are shimmed). One `session-store` deletion test
 fails on the mock. These predate this task. The refactor's Phase 1 adapter would
 also make the UI suite shimmable in one place (stub the adapter, not five bundles),
 which is a concrete secondary benefit worth capturing here.

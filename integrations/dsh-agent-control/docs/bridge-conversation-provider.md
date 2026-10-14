@@ -7,7 +7,7 @@ Target: TokensCowork DSH 0.1.3-alpha.1; development dependencies 0.1.2-rc.1.
 
 The existing DSH Sessions tree is the entry point for both DSH and Bridge
 conversations. Users do not import sessions manually, switch to another browser,
-or use a replacement composer. Agent Control / Kanban remain management overlays.
+or use a replacement composer. Agent Control remains management overlays.
 
 Two responsibilities must not be confused:
 

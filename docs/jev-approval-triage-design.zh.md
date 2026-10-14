@@ -110,7 +110,7 @@ request?: {
 | Git 不可逆或外发 | `push`、`reset --hard`、`clean -f`、`checkout -- .`/`restore`、`rebase`、`branch -D`、`tag -d`、`stash drop/clear`、`filter-*`、`update-ref`、`gc --prune` |
 | 远程和跨机 | `ssh`/`scp`/`rsync` 到别的主机；任何**写到 Windows 或在 Windows 上执行**的操作：`/mnt/c/**`、`powershell.exe`、`cmd.exe`、`wsl.exe`、Windows 路径；`host=windows` 的 Bridge 上的写操作 |
 | 有副作用的网络请求 | `curl`/`wget`/`http` 带上 `-X POST/PUT/PATCH/DELETE`、`-d`、`--data*`、`-F`、`-T`，包括**真实模型加载的 POST**（modeldeck、GQX 推理服务、TokensAPI 等） |
-| 平台生命周期 | `hermes kanban` 的状态变更命令、会话或 run 控制 API（`/api/v1/runs/*` 的写操作）、WoL |
+| 平台生命周期 | `hermes kanban` 的状态变更命令、会话控制 API（`/api/v1/sessions/*` 的写操作、`abctl`）、WoL |
 | 数据库 | 对 `*.sqlite`/`*.db` 的写入或 `sqlite3` 非只读调用 |
 | 动态代码 | `eval`、`source` 工作区外文件；`bash -c`/`sh -c`/`python -c`/`node -e` 的内联代码会**递归分类**，解析不了的整体判为 HARD_HUMAN |
 | 文件工具 | `Edit`/`Write` 的目标在工作区外，并且不在 `/tmp/**`、`$TMPDIR/**` 里 |

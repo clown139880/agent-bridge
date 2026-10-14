@@ -37,7 +37,7 @@ pnpm --filter dsh-agent-control-plugin sync:hal
 4. rsyncs the npm `files` allowlist (`lib/`, `python/`, `presets/`,
    `fixtures/`, `package.json`, `cordis.patch.yml`, `README.md`, `LICENSE`)
    into the installed plugin. The profile's own root `cordis.patch.yml`
-   (bridge/kanban config) and the plugin's nested `node_modules/` are left
+   (bridge config) and the plugin's nested `node_modules/` are left
    untouched.
 5. Verifies source vs installed sha256 for the key bundles.
 6. Restarts `dsh-agent-control.service` and confirms `/api` returns HTTP
@@ -98,4 +98,4 @@ systemctl restart dsh-agent-control.service
   `*control-plane*`, or `agent-control-plane.service`.
 - It only ever restarts the DSH web console. A Codex behind the HAL Bridge must
   never activate a HAL release or restart the HAL Bridge / Control Plane.
-- It does not touch the Hermes Kanban DB or the profile's `cordis.patch.yml`.
+- It does not touch the profile's `cordis.patch.yml`.

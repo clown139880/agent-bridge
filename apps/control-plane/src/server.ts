@@ -1,15 +1,13 @@
-import { randomUUID, timingSafeEqual } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from "node:http";
 import { basename } from "node:path";
 import type { Duplex } from "node:stream";
 import pino from "pino";
 import { WebSocket, WebSocketServer } from "ws";
-import { AgentControlStore, ConversationMemoryStore, Store, type SessionRecord, type WorkerRunRecord } from "@agent-bridge/database";
+import { AgentControlStore, ConversationMemoryStore, Store, type SessionRecord } from "@agent-bridge/database";
 import {
   parseMessage,
-  parseWorkerId,
   statusForEvent,
-  workerId as buildWorkerId,
   type AgentEvent,
   type AgentType,
   type ApprovalChoice,
@@ -24,8 +22,7 @@ import {
 } from "@agent-bridge/protocol";
 import type { ControlGateway } from "./matrix.js";
 import { AgentControlApi } from "./api/router.js";
-import { MAX_JSON_BODY_BYTES } from "./api/validation.js";
-import { BridgeRegistry, type BridgeConnection } from "./bridge-registry.js";
+import { BridgeRegistry } from "./bridge-registry.js";
 import { WebhookNotifier, type WebhookOptions } from "./webhook.js";
 import { AgentMemory, AgentSkills, type Writer } from "@agent-bridge/agent-memory";
 import { ConversationMcpServer } from "./memory-mcp.js";
@@ -33,35 +30,6 @@ import { compareBridgeVersions } from "./bridge-version.js";
 import { PostDeployResumer } from "./post-deploy.js";
 
 const log = pino({ name: "control-plane" });
-
-/** Map a worker-id prefix (from `${prefix}@machine`) to an agent type. */
-function agentTypeForWorkerPrefix(prefix: string): AgentType {
-  if (prefix === "claude") return "claude-code";
-  if (prefix === "pi") return "pi";
-  return "codex-cli";
-}
-
-/** Registration capability a bridge must advertise to run the given agent type. */
-function capabilityForAgent(agentType: AgentType): string {
-  if (agentType === "claude-code") return "claude-code";
-  if (agentType === "pi") return "pi";
-  return "codex-cli";
-}
-
-interface PendingRunLaunch {
-  runId: string;
-  machineId: string;
-  agentType: AgentType;
-  projectPath: string;
-  prompt: string;
-  resumeSessionId?: string;
-  resumeNativeSessionId?: string;
-  model?: string;
-  attachments?: AttachmentRef[];
-  targetVersion: string;
-  epoch: string;
-  timeout: NodeJS.Timeout;
-}
 
 interface PendingLaunch {
   sender: string;
@@ -97,8 +65,6 @@ const APPROVAL_REACTIONS: ReadonlyArray<{ key: string; choice: ApprovalChoice; l
 ];
 
 const NUMBER_REACTIONS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣"] as const;
-const RECLAIMABLE_BLOCKED_AGE_MS = 300_000;
-const RECLAIM_REASON = "Reclaimed stale reasonless blocked run; bridge reported no actionable approval";
 const ORPHANED_RUN_REASON = "The worker's Bridge restarted and no longer holds this run's session; its turn was interrupted";
 
 export class ControlPlane {
@@ -121,7 +87,6 @@ export class ControlPlane {
   private readonly launchesAwaitingPath = new Map<string, PendingLaunch>();
   private readonly launchesByRequestId = new Map<string, PendingLaunch & { machineId: string; projectPath: string }>();
   private readonly updateNotifications = new Set<string>();
-  private readonly pendingRunLaunches = new Map<string, PendingRunLaunch>();
   /** Bridge version this process already announced per machine, so a self-update's own report is not repeated. */
   private readonly announcedBridgeVersions = new Map<string, string>();
   private readonly postDeploy: PostDeployResumer;
@@ -151,7 +116,6 @@ export class ControlPlane {
         latestVersion: string;
         source: string;
         publishedAt?: number;
-        admissionTimeoutMs?: number;
       };
       webhook?: WebhookOptions;
     },
@@ -219,13 +183,8 @@ export class ControlPlane {
           response.writeHead(404).end();
           return;
         }
-        const apiPath = new URL(request.url, "http://localhost").pathname;
-        const legacyRoute = (request.method === "POST" && apiPath === "/api/v1/runs")
-          || /^\/api\/v1\/runs\/[^/]+(?:\/.*)?$/.test(apiPath);
-        void (legacyRoute ? this.handleWorkerApi(request, response)
-          : this.controlApi.handle(request, response).then((handled) => handled
-            ? undefined : this.handleWorkerApi(request, response))).catch((error) => {
-          log.error({ error }, "Worker API request failed");
+        void this.controlApi.handle(request, response).catch((error) => {
+          log.error({ error }, "Control API request failed");
           if (!response.headersSent) this.json(response, 500, { error: "internal_error" });
           else response.end();
         });
@@ -264,7 +223,6 @@ export class ControlPlane {
     this.matrix.stop();
     clearInterval(this.cleanupTimer);
     for (const bridge of this.bridges.values()) bridge.socket.close(1001, "server shutdown");
-    for (const launch of this.pendingRunLaunches.values()) clearTimeout(launch.timeout);
     await new Promise<void>((resolve) => this.http.close(() => resolve()));
   }
 
@@ -384,251 +342,6 @@ export class ControlPlane {
     if (pending.threadId) await this.matrix.sendThread(pending.threadId, `🔐 已选择：${action.label}。Codex 正在继续。`);
   }
 
-  private bearerMatch(header: string | undefined, token: string | undefined): boolean {
-    if (!header || !token) return false;
-    const prefix = "Bearer ";
-    if (!header.startsWith(prefix)) return false;
-    const a = Buffer.from(header.slice(prefix.length));
-    const b = Buffer.from(token);
-    return a.length === b.length && timingSafeEqual(a, b);
-  }
-
-  private async handleWorkerApi(request: IncomingMessage, response: ServerResponse): Promise<void> {
-    const authorization = request.headers.authorization;
-    const allowed = this.bearerMatch(authorization, this.options.workerApiToken)
-      || this.bearerMatch(authorization, this.options.controlApiWriteToken)
-      || (request.method === "GET" && this.bearerMatch(authorization, this.options.controlApiReadToken));
-    if (!allowed) {
-      this.json(response, 401, { error: "unauthorized" });
-      return;
-    }
-    const url = new URL(request.url ?? "/", "http://localhost");
-    if (request.method === "GET" && url.pathname === "/api/v1/workers") {
-      const workers = this.store.listMachines().flatMap((machine) => {
-        // One worker per agent family the bridge advertises. Codex is always
-        // present for backward compatibility; Claude appears when the bridge
-        // registered the claude-code capability.
-        const agents: Array<{ agentType: AgentType; label: string }> = [{ agentType: "codex-cli", label: "Codex" }];
-        if (machine.capabilities.includes("claude-code")) agents.push({ agentType: "claude-code", label: "Claude" });
-        if (machine.capabilities.includes("pi")) agents.push({ agentType: "pi", label: "Pi" });
-        return agents
-          .filter(({ agentType }) => agentType === "codex-cli" || machine.capabilities.includes(capabilityForAgent(agentType)))
-          .map(({ agentType, label }) => ({
-            id: buildWorkerId(agentType, machine.id),
-            machineId: machine.id,
-            agentType,
-            name: `${label} @ ${machine.name}`,
-            status: this.bridges.has(machine.id) ? "online" : "offline",
-            platform: machine.platform,
-            hostname: machine.hostname,
-            capabilities: machine.capabilities,
-            workspaces: this.store.listProjectPaths(machine.id),
-            lastSeenAt: machine.lastSeenAt,
-          }));
-      });
-      this.json(response, 200, { workers });
-      return;
-    }
-    if (request.method === "POST" && url.pathname === "/api/v1/runs") {
-      const body = await readJson(request);
-      const workerId = optionalStringField(body, "workerId");
-      const explicitMachineId = optionalStringField(body, "machineId");
-      const parsedWorker = workerId ? parseWorkerId(workerId) : undefined;
-      const machineId = parsedWorker?.machineId ?? explicitMachineId;
-      const agentType = parsedWorker ? agentTypeForWorkerPrefix(parsedWorker.prefix) : "codex-cli";
-      const projectPath = stringField(body, "projectPath");
-      const prompt = stringField(body, "prompt");
-      const attachments = attachmentsFromBody(body);
-      const requestedRunId = optionalStringField(body, "runId");
-      const taskId = optionalStringField(body, "taskId");
-      const conversationId = optionalStringField(body, "conversationId");
-      const resumeSessionId = optionalStringField(body, "resumeSessionId");
-      const model = optionalStringField(body, "model");
-      const allowStaleVersion = body && typeof body === "object"
-        ? (body as Record<string, unknown>).allow_stale_version === true : false;
-      if (workerId && (!parsedWorker || !machineId || (explicitMachineId && explicitMachineId !== machineId))) {
-        this.json(response, 400, { error: "invalid_worker_id", workerId });
-        return;
-      }
-      if (!machineId || !projectPath || !prompt) {
-        this.json(response, 400, { error: "workerId, projectPath and prompt are required" });
-        return;
-      }
-      const bridge = this.bridges.get(machineId);
-      if (!bridge || !bridge.capabilities.includes(capabilityForAgent(agentType))) {
-        this.json(response, 409, { error: "worker_offline", machineId });
-        return;
-      }
-      const runId = requestedRunId ?? randomUUID();
-      const existing = this.store.getWorkerRun(runId);
-      if (existing) {
-        if (existing.machineId !== machineId || existing.projectPath !== projectPath
-          || existing.taskId !== (taskId ?? null) || existing.conversationId !== (conversationId ?? null)) {
-          this.json(response, 409, { error: "run_id_conflict", runId });
-          return;
-        }
-        this.json(response, 200, workerRunJson(existing));
-        return;
-      }
-      const priorConversationRun = !resumeSessionId && conversationId
-        ? this.store.getLatestWorkerRunByConversation(conversationId, machineId, projectPath)
-        : undefined;
-      const priorTaskRun = !resumeSessionId && !priorConversationRun && taskId
-        && conversationId?.startsWith("hermes-task:") && conversationId.endsWith(`:${taskId}`)
-        ? this.store.getLatestLegacyWorkerRunByTask(taskId, machineId, projectPath)
-        : undefined;
-      const effectiveResumeSessionId = resumeSessionId
-        ?? priorConversationRun?.sessionId ?? priorTaskRun?.sessionId ?? undefined;
-      let resumeSession: SessionRecord | undefined;
-      if (effectiveResumeSessionId) {
-        resumeSession = this.store.getSession(effectiveResumeSessionId);
-        if (!resumeSession) {
-          this.json(response, 404, { error: "resume_session_not_found", resumeSessionId: effectiveResumeSessionId });
-          return;
-        }
-        if (resumeSession.machineId !== machineId || resumeSession.projectPath !== projectPath) {
-          this.json(response, 409, { error: "resume_session_conflict", resumeSessionId: effectiveResumeSessionId });
-          return;
-        }
-        const latestSessionRun = this.store.getWorkerRunBySession(resumeSession.id);
-        const runIsBusy = latestSessionRun
-          ? ["starting", "working", "waiting", "blocked"].includes(latestSessionRun.status)
-          : ["starting", "working", "blocked"].includes(resumeSession.status);
-        if (runIsBusy) {
-          this.json(response, 409, { error: "resume_session_busy", resumeSessionId: effectiveResumeSessionId });
-          return;
-        }
-      }
-      // The public id names the session to continue; the agent itself resumes by its
-      // own id. Sending the public id as the resume id is what made `claude --resume
-      // claude-<uuid>` exit at startup on every worker-API resume.
-      const resumeNativeSessionId = resumeSession?.nativeSessionId || undefined;
-      const now = Date.now();
-      this.store.createWorkerRun({
-        id: runId, taskId: taskId ?? null, conversationId: conversationId ?? null,
-        machineId, agentType, projectPath,
-        sessionId: resumeSession?.id ?? null,
-        status: this.bridgeNeedsUpdate(bridge) && !allowStaleVersion ? "update_waiting" : "starting",
-        error: null, createdAt: now, updatedAt: now,
-      });
-      if (this.bridgeNeedsUpdate(bridge) && !allowStaleVersion) {
-        this.queueRunForUpdate({ runId, machineId, agentType, projectPath, prompt,
-          resumeSessionId: effectiveResumeSessionId, resumeNativeSessionId, model, attachments });
-        this.sendUpdateAnnouncement(bridge.socket);
-      } else {
-        if (allowStaleVersion && this.bridgeNeedsUpdate(bridge)) {
-          log.warn({ machineId, runId, currentVersion: bridge.bridgeVersion,
-            targetVersion: this.options.bridgeUpdate?.latestVersion }, "Audited stale bridge version override");
-        }
-        this.sendStartAgent(bridge, runId, projectPath, prompt, effectiveResumeSessionId, resumeNativeSessionId, model, agentType, attachments);
-      }
-      this.json(response, 202, workerRunJson(this.store.getWorkerRun(runId)!));
-      return;
-    }
-    const match = url.pathname.match(/^\/api\/v1\/runs\/([^/]+)(?:\/(events|input|interrupt|reclaim))?$/);
-    if (match) {
-      const runId = decodeURIComponent(match[1]!);
-      const action = match[2];
-      const run = this.store.getWorkerRun(runId);
-      if (!run) {
-        this.json(response, 404, { error: "run_not_found", runId });
-        return;
-      }
-      if (request.method === "GET" && !action) {
-        const approvals = [...this.approvalsById.values()]
-          .filter((approval) => approval.sessionId === run.sessionId)
-          .map(({ approvalId, kind, summary, choices }) => ({ approvalId, kind, summary, choices }));
-        this.json(response, 200, { ...workerRunJson(run), approvals });
-        return;
-      }
-      if (request.method === "GET" && action === "events") {
-        const after = Math.max(0, Number(url.searchParams.get("after") ?? "0") || 0);
-        const limit = Math.min(500, Math.max(1, Number(url.searchParams.get("limit") ?? "100") || 100));
-        const page = run.sessionId ? this.store.listRunEvents(run.sessionId, run.id, after, limit) : { events: [], next: after };
-        this.json(response, 200, { runId, ...page });
-        return;
-      }
-      if (request.method === "POST" && (action === "input" || action === "interrupt")) {
-        if (!run.sessionId) {
-          this.json(response, 409, { error: "run_not_attached", runId });
-          return;
-        }
-        const bridge = this.bridges.get(run.machineId);
-        if (!bridge) {
-          this.json(response, 409, { error: "worker_offline", machineId: run.machineId });
-          return;
-        }
-        if (action === "input") {
-          const body = await readJson(request);
-          const input = stringField(body, "text");
-          const model = optionalStringField(body, "model");
-          const attachments = attachmentsFromBody(body);
-          if (!input) {
-            this.json(response, 400, { error: "text is required" });
-            return;
-          }
-          this.send(bridge.socket, { type: "agent_input", sessionId: run.sessionId, text: input, model, attachments });
-        } else {
-          this.send(bridge.socket, { type: "stop_agent", sessionId: run.sessionId });
-        }
-        this.json(response, 202, { runId, accepted: true });
-        return;
-      }
-      if (request.method === "POST" && action === "reclaim") {
-        const hasApproval = [...this.approvalsById.values()].some((approval) => approval.sessionId === run.sessionId);
-        if (run.status !== "blocked" || run.error || hasApproval
-          || run.updatedAt > Date.now() - RECLAIMABLE_BLOCKED_AGE_MS) {
-          this.json(response, 409, { error: "run_not_reclaimable", runId });
-          return;
-        }
-        if (run.sessionId) {
-          this.store.updateSessionStatus(run.sessionId, "failed");
-          const bridge = this.bridges.get(run.machineId);
-          if (bridge) this.send(bridge.socket, { type: "stop_agent", sessionId: run.sessionId });
-        }
-        this.store.updateWorkerRun(run.id, "failed", RECLAIM_REASON);
-        this.json(response, 200, workerRunJson(this.store.getWorkerRun(run.id)!));
-        return;
-      }
-    }
-    const approvalMatch = url.pathname.match(/^\/api\/v1\/runs\/([^/]+)\/approvals\/([^/]+)$/);
-    if (request.method === "POST" && approvalMatch) {
-      const runId = decodeURIComponent(approvalMatch[1]!);
-      const approvalId = decodeURIComponent(approvalMatch[2]!);
-      const run = this.store.getWorkerRun(runId);
-      const pending = this.approvalsById.get(approvalId);
-      if (!run || !run.sessionId || !pending || pending.sessionId !== run.sessionId) {
-        this.json(response, 404, { error: "approval_not_found" });
-        return;
-      }
-      const body = await readJson(request);
-      const choice = stringField(body, "choice") as ApprovalChoice | undefined;
-      if (!choice || !pending.choices.includes(choice)) {
-        this.json(response, 400, { error: "invalid_choice", choices: pending.choices });
-        return;
-      }
-      const bridge = this.bridges.get(run.machineId);
-      if (!bridge) {
-        this.json(response, 409, { error: "worker_offline", machineId: run.machineId });
-        return;
-      }
-      const projected=this.controlStore.pending(approvalId);
-      if(projected&&!this.controlStore.reservePending(approvalId,`legacy:${runId}:${approvalId}`)) {
-        this.json(response,409,{error:"approval_already_resolved",runId,approvalId});
-        return;
-      }
-      this.forgetApproval(pending);
-      await this.removeApprovalReactions(pending);
-      this.send(bridge.socket, { type: "approval_response", sessionId: run.sessionId, approvalId, choice });
-      this.controlStore.resolvePending(approvalId, choice === "deny" ? "denied" : "accepted", { choice });
-      this.store.updateSessionStatus(run.sessionId, "working");
-      this.store.updateWorkerRun(run.id, "working");
-      this.json(response, 202, { runId, approvalId, accepted: true });
-      return;
-    }
-    this.json(response, 404, { error: "not_found" });
-  }
-
   private json(response: ServerResponse, status: number, body: unknown): void {
     response.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
     response.end(JSON.stringify(body));
@@ -678,7 +391,6 @@ export class ControlPlane {
           message.protocolVersion, message.features, message.sharedSkills);
         this.send(socket, { type: "registered", machineId: registeredId });
         this.sendUpdateAnnouncement(socket);
-        this.releasePendingRuns(registeredId);
         this.replayControlActions(registeredId);
         this.postDeploy.bridgeRegistered(registeredId, message.bridgeVersion);
         log.info({ machineId: registeredId }, "Bridge registered");
@@ -845,10 +557,6 @@ export class ControlPlane {
       return;
     }
     if (message.type === "bridge_update.status") {
-      if ((message.phase === "failed" || message.phase === "rolled_back"
-        || (message.phase === "discovered" && !message.updatable))) {
-        this.markPendingRuns(machineId, "update_failed", message.reason ?? "bridge update failed; retry is required");
-      }
       await this.handleBridgeUpdateStatus(machineId, message);
       return;
     }
@@ -917,55 +625,9 @@ export class ControlPlane {
       epoch: this.updateEpoch() });
   }
 
-  private bridgeNeedsUpdate(bridge: BridgeConnection): boolean {
-    return Boolean(this.options.bridgeUpdate
-      && (!bridge.bridgeVersion
-        || compareBridgeVersions(bridge.bridgeVersion, this.options.bridgeUpdate.latestVersion) < 0));
-  }
-
   private updateEpoch(): string {
     const update = this.options.bridgeUpdate!;
     return `${update.latestVersion}:${update.publishedAt ?? 0}`;
-  }
-
-  private queueRunForUpdate(input: Omit<PendingRunLaunch, "targetVersion" | "epoch" | "timeout">): void {
-    const update = this.options.bridgeUpdate!;
-    const timeout = setTimeout(() => {
-      const pending = this.pendingRunLaunches.get(input.runId);
-      if (!pending) return;
-      this.store.updateWorkerRun(input.runId, "update_required",
-        `bridge did not register version ${pending.targetVersion} before the update admission timeout`);
-    }, update.admissionTimeoutMs ?? 120_000);
-    timeout.unref();
-    this.pendingRunLaunches.set(input.runId, { ...input, targetVersion: update.latestVersion,
-      epoch: this.updateEpoch(), timeout });
-  }
-
-  private markPendingRuns(machineId: string, status: "update_required" | "update_failed", reason: string): void {
-    for (const pending of this.pendingRunLaunches.values()) {
-      if (pending.machineId === machineId) this.store.updateWorkerRun(pending.runId, status, reason);
-    }
-  }
-
-  private releasePendingRuns(machineId: string): void {
-    const bridge = this.bridges.get(machineId);
-    if (!bridge?.bridgeVersion) return;
-    for (const [runId, pending] of this.pendingRunLaunches) {
-      if (pending.machineId !== machineId
-        || compareBridgeVersions(bridge.bridgeVersion, pending.targetVersion) < 0) continue;
-      clearTimeout(pending.timeout);
-      this.pendingRunLaunches.delete(runId);
-      this.store.updateWorkerRun(runId, "starting");
-      this.sendStartAgent(bridge, runId, pending.projectPath, pending.prompt, pending.resumeSessionId,
-        pending.resumeNativeSessionId, pending.model, pending.agentType, pending.attachments);
-    }
-  }
-
-  private sendStartAgent(bridge: BridgeConnection, runId: string, projectPath: string,
-    prompt: string, resumeSessionId?: string, resumeNativeSessionId?: string, model?: string,
-    agentType: AgentType = "codex-cli", attachments?: AttachmentRef[]): void {
-    this.send(bridge.socket, { type: "start_agent", sessionId: runId, resumeSessionId, resumeNativeSessionId,
-      agentType, projectPath, prompt, model, attachments });
   }
 
   // Resume hint for submit_turn: lets the bridge revive a session it no longer
@@ -1043,9 +705,8 @@ export class ControlPlane {
    * A run is driven by its session's live turn. When a worker's complete
    * inventory no longer holds that session (its Bridge restarted mid-turn), no
    * terminal agent event will ever arrive, so the run would stay "working"
-   * forever and its Kanban card with it. Close such runs, and launches that
-   * waited on an update queue lost with a restarted Control Plane. A run this connection
-   * started, one waiting for a Bridge update, or one whose session has a queued
+   * forever. Close such runs, including leftover update_* rows from the removed
+   * launch queue. A run this connection started or one whose session has a queued
    * turn (e.g. a post-deploy continuation that revives it) is still owned.
    */
   private reclaimOrphanedRuns(machineId: string, present: Set<string>): void {
@@ -1056,7 +717,6 @@ export class ControlPlane {
       AND status IN ('starting','working','blocked','update_waiting','update_required','update_failed') AND updated_at<?`)
       .all(machineId, registeredAt) as Array<{ id: string; session_id: string | null }>;
     for (const run of runs) {
-      if (this.pendingRunLaunches.has(run.id)) continue;
       if (run.session_id && (present.has(run.session_id) || queued.has(run.session_id))) continue;
       this.store.updateWorkerRun(run.id, "failed", ORPHANED_RUN_REASON);
       if (run.session_id) this.store.updateSessionStatus(run.session_id, "failed");
@@ -1386,32 +1046,7 @@ export class ControlPlane {
   }
 }
 
-async function readJson(request: IncomingMessage): Promise<Record<string, unknown>> {
-  const chunks: Buffer[] = [];
-  let size = 0;
-  for await (const chunk of request) {
-    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    size += buffer.length;
-    if (size > MAX_JSON_BODY_BYTES) throw new Error("request body too large");
-    chunks.push(buffer);
-  }
-  if (!chunks.length) return {};
-  const value: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("JSON object required");
-  return value as Record<string, unknown>;
-}
-
-function stringField(body: Record<string, unknown>, name: string): string | undefined {
-  const value = body[name];
-  return typeof value === "string" && value.trim() ? value : undefined;
-}
-
-function optionalStringField(body: Record<string, unknown>, name: string): string | undefined {
-  const value = body[name];
-  return value === undefined ? undefined : stringField(body, name);
-}
-
-/** Best-effort read of attachment refs from a worker-API body or a replayed action body. */
+/** Best-effort read of attachment refs from a replayed action body. */
 function attachmentsFromBody(body: Record<string, unknown>): AttachmentRef[] | undefined {
   const value = body.attachments;
   if (!Array.isArray(value) || value.length === 0) return undefined;
@@ -1420,23 +1055,6 @@ function attachmentsFromBody(body: Record<string, unknown>): AttachmentRef[] | u
     .map((item) => ({ id: String(item.id ?? ""), filename: String(item.filename ?? ""),
       mimeType: String(item.mimeType ?? ""), size: typeof item.size === "number" ? item.size : 0 }))
     .filter((ref) => ref.id && ref.mimeType);
-}
-
-function workerRunJson(run: WorkerRunRecord): Record<string, unknown> {
-  return {
-    runId: run.id,
-    taskId: run.taskId,
-    conversationId: run.conversationId,
-    workerId: buildWorkerId(run.agentType, run.machineId),
-    machineId: run.machineId,
-    agent: run.agentType,
-    workspace: run.projectPath,
-    sessionId: run.sessionId,
-    status: run.status,
-    error: run.error,
-    createdAt: run.createdAt,
-    updatedAt: run.updatedAt,
-  };
 }
 
 function statusIcon(status: string): string {

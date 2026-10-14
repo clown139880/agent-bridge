@@ -3,8 +3,7 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { SessionCreationController, SessionSourcePicker } from '../src/client/session-creation.js'
-import { Overview, Tasks } from '../src/client/index.js'
-import { useDialog } from '../src/client/dialog.js'
+import { Overview } from '../src/client/index.js'
 
 let container: HTMLDivElement, root: Root
 beforeEach(() => {
@@ -14,10 +13,6 @@ beforeEach(() => {
 })
 afterEach(async () => { await act(async () => root.unmount()); container.remove(); vi.restoreAllMocks() })
 const click = async (element: Element) => act(async () => { (element as HTMLElement).click() })
-const change = async (input: HTMLInputElement, value: string) => act(async () => {
-  Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, value)
-  input.dispatchEvent(new Event('input', { bubbles: true }))
-})
 
 describe('management UI interactions', () => {
   it('requires an explicit create action, rejects offline choices, and cancels with Escape', async () => {
@@ -76,24 +71,6 @@ describe('management UI interactions', () => {
     const cancelled = creation.catch(() => {})
     await act(async () => controller.cancel()); await cancelled
     dispose(); vi.unstubAllGlobals()
-  })
-
-  it('filters the board and closes only the nested dialog, returning focus to its trigger', async () => {
-    const closed = vi.fn()
-    function Harness() { const ref = useDialog(true,closed); return <div ref={ref}><Tasks snapshot={{board:{assignees:['Ada'],columns:[{name:'todo',tasks:[{id:'T1',title:'Fix long workspace names',assignee:'Ada'}]},{name:'done',tasks:[{id:'T2',title:'Deploy release'}]}]}}} refresh={async () => {}} openSession={() => {}} /></div> }
-    await act(async () => root.render(<Harness />))
-    await change(container.querySelector<HTMLInputElement>('input[type=search]')!, 'workspace')
-    expect(container.textContent).toContain('Fix long workspace names')
-    expect(container.textContent).not.toContain('Deploy release')
-    const trigger = [...container.querySelectorAll('button')].find(button => button.textContent?.includes('新建任务'))!
-    trigger.focus(); await click(trigger)
-    expect(container.querySelector('[aria-label="新建任务"]')).not.toBeNull()
-    await act(async () => document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true})))
-    expect(closed).not.toHaveBeenCalled()
-    expect(container.querySelector('[aria-label="新建任务"]')).toBeNull()
-    expect(document.activeElement).toBe(trigger)
-    await change(container.querySelector<HTMLInputElement>('input[type=search]')!, 'does-not-exist')
-    expect(container.textContent).toContain('没有匹配的任务')
   })
 
   it('shows online versions first and makes recent conversations navigable', async () => {

@@ -8,7 +8,6 @@ import type { DashboardRequest } from './types.js'
 
 export * from './bridge-client.js'
 export * from './errors.js'
-export * from './kanban-client.js'
 export * from './service.js'
 export * from './types.js'
 export { AgentBridgeImportTarget } from './agent-bridge-provider/import-target.js'
@@ -24,7 +23,6 @@ export interface Config extends AgentControlConfig {}
 
 export const Config: Schema<Config> = Schema.object({
   bridge: Schema.object({ mode: Schema.union(['live', 'mock']).default('live'), origin: Schema.string().default('http://127.0.0.1:8787'), tokenEnv: Schema.string().default('AGENT_BRIDGE_CONTROL_TOKEN'), token: Schema.string().role('secret'), timeoutMs: Schema.number().min(100).default(15000) }).required(),
-  kanban: Schema.object({ mode: Schema.union(['sidecar', 'ssh', 'http', 'mock']).default('sidecar'), board: Schema.string().default('default'), permissionMode: Schema.union(['read-only', 'orchestrator', 'operator']).default('orchestrator'), author: Schema.string().default('dsh-orchestrator'), hermesRoot: Schema.string().default('/root/.hermes/hermes-agent'), hermesHome: Schema.string().default('/root/.hermes'), python: Schema.string().default('python3'), sshCommand: Schema.string().default('ssh'), sshHost: Schema.string(), remoteScript: Schema.string(), baseUrl: Schema.string(), tokenEnv: Schema.string(), timeoutMs: Schema.number().min(100).default(15000) }).required(),
 }) as Schema<Config>
 
 declare module '@deepseek-ai/cordis' { interface Context { agentControl: AgentControlService } }
@@ -48,7 +46,7 @@ export function createAgentControlRpcHandler(service: AgentControlService) {
   return async (_endpoint: string, payload: unknown, signal: AbortSignal): Promise<RpcResult> => {
     try {
       const body = payload as Partial<DashboardRequest>
-      if ((body.domain !== 'overview' && body.domain !== 'bridge' && body.domain !== 'kanban') || typeof body.operation !== 'string') {
+      if ((body.domain !== 'overview' && body.domain !== 'bridge') || typeof body.operation !== 'string') {
         throw new ControlError('invalid_parameter', 'domain and operation are required.', 400)
       }
       const value = await service.dispatch({
@@ -83,14 +81,10 @@ export function apply(ctx: Context, config: Config): void {
   ctx.systemPrompt.section({ name: 'tool:agent-control', order: 2650, text: [
     'Agent Control orchestration rules:',
     '- Use Agent Bridge directly for short questions or immediate continuation of an external session.',
-    '- Create a Hermes Kanban task for durable tracking, dependencies, review, or work spanning multiple turns.',
-    '- Resolve assignees from real Bridge workers or Hermes profiles; never invent an assignee.',
-    '- You may create and observe tasks, but external agent output alone is not proof that a task is complete.',
-    '- Agent Bridge sessions and Kanban tasks may be associated, but they are distinct sources of truth.',
-    '- Worker-only Kanban lifecycle operations complete/block/heartbeat are intentionally unavailable.',
+    '- Resolve workers from real Bridge workers; never invent one.',
   ].join('\n') })
   ctx.on('tools/pre-execute', async (execution, next) => MUTATING_TOOL_NAMES.has(execution.name)
-    ? { kind: 'ask', reason: `${execution.name} changes external Agent Bridge or Hermes state.` }
+    ? { kind: 'ask', reason: `${execution.name} changes external Agent Bridge state.` }
     : next())
   // Register through a fiber that injects BOTH `connection` and `webServer`,
   // then mount the RPC channel with `connection.register(scoped, …)` rather than
