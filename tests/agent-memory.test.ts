@@ -18,7 +18,7 @@ function fixture(options: { git?: boolean } = {}) {
   const vault = mkdtempSync(join(tmpdir(), "agent-memory-"));
   const root = join(vault, "agent-memory");
   mkdirSync(join(root, "scopes"), { recursive: true });
-  writeFileSync(join(root, "predicates.yaml"), "predicates:\n  - id: preference\n  - id: rule\n  - id: fact\n  - id: profile\n");
+  writeFileSync(join(root, "predicates.yaml"), "predicates:\n  - id: preference\n  - id: rule\n  - id: fact\n  - id: decision\n  - id: profile\n");
   const scopes: Array<[string, string, string, string?]> = [
     ["_global", "全局", "  matrix_rooms: [\"!dm:example.org\", \"!akasha:example.org\"]\n  repositories: []\n  locations: []"],
     ["travel", "旅游助手", "  matrix_rooms: [\"!travel:example.org\"]\n  repositories: []\n  locations: []"],
@@ -119,14 +119,14 @@ test("bootstrap is deterministic, budgeted by whole items and scoped; search hid
   memory.write(hermes, { scope: "_global", topic: "simon", kind: "profile", value: "住杭州，一家三口" });
   memory.write(hermes, { scope: "travel", topic: "altitude", kind: "fact", value: "孩子在 3600m 血氧掉到 87%" });
   memory.write(hermes, { scope: "travel", topic: "draft", kind: "fact", value: "未置顶的事实", pin: false });
-  memory.log(hermes, { scope: "travel", summary: "定稿方案A+，10/3 出发", topics: ["altitude"] });
+  memory.write(hermes, { scope: "travel", topic: "plan", kind: "decision", value: "定稿方案A+，10/3 出发" });
   memory.write(hermes, { scope: "card-negumi", topic: "nickname", kind: "preference", value: "叫老公" });
   tick("2026-10-12T09:00:00Z");
 
   const first = memory.sessionBootstrap("travel");
   assert.equal(first, memory.sessionBootstrap("travel"));
-  // Content only: description, then one line per pinned fact and recent event.
-  assert.equal(first, "关于你本人。\n- 住杭州，一家三口\n- 孩子在 3600m 血氧掉到 87%\n- 10-12 定稿方案A+，10/3 出发");
+  // Content only: description, then one line per pinned fact.
+  assert.equal(first, "关于你本人。\n- 住杭州，一家三口\n- 孩子在 3600m 血氧掉到 87%\n- 定稿方案A+，10/3 出发");
   assert.doesNotMatch(first, /未置顶的事实|叫老公/);
   assert.equal(readFileSync(join(vault, "cache/travel.md"), "utf8"), `${first}\n`);
 
@@ -136,10 +136,10 @@ test("bootstrap is deterministic, budgeted by whole items and scoped; search hid
 
   assert.deepEqual(memory.search("老公", "all"), []);
   assert.equal(memory.search("老公", ["card-negumi"]).length, 1);
-  assert.deepEqual(memory.search("方案A+", "all").map((hit) => [hit.scope, hit.kind]), [["travel", "event"]]);
+  assert.deepEqual(memory.search("方案A+", "all").map((hit) => [hit.scope, hit.path]), [["travel", "scopes/travel/facts/plan/decision.md"]]);
   // Not every term has to match; the hit matching more terms ranks first.
   const loose = memory.search("旅行安排 血氧 方案A+", ["travel"]);
-  assert.deepEqual(loose.map((hit) => hit.kind), ["fact", "event"]);
+  assert.deepEqual(loose.map((hit) => hit.path), ["scopes/travel/facts/altitude/fact.md", "scopes/travel/facts/plan/decision.md"]);
   assert.deepEqual(memory.search("完全不相关", ["travel"]), []);
   // Unsegmented Chinese sentences: alias inside the message, or shared fragments.
   assert.equal(memory.recall("下次带孩子去西藏要注意血氧吗", ["travel"])[0]!.path, "scopes/travel/facts/altitude/fact.md");
@@ -153,14 +153,6 @@ test("bootstrap is deterministic, budgeted by whole items and scoped; search hid
   assert.equal(memory.load("card-negumi"), "# 人设\n\n温柔。\n\n- 叫老公");
   assert.equal(memory.load("card-negumi", { persona: false }), "- 叫老公");
   assert.equal(memory.persona("travel"), "");
-});
-
-test("old events fall out of the bootstrap after the lookback window", () => {
-  const { memory, tick } = fixture();
-  memory.log(hermes, { scope: "travel", summary: "很早以前的进展" });
-  tick("2026-12-01T08:00:00Z");
-  assert.doesNotMatch(memory.bootstrap("travel"), /很早以前/);
-  assert.equal(memory.search("很早以前", ["travel"]).length, 1);
 });
 
 test("each write is one commit touching only its scope; broken hand edits are skipped and linted", () => {

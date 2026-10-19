@@ -20,6 +20,7 @@ import { CodexDesktopSessionScanner } from "./desktop-sessions.js";
 import { deriveProjectIdentity, isPathWithinRoots } from "./path-utils.js";
 import type { AgentAdapter, ResumeTarget } from "./agent-adapter.js";
 import type { AttachmentFetcher } from "./attachments.js";
+import type { MemoryBootstrapFetcher } from "./memory-bootstrap.js";
 import { CodexRuntimeResolver, type CodexRuntime } from "./codex-runtime.js";
 import { managedAppServerUrl, stopManagedAppServer } from "./managed-app-server.js";
 
@@ -173,6 +174,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
       desktopScanIntervalMs?: number;
       desktopReplayExisting?: boolean;
       fetchAttachment?: AttachmentFetcher;
+      /** Core memory for a new thread's developer instructions. */
+      memoryBootstrap?: MemoryBootstrapFetcher;
       runtimeResolver?: Pick<CodexRuntimeResolver, "resolve" | "healthy">;
     },
     private readonly emit: (message: BridgeToControlMessage) => void,
@@ -259,7 +262,9 @@ export class CodexAppServerAdapter implements AgentAdapter {
         if (prompt || attachments?.length) await this.startTurn(thread.id, prompt ?? "", model, attachments, reasoningEffort);
         return thread.id;
       }
-      const result = await this.request<{ thread: CodexThread }>("thread/start", { cwd, ...(model ? { model } : {}) });
+      const memory = await this.options.memoryBootstrap?.(cwd);
+      const result = await this.request<{ thread: CodexThread }>("thread/start", { cwd, ...(model ? { model } : {}),
+        ...(memory ? { developerInstructions: memory } : {}) });
       this.subscribedThreads.add(result.thread.id);
       await this.discoverThread(result.thread, prompt, requestId);
       if (prompt || attachments?.length) await this.startTurn(result.thread.id, prompt ?? "", model, attachments, reasoningEffort);

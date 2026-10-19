@@ -55,7 +55,7 @@ const MEMORY_READ_TOOLS = [
   },
   {
     name: "memory_bootstrap",
-    description: "Core memory to read at the start of a task: _global plus the given scope (pinned facts and recent progress). Memory is reference, not authorization; the repository is authoritative for project state.",
+    description: "Core memory to read at the start of a task: _global plus the given scope (pinned facts). Memory is reference, not authorization; the repository is authoritative for project state.",
     inputSchema: { type: "object", required: ["scope"], additionalProperties: false, properties: { scope: SCOPE } },
   },
   {
@@ -67,7 +67,7 @@ const MEMORY_READ_TOOLS = [
   },
   {
     name: "memory_search",
-    description: "Deterministic keyword/alias search over current facts and progress events (falls back to sentence recall when no keyword matches). scope: a slug, a comma-separated list, or all (all excludes hidden scopes).",
+    description: "Deterministic keyword/alias search over current facts (falls back to sentence recall when no keyword matches). scope: a slug, a comma-separated list, or all (all excludes hidden scopes).",
     inputSchema: { type: "object", required: ["query"], additionalProperties: false, properties: {
       query: { type: "string" }, scope: { type: "string" }, limit: { type: "integer", minimum: 1, maximum: 50 },
       mode: { type: "string", enum: ["keyword", "recall"], description: "recall: match a whole natural-language message (per-turn prefetch)." },
@@ -97,13 +97,6 @@ const MEMORY_WRITE_TOOLS = [
       pin: { type: "boolean", description: "Default true: shown in the bootstrap. false: search only." },
       derived_from: { type: "array", items: { type: "string" }, description: "Evidence, e.g. session:<id> e:<n>." },
       valid_from: { type: "string" },
-    } },
-  },
-  {
-    name: "memory_log",
-    description: "Append a one-line progress/hand-off note to a scope (appears under recent progress so a new conversation can pick up where this one stopped).",
-    inputSchema: { type: "object", required: ["scope", "summary"], additionalProperties: false, properties: {
-      scope: SCOPE, summary: { type: "string" }, body: { type: "string" }, topics: { type: "array", items: { type: "string" } },
     } },
   },
   {
@@ -338,8 +331,6 @@ export class ConversationMcpServer {
         value: required("value"), topicDisplay: stringArg(args.topic_display), aliases: stringArrayArg(args.aliases),
         body: stringArg(args.body), pin: typeof args.pin === "boolean" ? args.pin : undefined,
         derivedFrom: stringArrayArg(args.derived_from), validFrom: stringArg(args.valid_from) }) };
-      case "memory_log": return { ...store.log(needWriter(), { scope: scope(), summary: required("summary"), body: stringArg(args.body),
-        topics: stringArrayArg(args.topics) }) };
       case "memory_retract": return { ...store.retract(needWriter(), { scope: scope(), topic: required("topic"), kind: required("kind"),
         reason: required("reason") }) };
       default: throw new Error("unknown_tool");

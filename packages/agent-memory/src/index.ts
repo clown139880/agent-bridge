@@ -93,19 +93,9 @@ export interface FactRecord {
   by: string | null;
 }
 
-export interface EventRecord {
-  scope: string;
-  path: string;
-  summary: string;
-  occurredAt: string;
-  topics: string[];
-  body: string;
-  by: string | null;
-}
-
 export interface SearchHit {
   scope: string;
-  kind: "fact" | "event";
+  kind: "fact";
   path: string;
   score: number;
   text: string;
@@ -120,8 +110,6 @@ export class MemoryError extends Error {
 const GLOBAL = "_global";
 const DEFAULT_BUDGET = 1500;
 const GLOBAL_BUDGET = 3600;
-const RECENT_EVENTS = 10;
-const LOOKBACK_DAYS = 30;
 
 export class AgentMemory {
   private readonly root: string;
@@ -267,37 +255,17 @@ export class AgentMemory {
     return all.filter((fact) => !fact.validUntil && !fact.retracted);
   }
 
-  events(scope: string): EventRecord[] {
-    const dir = join(this.scopesDir, scope, "events");
-    const result: EventRecord[] = [];
-    for (const file of walk(dir)) {
-      if (!file.endsWith(".md") || basename(file).includes(".sync-conflict-")) continue;
-      try {
-        const { data, body } = parseDocument(readFileSync(file, "utf8"));
-        if (data.type !== "event") continue;
-        result.push({ scope, path: this.rel(file), summary: str(data.summary), occurredAt: str(data.occurred_at),
-          topics: strings(data.entities), body: body.trim(), by: str(data.by) || null });
-      } catch { /* reported by lint() */ }
-    }
-    return result.sort((a, b) => b.occurredAt.localeCompare(a.occurredAt) || a.path.localeCompare(b.path));
-  }
-
   /**
    * Deterministic core memory for one scope: the scope description, then pinned current facts,
-   * then recent progress, one line each and content only (no headings, topic labels or footer:
+   * one line each and content only (no headings, topic labels or footer:
    * every character is paid on every turn). Stops before the first whole line over budget.
    */
   bootstrap(scope: string, budget?: number): string {
     const info = this.scope(scope);
     const limit = budget ?? info.bootstrapBudget;
     const today = isoDate(this.now());
-    const since = isoDate(new Date(this.now().getTime() - LOOKBACK_DAYS * 86_400_000));
-    const entries = [
-      ...this.facts(scope).filter((fact) => fact.pinned && !fact.validUntil && (!fact.validFrom || fact.validFrom <= today))
-        .map((fact) => `- ${fact.value}`),
-      ...this.events(scope).filter((event) => event.occurredAt.slice(0, 10) >= since && event.occurredAt.slice(0, 10) <= today)
-        .slice(0, RECENT_EVENTS).map((event) => `- ${event.occurredAt.slice(5, 10)} ${event.summary}`),
-    ];
+    const entries = this.facts(scope).filter((fact) => fact.pinned && !fact.validUntil && (!fact.validFrom || fact.validFrom <= today))
+      .map((fact) => `- ${fact.value}`);
     const lines = info.description ? [info.description] : [];
     if (lines.join("\n").length > limit) throw new MemoryError("budget_too_small", String(limit));
     for (const entry of entries) {
@@ -309,7 +277,7 @@ export class AgentMemory {
 
   /**
    * Persona (SOUL or role card): `soul.md` in the scope directory, a plain note that only humans
-   * edit. No memory tool writes it; agent-learned facts and events live beside it.
+   * edit. No memory tool writes it; agent-learned facts live beside it.
    */
   persona(scope: string): string {
     this.scope(scope);
@@ -352,11 +320,6 @@ export class AgentMemory {
         if (score) hits.push({ scope, kind: "fact", path: fact.path, score,
           text: `${fact.topicDisplay}/${fact.kind} = ${fact.value}` });
       }
-      for (const event of this.events(scope)) {
-        const score = scoreTerms(terms, event.topics.map(fold), fold(event.summary), fold(event.body));
-        if (score) hits.push({ scope, kind: "event", path: event.path, score: score - 0.5,
-          text: `${event.occurredAt.slice(0, 10)}: ${event.summary}` });
-      }
     }
     // Keyword terms rarely survive unsegmented Chinese; fall back to sentence recall.
     if (!hits.length) return this.recall(query, scopes, limit);
@@ -381,10 +344,6 @@ export class AgentMemory {
           .filter((name) => name.length >= 2);
         const score = (names.some((name) => text.includes(name)) ? 3 : 0) + overlap(fold(`${fact.topicDisplay} ${fact.value}`));
         if (score >= 1) hits.push({ scope, kind: "fact", path: fact.path, score, text: `${fact.topicDisplay}/${fact.kind} = ${fact.value}` });
-      }
-      for (const event of this.events(scope)) {
-        const score = overlap(fold(event.summary)) - 0.5;
-        if (score >= 1) hits.push({ scope, kind: "event", path: event.path, score, text: `${event.occurredAt.slice(0, 10)}: ${event.summary}` });
       }
     }
     return rank(hits, limit);
@@ -450,24 +409,6 @@ export class AgentMemory {
     return { scope: input.scope, path: this.rel(current), commit };
   }
 
-  /** Append-only progress/hand-off record; appears under 最近进展 in the bootstrap. */
-  log(writer: Writer, input: { scope: string; summary: string; body?: string; topics?: string[] }): WriteResult {
-    this.authorize(writer, input.scope);
-    const summary = input.summary.trim();
-    if (!summary || summary.includes("\n")) throw new MemoryError("invalid_summary", "summary must be one non-empty line");
-    if (containsSecret(summary, input.body)) throw new MemoryError("secret_rejected");
-    const topics = input.topics ?? [];
-    if (topics.some((topic) => !SLUG.test(topic))) throw new MemoryError("invalid_topic");
-    const now = this.now();
-    const id = `ev-${now.toISOString().replace(/[-:T]/g, "").slice(0, 14)}-${randomBytes(3).toString("hex")}`;
-    const file = join(this.scopesDir, input.scope, "events", isoDate(now), `${id}.md`);
-    mkdirSync(dirname(file), { recursive: true });
-    writeAtomic(file, renderDocument({ data: { type: "event", id, summary, occurred_at: now.toISOString(), entities: topics, by: writer.name },
-      body: input.body ?? "" }));
-    const commit = this.commit(input.scope, writer, `memory(${input.scope}): log ${summary.slice(0, 60)}`);
-    return { scope: input.scope, path: this.rel(file), commit };
-  }
-
   /** Files the reader skipped: broken frontmatter, unknown topics/kinds, duplicate aliases, binding conflicts. */
   lint(): string[] {
     const problems: string[] = [];
@@ -505,7 +446,8 @@ export class AgentMemory {
   private authorize(writer: Writer, scope: string): void {
     const info = this.scope(scope);
     if (info.status === "archived") throw new MemoryError("scope_archived", scope);
-    if (scope === GLOBAL && writer.role !== "agent") throw new MemoryError("forbidden", "project writers cannot write _global");
+    // _global, _assistants and _agent-* belong to the assistants; repository agents write only project scopes.
+    if (scope.startsWith("_") && writer.role !== "agent") throw new MemoryError("forbidden", "project writers cannot write _-prefixed scopes");
   }
 
   private predicates(): Set<string> {

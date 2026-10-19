@@ -72,7 +72,8 @@ def test_room_scope_bootstrap_tools_and_handoff(mcp, tmp_path):
     assert mcp.calls[0] == ("memory_resolve_scope", {"room_id": "!velvet:x", "room_name": "天鹅绒之馆", "create": True})
     block = provider.system_prompt_block()
     assert "# 作用域 velvet-room" in block and "# 自身 _agent-dorothy" in block and block.startswith("长期记忆（当前房间：velvet-room；")
-    assert {tool["name"] for tool in provider.get_tool_schemas()} >= {"memory_write", "memory_log", "memory_load"}
+    assert {tool["name"] for tool in provider.get_tool_schemas()} >= {"memory_write", "memory_load"}
+    assert "memory_log" not in {tool["name"] for tool in provider.get_tool_schemas()}
 
     json.loads(provider.handle_tool_call("memory_write", {"topic": "comfy", "kind": "fact", "value": "v"}))
     assert mcp.calls[-1] == ("memory_write", {"topic": "comfy", "kind": "fact", "value": "v", "scope": "velvet-room"})
@@ -120,3 +121,23 @@ def test_skill_index_lists_room_skills_and_pinned_only(monkeypatch):
     block = provider._skill_index()
     assert "- mine:" in block and "- global-pinned:" in block
     assert "global-other" not in block and "room-skill" not in block and "2 more skills" in block
+
+
+def test_dm_reads_and_writes_the_shared_scope(mcp, tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_MEMORY_SHARED_SCOPE", "_assistants")
+    provider = plugin.AgentBridgeMemoryProvider()
+    provider.initialize("s1", platform="matrix", chat_id="!dm:x", hermes_home=str(tmp_path), agent_context="primary")
+    block = provider.system_prompt_block()
+    assert "# 作用域 _global" in block and "# 自身 _assistants" in block and "# 自身 _agent-dorothy" in block
+    provider.handle_tool_call("memory_write", {"topic": "nas", "kind": "fact", "value": "v"})
+    assert mcp.calls[-1][1]["scope"] == "_assistants"
+    provider.handle_tool_call("memory_write", {"topic": "me", "kind": "profile", "value": "v", "scope": "_global"})
+    assert mcp.calls[-1][1]["scope"] == "_global"
+    provider.handle_tool_call("memory_search", {"query": "x"})
+    assert mcp.calls[-1][1]["scope"] == "_assistants,_global"
+    # A room keeps its own scope as the default.
+    room = plugin.AgentBridgeMemoryProvider()
+    room.initialize("s2", platform="matrix", chat_id="!velvet:x", hermes_home=str(tmp_path), agent_context="primary")
+    room.handle_tool_call("memory_write", {"topic": "a", "kind": "fact", "value": "v"})
+    assert mcp.calls[-1][1]["scope"] == "velvet-room"
+    assert "# 自身 _assistants" in room.system_prompt_block()

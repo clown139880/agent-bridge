@@ -15,11 +15,22 @@
 | token | 工具 |
 | --- | --- |
 | `CONVERSATION_MCP_READ_TOKEN` | `conversation_*`，以及 `memory_resolve_scope/bootstrap/load/search/get/scopes` |
-| `AGENT_MEMORY_TOKENS` 中的任一项 | 上述全部工具，加上 `memory_write/log/retract`。写入者身份取自 token，不取自参数 |
+| `AGENT_MEMORY_TOKENS` 中的任一项 | 上述全部工具，加上 `memory_write/retract`。写入者身份取自 token，不取自参数 |
 
 `memory_search` 先按空格分词做关键词匹配（命中词数越多越靠前）；一个都没命中时，退回整句召回：消息里出现主题名或别名得 3 分，每个共有的两字片段得 0.5 分（最多 3 分）。`mode: "recall"` 直接用整句召回，Hermes 插件的每轮召回走这个模式，只在 `scope.md` 写了 `prefetch: true` 的作用域开启。
 
-`agent` 角色（Hermes、Dorothy）可以写 `_global`；`project` 角色（仓库里的 Codex/Claude/pi）只能写项目作用域。没绑定的房间或仓库，可以由写入者用 `memory_resolve_scope create=true` 建一个临时作用域（`status: provisional`）。
+`agent` 角色（Hermes、Dorothy）可以写 `_global`；`project` 角色（仓库里的 Codex/Claude/pi）只能写项目作用域，不能写下划线开头的作用域。没绑定的房间或仓库，可以由写入者用 `memory_resolve_scope create=true` 建一个临时作用域（`status: provisional`）。
+
+## 作用域分工（0.6.98）
+
+- `_global`：只放所有 agent 都该知道的事——你的画像、通用偏好、通用规则。Bridge 下写代码的 agent 每个会话都会看到它，所以不放 HAL 运维细节、助理之间的约定或一次性的事。
+- `_assistants`（`discoverable: false`）：Hermes 和 Dorothy 共用、其他 worker 不需要的记忆，例如服务和设备的用法、HAL 上的环境经验、两个助理的分工。两个 profile 用 `AGENT_MEMORY_SHARED_SCOPE=_assistants` 注入；私聊里不指定作用域时读写都落在这里（搜索时连同 `_global`）。
+- `_agent-hermes`、`_agent-dorothy`：各自的人设和职责规则。
+- 没有进度日志：0.6.98 去掉了 `memory_log` 和 bootstrap 里的「最近进展」。进度写在项目里（提交、文档），需要回溯时查对话档案。旧的 `events/` 文件留在库里，不再读取。
+
+## Bridge 会话的开局注入
+
+Bridge 开新会话前用自己的 `BRIDGE_TOKEN` 调 `GET /memory/bootstrap?machine_id=&cwd=&repository=`，Control Plane 按机器、目录和仓库解析作用域（不新建），返回 `_global` 加项目作用域的 bootstrap。Codex 放进 `thread/start` 的 `developerInstructions`（只在新线程，之后随线程保存）；Claude 每次启动进程都放进 `--append-system-prompt`。超时 2 秒，失败就不带记忆照常开局。所以 Bridge 下的 agent 不必再调 `memory_resolve_scope`/`memory_bootstrap`，只在要写入时用 MCP。
 
 ## 检查
 
@@ -33,7 +44,7 @@ curl -s -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
 
 ## 人设（SOUL 与角色卡）
 
-人设作用域在目录里有一个 `soul.md`：一篇普通笔记，只由人在 Obsidian 里改，没有任何记忆工具会写它；同一作用域里的 facts/events 仍是 agent 可写的记忆。
+人设作用域在目录里有一个 `soul.md`：一篇普通笔记，只由人在 Obsidian 里改，没有任何记忆工具会写它；同一作用域里的 facts 仍是 agent 可写的记忆。
 
 - SOUL：`_agent-hermes`、`_agent-dorothy`。各 Hermes profile 的 `SOUL.md` 是指向对应 `soul.md` 的软链接，所以 cron 和子 agent 也按原机制加载；Hermes 每条消息重读 SOUL.md，改完即生效。插件注入自身作用域时用 `include_persona: false`，避免重复。
 - 角色卡：`card-<名字>`（`discoverable: false`）。`memory_load` 返回人设加这张卡的记忆；对应的 Hermes 技能只是一句「加载 card-<名字>」。

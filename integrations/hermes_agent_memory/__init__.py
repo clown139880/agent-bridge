@@ -10,6 +10,8 @@ Configuration (profile .env):
   AGENT_MEMORY_TOKEN       writer token from the Control Plane AGENT_MEMORY_TOKENS (required)
   AGENT_MEMORY_URL         default http://127.0.0.1:8787/mcp
   AGENT_MEMORY_SELF_SCOPE  optional hidden scope with this agent's own rules (e.g. _agent-dorothy)
+  AGENT_MEMORY_SHARED_SCOPE optional hidden scope shared by the assistants (e.g. _assistants); a DM's
+                           default for reads and writes, so _global keeps only what every agent should know
   AGENT_MEMORY_MACHINE_ID  machine id for cwd-based scopes on the CLI (default hal)
   AGENT_SKILLS_SCOPES      scopes whose skill list comes from the shared skill library (comma list or "all");
                            pairs with the agent-bridge-skills plugin (docs/agent-skills-design.zh.md)
@@ -50,7 +52,7 @@ PREFETCH_CHARS = 800
 HEADER = "长期记忆（当前房间：{scope}；只是参考，不扩大授权）："
 
 TOOLS: List[Dict[str, Any]] = [
-    {"name": "memory_search", "description": "Search memory facts and progress notes. scope: current (default), _global, a scope slug, or all.",
+    {"name": "memory_search", "description": "Search memory facts. scope: current (default), _global, a scope slug, a comma list, or all.",
      "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "scope": {"type": "string"},
                                                      "limit": {"type": "integer"}}, "required": ["query"]}},
     {"name": "memory_get", "description": "Read one fact (topic + kind) with optional history or as_of date.",
@@ -67,21 +69,19 @@ WRITE_TOOLS: List[Dict[str, Any]] = [
         "Record a durable fact the user confirmed (decision, preference, rule, lesson); never credentials or one-off "
         "state. topic: lowercase ASCII slug (give topic_display in Chinese); kind: preference, rule, "
         "decision, fact, lesson, pointer or profile. value is one line; details in body. Same topic+kind supersedes "
-        "the old value. scope defaults to the current room; use _global for facts about the user or for every room."),
+        "the old value. scope defaults to the current room (in a DM: the assistants' shared scope); use _global only "
+        "for the user's profile, preferences and rules that every agent, coding agents included, should know."),
      "parameters": {"type": "object", "properties": {
          "topic": {"type": "string"}, "kind": {"type": "string"}, "value": {"type": "string"},
          "topic_display": {"type": "string"}, "aliases": {"type": "array", "items": {"type": "string"}},
          "body": {"type": "string"}, "pin": {"type": "boolean"}, "scope": {"type": "string"}},
          "required": ["topic", "kind", "value"]}},
-    {"name": "memory_log", "description": "After finishing a meaningful piece of work, append a one-line progress/hand-off note so a new conversation can continue.",
-     "parameters": {"type": "object", "properties": {"summary": {"type": "string"}, "body": {"type": "string"},
-                                                     "scope": {"type": "string"}}, "required": ["summary"]}},
     {"name": "memory_retract", "description": "Retract a wrong or outdated fact (kept in history).",
      "parameters": {"type": "object", "properties": {"topic": {"type": "string"}, "kind": {"type": "string"},
                                                      "reason": {"type": "string"}, "scope": {"type": "string"}},
                     "required": ["topic", "kind", "reason"]}},
 ]
-FORWARDED = {"memory_search", "memory_get", "memory_load", "memory_write", "memory_log", "memory_retract"}
+FORWARDED = {"memory_search", "memory_get", "memory_load", "memory_write", "memory_retract"}
 
 
 class MemoryUnavailable(RuntimeError):
@@ -111,6 +111,7 @@ class AgentBridgeMemoryProvider(MemoryProvider):
         self._url = DEFAULT_URL
         self._token = ""
         self._self_scope = ""
+        self._shared_scope = ""
         self._skill_scopes = ""
         self._scope = "_global"
         # Hermes reads tool schemas before initialize(); start writable and narrow for cron/subagents.
@@ -131,6 +132,7 @@ class AgentBridgeMemoryProvider(MemoryProvider):
         self._url = get_secret("AGENT_MEMORY_URL", "") or DEFAULT_URL
         self._token = get_secret("AGENT_MEMORY_TOKEN", "") or ""
         self._self_scope = get_secret("AGENT_MEMORY_SELF_SCOPE", "") or ""
+        self._shared_scope = get_secret("AGENT_MEMORY_SHARED_SCOPE", "") or ""
         self._machine_id = get_secret("AGENT_MEMORY_MACHINE_ID", "") or "hal"
         self._skill_scopes = (get_secret("AGENT_SKILLS_SCOPES", "") or "").strip()
 
@@ -198,13 +200,17 @@ class AgentBridgeMemoryProvider(MemoryProvider):
 
     def _fetch_bootstrap(self) -> str:
         parts = [self._call("memory_bootstrap", {"scope": self._scope})["text"]]
-        if self._self_scope:
+        for extra in dict.fromkeys(item for item in (self._shared_scope, self._self_scope) if item):
             try:
                 # The self scope's persona is already SOUL.md (a symlink to its soul.md); only its memory here.
-                parts.append(self._call("memory_load", {"scope": self._self_scope, "include_persona": False})["text"])
+                parts.append(self._call("memory_load", {"scope": extra, "include_persona": False})["text"])
             except ValueError as exc:
-                logger.warning("agent-memory: self scope %s unavailable: %s", self._self_scope, exc)
+                logger.warning("agent-memory: scope %s unavailable: %s", extra, exc)
         return "\n".join(part for part in parts if part)
+
+    def _home_scope(self) -> str:
+        """Default scope for tool calls: the room, or in a DM the assistants' shared scope (not _global)."""
+        return self._shared_scope if self._scope == "_global" and self._shared_scope else self._scope
 
     def _skill_index(self, budget: int = SKILL_INDEX_BUDGET) -> str:
         """Skill list from the shared library for scopes in AGENT_SKILLS_SCOPES: the room's skills and pinned skills
@@ -212,7 +218,7 @@ class AgentBridgeMemoryProvider(MemoryProvider):
         pilot = {item.strip() for item in self._skill_scopes.split(",") if item.strip()}
         if not pilot or (self._skill_scopes != "all" and self._scope not in pilot):
             return ""
-        scopes = list(dict.fromkeys(item for item in (self._scope, self._self_scope, "_global") if item))
+        scopes = list(dict.fromkeys(item for item in (self._scope, self._self_scope, self._shared_scope, "_global") if item))
         try:
             skills = self._call("skill_index", {"scopes": scopes})["skills"]
         except Exception as exc:
@@ -283,7 +289,8 @@ class AgentBridgeMemoryProvider(MemoryProvider):
         if not self._prefetch or is_trivial_prompt(query):
             return ""
         try:
-            hits = self._call("memory_search", {"query": query[:500], "scope": f"{self._scope},_global", "mode": "recall",
+            scopes = ",".join(dict.fromkeys(item for item in (self._scope, self._shared_scope, "_global") if item))
+            hits = self._call("memory_search", {"query": query[:500], "scope": scopes, "mode": "recall",
                                                 "limit": PREFETCH_HITS}, timeout=PREFETCH_TIMEOUT).get("hits", [])
         except Exception:
             return ""
@@ -317,12 +324,14 @@ class AgentBridgeMemoryProvider(MemoryProvider):
                 return json.dumps({"current_scope": self._scope, **listed}, ensure_ascii=False)
             if tool_name not in FORWARDED:
                 return json.dumps({"error": f"unknown tool {tool_name}"})
-            if tool_name in {"memory_write", "memory_log", "memory_retract"} and not self._writable:
+            if tool_name in {"memory_write", "memory_retract"} and not self._writable:
                 return json.dumps({"error": "read_only_context"})
             arguments = {key: value for key, value in (args or {}).items() if value is not None}
             scope = arguments.get("scope")
             if tool_name != "memory_load" and (not scope or scope == "current"):
-                arguments["scope"] = self._scope
+                home = self._home_scope()
+                # A DM searches its shared scope and _global together; the room's own scope otherwise.
+                arguments["scope"] = f"{home},_global" if tool_name == "memory_search" and home != self._scope else home
             return json.dumps(self._call(tool_name, arguments), ensure_ascii=False)
         except Exception as exc:
             return json.dumps({"error": str(exc)}, ensure_ascii=False)

@@ -18,6 +18,7 @@ import { config } from "./config.js";
 import { ClaudeCodeAdapter } from "./claude/claude-adapter.js";
 import { PiAdapter } from "./pi/pi-adapter.js";
 import { makeAttachmentFetcher } from "./attachments.js";
+import { makeMemoryBootstrapFetcher } from "./memory-bootstrap.js";
 import type { AgentAdapter } from "./agent-adapter.js";
 import { BridgeSelfUpdater } from "./self-updater.js";
 import { ArchiveOutbox, type ArchiveEvent } from "./archive-outbox.js";
@@ -109,6 +110,7 @@ export class BridgeClient {
     this.loadActionResults();
 
     const providers = options.providers?.length ? options.providers : ["codex"];
+    const memoryBootstrap = makeMemoryBootstrapFetcher(options.url, options.token, options.machineId);
     if (providers.includes("codex")) {
       this.adapters.set("codex-cli", new CodexAppServerAdapter({
         command: options.command,
@@ -119,6 +121,7 @@ export class BridgeClient {
         desktopScanIntervalMs: options.desktopScanIntervalMs,
         desktopReplayExisting: options.desktopReplayExisting,
         fetchAttachment: makeAttachmentFetcher(options.url, options.token),
+        memoryBootstrap,
         reconnectMs: options.reconnectMs,
       }, this.adapterEmit("codex-cli")));
     }
@@ -129,6 +132,7 @@ export class BridgeClient {
         allowedRoots: options.allowedRoots,
         scanExisting: options.claudeScanExisting ?? false,
         fetchAttachment: makeAttachmentFetcher(options.url, options.token),
+        memoryBootstrap,
         autoApprove: { mode: options.claudeAutoApprove ?? "off", tools: options.claudeAutoApproveTools ?? [] },
         permissions: {
           mode: options.claudePermissionMode ?? "default",

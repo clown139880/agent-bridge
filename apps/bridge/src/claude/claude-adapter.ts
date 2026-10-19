@@ -18,6 +18,7 @@ import type {
 import { DEFAULT_EFFORT } from "@agent-bridge/protocol";
 import type { AgentAdapter, AdapterEmit, ResumeTarget } from "../agent-adapter.js";
 import type { AttachmentFetcher, FetchedAttachment } from "../attachments.js";
+import type { MemoryBootstrapFetcher } from "../memory-bootstrap.js";
 import { resolveProjectPath, summarizePrompt } from "../app-server.js";
 import { deriveProjectIdentity } from "../path-utils.js";
 import { SUBAGENT_TOOLS, taskKind, taskStatus, toolSummary } from "./activity.js";
@@ -164,6 +165,8 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       allowedRoots: string[];
       scanExisting: boolean;
       fetchAttachment?: AttachmentFetcher;
+      /** Core memory appended to the system prompt of every launch (it is not persisted on resume). */
+      memoryBootstrap?: MemoryBootstrapFetcher;
       // Auto-approval policy. "off" prompts for every tool (legacy behavior),
       // "readonly" clears READONLY_TOOLS, "all" clears everything (scoped
       // --dangerously-skip-permissions). `tools` always clears, on top of mode.
@@ -389,6 +392,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     initPromise.catch(() => undefined);
 
     const permissions = this.options.permissions;
+    const memory = await this.options.memoryBootstrap?.(cwd);
     session.query = query({
       prompt: session.input,
       options: {
@@ -397,6 +401,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
         resume: resumeNativeId,
         model,
         effort,
+        appendSystemPrompt: memory,
         // Lets a tool the agent runs name its own Bridge session (deploy/hal/deploy.sh).
         env: { AGENT_BRIDGE_SESSION_ID: sessionId },
         abort: session.abort.signal,

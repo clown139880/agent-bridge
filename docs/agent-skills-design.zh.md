@@ -1,6 +1,6 @@
 # 设计：按作用域组织的共享技能库（agent-skills）
 
-- 状态：已上线（2026-10-14）。Control Plane 技能模块 0.6.93–0.6.95（置顶 0.6.95）；Hermes 插件 agent-bridge-skills 0.1.1、agent-bridge-memory 0.6.1。Dorothy 和 Hermes（default）都已全面切换：`AGENT_SKILLS_SCOPES=all`，本地技能目录只剩 Hermes 自带、hub 安装的技能（Hermes 另保留 `godmode`）和 5 个角色卡加载器。阶段 5（Bridge 下的 agent）未开始。运行说明见 [agent-memory-operations.zh.md](agent-memory-operations.zh.md)「技能库」。
+- 状态：已上线（2026-10-14）。Control Plane 技能模块 0.6.93–0.6.95（置顶 0.6.95）；Hermes 插件 agent-bridge-skills 0.1.1、agent-bridge-memory 0.6.1。Dorothy 和 Hermes（default）都已全面切换：`AGENT_SKILLS_SCOPES=all`，本地技能目录只剩 Hermes 自带、hub 安装的技能（Hermes 另保留 `godmode`）和 5 个角色卡加载器。阶段 5（Bridge 下的 agent）已取消（2026-10-19）：Bridge 下的 agent 在项目里工作，要沉淀的东西写进项目仓库，只接入记忆。运行说明见 [agent-memory-operations.zh.md](agent-memory-operations.zh.md)「技能库」。
 - 关联：[agent-memory-design.zh.md](agent-memory-design.zh.md)（作用域、写入方、Hermes 插件）、[agent-memory-operations.zh.md](agent-memory-operations.zh.md)。
 - 基线：agent-bridge `0.6.92`；Hermes `647115b12d`；技能库 `clown139880/agent-skills`（私有 Gitea，HAL checkout `/root/agent-skills`）。
 
@@ -117,7 +117,7 @@
 | 2 插件 | 接管三个工具、技能列表注入、跳转桩同步 | 插件测试；在一个测试 profile 上验证三个工具、`/negumi`、后台 review 新建技能落到正确作用域 |
 | 3 试点 | 先切 Dorothy 的一个房间（jmyd 或惠的电台） | 切换前后各量一次系统提示词 token 数；房间内能用、能沉淀、能斜杠加载 |
 | 4 全面切换 | Dorothy 全部房间，再 Hermes | 原技能目录只剩自带、hub 和跳转桩；token 对比报告 |
-| 5 Bridge agent | §7 | 另行决定 |
+| 5 Bridge agent | §7 | 已取消：沉淀写进项目仓库 |
 
 **结果（2026-10-14，字符数；token 为粗估：中文 1 字 1 token，其余 4 字符 1 token）**
 

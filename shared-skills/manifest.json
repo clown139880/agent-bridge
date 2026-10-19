@@ -40,7 +40,7 @@
       "name": "agent-memory",
       "version": "1.0.0",
       "files": {
-        "SKILL.md": "8c9a4a0075f54e1c11f868beec740fd1a3301e5ce4703ba294c53e78eaaead96",
+        "SKILL.md": "de926cbde44631c8c2b40d33d0dba7c19e5762bc86f908b52244772f856fdf9c",
         "agents/openai.yaml": "9898e403a9ec90d6a5fb702433d41c47754962b7464622d2e5d8766909295f0d"
       },
       "dependencies": [

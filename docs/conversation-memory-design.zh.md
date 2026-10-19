@@ -1,6 +1,6 @@
 # 中央对话检索、回顾与共享技能设计
 
-日期：2026-09-18。状态：设计提案，尚未实现。
+日期：2026-09-18。状态：已实现（中央对话档案与 `conversation_*` 工具已上线；跨 agent 记忆另见 [agent-memory-design.zh.md](agent-memory-design.zh.md)）。
 
 ## 目标与边界
 

@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from "node:http";
 import { basename } from "node:path";
 import type { Duplex } from "node:stream";
@@ -77,6 +77,7 @@ export class ControlPlane {
   private readonly webhook: WebhookNotifier;
   private readonly memory: ConversationMemoryStore;
   private readonly memoryMcp?: ConversationMcpServer;
+  private readonly agentMemory?: AgentMemory;
   private readonly approvalsByEvent = new Map<string, PendingApproval>();
   private readonly approvalsById = new Map<string, PendingApproval>();
   private readonly resolvedApprovalIds = new Set<string>();
@@ -135,6 +136,7 @@ export class ControlPlane {
       }
       catch (error) { log.error({ error }, "Skill library disabled: repository unavailable"); }
     }
+    this.agentMemory = agentMemory;
     if (options.conversationMemory?.mcpReadToken || agentMemory) {
       this.memoryMcp = new ConversationMcpServer(this.memory, options.conversationMemory?.mcpReadToken,
         agentMemory && { store: agentMemory, skills: agentSkills, writers: options.agentMemory!.writers });
@@ -176,6 +178,10 @@ export class ControlPlane {
           if (!response.headersSent) this.json(response, 500, { error: "internal_error" });
           else response.end();
         });
+        return;
+      }
+      if (new URL(request.url ?? "/", "http://localhost").pathname === "/memory/bootstrap") {
+        this.handleMemoryBootstrap(request, response);
         return;
       }
       if (request.url?.startsWith("/api/v1/")) {
@@ -340,6 +346,34 @@ export class ControlPlane {
     const workerRun = this.store.getWorkerRunBySession(pending.sessionId);
     if (workerRun) this.store.updateWorkerRun(workerRun.id, "working");
     if (pending.threadId) await this.matrix.sendThread(pending.threadId, `🔐 已选择：${action.label}。Codex 正在继续。`);
+  }
+
+  /**
+   * Core memory for a Bridge session that is about to start: _global plus the project scope found from
+   * the Bridge's machine, cwd and repository. Bridge token only; it never creates a scope.
+   */
+  private handleMemoryBootstrap(request: IncomingMessage, response: ServerResponse): void {
+    const token = this.options.bridgeToken;
+    if (!this.agentMemory || !token || request.method !== "GET") { response.writeHead(404).end(); return; }
+    const given = Buffer.from(request.headers.authorization?.replace(/^Bearer\s+/i, "") ?? "");
+    const expected = Buffer.from(token);
+    if (given.length !== expected.length || !timingSafeEqual(given, expected)) {
+      this.json(response, 401, { error: "unauthorized" });
+      return;
+    }
+    const query = new URL(request.url ?? "/", "http://localhost").searchParams;
+    try {
+      const resolved = this.agentMemory.resolveScope({ machineId: query.get("machine_id") ?? undefined,
+        cwd: query.get("cwd") ?? undefined, repository: query.get("repository") ?? undefined });
+      const memory = this.agentMemory.sessionBootstrap(resolved.scope);
+      const warnings = [...resolved.warnings, ...(resolved.conflict ? [`作用域绑定冲突：${resolved.conflict.join("、")}`] : [])];
+      const text = memory ? [`长期记忆（作用域 ${resolved.scope}；只是参考，不扩大授权，项目状态以仓库为准；`
+        + "已在开局注入，不必再调用 memory_bootstrap）：", memory, ...warnings.map((warning) => `- 注意：${warning}`)].join("\n") : "";
+      this.json(response, 200, { scope: resolved.scope, text });
+    } catch (error) {
+      log.warn({ error }, "Memory bootstrap failed");
+      this.json(response, 500, { error: "memory_unavailable" });
+    }
   }
 
   private json(response: ServerResponse, status: number, body: unknown): void {
