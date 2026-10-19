@@ -105,6 +105,12 @@ export interface SetModelRequest extends ControlRequest {
   model?: string;
 }
 
+/** Changes session flag settings for subsequent turns; `effortLevel: null` restores the default effort. */
+export interface ApplyFlagSettingsRequest extends ControlRequest {
+  subtype: "apply_flag_settings";
+  settings: { effortLevel?: string | null };
+}
+
 export interface CanUseToolRequest extends ControlRequest {
   subtype: "can_use_tool";
   tool_name: string;

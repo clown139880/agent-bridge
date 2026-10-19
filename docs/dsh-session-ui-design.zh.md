@@ -422,3 +422,13 @@ Agent Bridge 后端 58 项通过、4 项跳过；插件 47 项通过、1 项跳�
 最终修复使用稳定闭包调用 `source.subscribe()` 和 `source.getSnapshot()`，保留 DSH observable 的 receiver，并把 UI 测试改为与真实 controller 相同的 `this.refreshSnapshot` 形式。插件检查为 49 项通过、1 项跳过。修复部署后的真实页面已直接显示 Bridge 会话、项目摘要和“展开其余会话”；点击 Bridge 行会选中该行并挂载 Bridge conversation。Client SHA256 为 `84471E6A727B2440DFFF20E73BFF1A242CD020DB4C55919F1087EC9F2505FE0F`，Host SHA256 为 `6DB998D5D2FBC5DB818062C76365F655A3A739C0C2C73058203634D55B87C525`，备份位于 `20260908-220152-593`。重启使旧兼容模式 token 失效，因此该浏览器页中的详情 RPC 最终返回 403；列表可见性、行点击和 conversation 挂载已经在真实 renderer 验证，详情数据加载需要用重启后生成的新兼容模式链接复验。
 
 后续每轮“真实验收”必须读取页面 console，并包含用户 profile 中的实际 Bridge 行可见性与交互；mock preview、哈希和无错误日志只能作为辅助证据。
+
+## Bridge 会话的推理强度
+
+模型目录改为 relay 的 `/models` 列表后，effort 元数据随之消失，`ModelSelect` 不再显示推理强度。effort 属于
+coding agent 而非模型，因此目录按 worker 的 agent 为每个模型（含 Remote auto）补上等级：Claude 为
+low／medium／high／xhigh／max，Codex 为 low／medium／high／xhigh，Pi 不支持则不显示。不设 defaultEffort，
+原生菜单因此另有“provider 默认”一项，选它时 adapter 发送 `reasoningEffort: "default"`，Bridge 据此恢复 agent
+默认值。Claude adapter 在新 turn 前用 `apply_flag_settings.effortLevel` 切换 effort，创建会话时用 `--effort`；
+`create_session` 也携带 effort，草稿的第一条消息不再丢失所选等级。所选等级按会话记在客户端，重新打开会话时
+菜单显示的仍是 Host 实际发送的等级。

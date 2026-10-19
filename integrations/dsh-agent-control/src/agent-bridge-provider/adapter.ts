@@ -12,6 +12,8 @@ import { relayPendingInteractions } from './approval-bridge.js'
 import { uploadPromptImages } from './attachments.js'
 
 export const AGENT_BRIDGE_PROVIDER = PROVIDER
+/** The Bridge's word for "the agent's own default effort". */
+const DEFAULT_EFFORT = 'default'
 export { toolProgressLine }
 /**
  * Whether an aborted local turn was stopped by someone (Stop, a cancelling
@@ -69,10 +71,12 @@ export class AgentBridgeLlmAdapter extends LlmAdapter {
       let expectedTurnId = ''
       // Native provider catalogs are not remote model catalogs.
       const model = options.provider === PROVIDER && options.model !== 'remote' ? options.model : undefined
+      const effort = options.provider === PROVIDER ? options.reasoningEffort : undefined
       if (!remoteId) {
         // A draft's first message creates its Bridge session; that session has no
-        // earlier history to skip. create_session takes no reasoning effort.
-        receipt = await this.target.createDraftRemote(nativeId, { input, ...(model ? { model } : {}), ...(attachments.length ? { attachments } : {}) }, signal)
+        // earlier history to skip, and starts on the agent's default effort.
+        receipt = await this.target.createDraftRemote(nativeId, { input, ...(model ? { model } : {}), ...(effort ? { reasoningEffort: effort } : {}),
+          ...(attachments.length ? { attachments } : {}) }, signal)
         remoteId = str(receipt['sessionId'])
       } else {
         const baseline = await readHistory(this.service.bridge, remoteId, undefined, signal)
@@ -83,7 +87,9 @@ export class AgentBridgeLlmAdapter extends LlmAdapter {
         const args: JsonObject = { sessionId: remoteId, input, delivery: 'auto', ...(expectedTurnId ? { expectedTurnId } : {}) }
         if (attachments.length) args['attachments'] = attachments
         if (!expectedTurnId && model) args['model'] = model
-        if (!expectedTurnId && options.reasoningEffort) args['reasoningEffort'] = options.reasoningEffort
+        // No pick is the menu's agent-default choice. A Bridge session keeps its
+        // last effort, so going back to the default has to be said explicitly.
+        if (!expectedTurnId && options.provider === PROVIDER) args['reasoningEffort'] = effort || DEFAULT_EFFORT
         receipt = record(await this.service.bridge.call({ operation: 'submit_turn', args }, signal))
       }
       let finished = false

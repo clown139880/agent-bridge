@@ -15,6 +15,7 @@ import type {
   SessionState,
   UserInputQuestion,
 } from "@agent-bridge/protocol";
+import { DEFAULT_EFFORT } from "@agent-bridge/protocol";
 import { CodexDesktopSessionScanner } from "./desktop-sessions.js";
 import { deriveProjectIdentity, isPathWithinRoots } from "./path-utils.js";
 import type { AgentAdapter, ResumeTarget } from "./agent-adapter.js";
@@ -243,7 +244,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
     this.desktopScannerStarted = false;
   }
 
-  async startSession(requestId: string, projectPath: string, prompt?: string, resume?: ResumeTarget, model?: string, attachments?: AttachmentRef[]): Promise<string> {
+  async startSession(requestId: string, projectPath: string, prompt?: string, resume?: ResumeTarget, model?: string, attachments?: AttachmentRef[], reasoningEffort?: string): Promise<string> {
     await this.ensureReady();
     const cwd = await resolveProjectPath(projectPath, this.options.allowedRoots);
     if (prompt) this.pendingStartPrompts.set(cwd, prompt);
@@ -255,13 +256,13 @@ export class CodexAppServerAdapter implements AgentAdapter {
         const threadCwd = await resolveProjectPath(thread.cwd, this.options.allowedRoots);
         if (threadCwd !== cwd) throw new Error(`Codex thread ${resumeSessionId} belongs to ${threadCwd}, not ${cwd}`);
         await this.discoverThread(thread, prompt, requestId);
-        if (prompt || attachments?.length) await this.startTurn(thread.id, prompt ?? "", model, attachments);
+        if (prompt || attachments?.length) await this.startTurn(thread.id, prompt ?? "", model, attachments, reasoningEffort);
         return thread.id;
       }
       const result = await this.request<{ thread: CodexThread }>("thread/start", { cwd, ...(model ? { model } : {}) });
       this.subscribedThreads.add(result.thread.id);
       await this.discoverThread(result.thread, prompt, requestId);
-      if (prompt || attachments?.length) await this.startTurn(result.thread.id, prompt ?? "", model, attachments);
+      if (prompt || attachments?.length) await this.startTurn(result.thread.id, prompt ?? "", model, attachments, reasoningEffort);
       return result.thread.id;
     } finally {
       if (prompt && this.pendingStartPrompts.get(cwd) === prompt) this.pendingStartPrompts.delete(cwd);
@@ -303,9 +304,9 @@ export class CodexAppServerAdapter implements AgentAdapter {
     }
   }
 
-  async createSessionAction(actionId: string, projectPath: string, input?: string, model?: string, attachments?: AttachmentRef[]): Promise<{ sessionId: string; turnId?: string }> {
+  async createSessionAction(actionId: string, projectPath: string, input?: string, model?: string, reasoningEffort?: string, attachments?: AttachmentRef[]): Promise<{ sessionId: string; turnId?: string }> {
     await this.ensureRuntimeForNewWork(actionId);
-    const sessionId = await this.startSession(actionId, projectPath, input, undefined, model, attachments);
+    const sessionId = await this.startSession(actionId, projectPath, input, undefined, model, attachments, reasoningEffort);
     return { sessionId, turnId: this.activeTurns.get(sessionId) };
   }
 
@@ -320,7 +321,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
         throw domainError("approval_pending", "approval is pending");
       await this.ensureThreadSubscribed(sessionId);
       const activeTurnId = this.activeTurns.get(sessionId);
-      if (activeTurnId && (model || reasoningEffort)) throw domainError("model_not_applicable", "model and reasoning effort cannot be changed while steering an active turn");
+      if (activeTurnId && (model || codexEffort(reasoningEffort))) throw domainError("model_not_applicable", "model and reasoning effort cannot be changed while steering an active turn");
       if (expectedTurnId && expectedTurnId !== activeTurnId) throw domainError("turn_changed", "active turn changed");
       if (delivery === "steer" && !activeTurnId) throw domainError("no_active_turn", "session has no active turn");
       if (delivery === "start_turn" && activeTurnId) throw domainError("turn_already_active", "session already has an active turn");
@@ -330,7 +331,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
       else {
         if(model)this.pendingTurnModels.set(sessionId,model);
         let result:{turn?:CodexTurn};
-        try{result=await this.request<{turn?:CodexTurn}>("turn/start",{threadId:sessionId,input,...(model?{model}:{}),...(reasoningEffort?{effort:reasoningEffort}:{})});}
+        try{result=await this.request<{turn?:CodexTurn}>("turn/start",{threadId:sessionId,input,...(model?{model}:{}),...(codexEffort(reasoningEffort)?{effort:codexEffort(reasoningEffort)}:{})});}
         finally{this.pendingTurnModels.delete(sessionId);}
         if (result.turn?.id) {
           this.setActiveTurn(sessionId, result.turn.id);
@@ -1118,12 +1119,12 @@ export class CodexAppServerAdapter implements AgentAdapter {
     }
   }
 
-  private async startTurn(threadId: string, text: string, model?: string, attachments?: AttachmentRef[]): Promise<void> {
+  private async startTurn(threadId: string, text: string, model?: string, attachments?: AttachmentRef[], reasoningEffort?: string): Promise<void> {
     const input = await codexInput(text, attachments, this.options.fetchAttachment);
     if(model)this.pendingTurnModels.set(threadId,model);
     let result:{turn?:CodexTurn};
     try{result=await this.request<{turn?:CodexTurn}>("turn/start", {threadId,
-      input,...(model?{model}:{})});}
+      input,...(model?{model}:{}),...(codexEffort(reasoningEffort)?{effort:codexEffort(reasoningEffort)}:{})});}
     finally{this.pendingTurnModels.delete(threadId);}
     if(result.turn?.id){this.setActiveTurn(threadId,result.turn.id);
       const actual=result.turn.model??model;if(actual)this.turnModels.set(result.turn.id,actual);}
@@ -1399,4 +1400,13 @@ async function waitForSocketClose(socket: WebSocket, timeoutMs: number): Promise
 function isThreadNotFoundError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return /(?:thread.*(?:not found|does not exist)|(?:not found|unknown).*thread)/i.test(message);
+}
+
+/**
+ * The effort to send Codex. Codex has no request that clears an effort override,
+ * so the default choice sends none and the thread keeps its last explicit level.
+ */
+function codexEffort(value?: string): string | undefined {
+  const effort = value?.trim();
+  return effort && effort !== DEFAULT_EFFORT ? effort : undefined;
 }

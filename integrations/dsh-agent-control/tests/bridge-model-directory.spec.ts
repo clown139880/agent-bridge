@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { BRIDGE_PROVIDER, BridgeModelDirectory, NativeModels, REMOTE_MODEL, groupIdOf, groupModels, installBridgeModelDirectories, modelsForWorker } from '../src/client/bridge-model-directory.js'
+import { BRIDGE_PROVIDER, BridgeModelDirectory, NativeModels, REMOTE_MODEL, groupIdOf, groupModels, installBridgeModelDirectories, modelsForWorker, withAgentEfforts } from '../src/client/bridge-model-directory.js'
 import type { NativeCatalog, NativeEntry } from '../src/client/native-catalog.js'
 
 const nativeId = 'agent-bridge-session-1'
@@ -143,6 +143,43 @@ describe('BridgeModelDirectory', () => {
     expect(resolver.directoryFor(nativeId)).toBe(resolver.directoryFor(nativeId))
     stop()
     expect(resolver.directoryFor('native-session')).toBe(nativeDirectory)
+  })
+})
+
+describe('effort levels', () => {
+  const ids = (state: Awaited<ReturnType<BridgeModelDirectory['load']>>) =>
+    state.groups.map(group => group.models.map(model => model.reasoning?.efforts.map(effort => effort.id) ?? []))
+
+  it('offers the levels of the worker agent on every model, Remote auto included', async () => {
+    const claude = await new BridgeModelDirectory(nativeId, catalog(claudeEntry), models().source, vi.fn()).load()
+    for (const levels of ids(claude).flat()) expect(levels).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
+    expect(claude.groups.flatMap(group => group.models).every(model => model.reasoning?.defaultEffort === undefined)).toBe(true)
+    const codex = await new BridgeModelDirectory(nativeId, catalog(entry), models().source, vi.fn()).load()
+    for (const levels of ids(codex).flat()) expect(levels).toEqual(['low', 'medium', 'high', 'xhigh'])
+    // Pi ignores effort, so it offers none.
+    expect(withAgentEfforts({ ...entry, workerId: 'pi@hal', worker: 'Pi' }, [{ id: 'a', name: 'a' }])[0]?.reasoning).toBeUndefined()
+  })
+
+  it('sends the picked level and shows it again when the session is reopened', async () => {
+    const stored = new Map<string, string>()
+    vi.stubGlobal('localStorage', { getItem: (key: string) => stored.get(key) ?? null, setItem: (key: string, value: string) => { stored.set(key, value) } })
+    const selectModel = vi.fn(async () => ({ ok: true }))
+    const directory = new BridgeModelDirectory(nativeId, catalog(claudeEntry), models().source, selectModel)
+    await directory.load()
+    await directory.select({ provider: groupIdOf('claude-opus-5'), model: 'claude-opus-5', reasoningEffort: 'max' })
+    expect(selectModel).toHaveBeenCalledWith({ sessionId: nativeId, provider: BRIDGE_PROVIDER, model: 'claude-opus-5', reasoningEffort: 'max' })
+    expect((await directory.load()).current?.reasoningEffort).toBe('max')
+
+    const reopened = new BridgeModelDirectory(nativeId, catalog(claudeEntry), models().source, vi.fn())
+    expect((await reopened.load()).current).toEqual({ provider: groupIdOf('claude-opus-5'), model: 'claude-opus-5', reasoningEffort: 'max' })
+    // A level this agent does not take is not shown.
+    const codex = new BridgeModelDirectory(nativeId, catalog(entry), models().source, vi.fn())
+    expect((await codex.load()).current?.reasoningEffort).toBeUndefined()
+
+    await directory.select({ provider: groupIdOf('claude-opus-5'), model: 'claude-opus-5' })
+    const cleared = new BridgeModelDirectory(nativeId, catalog(claudeEntry), models().source, vi.fn())
+    expect((await cleared.load()).current?.reasoningEffort).toBeUndefined()
+    vi.unstubAllGlobals()
   })
 })
 

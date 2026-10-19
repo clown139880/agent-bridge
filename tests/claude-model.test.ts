@@ -145,3 +145,36 @@ test('submit_turn switches the model for a fresh turn but not for a steer', asyn
   assert.deepEqual(applied, ['claude-opus-5-5']);
   assert.equal(pushed.length, 2);
 });
+
+test('submit_turn sets the effort for a fresh turn, skips an unchanged one and rejects an unknown level', async () => {
+  const adapter = new ClaudeCodeAdapter({ command: '', allowedRoots: [] }, () => {});
+  const efforts: Array<string | null> = [];
+  const session = {
+    sessionId: 'session', turnSeq: 0, logs: [], pendingApprovals: new Map(),
+    input: { push: () => {} },
+    query: { setModel: async () => {}, setEffort: async (effort: string | null) => { efforts.push(effort); } },
+  } as Record<string, unknown>;
+  (adapter as unknown as { sessions: Map<string, unknown> }).sessions.set('session', session);
+  const settle = () => { delete session['activeTurnId']; };
+
+  await adapter.submitTurnAction('a1', 'session', 'think hard', 'auto', undefined, undefined, 'XHigh');
+  assert.deepEqual(efforts, ['xhigh']);
+  assert.equal(session['effort'], 'xhigh');
+  // A steer keeps the running turn's effort.
+  await adapter.submitTurnAction('a2', 'session', 'and this', 'auto', undefined, undefined, 'max');
+  assert.deepEqual(efforts, ['xhigh']);
+  settle();
+  await adapter.submitTurnAction('a3', 'session', 'again', 'auto', undefined, undefined, 'xhigh');
+  await adapter.submitTurnAction('a4', 'session', 'no pick', 'auto');
+  assert.deepEqual(efforts, ['xhigh']);
+  settle();
+  await assert.rejects(adapter.submitTurnAction('a5', 'session', 'bogus', 'auto', undefined, undefined, 'ultra'),
+    (error: Error & { code?: string }) => error.code === 'invalid_reasoning_effort');
+  assert.deepEqual(efforts, ['xhigh']);
+  // `default` hands the next turn back to Claude's own default, once.
+  await adapter.submitTurnAction('a6', 'session', 'default', 'auto', undefined, undefined, 'default');
+  settle();
+  await adapter.submitTurnAction('a7', 'session', 'default again', 'auto', undefined, undefined, 'default');
+  assert.deepEqual(efforts, ['xhigh', null]);
+  assert.equal(session['effort'], undefined);
+});

@@ -602,7 +602,7 @@ export class PiAdapter implements AgentAdapter {
     this.beginTurn(session, text, model, await this.materialize(attachments));
   }
 
-  async createSessionAction(actionId: string, projectPath: string, input?: string, model?: string, attachments?: AttachmentRef[]): Promise<{ sessionId: string; turnId?: string }> {
+  async createSessionAction(actionId: string, projectPath: string, input?: string, model?: string, _reasoningEffort?: string, attachments?: AttachmentRef[]): Promise<{ sessionId: string; turnId?: string }> {
     const sessionId = await this.startSession(actionId, projectPath, input, undefined, model, attachments);
     return { sessionId, turnId: this.sessions.get(sessionId)?.activeTurnId };
   }

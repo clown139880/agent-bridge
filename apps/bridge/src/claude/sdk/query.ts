@@ -25,6 +25,7 @@ import {
   type SDKControlResponse,
   type SDKMessage,
   type SetModelRequest,
+  type ApplyFlagSettingsRequest,
 } from "./types.js";
 import {
   getDefaultClaudeCodePath,
@@ -143,6 +144,13 @@ export class Query implements AsyncIterableIterator<SDKMessage> {
   async setModel(model: string): Promise<void> {
     if (!this.childStdin) throw new Error("Model switching requires --input-format stream-json");
     const request: SetModelRequest = { subtype: "set_model", model };
+    await this.request(request, this.childStdin);
+  }
+
+  /** Switch the effort level used by subsequent turns, like `--effort` at spawn; `null` restores the default. */
+  async setEffort(effortLevel: string | null): Promise<void> {
+    if (!this.childStdin) throw new Error("Effort switching requires --input-format stream-json");
+    const request: ApplyFlagSettingsRequest = { subtype: "apply_flag_settings", settings: { effortLevel } };
     await this.request(request, this.childStdin);
   }
 

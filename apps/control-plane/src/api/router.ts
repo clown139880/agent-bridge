@@ -231,10 +231,10 @@ export class AgentControlApi {
     const parsed=parseWorkerId(workerId);const agentType=parsed?agentTypeForWorkerPrefix(parsed.prefix):undefined;
     if(!parsed||!agentType)throw new ApiProblem(400,"invalid_worker_id","workerId must be <codex|claude|pi>@machine");
     const machineId=parsed.machineId,workspace=string(body.workspace,"workspace",true)!,input=string(body.input,"input"),
-      model=string(body.model,"model"),attachments=attachmentsField(body.attachments);
+      model=string(body.model,"model"),reasoningEffort=string(body.reasoningEffort,"reasoningEffort"),attachments=attachmentsField(body.attachments);
     this.requireActionBridge(machineId);
     const created=this.createAction(principal,key,"/api/v1/sessions",body,"create_session",machineId);
-    if(!created.existing)this.dispatch(created.action,{type:"action.create_session",actionId:created.action.actionId,agentType,projectPath:workspace,input,model,attachments});
+    if(!created.existing)this.dispatch(created.action,{type:"action.create_session",actionId:created.action.actionId,agentType,projectPath:workspace,input,model,reasoningEffort,attachments});
     this.ok(response,actionJson(this.store.action(created.action.actionId)!),202);
   }
 

@@ -952,6 +952,13 @@ describe('Bridge native turn', () => {
     expect(f.bridge.call).toHaveBeenCalledWith({ operation: 'submit_turn', args: {
       sessionId: 'remote-1', input: 'go', delivery: 'auto', model: 'gpt-5.6-sol', reasoningEffort: 'high',
     } }, expect.any(AbortSignal))
+    // No pick is the agent-default choice, which the Bridge session has to be told.
+    submitted = false
+    for await (const _chunk of adapter.stream({ sessionId: agent.id, provider: 'agent-bridge', model: 'remote',
+      messages: [{ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'again' }] }] } as GenerateOptions)) { /* drain */ }
+    expect(f.bridge.call).toHaveBeenCalledWith({ operation: 'submit_turn', args: {
+      sessionId: 'remote-1', input: 'again', delivery: 'auto', reasoningEffort: 'default',
+    } }, expect.any(AbortSignal))
     await f.target.dispose()
   })
   it('reports failed receipts rather than emitting a successful finish', async () => {

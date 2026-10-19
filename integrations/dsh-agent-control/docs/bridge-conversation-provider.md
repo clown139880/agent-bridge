@@ -213,7 +213,12 @@ to an already-running Desktop Host, or restart Desktop to hide this distinction.
 The native model-control seat is session-aware. For imported Bridge sessions it
 loads the bound worker's model catalog and persists the choice as an
 `agent-bridge` selection, so the adapter sends that model and reasoning effort
-on the next new remote turn. Ordinary DSH sessions continue to use the shared
+on the next new remote turn. The relay catalog carries no reasoning metadata, so
+the menu offers the effort levels of the worker's agent (Claude: low–max, Codex:
+low–xhigh, Pi: none) plus the agent default; the default choice is sent as
+`reasoningEffort: "default"` because a Bridge session keeps its last level. The
+picked level is remembered per session in the client, since the Bridge session
+records none. Ordinary DSH sessions continue to use the shared
 Host provider catalog. Current-message images are read
 through the native attachment store, uploaded to Bridge, and submitted as refs.
 Image-only prompts carry a neutral `[Image attached]` text marker for Bridge's

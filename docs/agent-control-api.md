@@ -509,6 +509,7 @@ interface CreateSessionRequest {
   workspace: string;         // required; Bridge 所见绝对路径
   input?: string;            // optional; 非空时创建后立即 start turn
   model?: string;            // optional; only for the initial turn
+  reasoningEffort?: string;  // optional; the session's starting effort
   attachments?: AttachmentRef[]; // optional; images only
 }
 ```
@@ -563,7 +564,10 @@ interface SubmitTurnRequest {
 }
 ```
 
-`model` 或 `reasoningEffort` 在 active turn/steer 上返回 `409 model_not_applicable`。附件引用必须先由
+`model` 或 `reasoningEffort` 在 active turn/steer 上返回 `409 model_not_applicable`。`reasoningEffort` 是 agent 的
+effort 等级：Claude 接受 `low|medium|high|xhigh|max`（其他值以 `invalid_reasoning_effort` 失败），Codex 原样传给
+`turn/start.effort`。effort 在 session 内保持到下次修改；省略表示沿用当前 effort，`"default"` 表示恢复 agent 默认值
+（Claude 清除覆盖；Codex 没有清除覆盖的请求，`default` 等同于省略）。附件引用必须先由
 `POST /attachments` 创建；每条消息最多 8 张。DSH 原生 provider 支持没有可见文字的图片消息，但会为
 Bridge 的非空 input 契约补入中性文本标记。
 

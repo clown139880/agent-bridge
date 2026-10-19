@@ -646,6 +646,7 @@ export class ControlPlane {
         actionId: action.actionId, projectPath: String(request.workspace),
         input: typeof request.input === "string" ? request.input : undefined,
         model: typeof request.model === "string" ? request.model : undefined,
+        reasoningEffort: typeof request.reasoningEffort === "string" ? request.reasoningEffort : undefined,
         attachments: attachmentsFromBody(request) });
       else if (action.kind === "submit_turn" && action.sessionId) this.registry.send(machineId, {
         type: "action.submit_turn", actionId: action.actionId, sessionId: action.sessionId,

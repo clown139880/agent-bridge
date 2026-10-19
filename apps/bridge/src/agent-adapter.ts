@@ -27,7 +27,7 @@ export interface AgentAdapter {
    * Start a session for a project, or continue `resume`, optionally kicking off a
    * first turn. Returns the public session id the session reports under.
    */
-  startSession(requestId: string, projectPath: string, prompt?: string, resume?: ResumeTarget, model?: string, attachments?: AttachmentRef[]): Promise<string>;
+  startSession(requestId: string, projectPath: string, prompt?: string, resume?: ResumeTarget, model?: string, attachments?: AttachmentRef[], reasoningEffort?: string): Promise<string>;
   /**
    * Revive a session this bridge no longer holds in memory (e.g. after a restart/
    * self-update killed its subprocess), keeping the same public sessionId, so a
@@ -39,7 +39,7 @@ export interface AgentAdapter {
   input(sessionId: string, text: string, model?: string, attachments?: AttachmentRef[]): Promise<void>;
 
   /** Idempotent action: create a session. */
-  createSessionAction(actionId: string, projectPath: string, input?: string, model?: string, attachments?: AttachmentRef[]): Promise<{ sessionId: string; turnId?: string }>;
+  createSessionAction(actionId: string, projectPath: string, input?: string, model?: string, reasoningEffort?: string, attachments?: AttachmentRef[]): Promise<{ sessionId: string; turnId?: string }>;
   /** Idempotent action: submit a turn with explicit delivery semantics. */
   submitTurnAction(
     actionId: string,

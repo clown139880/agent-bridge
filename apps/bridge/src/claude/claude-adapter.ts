@@ -15,6 +15,7 @@ import type {
   TaskStatus,
   UserInputQuestion,
 } from "@agent-bridge/protocol";
+import { DEFAULT_EFFORT } from "@agent-bridge/protocol";
 import type { AgentAdapter, AdapterEmit, ResumeTarget } from "../agent-adapter.js";
 import type { AttachmentFetcher, FetchedAttachment } from "../attachments.js";
 import { resolveProjectPath, summarizePrompt } from "../app-server.js";
@@ -118,6 +119,8 @@ interface ClaudeSession {
   input: PushableAsyncIterable<SDKUserMessage>;
   /** Model in force for the next turn; undefined means the workspace default. */
   model?: string;
+  /** Effort level in force for the next turn; undefined means Claude's default. */
+  effort?: string;
   query?: Query;
   abort: AbortController;
   activeTurnId?: string;
@@ -228,9 +231,10 @@ export class ClaudeCodeAdapter implements AgentAdapter {
 
   // ---- session lifecycle -------------------------------------------------
 
-  async startSession(requestId: string, projectPath: string, prompt?: string, resume?: ResumeTarget, model?: string, attachments?: AttachmentRef[]): Promise<string> {
+  async startSession(requestId: string, projectPath: string, prompt?: string, resume?: ResumeTarget, model?: string, attachments?: AttachmentRef[], reasoningEffort?: string): Promise<string> {
+    const effort = claudeEffort(reasoningEffort) ?? undefined;
     if (!resume) {
-      return this.launch({ publicSessionId: `claude-${randomUUID()}`, requestId, projectPath, prompt, model, attachments });
+      return this.launch({ publicSessionId: `claude-${randomUUID()}`, requestId, projectPath, prompt, model, effort, attachments });
     }
     // Continue under the public id, resuming Claude's own uuid. The public id is a
     // uuid only for sessions discovered from a transcript on disk.
@@ -248,7 +252,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     // A held, idle subprocess still owns the conversation; replace it rather than
     // leaving two processes writing one transcript.
     if (held) this.close(held);
-    return this.launch({ publicSessionId: resume.sessionId, requestId, projectPath, prompt, resumeNativeId, model, attachments });
+    return this.launch({ publicSessionId: resume.sessionId, requestId, projectPath, prompt, resumeNativeId, model, effort: effort ?? held?.effort, attachments });
   }
 
   /**
@@ -326,7 +330,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     log.info({ sessionId: session.sessionId }, "transcript continued outside the bridge; relaunching session");
     this.close(session);
     await this.launch({ publicSessionId: session.sessionId, requestId: session.sessionId, projectPath: session.projectPath,
-      resumeNativeId: nativeId, ...(session.model ? { model: session.model } : {}) });
+      resumeNativeId: nativeId, ...(session.model ? { model: session.model } : {}), ...(session.effort ? { effort: session.effort } : {}) });
     const relaunched = this.require(session.sessionId);
     this.backfillTranscript(relaunched, settled);
     return relaunched;
@@ -343,8 +347,8 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     this.sessions.delete(session.sessionId);
   }
 
-  private async launch(params: { publicSessionId: string; requestId: string; projectPath: string; prompt?: string; resumeNativeId?: string; model?: string; attachments?: AttachmentRef[] }): Promise<string> {
-    const { publicSessionId: sessionId, requestId, projectPath, prompt, resumeNativeId, model, attachments } = params;
+  private async launch(params: { publicSessionId: string; requestId: string; projectPath: string; prompt?: string; resumeNativeId?: string; model?: string; effort?: string; attachments?: AttachmentRef[] }): Promise<string> {
+    const { publicSessionId: sessionId, requestId, projectPath, prompt, resumeNativeId, model, effort, attachments } = params;
     const cwd = await resolveProjectPath(projectPath, this.options.allowedRoots);
     // The public id is bridge-assigned and stable for the session's lifetime.
     // Claude's own uuid is learned from system/init (see handleSystem) and kept as
@@ -358,6 +362,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       projectIdentity: await deriveProjectIdentity(cwd),
       promptSummary: summarizePrompt(prompt),
       ...(model ? { model } : {}),
+      ...(effort ? { effort } : {}),
       createdAt: Date.now(),
       updatedAt: Date.now(),
       settledAt: Date.now(),
@@ -391,6 +396,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
         // Claude's own resumable id (native uuid), NOT the bridge public id.
         resume: resumeNativeId,
         model,
+        effort,
         // Lets a tool the agent runs name its own Bridge session (deploy/hal/deploy.sh).
         env: { AGENT_BRIDGE_SESSION_ID: sessionId },
         abort: session.abort.signal,
@@ -866,8 +872,21 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     log.info({ sessionId: session.sessionId, model: next }, "claude model switched");
   }
 
-  async createSessionAction(actionId: string, projectPath: string, input?: string, model?: string, attachments?: AttachmentRef[]): Promise<{ sessionId: string; turnId?: string }> {
-    const sessionId = await this.startSession(actionId, projectPath, input, undefined, model, attachments);
+  /**
+   * Like applyModel: an effort change applies from the next turn, and a rejected
+   * one fails the turn. `null` restores Claude's default; undefined keeps the
+   * current effort.
+   */
+  private async applyEffort(session: ClaudeSession, effort: string | null | undefined): Promise<void> {
+    if (effort === undefined || effort === (session.effort ?? null)) return;
+    if (!session.query) throw new Error("Claude session is not running");
+    await session.query.setEffort(effort);
+    session.effort = effort ?? undefined;
+    log.info({ sessionId: session.sessionId, effort: effort ?? "default" }, "claude effort switched");
+  }
+
+  async createSessionAction(actionId: string, projectPath: string, input?: string, model?: string, reasoningEffort?: string, attachments?: AttachmentRef[]): Promise<{ sessionId: string; turnId?: string }> {
+    const sessionId = await this.startSession(actionId, projectPath, input, undefined, model, attachments, reasoningEffort);
     return { sessionId, turnId: this.sessions.get(sessionId)?.activeTurnId };
   }
 
@@ -878,9 +897,10 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     delivery: "auto" | "steer" | "start_turn",
     expectedTurnId?: string,
     model?: string,
-    _reasoningEffort?: string,
+    reasoningEffort?: string,
     attachments?: AttachmentRef[],
   ): Promise<{ sessionId: string; turnId?: string; resolvedAction: "steer" | "start_turn" }> {
+    const effort = claudeEffort(reasoningEffort);
     const session = await this.reloadIfContinuedElsewhere(this.require(sessionId));
     if (session.pendingUserInput) throw domainError("user_input_pending", "structured user input is pending");
     if ([...session.pendingApprovals.values()].some((a) => !a.answered)) throw domainError("approval_pending", "approval is pending");
@@ -891,7 +911,10 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     const resolvedAction = activeTurnId ? "steer" : "start_turn";
     // A steer joins the running turn, whose model is already fixed; the
     // control-plane rejects a model on steer, so only a fresh turn switches.
-    if (!activeTurnId) await this.applyModel(session, model);
+    if (!activeTurnId) {
+      await this.applyModel(session, model);
+      await this.applyEffort(session, effort);
+    }
     this.beginTurn(session, text, await this.materialize(attachments));
     this.emitSessionEvent(session, "message.completed", `claude:${sessionId}:action:${actionId}:user`, { role: "user", text: truncate(text), attachments: attachments ?? [] });
     return { sessionId, turnId: session.activeTurnId, resolvedAction };
@@ -1374,6 +1397,20 @@ function mapFreeTextAnswer(questions: UserInputQuestion[], text: string): Record
 
 function domainError(code: string, message: string): Error & { code: string; retryable: boolean } {
   return Object.assign(new Error(message), { code, retryable: false });
+}
+
+/** The levels `claude --effort` accepts. Claude Code takes any string over the control protocol without complaint, so the bridge checks. */
+export const CLAUDE_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
+
+/** A requested effort: a level, `null` for `default` (Claude's own default), or undefined to keep the current one. */
+function claudeEffort(value?: string): string | null | undefined {
+  const effort = value?.trim().toLowerCase();
+  if (!effort) return undefined;
+  if (effort === DEFAULT_EFFORT) return null;
+  if (!(CLAUDE_EFFORTS as readonly string[]).includes(effort)) {
+    throw domainError("invalid_reasoning_effort", `Claude effort must be one of ${CLAUDE_EFFORTS.join(", ")}`);
+  }
+  return effort;
 }
 
 interface SessionMeta {

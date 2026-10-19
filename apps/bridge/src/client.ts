@@ -464,7 +464,7 @@ export class BridgeClient {
         throw Object.assign(new Error(this.admissionMessage()), { code: "update_required", retryable: true });
       }
       if(message.type==="action.create_session"){
-        const value=await this.adapterForType(message.agentType).createSessionAction(message.actionId,message.projectPath,message.input,message.model,message.attachments);
+        const value=await this.adapterForType(message.agentType).createSessionAction(message.actionId,message.projectPath,message.input,message.model,message.reasoningEffort,message.attachments);
         result={type:"action.result",actionId:message.actionId,kind,status:"succeeded",...value,timestamp:Date.now()};
       }else if(message.type==="action.submit_turn"){
         const value=await (await this.ensureTurnOwner(message)).submitTurnAction(message.actionId,message.sessionId,message.input,message.delivery,message.expectedTurnId,message.model,message.reasoningEffort,message.attachments);

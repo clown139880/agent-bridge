@@ -78,6 +78,23 @@ export function modelsForWorker(entry: NativeEntry, models: readonly DirectoryMo
 }
 
 /**
+ * The effort levels each agent applies per turn. The relay catalog carries no
+ * reasoning metadata — effort is the coding agent's setting, not the model's —
+ * so the menu offers the levels the worker's agent accepts. An agent missing
+ * here ignores effort, so its models offer none.
+ */
+const AGENT_EFFORTS: Record<string, Array<{ id: string; name: string }>> = {
+  claude: [{ id: 'low', name: 'Low' }, { id: 'medium', name: 'Medium' }, { id: 'high', name: 'High' }, { id: 'xhigh', name: 'Extra high' }, { id: 'max', name: 'Max' }],
+  codex: [{ id: 'low', name: 'Low' }, { id: 'medium', name: 'Medium' }, { id: 'high', name: 'High' }, { id: 'xhigh', name: 'Extra high' }],
+}
+
+/** Give every model this worker's agent effort levels; no default, so the menu also offers the agent's own default. */
+export function withAgentEfforts(entry: NativeEntry, models: readonly DirectoryModel[]): DirectoryModel[] {
+  const efforts = AGENT_EFFORTS[agentOf(entry)]
+  return efforts ? models.map(model => ({ ...model, reasoning: { efforts: efforts.map(effort => ({ ...effort })) } })) : [...models]
+}
+
+/**
  * Model families, in menu order. The relay's rows carry no vendor field
  * (`owned_by` is mostly "custom"), so the family is read off the id.
  */
@@ -115,8 +132,10 @@ export function groupModels(models: readonly DirectoryModel[]): DirectoryState['
     if (rows) rows.push(model); else byFamily.set(id, [model])
   }
   const order = [...FAMILIES, OTHER_FAMILY]
+  // Remote auto still runs on the agent, so it takes the same effort levels.
+  const reasoning = models[0]?.reasoning
   return [
-    { id: AUTO_GROUP, name: '自动', models: [{ id: REMOTE_MODEL, name: 'Remote auto', description: '不指定模型，沿用远端会话 / worker 的默认模型' }] },
+    { id: AUTO_GROUP, name: '自动', models: [{ id: REMOTE_MODEL, name: 'Remote auto', description: '不指定模型，沿用远端会话 / worker 的默认模型', ...(reasoning ? { reasoning } : {}) }] },
     ...order.flatMap(family => {
       const rows = byFamily.get(`${BRIDGE_PROVIDER}:${family.id}`)
       return rows ? [{ id: `${BRIDGE_PROVIDER}:${family.id}`, name: family.name,
@@ -151,6 +170,33 @@ function rememberModel(entry: NativeEntry | undefined, model: string): void {
   try {
     const stored = JSON.parse(globalThis.localStorage?.getItem(RECENT_KEY) ?? '{}') as Record<string, unknown>
     globalThis.localStorage?.setItem(RECENT_KEY, JSON.stringify({ ...stored, [agentOf(entry)]: model }))
+  } catch { /* remembering is a convenience */ }
+}
+
+const EFFORT_KEY = 'agent-control:bridge-effort'
+const EFFORT_LIMIT = 200
+
+/**
+ * The effort last picked for each Bridge session. The Host keeps the pick and
+ * sends it with every turn, but the Bridge session records no effort, so a
+ * reopened menu would otherwise show the agent default while turns still run
+ * on the picked level.
+ */
+function storedEffort(nativeId: string): string | undefined {
+  try {
+    const stored = JSON.parse(globalThis.localStorage?.getItem(EFFORT_KEY) ?? '{}') as Record<string, unknown>
+    return typeof stored[nativeId] === 'string' ? stored[nativeId] : undefined
+  } catch { return undefined }
+}
+
+function rememberEffort(nativeId: string, effort: string | undefined): void {
+  try {
+    const stored = JSON.parse(globalThis.localStorage?.getItem(EFFORT_KEY) ?? '{}') as Record<string, unknown>
+    delete stored[nativeId]
+    if (effort) stored[nativeId] = effort
+    // Insertion order is pick order, so the oldest picks drop first.
+    const kept = Object.entries(stored).slice(-EFFORT_LIMIT)
+    globalThis.localStorage?.setItem(EFFORT_KEY, JSON.stringify(Object.fromEntries(kept)))
   } catch { /* remembering is a convenience */ }
 }
 
@@ -226,7 +272,8 @@ export class BridgeModelDirectory implements Directory {
     if (this.disposed || this.selected || !entry?.model?.trim()) return
     const current = this.state.current
     if (current?.model === entry.model) return
-    this.set({ ...this.state, current: { provider: groupIdOf(entry.model), model: entry.model } })
+    this.set({ ...this.state, current: { provider: groupIdOf(entry.model), model: entry.model,
+      ...(current?.reasoningEffort ? { reasoningEffort: current.reasoningEffort } : {}) } })
   }
 
   async load(): Promise<DirectoryState> {
@@ -245,7 +292,7 @@ export class BridgeModelDirectory implements Directory {
       if (!entry) { await this.catalog.refresh(); entry = this.catalog.entry(this.nativeId) }
       if (!entry) throw new Error('Bridge 会话尚未同步，请稍后重试。')
       if (!entry.workerId) throw new Error('Bridge 会话缺少执行 worker。')
-      const models = modelsForWorker(entry, await this.models.load())
+      const models = withAgentEfforts(entry, modelsForWorker(entry, await this.models.load()))
       if (!models.length) throw new Error('此 Bridge worker 没有可用模型。')
       const has = (model: string | undefined) => !!model && (model === REMOTE_MODEL || models.some(value => value.id === model))
       // What the menu shows must be what the next turn sends. A Bridge agent
@@ -257,7 +304,9 @@ export class BridgeModelDirectory implements Directory {
         : has(sessionModel) ? sessionModel! : REMOTE_MODEL
       const recent = this.selected || has(sessionModel) ? undefined
         : recentModels(this.catalog, entry).find(model => model !== REMOTE_MODEL && has(model))
-      const reasoningEffort = models.find(value => value.id === currentModel)?.reasoning?.defaultEffort
+      const efforts = models[0]?.reasoning?.efforts ?? []
+      const picked = this.selected ? this.state.current?.reasoningEffort : storedEffort(this.nativeId)
+      const reasoningEffort = efforts.some(effort => effort.id === picked) ? picked : undefined
       const current = { provider: groupIdOf(currentModel), model: currentModel, ...(reasoningEffort ? { reasoningEffort } : {}) }
       this.set({ current, routable: true, groups: groupModels(models), failures: [], status: 'ready', error: null })
       // Adopt the recent model through the Host, exactly as a click would, so the
@@ -282,6 +331,7 @@ export class BridgeModelDirectory implements Directory {
       if (!result.ok) throw new Error(`${result.error?.code ?? 'select_failed'}: ${result.error?.message ?? '模型选择失败'}`)
       this.selected = true
       if (remember) rememberModel(this.catalog.entry(this.nativeId), selection.model)
+      rememberEffort(this.nativeId, selection.reasoningEffort)
       this.set({ ...this.state, current: { ...selection, provider: groupIdOf(selection.model) }, status: 'ready', error: null })
     } catch (error) {
       this.set({ ...this.state, status: 'error', error: errorText(error) })

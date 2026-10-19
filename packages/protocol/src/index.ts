@@ -376,8 +376,12 @@ export interface CreateSessionActionMessage {
   projectPath: string;
   input?: string;
   model?: string;
+  /** An agent effort level, or DEFAULT_EFFORT; omitted keeps the session's current effort. */
+  reasoningEffort?: string;
   attachments?: AttachmentRef[];
 }
+/** `reasoningEffort` value that returns a session to its agent's default effort. */
+export const DEFAULT_EFFORT = "default";
 export interface SubmitTurnActionMessage {
   type: "action.submit_turn";
   actionId: string;
