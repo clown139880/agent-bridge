@@ -44,6 +44,27 @@ async function fixture() {
   return {path,store,control,internals,sent,base,headers,async close(){await control.stop();store.db.close();rmSync(path,{force:true});}};
 }
 
+test("Control Center shares the listener without swallowing API, assets or health", async () => {
+  const f = await fixture();
+  try {
+    const origin = f.base.replace(/\/api\/v1$/, "");
+    const health = await fetch(`${origin}/health`);
+    assert.equal(health.status, 200); await health.arrayBuffer();
+    const page = await fetch(`${origin}/control/login`);
+    assert.ok([200, 503].includes(page.status));
+    assert.equal(page.headers.get("referrer-policy"), "no-referrer");
+    await page.arrayBuffer();
+    const asset = await fetch(`${origin}/control/assets/missing.js`);
+    assert.equal(asset.status, 404); await asset.arrayBuffer();
+    const unauthorized = await fetch(`${f.base}/sessions`);
+    assert.equal(unauthorized.status, 401); await unauthorized.arrayBuffer();
+    const missing = await fetch(`${f.base}/missing`, { headers: f.headers });
+    assert.equal(missing.status, 404);
+    assert.match(missing.headers.get("content-type")!, /application\/json/);
+    await missing.arrayBuffer();
+  } finally { await f.close(); }
+});
+
 test("orphaned archive replay records a gap and is acknowledged instead of retrying forever", async () => {
   const f = await fixture();
   try {

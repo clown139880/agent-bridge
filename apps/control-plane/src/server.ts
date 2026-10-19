@@ -28,6 +28,7 @@ import { AgentMemory, AgentSkills, type Writer } from "@agent-bridge/agent-memor
 import { ConversationMcpServer } from "./memory-mcp.js";
 import { compareBridgeVersions } from "./bridge-version.js";
 import { PostDeployResumer } from "./post-deploy.js";
+import { controlWebListener } from "./web/app.js";
 
 const log = pino({ name: "control-plane" });
 
@@ -192,6 +193,15 @@ export class ControlPlane {
         void this.controlApi.handle(request, response).catch((error) => {
           log.error({ error }, "Control API request failed");
           if (!response.headersSent) this.json(response, 500, { error: "internal_error" });
+          else response.end();
+        });
+        return;
+      }
+      const pathname = new URL(request.url ?? "/", "http://localhost").pathname;
+      if (pathname === "/control" || pathname.startsWith("/control/")) {
+        void controlWebListener(request, response).catch((error) => {
+          log.error({ error }, "Control Center request failed");
+          if (!response.headersSent) response.writeHead(500).end("Internal error");
           else response.end();
         });
         return;

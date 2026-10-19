@@ -1,6 +1,6 @@
 {
   "name": "agent-bridge",
-  "version": "0.6.98",
+  "version": "0.6.99",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@11.3.0",
@@ -8,8 +8,10 @@
     "node": ">=22.12"
   },
   "scripts": {
-    "build": "tsc -b && pnpm --filter dsh-agent-control-plugin build",
-    "check": "tsc -b --pretty false",
+    "build": "tsc -b && pnpm --filter @agent-bridge/control-center build && pnpm --filter dsh-agent-control-plugin build",
+    "build:control": "tsc -b && pnpm --filter @agent-bridge/control-center build",
+    "check": "tsc -b --pretty false && pnpm --filter @agent-bridge/control-center check",
+    "dev:control-center": "pnpm --filter @agent-bridge/control-center exec vite",
     "dev:control": "tsx watch --conditions=source apps/control-plane/src/index.ts",
     "dev:bridge": "tsx watch --conditions=source apps/bridge/src/index.ts",
     "start:control": "node apps/control-plane/dist/index.js",

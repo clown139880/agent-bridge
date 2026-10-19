@@ -36,6 +36,12 @@ DSH 原生 Session。API 中的 `taskId`、`conversationId` 只是关联标识�
 `WORKER_API_TOKEN` 也是一枚读写 token（Hermes `/ab` 命令使用）。生产应给 DSH Host 使用独立 Control token。
 DSH Host 插件保存 Control token 并代理请求/事件；浏览器 Client 不得读取 token，也不得直连 Control Plane。
 
+以上 Host/Client 限制针对 DSH 插件。独立 Control Center 网页（`/control/`）由操作者主动输入已有 Control
+read/write token，同源直连 `/api/v1`，仅在当前页面内存保存凭据；刷新或关闭后需重新登录。token 不进入
+localStorage、sessionStorage、cookie、构建产物、日志或 SSE query；fetch SSE 使用 Authorization header。
+“启用操作”只是 UI 意图，GET 成功不证明 write scope，真实写权限仍由本 API 校验。生产入口使用 HTTPS。
+详见 [移动端设计](control-center-mobile.md)。此入口不会读取或暴露 DSH Host 保存的 token。
+
 ## 3. Endpoint 总表
 
 | 状态 | Method | Path | 用途 |
@@ -544,6 +550,13 @@ action receipt 和 idempotency key 按正常保留期保留，因此删除成功
 参数：`after`（事件 Cursor，省略表示从保留窗口最早处）、`limit`（默认 100，最大 500）、可重复 `type`。
 按事件因果落库顺序升序返回 `Page<SessionEvent>`。`nextCursor` 指向最后一条返回事件；无新事件时等于
 请求的 `after`（首次空页可为 `null`），`hasMore` 表示当前页后仍有已落库事件。
+
+另支持尾页模式 `tail=true`：省略 `before` 时返回最近 `limit` 条；指定
+`before=<此前尾页的 nextCursor>` 时读取更早内容。响应 `data` 页内仍按落库顺序升序；
+`hasMore` 表示还有更早的事件，`nextCursor` 指向本页最早事件供下次 `before` 使用，无更早内容时为 null。
+`type` 过滤和 `limit` 上限与正向模式相同。`tail=true` 时使用 `before`，不使用 `after`。
+两种模式均附带 `streamCursor`，但历史事件分页 cursor 与 `/stream` 水位属于不同游标空间，禁止混用；
+不能用任意 REST 响应水位跳过尚未应用的 SSE 帧。
 
 这是 session 的跨 run 对话真相，必须包括 user/assistant 完整消息、turn 边界、工具摘要、approval 和 user
 input；不得只返回当前 `AgentEvent` 的生命周期摘要。系统不传输、不存储 token/文本 delta，只提供
