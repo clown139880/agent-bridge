@@ -66,13 +66,12 @@ build() {
   if [ ! -d node_modules ] || ! git diff --quiet "$1" "$2" -- pnpm-lock.yaml; then
     CI=true pnpm install --frozen-lockfile --filter '!dsh-agent-control-plugin'
   fi
-  pnpm exec tsc -b --pretty false
+  pnpm exec tsc -b --pretty false || return $?
+  pnpm --filter @agent-bridge/control-center build
 }
 
 if ! build "$previous" "$target"; then
-  log "build of $target failed; restoring $previous"
-  git reset --hard --quiet "$previous"
-  build "$target" "$previous" || log "rebuild of $previous failed too"
+  log "build of $target failed; checkout and build output retained for investigation"
   die "deploy aborted; services were not restarted"
 fi
 
