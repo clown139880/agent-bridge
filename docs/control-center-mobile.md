@@ -1,8 +1,8 @@
 # Control Center 移动端网页设计
 
-状态：Phase 1 + Phase 2 已在 `0.6.99` 实现；部署状态另见交付记录。设计核对基线：2026-10-19，仓库根版本 `0.6.98`。
+状态：Phase 1 + Phase 2 已在 `0.6.99` 上线（部署提交 `e9664ef`），实际服务只读验收通过；证据与待验收项目见 [交付记录](control-center-mobile-delivery.md)。设计核对基线：2026-10-19，仓库根版本 `0.6.98`。
 
-本文最初作为仅设计任务产出；后续已获批准实施 Phase 1 + Phase 2。下文保留设计决策，实际使用与构建见 [Control Center README](../apps/control-center/README.md)。前端首版合并为 `src/main.tsx`、`src/state.ts` 和 `src/api/`，正文采用安全纯文本；没有实现逐 token delta 或 Phase 3。实现完成不代表服务已部署。
+本文最初作为仅设计任务产出；后续已获批准实施 Phase 1 + Phase 2。下文保留设计决策，实际使用与构建见 [Control Center README](../apps/control-center/README.md)。前端首版合并为 `src/main.tsx`、`src/state.ts` 和 `src/api/`，正文采用安全纯文本；没有实现逐 token delta 或 Phase 3。本次已通过获准的 HAL 部署脚本上线；真机和真实 HTTPS 验收尚未完成。
 
 ## 1. 目标、假设与边界
 
@@ -373,4 +373,4 @@ flowchart TD
 
 实施时的验证建议：API adapter / SSE 用受控帧验证断 chunk、重复、重连、背压、snapshot 竞态和终态收尾；浏览器覆盖移动 Safari / Android Chrome 的软键盘、切后台再恢复、断网、滚动和 360px 窄屏。静态托管应回归 API、memory、health 和 `/bridge` upgrade；不为了网页引入控制面生命周期变化。
 
-未来代码实施会涉及 Control Plane 与构建交付链，届时按仓库规则升级根版本，并让 HAL 发布流程显式生成/携带前端 `dist`（当前仅 `tsc -b` 不会产出 Vite 资源）。实际构建、提交、推送和部署须在后续实现任务范围内进行；本文档不触发这些动作。
+实施已按仓库规则升级根版本至 `0.6.99`，并在明确获准后让 HAL 部署脚本于 `tsc -b` 之后显式生成前端 `dist`，失败保留现场并中止部署。实际部署源提交为 `e9664ef`；本设计文档本身不触发部署，验证结果见交付记录。

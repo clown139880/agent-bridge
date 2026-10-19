@@ -1,6 +1,6 @@
 # Control Center 移动端实施记录
 
-版本：根 `package.json` **0.6.99**。Phase 1 和 Phase 2 已实现、构建与相关测试通过；部署尚未执行，等待对部署脚本例外的明确确认。逐 token delta 和 Phase 3 未实施。
+版本：根 `package.json` **0.6.99**。Phase 1 和 Phase 2 已上线，构建、相关测试与线上只读验收通过。功能提交 `5f8a0ad`，部署脚本提交及本次部署源提交 `e9664ef9b57adbc5ac9ce231321e84156faa3c8d`。逐 token delta 和 Phase 3 未实施；真机、真实 HTTPS 与通知房回执的验收边界见下文。
 
 ## 文件清单
 
@@ -22,6 +22,7 @@
 | `apps/control-plane/package.json` | Hono 和 Node 适配器依赖 |
 | `package.json` | 版本、前端检查和 `build:control` |
 | `pnpm-lock.yaml` | 锁定新增依赖 |
+| `deploy/hal/deploy.sh` | 获批后补齐前端构建、显式传播 tsc 失败、失败保留现场并中止 |
 | `docs/agent-control-api.md` | 已有 tail/before 能力和独立网页认证边界说明 |
 | `docs/control-center-mobile.md` | 原设计及实施状态 |
 | `docs/control-center-mobile-delivery.md` | 本记录 |
@@ -43,37 +44,47 @@
 
 测试日志和截图在本机忽略目录 `.runtime/`，不作为已部署证据。Safari 真机、Android 真机与真实 HTTPS 反代尚未验收。
 
-## 需要人工确认：部署准备
+## 部署结果
 
-用户明确将“改 deploy”和 `git reset --hard` 列为例外，所以未修改或运行 `deploy/hal/deploy.sh`。现有脚本只构建 `tsc -b`，构建失败分支又会调用被禁止的 reset；不能用隐藏构建钩子或别的部署入口绕过此限制。
+2026-10-20（Asia/Shanghai），按用户后续明确批准的最小范围修改 `deploy/hal/deploy.sh`，版本保持 0.6.99：
 
-待确认的具体最小调整如下：
+- `pnpm exec tsc -b --pretty false || return $?`，避免后续前端构建掩盖 TypeScript 失败。
+- 随后执行 `pnpm --filter @agent-bridge/control-center build`，生成同源托管所需 Vite 产物。
+- 构建失败只记录并退出：保留 checkout 与构建现场，不 reset、不自动重建、不重启服务。其他部署行为未改。
 
-```diff
- build() {
-   # 原依赖安装逻辑保留
-   pnpm exec tsc -b --pretty false
-+  pnpm --filter @agent-bridge/control-center build
- }
+脚本提交 `e9664ef` 已推送 `origin/main`；`bash -n`、`git diff --check` 和隔离 stub 检查通过，验证 tsc/front-end 的非零退出分别传播，并验证失败分支直接中止。通过唯一部署入口 `deploy/hal/deploy.sh --note ...` 执行，HAL Bridge 重启中断原 turn。Hermes 随后确认服务上线、post-deploy intent 目录为空且未收到自动续跑；由用户本次消息恢复收尾。此次没有重跑部署或手动重启，也没有扩大修改部署/续跑逻辑；未自动续跑的原因未在本任务中调查。
 
- if ! build "$previous" "$target"; then
--  log "build of $target failed; restoring $previous"
--  git reset --hard --quiet "$previous"
--  build "$target" "$previous" || log "rebuild of $previous failed too"
-+  log "build of $target failed; checkout and build output retained for investigation"
-   die "deploy aborted; services were not restarted"
- fi
-```
+部署后复核时，`/var/lib/agent-bridge/deployed-commit`、本地 HEAD 和 `origin/main` 均为 `e9664ef9b57adbc5ac9ce231321e84156faa3c8d`，工作区干净。下述文档收尾提交会让 Git HEAD 前移，但**不改变运行中的部署提交**。
 
-批准后还应让 `tsc` 的失败明确传播（`pnpm exec tsc -b --pretty false || return $?`），避免增加下一条命令后掩盖其失败。失败时不重置 Git、不恢复构建产物、不重启；保留现场由人工检查。其他部署行为保持原样。
+## 线上只读验收（2026-10-20 00:23–00:24 CST）
 
-脚本原本还会写仓库外的 `/run/lock/agent-bridge-deploy.lock`、`/var/lib/agent-bridge` 部署标记和 post-deploy intent；必要时安装 systemd unit 或 abctl 链接。用户也把仓库外写入列为例外，执行前需确认这些脚本固有写入在本次授权中允许。不会手动编辑密钥或生产数据库，不使用其他重启入口。
+目标为实际控制面 `http://127.0.0.1:8787`，非 mock。从 `/etc/agent-bridge/control-plane.env` 在 Node 脚本内读取 `CONTROL_API_READ_TOKEN`；token 仅用于内存中的 Bearer header，未打印、写入验证报告或传入命令参数。所有业务探测均为 GET，没有对生产 session 发送消息、interrupt、新建、审批或其他写请求；脚本未使用管道到解释器。
 
-## 部署后待完成
+| 检查 | 实际结果 |
+| --- | --- |
+| 服务进程 | Control Plane 和 HAL Bridge 均为 systemd `active`；PID 分别为 `1268342`、`1268343`，启动时间均为 2026-10-20 00:20:06 CST；journal 有实际监听及 HAL 注册记录 |
+| 版本/提交 | 部署标记为 `e9664ef`，根版本 `0.6.99`；控制面从该 checkout 的根 package.json 读取版本。实际 API 中 `codex@hal`、`claude@hal`、`pi@hal` 均 online，均报告 `bridgeVersion: 0.6.99`。协议未提供进程内独立 commit 字段，提交证据来自部署标记、代码源和启动记录 |
+| 健康 | `/health` 返回 200、`ok: true`、`bridges: 1` |
+| 登录与深链 | `/control/login` 返回 200 `text/html`；真实 session 的 `/control/sessions/{id}` 返回相同入口 HTML；入口 HTML 与部署构建产物 SHA-256 一致 |
+| 安全头 | 登录页 CSP 含 `script-src 'self'`、`connect-src 'self'`；`Referrer-Policy: no-referrer`、`X-Content-Type-Options: nosniff`、`Cache-Control: no-store` 均通过 |
+| 静态资源 | 入口引用的 JS/CSS 均返回 200，服务内容与本地部署构建产物 SHA-256 一致，具体 hash 见下表 |
+| 真 404 | `/control/nonexistent.js`、`/control/assets/nonexistent.js`、`/control/nope/x` 均为 404；带 read token 的未知 `/api/v1/control-center-probe-nonexistent` 为 JSON 404 `not_found`，未被 SPA 吞掉 |
+| API 鉴权 | 不带 token 的 `/api/v1/snapshot` 返回 401；带 read token 的 snapshot 返回 200，worker/session/approvals/userInput/streamCursor 结构符合契约；此快照含 6 workers、200 sessions、0 approvals、0 userInput（只代表当时快照） |
+| 活动详情/历史 | 从实际 active session 读取详情与 `events?tail=true&limit=5` 均为 200，返回 5 条历史事件；未输出会话正文 |
+| SSE 首次接流 | `GET /api/v1/stream?sessionId=...&cursor=<snapshot水位>` 返回 200 `text/event-stream`，收到 7 个该 session 的合法 `bridge.event` envelope；frame id 与 envelope cursor 一致，游标推进 |
+| SSE 重连 | 断开后用 `Last-Event-ID` 恢复，再收到 8 个同 session 的 envelope，未重复恢复边界游标；仍为 200 |
+| SSE 缓冲/释放 | 两次连接均含 `retry: 3000`、`X-Accel-Buffering: no`、`Cache-Control: no-cache, no-transform`；验证脚本读取到帧后取消连接。事件来自正常活动，没有主动制造生产写操作；此检查不等同真实反代下背压压力测试 |
 
-获准并推送脚本变更后，从干净 main 调用 `deploy/hal/deploy.sh --note ...`；由 post-deploy turn 完成：
+| 已托管资源 URL | SHA-256（源构建与实际服务一致） |
+| --- | --- |
+| `/control/assets/index-DGJ5-E3k.js` | `2b34729d7b777b9e6c59439c82e16e0b37334e8378dd13ea44710658b61415d7` |
+| `/control/assets/index-DqENv0wY.css` | `2845e62aa55645d488517b1d7cc1ea7c5192cca80123418f7bdaa774fc7299fc` |
 
-1. 核对实际运行的 Control Plane / HAL Bridge 版本和提交，检查两条既定启动/更新通知。
-2. 对实际服务检查 `/health`、`/control/login`、页面深链、CSP/Referrer-Policy、资源 URL 与源构建 hash、缺失资源和未知 API 的真实 404。
-3. 用已有获准凭据只读验证 snapshot/活动详情 SSE；凭据不打印、不放命令参数。不通过对生产 turn 发消息或 interrupt 来做部署冒烟。
-4. 记录真实部署结果和未完成的真机/HTTPS 验收，再报告上线。提交、push、干净 worktree 或本地浏览器成功均不等于已部署。
+脱敏验证汇总位于本机忽略目录 `.runtime/control-center-live/{snapshot,sse,resume}-result.json`，不提交验证脚本、生产会话内容或构建产物。此次收尾仅文档变更，不重跑应用构建或部署；上文 37 项测试和构建结果属于部署前验证。
+
+## 尚需人工验收/确认
+
+- Safari / Android 真机：软键盘、安全区、滚动、切后台恢复与断网重连。现有 Chromium 手机视口测试使用模拟 API，不能替代真机。
+- 真实 HTTPS 入口/反代：TLS、同源资源、SSE 不缓冲、网络中断和慢客户端场景。本次线上验证仅走 HAL 本机 HTTP；移动端输入操作 token 前应完成真实 HTTPS 验收。
+- 通知房两条既定消息（`🟢 控制面已启动 · 版本 0.6.99`、`🔄 更新完成：hal · old → 0.6.99`）未取得可独立读取的房间回执；journal 已确认启动/注册，但不能据此声称两条通知已收到，需人工核对。
+- 自动 post-deploy 续跑未触发：本次已通过用户恢复完成验证；是否另行调查续跑链路由人工确认，不属于本次代码收尾。
