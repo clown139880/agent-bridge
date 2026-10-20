@@ -24,7 +24,7 @@ test("parseMessage accepts approval responses", () => {
 });
 
 test("parseMessage preserves optional model fields", () => {
-  assert.deepEqual(parseMessage('{"type":"start_agent","sessionId":"r1","model":"deepseek-chat"}'), {
-    type: "start_agent", sessionId: "r1", model: "deepseek-chat",
+  assert.deepEqual(parseMessage('{"type":"action.submit_turn","sessionId":"r1","model":"deepseek-chat"}'), {
+    type: "action.submit_turn", sessionId: "r1", model: "deepseek-chat",
   });
 });

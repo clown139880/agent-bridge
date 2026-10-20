@@ -10,11 +10,6 @@ import { Store } from "../packages/database/src/index.js";
 import { ControlPlane } from "../apps/control-plane/src/server.js";
 import { makeMemoryBootstrapFetcher } from "../apps/bridge/src/memory-bootstrap.js";
 
-class HeadlessGateway {
-  readonly enabled = false; async start() { return ""; } stop() {} async sendRoot() { return ""; }
-  async sendThread() { return ""; } async sendReaction() { return ""; } async removeReaction() {} async sendNotice() { return ""; }
-}
-
 function vault(): string {
   const dir = mkdtempSync(join(tmpdir(), "memory-bootstrap-"));
   const root = join(dir, "agent-memory");
@@ -37,7 +32,7 @@ test("a Bridge gets _global plus its project's memory for a new session, and not
   execFileSync("git", ["init", "-q"], { cwd: repo });
   execFileSync("git", ["remote", "add", "origin", "git@github.com:Example/demo.git"], { cwd: repo });
   const path = join(tmpdir(), `memory-bootstrap-${randomUUID()}.sqlite`), store = new Store(path);
-  const control = new ControlPlane(store, new HeadlessGateway(), { host: "127.0.0.1", port: 0, bridgeToken: "bridge-secret",
+  const control = new ControlPlane(store, { host: "127.0.0.1", port: 0, bridgeToken: "bridge-secret",
     agentMemory: { vault: dir, writers: [] } });
   await control.start();
   try {

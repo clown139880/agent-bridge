@@ -11,11 +11,6 @@ import { ControlPlane } from "../apps/control-plane/src/server.js";
 import { CodexAppServerAdapter } from "../apps/bridge/src/app-server.js";
 import type { BridgeToControlMessage, ControlToBridgeMessage } from "../packages/protocol/src/index.js";
 
-class HeadlessGateway {
-  readonly enabled=false;async start(){return "";}stop(){}async sendRoot(){return "";}
-  async sendThread(){return "";}async sendReaction(){return "";}async removeReaction(){}async sendNotice(){return "";}
-}
-
 type Internals={http:HttpServer;bridges:Map<string,{machineId:string;name:string;capabilities:string[];features?:string[];bridgeVersion?:string;socket:WebSocket}>;
   controlStore:AgentControlStore;handleBridgeMessage(machineId:string,message:BridgeToControlMessage):Promise<void>};
 
@@ -24,7 +19,7 @@ async function fixture(tokens: { read?: string; write?: string } = { read: "read
   store.upsertMachine({id:"dev",name:"Workstation",platform:"linux",hostname:"dev.local",capabilities:["codex-cli","codex-app-server"]});
   const sent:ControlToBridgeMessage[]=[];const socket={readyState:WebSocket.OPEN,OPEN:WebSocket.OPEN,
     send(value:string){sent.push(JSON.parse(value) as ControlToBridgeMessage);},close(){}} as unknown as WebSocket;
-  const control=new ControlPlane(store,new HeadlessGateway(),{host:"127.0.0.1",port:0,workerApiEnabled:true,
+  const control=new ControlPlane(store, {host:"127.0.0.1",port:0,workerApiEnabled:true,
     workerApiToken:"worker",controlApiReadToken:tokens.read,controlApiWriteToken:tokens.write,
     sse:{keepaliveMs:50,pollMs:5,maxBackpressure:3}});
   const internals=control as unknown as Internals;internals.bridges.set("dev",{machineId:"dev",name:"Workstation",

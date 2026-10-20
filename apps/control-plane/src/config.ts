@@ -20,7 +20,6 @@ function required(name: string): string {
   return value;
 }
 
-const matrixEnabled = process.env.MATRIX_ENABLED !== "false";
 const workerApiEnabled = process.env.WORKER_API_ENABLED === "true";
 const controlApiReadToken = process.env.CONTROL_API_READ_TOKEN;
 const controlApiWriteToken = process.env.CONTROL_API_WRITE_TOKEN;
@@ -50,13 +49,6 @@ if (bridgeUpdatePublishedAt !== undefined && !Number.isFinite(bridgeUpdatePublis
 
 export const config = {
   version: controlPlaneVersion,
-  matrixEnabled,
-  matrixHomeserver: matrixEnabled ? required("MATRIX_HOMESERVER") : "",
-  matrixUserId: matrixEnabled ? required("MATRIX_USER_ID") : "",
-  matrixPassword: matrixEnabled ? required("MATRIX_PASSWORD") : "",
-  matrixRoomId: process.env.MATRIX_ROOM_ID,
-  matrixRoomName: process.env.MATRIX_ROOM_NAME ?? "Agent Control",
-  matrixAllowedUserId: process.env.MATRIX_ALLOWED_USER_ID,
   databasePath,
   // deploy/hal/deploy.sh writes post-deploy intents beside the database (outside the checkout).
   postDeployDir: process.env.POST_DEPLOY_DIR ?? join(dirname(databasePath), "post-deploy"),

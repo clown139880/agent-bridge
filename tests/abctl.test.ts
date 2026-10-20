@@ -12,11 +12,6 @@ import { ControlPlane } from "../apps/control-plane/src/server.js";
 import { BridgeOps, ControlClient, serveMcp } from "../packages/cli/src/index.js";
 import type { BridgeToControlMessage, ControlToBridgeMessage } from "../packages/protocol/src/index.js";
 
-class HeadlessGateway {
-  readonly enabled = false; async start() { return ""; } stop() {} async sendRoot() { return ""; }
-  async sendThread() { return ""; } async sendReaction() { return ""; } async removeReaction() {} async sendNotice() { return ""; }
-}
-
 type Internals = { http: HttpServer; bridges: Map<string, unknown>;
   handleBridgeMessage(machineId: string, message: BridgeToControlMessage): Promise<void> };
 
@@ -26,7 +21,7 @@ async function fixture() {
   const sent: ControlToBridgeMessage[] = [];
   const socket = { readyState: WebSocket.OPEN, OPEN: WebSocket.OPEN,
     send(value: string) { sent.push(JSON.parse(value) as ControlToBridgeMessage); }, close() {} } as unknown as WebSocket;
-  const control = new ControlPlane(store, new HeadlessGateway(), { host: "127.0.0.1", port: 0,
+  const control = new ControlPlane(store, { host: "127.0.0.1", port: 0,
     controlApiReadToken: "read", controlApiWriteToken: "write", sse: { keepaliveMs: 50, pollMs: 5, maxBackpressure: 3 } });
   const internals = control as unknown as Internals;
   internals.bridges.set("dev", { machineId: "dev", name: "Workstation", capabilities: ["codex-cli", "codex-app-server"],

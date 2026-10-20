@@ -24,7 +24,6 @@
   },
   "dependencies": {
     "dotenv": "^17.2.2",
-    "matrix-js-sdk": "^39.3.0",
     "pino": "^9.9.4",
     "ws": "^8.18.3"
   },
