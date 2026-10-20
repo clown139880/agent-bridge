@@ -1,6 +1,6 @@
 # Control Center 移动端网页设计
 
-状态：Phase 1 + Phase 2 已在 `0.6.99` 上线；后续获批将认证改为内网直达/外网 CF Access，`0.6.100` 实施中。原版实际服务只读验收通过；证据与待验收项目见 [交付记录](control-center-mobile-delivery.md)。设计核对基线：2026-10-19，仓库根版本 `0.6.98`。
+状态：Phase 1 + Phase 2 已在 `0.6.99` 上线；后续获批的内网直达/外网 CF Access 方案已在 `0.6.100` 上线（部署提交 `c56127e`），实际服务免登录/只读验收通过；证据与待验收项目见 [交付记录](control-center-mobile-delivery.md)。设计核对基线：2026-10-19，仓库根版本 `0.6.98`。
 
 本文最初作为仅设计任务产出；后续已获批准实施 Phase 1 + Phase 2。下文保留设计决策，实际使用与构建见 [Control Center README](../apps/control-center/README.md)。前端首版合并为 `src/main.tsx`、`src/state.ts` 和 `src/api/`，正文采用安全纯文本；没有实现逐 token delta 或 Phase 3。本次已通过获准的 HAL 部署脚本上线；真机和真实 HTTPS 验收尚未完成。
 

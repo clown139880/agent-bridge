@@ -1,6 +1,6 @@
 # Control Center 移动端实施记录
 
-当前变更：根 `package.json` **0.6.100**，网页免 token 登录实现完成，待本次部署与线上验证。新增网页入口及网络信任边界见设计文档 §5；不取消 `/api/v1` 的 Bearer 鉴权。
+当前版本：根 `package.json` **0.6.100**，网页免 token 登录已上线，部署提交 `c56127e6d81a0de80fc997d3192f05a2174e2739`，线上只读验收通过。新增网页入口及网络信任边界见设计文档 §5；不取消 `/api/v1` 的 Bearer 鉴权。
 
 以下为 **0.6.99** 已交付记录：Phase 1 和 Phase 2 已上线，构建、相关测试与线上只读验收通过。功能提交 `5f8a0ad`，部署脚本提交及本次部署源提交 `e9664ef9b57adbc5ac9ce231321e84156faa3c8d`。逐 token delta 和 Phase 3 未实施；真机、真实 HTTPS 与通知房回执的验收边界见下文。
 
@@ -84,14 +84,14 @@
 
 脱敏验证汇总位于本机忽略目录 `.runtime/control-center-live/{snapshot,sse,resume}-result.json`，不提交验证脚本、生产会话内容或构建产物。此次收尾仅文档变更，不重跑应用构建或部署；上文 37 项测试和构建结果属于部署前验证。
 
-## 尚需人工验收/确认
+## 0.6.99 当时的待验收项（历史记录）
 
 - Safari / Android 真机：软键盘、安全区、滚动、切后台恢复与断网重连。现有 Chromium 手机视口测试使用模拟 API，不能替代真机。
 - 真实 HTTPS 入口/反代：TLS、同源资源、SSE 不缓冲、网络中断和慢客户端场景。本次线上验证仅走 HAL 本机 HTTP；移动端输入操作 token 前应完成真实 HTTPS 验收。
 - 通知房两条既定消息（`🟢 控制面已启动 · 版本 0.6.99`、`🔄 更新完成：hal · old → 0.6.99`）未取得可独立读取的房间回执；journal 已确认启动/注册，但不能据此声称两条通知已收到，需人工核对。
 - 自动 post-deploy 续跑未触发：本次已通过用户恢复完成验证；是否另行调查续跑链路由人工确认，不属于本次代码收尾。
 
-## 0.6.100：网页免 token 登录（部署前记录）
+## 0.6.100：网页免 token 登录（已部署）
 
 用户批准“网页免 token、API 保留鉴权”，并批准本次后端升级和指定脚本部署。前端自动连接 `/control/api/v1`；
 服务端从现有 Control read/write 配置读取凭据并直接派发到原 handler，不把 token 返回浏览器，SSE 不缓冲。
@@ -102,10 +102,43 @@
 CORS。配置缺少 write 时服务端和网页都只读，两个 Control token 均未配置时返回 503。可直达入口即被信任，
 外网必须由 CF Access 覆盖整个 `/control/*`，源站直连应受网络限制；本次不会声称已验证外部 Access/TLS 配置。
 
-部署后需只读确认：服务版本/提交与健康、免登录页面/深链/资源 hash、无 token 的网页 snapshot 和活动详情 SSE、
-网页来源拦截、原 `/api/v1` 无 token 401/带 read token 200。不得用生产会话写操作做冒烟。最后记录真实部署结果。
+本次部署通过原 `deploy/hal/deploy.sh` 执行；部署前提交已推送，checkout 干净。仅在调用时把已只读核对的
+`CODEX_THREAD_ID` 作为 `AGENT_BRIDGE_SESSION_ID` 传入，使原脚本准确记录 intent；没有修改部署脚本、凭据或
+续跑逻辑。本次自动 post-deploy turn 已收到，journal 也有 `Continued the deploying session after its deploy`。
 
 部署前验证：`pnpm check`、`pnpm --filter @agent-bridge/control-center build` 通过；针对性回归 **39/39** 通过，
 包含原 API/SSE、网页来源/白名单/只读/未配置场景和非安全 HTTP 390px Chromium 触摸操作。浏览器无需登录即可
 进入与刷新，未发出 Authorization header；模拟 API 下新建、发送、追加与打断请求正常，待办/只读仍禁用写操作。
 测试日志：本机忽略目录 `.runtime/control-center-access-validation.log`。
+
+### 0.6.100 实际线上验证（2026-10-20 09:04–09:05 CST）
+
+- 部署标记、验证时 HEAD 与 origin/main 均为 `c56127e6d81a0de80fc997d3192f05a2174e2739`。Control Plane / HAL Bridge
+  均 active，启动时间 09:03:40 CST，PID 分别为 1444833 / 1444834。实际 API 中三个 HAL workers 均 online，
+  报告 Bridge 版本 0.6.100；控制面从该部署根 package.json 读取版本。进程无独立 commit 字段，提交证据来自标记/源/启动记录。
+- `/health` 200 `ok: true`；`/control/login`、真实详情深链均返回 200 HTML，入口与本地部署产物 hash 一致。
+  CSP、Referrer-Policy no-referrer、nosniff、登录路径 no-store 继续正常。
+- 网页 `/control/api/v1/access` 无 Bearer 返回 `{writable:true}`；snapshot 无 Bearer 返回 200，结构符合契约；
+  活动 session 详情与尾页历史各 200。只发送 `X-Control-Center: 1`，没有向浏览器下发 Control token。
+- 真实 390×844 Chromium：旧 `/control/login` 自动进入最近列表（50 行），刷新自动恢复，打开详情无登录表单；
+  旧测试 fragment 被清除，所有 14 个网页 API 请求均为 GET 且没有 Authorization header，无 storage 内容、横向溢出或运行时异常。
+  实际服务浏览器脚本还拦截并拒绝所有非 GET/HEAD 请求，未触发任何生产会话写入。
+- 网页 API 缺少自定义头、foreign Origin、cross-site Fetch Metadata 均返回 403，无 CORS 授权；未知网页 API 404。
+  缺失 JS、缺失 assets 和未知页面均真实 404。原 `/api/v1/snapshot` 无 token 401、内部读取获准 read token 时 200，
+  原鉴权未放宽，凭据没有回显或传入命令参数。
+- 网页活动 SSE 不带 Bearer，按 snapshot 水位收到 8 帧，同 session 过滤与游标推进通过；随后 Last-Event-ID 重连收到 11 帧，同 session 过滤、恢复边界与游标推进通过。
+  SSE 200 `text/event-stream`，`retry:3000`、`X-Accel-Buffering:no`、`no-cache,no-transform` 正常，读后取消连接。
+- 新 JS `/control/assets/index-Cfyx6qUa.js` SHA-256 为
+  `55f38c8746246f72b186951363c360d041d38b893949a9f16566abf404bbc217`；CSS `/control/assets/index-DqENv0wY.css`
+  SHA-256 为 `2845e62aa55645d488517b1d7cc1ea7c5192cca80123418f7bdaa774fc7299fc`。服务内容均与本地部署构建一致。
+
+验证汇总及截图位于忽略目录 `.runtime/control-center-live/`，不提交产物或生产内容。此次 post-deploy 收尾仅修改文档并推送，
+不再次构建、部署或重启；之后文档提交会令 Git HEAD 前移，运行部署提交仍为 c56127e。
+
+### 当前尚需人工验收
+
+- 真实公网 HTTPS / Cloudflare Access：确认覆盖整个 `/control/*`（包括网页 API 与 SSE）、反代保留 Host，且无法绕过 Access 直连源站。
+  应用按用户方案信任网络入口，本次没有修改/验证外部 CF 或防火墙配置；不能把本机 HTTP 验证当作 Access 验收。
+- Safari / Android 真机的软键盘、安全区、前后台/断网及慢网 SSE。当前有 Chromium 手机视口和实际服务只读证据，未进行真机/真实反代压力验收。
+- 通知房 `🟢 控制面已启动 · 版本 0.6.100` 与 `🔄 更新完成：hal · 0.6.99 → 0.6.100` 未取得可独立读取的消息回执。
+  服务启动、HAL 注册和自动 post-deploy 续跑均有证据，但不能代替两条房间消息的人工核对。
