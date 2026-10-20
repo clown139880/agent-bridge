@@ -223,8 +223,54 @@ test("MCP exposes memory reads to the conversation token and writes only to writ
     assert.equal(hits.result.structuredContent.hits[0].scope, "travel");
     const scopes = await call("reader-token-0123456789", "memory_scopes", {});
     assert.equal(scopes.result.structuredContent.hidden, 1);
+    assert.equal((await call("reader-token-0123456789", "bootstrap", { scope: "travel" })).result.structuredContent.scope, "travel",
+      "the legacy endpoint also accepts 0.7 names");
+    assert.equal(mcp.legacyCalls, 8);
   } finally {
     server.close();
+    store.db.close();
+  }
+});
+
+test("/mcp/memory serves the short tool names over the MCP SDK with the same token boundary", async () => {
+  const { memory } = fixture();
+  const { Hono } = await import("../apps/control-plane/node_modules/hono/dist/index.js");
+  const { mcpRoute } = await import("../apps/control-plane/src/mcp/route.js");
+  const { memoryEndpoint } = await import("../apps/control-plane/src/mcp/memory.js");
+  const { ConversationMemoryStore, Store } = await import("../packages/database/src/index.js");
+  const store = new Store(join(mkdtempSync(join(tmpdir(), "agent-memory-db-")), "control.sqlite"));
+  const app = new Hono().all("/mcp/memory", mcpRoute(memoryEndpoint(new ConversationMemoryStore(store.db), "reader-token-0123456789", {
+    store: memory, writers: [{ name: "hermes", role: "agent", token: "hermes-token-0123456789" }] })));
+  let id = 0;
+  const rpc = async (token: string, method: string, params: unknown = {}) => {
+    const response = await app.request("/mcp/memory", { method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json", accept: "application/json, text/event-stream" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: ++id, method, params }) });
+    const text = await response.text();
+    const data = text.split("\n").find((line) => line.startsWith("data: "));
+    return { status: response.status, body: (text && JSON.parse(data ? data.slice(6) : text)) as any };
+  };
+  try {
+    assert.equal((await rpc("wrong-token-0123456789", "tools/list")).status, 401);
+    const init = await rpc("reader-token-0123456789", "initialize", { protocolVersion: "2025-06-18", capabilities: {},
+      clientInfo: { name: "test", version: "0" } });
+    assert.equal(init.body.result.serverInfo.name, "agent-bridge-memory");
+    const names = async (token: string) => (await rpc(token, "tools/list")).body.result.tools.map((tool: { name: string }) => tool.name);
+    const readerTools = await names("reader-token-0123456789");
+    assert.ok(readerTools.includes("history_search") && readerTools.includes("bootstrap") && readerTools.includes("scope"));
+    assert.ok(!readerTools.includes("write") && !readerTools.some((name: string) => name.startsWith("memory_")));
+    assert.ok((await names("hermes-token-0123456789")).includes("write"));
+
+    const denied = await rpc("reader-token-0123456789", "tools/call", { name: "write", arguments: { scope: "travel", topic: "visa", kind: "fact", value: "v" } });
+    assert.ok(denied.body.error || denied.body.result?.isError, "a reader cannot call a tool it was never given");
+    const written = await rpc("hermes-token-0123456789", "tools/call", { name: "write",
+      arguments: { scope: "travel", topic: "visa", topic_display: "签证", kind: "fact", value: "免签" } });
+    assert.equal(written.body.result.structuredContent.path, "scopes/travel/facts/visa/fact.md");
+    const boot = await rpc("reader-token-0123456789", "tools/call", { name: "bootstrap", arguments: { scope: "travel" } });
+    assert.match(boot.body.result.structuredContent.text, /^- 免签$/m);
+    const failed = await rpc("reader-token-0123456789", "tools/call", { name: "get", arguments: { scope: "travel", topic: "visa" } });
+    assert.ok(failed.body.error || failed.body.result?.isError, "schema validation rejects a missing kind");
+  } finally {
     store.db.close();
   }
 });

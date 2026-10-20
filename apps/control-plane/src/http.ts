@@ -16,6 +16,8 @@ export interface HttpAppDeps {
   health(): Record<string, unknown>;
   memoryBootstrap?: Handler<HttpEnv>;
   legacyMcp?: NodeHandler;
+  /** SDK MCP endpoints, served at /mcp/<name>. */
+  mcp?: Record<string, Handler<HttpEnv>>;
   controlApi: AgentControlApi;
   /** Whether the public /api/v1 entrance has any credential configured. */
   apiEnabled: boolean;
@@ -47,6 +49,7 @@ export function createHttpApp(deps: HttpAppDeps) {
   const app = new Hono<HttpEnv>();
   app.get("/health", (c) => c.json(deps.health()));
   if (deps.memoryBootstrap) app.get("/memory/bootstrap", deps.memoryBootstrap);
+  for (const [name, route] of Object.entries(deps.mcp ?? {})) app.all(`/mcp/${name}`, route);
   if (deps.legacyMcp) app.all("/mcp", nodeRoute("Conversation MCP", deps.legacyMcp));
   if (deps.apiEnabled) app.all("/api/v1/*", nodeRoute("Control API", (request, response) => deps.controlApi.handle(request, response)));
   app.all("/control/api/v1/*", controlBrowserApi(deps.controlApi, deps.browserTokens));

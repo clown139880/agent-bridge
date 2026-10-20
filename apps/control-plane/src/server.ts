@@ -27,6 +27,8 @@ import { BridgeRegistry } from "./bridge-registry.js";
 import { WebhookNotifier, type WebhookOptions } from "./webhook.js";
 import { AgentMemory, AgentSkills, type Writer } from "@agent-bridge/agent-memory";
 import { ConversationMcpServer } from "./memory-mcp.js";
+import { memoryEndpoint } from "./mcp/memory.js";
+import { mcpRoute } from "./mcp/route.js";
 import { compareBridgeVersions } from "./bridge-version.js";
 import { PostDeployResumer } from "./post-deploy.js";
 import { createHttpApp, type HttpEnv } from "./http.js";
@@ -102,10 +104,10 @@ export class ControlPlane {
       catch (error) { log.error({ error }, "Skill library disabled: repository unavailable"); }
     }
     this.agentMemory = agentMemory;
-    if (options.conversationMemory?.mcpReadToken || agentMemory) {
-      this.memoryMcp = new ConversationMcpServer(this.memory, options.conversationMemory?.mcpReadToken,
-        agentMemory && { store: agentMemory, skills: agentSkills, writers: options.agentMemory!.writers });
-    }
+    const memoryEndpointOptions = options.conversationMemory?.mcpReadToken || agentMemory
+      ? [this.memory, options.conversationMemory?.mcpReadToken,
+        agentMemory && { store: agentMemory, skills: agentSkills, writers: options.agentMemory!.writers }] as const : undefined;
+    if (memoryEndpointOptions) this.memoryMcp = new ConversationMcpServer(...memoryEndpointOptions);
     this.controlStore = new AgentControlStore(store.db, options.retention ?? {
       actionsMs: 86_400_000, attachmentsMs: 7 * 86_400_000,
     });
@@ -131,8 +133,9 @@ export class ControlPlane {
       },
     });
     const app = createHttpApp({
-      health: () => ({ ok: true, bridges: this.bridges.size }),
+      health: () => ({ ok: true, bridges: this.bridges.size, legacyMcpCalls: this.memoryMcp?.legacyCalls ?? 0 }),
       memoryBootstrap: (c) => this.handleMemoryBootstrap(c),
+      mcp: memoryEndpointOptions && { memory: mcpRoute(memoryEndpoint(...memoryEndpointOptions)) },
       legacyMcp: this.memoryMcp && ((request, response) => this.memoryMcp!.handle(request, response)),
       controlApi: this.controlApi,
       apiEnabled: Boolean(options.workerApiEnabled || options.controlApiReadToken || options.controlApiWriteToken),
