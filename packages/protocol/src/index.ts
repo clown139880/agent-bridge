@@ -13,7 +13,7 @@ export const AGENT_STATUSES = [
 ] as const;
 
 export type AgentStatus = (typeof AGENT_STATUSES)[number];
-export type AgentType = "codex-cli" | "codex-desktop" | "claude-code" | "opencode" | "pi";
+export type AgentType = "codex-cli" | "codex-desktop" | "claude-code" | "opencode" | "pi" | "grok";
 export const BRIDGE_PROTOCOL_VERSION = 3;
 
 /**
@@ -28,6 +28,8 @@ export function workerPrefix(agentType: AgentType): string {
       return "opencode";
     case "pi":
       return "pi";
+    case "grok":
+      return "grok";
     default:
       return "codex";
   }
@@ -80,7 +82,7 @@ export interface SessionDiscoveredMessage {
   requestId?: string;
   sessionId: string;
   /**
-   * The agent's own resumable id (Claude/pi uuid, Codex thread id). Omitted until
+   * The agent's own resumable id (Claude/pi uuid, Codex thread id, ACP session id). Omitted until
    * the agent has reported one; never filled in with the public `sessionId`.
    */
   nativeSessionId?: string;
@@ -248,7 +250,7 @@ export interface UserInputResolvedMessage {
   resolvedAt: number;
 }
 
-export type SessionSource = "app-server" | "desktop-rollout" | "claude-cli" | "pi-rpc";
+export type SessionSource = "app-server" | "desktop-rollout" | "claude-cli" | "pi-rpc" | "acp";
 
 export interface SessionState {
   sessionId: string;

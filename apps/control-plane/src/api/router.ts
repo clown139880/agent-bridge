@@ -12,11 +12,13 @@ function agentTypeForWorkerPrefix(prefix: string): AgentType | undefined {
   if (prefix === "codex") return "codex-cli";
   if (prefix === "claude") return "claude-code";
   if (prefix === "pi") return "pi";
+  if (prefix === "grok") return "grok";
   return undefined;
 }
 function capabilityForAgent(agentType: AgentType): string {
   if (agentType === "claude-code") return "claude-code";
   if (agentType === "pi") return "pi";
+  if (agentType === "grok") return "grok";
   return "codex-cli";
 }
 
@@ -51,7 +53,7 @@ function pendingJson(row: PendingRow): Record<string,unknown> {
 // agent type and workspace are known.
 function resumeContext(session:Record<string,unknown>,syncedAt?:number):{agentType:AgentType;workspace:string;nativeSessionId?:string;syncedAt?:number}|undefined{
   const agent=session.agent,workspace=session.workspace;
-  if((agent!=="codex-cli"&&agent!=="claude-code"&&agent!=="pi")||typeof workspace!=="string"||!workspace)return undefined;
+  if((agent!=="codex-cli"&&agent!=="claude-code"&&agent!=="pi"&&agent!=="grok")||typeof workspace!=="string"||!workspace)return undefined;
   const nativeSessionId=typeof session.nativeSessionId==="string"?session.nativeSessionId:undefined;
   return {agentType:agent,workspace,nativeSessionId,syncedAt};
 }
@@ -158,10 +160,11 @@ export class AgentControlApi {
       workspaces,recentWorkspaces:recent,lastSeenAt:machine.lastSeenAt,bridgeVersion:bridge?.bridgeVersion??null,activeSessionCount:active};
   }
   private machineWorkers(machine:ReturnType<Store["listMachines"]>[number]):Record<string,unknown>[]{
-    // Codex is always listed for backward compatibility; Claude/Pi appear when the bridge advertises them.
+    // Codex is always listed for backward compatibility; Claude/Pi/Grok appear when the bridge advertises them.
     const rows=[this.workerJson(machine,"codex-cli","Codex")];
     if(machine.capabilities.includes(capabilityForAgent("claude-code")))rows.push(this.workerJson(machine,"claude-code","Claude"));
     if(machine.capabilities.includes(capabilityForAgent("pi")))rows.push(this.workerJson(machine,"pi","Pi"));
+    if(machine.capabilities.includes(capabilityForAgent("grok")))rows.push(this.workerJson(machine,"grok","Grok"));
     return rows.filter(row=>row.status==='online'||!this.store.workerRemoved(String(row.id)));
   }
   private workers(response:ServerResponse):void{this.ok(response,{workers:this.legacy.listMachines().flatMap(m=>this.machineWorkers(m)),streamCursor:this.store.streamCursor()});}

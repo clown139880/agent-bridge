@@ -17,6 +17,8 @@ import { CodexAppServerAdapter } from "./app-server.js";
 import { config } from "./config.js";
 import { ClaudeCodeAdapter } from "./claude/claude-adapter.js";
 import { PiAdapter } from "./pi/pi-adapter.js";
+import { AcpAdapter } from "./acp/acp-adapter.js";
+import { acpProfiles } from "./acp/profiles.js";
 import { makeAttachmentFetcher } from "./attachments.js";
 import { makeMemoryBootstrapFetcher } from "./memory-bootstrap.js";
 import type { AgentAdapter } from "./agent-adapter.js";
@@ -30,13 +32,14 @@ function providerToAgentType(provider: string): AgentType | undefined {
   if (provider === "codex") return "codex-cli";
   if (provider === "claude") return "claude-code";
   if (provider === "pi") return "pi";
-  return undefined;
+  return acpProfiles().find((profile) => profile.provider === provider)?.agentType;
 }
 
 /** Registration capabilities contributed by each agent type. */
 function capabilitiesFor(agentType: AgentType): string[] {
   if (agentType === "claude-code") return ["claude-code", "claude-cli"];
   if (agentType === "pi") return ["pi", "pi-rpc"];
+  if (acpProfiles().some((profile) => profile.agentType === agentType)) return [agentType, "acp"];
   return ["codex-cli", "codex-app-server"];
 }
 
@@ -151,6 +154,14 @@ export class BridgeClient {
         allowedRoots: options.allowedRoots,
         fetchAttachment: makeAttachmentFetcher(options.url, options.token),
       }, this.adapterEmit("pi")));
+    }
+    for (const profile of acpProfiles()) {
+      if (!providers.includes(profile.provider)) continue;
+      this.adapters.set(profile.agentType, new AcpAdapter({
+        profile,
+        allowedRoots: options.allowedRoots,
+        fetchAttachment: makeAttachmentFetcher(options.url, options.token),
+      }, this.adapterEmit(profile.agentType)));
     }
     if (!this.adapters.size) throw new Error(`No known agent providers enabled: ${providers.join(",")}`);
 

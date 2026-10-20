@@ -831,10 +831,12 @@ export class AgentControlStore {
   }
 
   /** The agent workers a machine hosts, mirroring the /workers listing: Codex is
-   *  always present; Claude appears when the bridge advertises the capability. */
+   *  always present; the others appear when the bridge advertises their capability. */
   private machineAgents(capabilities:string[]):Array<{agentType:AgentType;label:string}>{
     const agents:Array<{agentType:AgentType;label:string}>=[{agentType:"codex-cli",label:"Codex"}];
     if(capabilities.includes("claude-code"))agents.push({agentType:"claude-code",label:"Claude"});
+    if(capabilities.includes("pi"))agents.push({agentType:"pi",label:"Pi"});
+    if(capabilities.includes("grok"))agents.push({agentType:"grok",label:"Grok"});
     return agents;
   }
 }
