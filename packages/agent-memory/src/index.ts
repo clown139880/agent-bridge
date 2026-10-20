@@ -285,7 +285,7 @@ export class AgentMemory {
     return existsSync(file) ? readFileSync(file, "utf8").trim() : "";
   }
 
-  /** What memory_load brings into a conversation: the persona (if any) then the core memory. */
+  /** What the load tool brings into a conversation: the persona (if any) then the core memory. */
   load(scope: string, options: { persona?: boolean } = {}): string {
     return [options.persona === false ? "" : this.persona(scope), this.bootstrap(scope)].filter(Boolean).join("\n\n");
   }

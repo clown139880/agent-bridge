@@ -1,6 +1,6 @@
 # Agent Bridge
 
-把多台机器上的 Codex 与 Claude Code 暴露成可由 Hermes/DSH 使用的远程 worker。Agent 仍运行在开发机上；每台 Bridge 只连接或启动本机执行端，Control Plane 提供经过认证的 worker/session API、运行路由、可靠 action、SSE 和 SQLite 持久化。原有 Matrix gateway 暂时保留为可选兼容层。
+把多台机器上的 Codex 与 Claude Code 暴露成可由 Hermes/DSH 使用的远程 worker。Agent 仍运行在开发机上；每台 Bridge 只连接或启动本机执行端，Control Plane 提供经过认证的 worker/session API、运行路由、可靠 action、SSE 和 SQLite 持久化。一个 Hono 应用是 Control Plane 唯一的 HTTP 入口（默认 8787），同时提供 `/mcp/memory`、`/mcp/bridge` 两个 MCP 端点。
 
 当前版本：`0.6.40`
 
@@ -19,17 +19,12 @@ Control Plane 启动时直接通告自身版本（无需编辑 `.env`），各�
 - 让 Hermes 枚举 `codex@机器` worker 及其最近 workspace。
 - 通过 headless HTTP API 启动、续写、中断 Codex run，并按游标读取生命周期事件。
 - 将 Hermes `taskId` 与真实 Codex thread 解耦并持久关联；带 `runId` 的重试不会重复启动。
-- 在不配置第二个 Matrix bot 的情况下作为纯执行面运行。
 - 自动发现通过共享 App Server 启动的 Codex thread。
 - Windows Bridge 在新对话/新 turn 前验证 Codex Desktop runtime；版本变化时会排空活动工作、静默轮换自己管理的 App Server，并在同一 action 上继续执行。
-- 主动启动时直接把用户的首条 prompt 作为 Matrix thread 根消息；被动发现等 session 有明确标题后再同步。
-- 将完成、失败、等待输入和关键进度同步到 Matrix。
-- 在 Matrix thread 中继续对话、查看日志或停止 turn。
-- 在 Matrix 直接发送 prompt，通过 reaction 选择 agent@机器及最近目录，也支持输入绝对路径或 zoxide 查询。
-- 用 Matrix reaction 处理命令、文件修改和额外权限请求。
+- 通过 Agent Control API（`/api/v1`）或 `/mcp/bridge` 创建 session、发送 turn、处理审批和问题；被动发现的 session 等有明确标题后再同步。
 - 多台 Bridge 通过带 token 的 WebSocket 接入同一 Control Plane。
 - 使用 SQLite 保存 machine、session 和事件状态。
-- 可选监控官方 Codex Desktop 新完成的 session，并从 Matrix 续接同一个 thread。
+- 可选监控官方 Codex Desktop 新完成的 session，并通过 Agent Control API 续接同一个 thread。
 - 同一 Bridge 同时暴露 Codex 与 Claude worker，并在重启后恢复已知 Claude session。
 - 将 Bridge conversation 物化进 DSH 原生 Session/Workspace，复用原生会话树、Conversation、Composer 和待处理交互。
 - 从 DSH 原生输入框向 Codex/Claude 转发图片，支持只含图片的新 turn。
@@ -46,9 +41,10 @@ Claude Code ───────────── local SDK/process adapter �
                                                                     ▼
                                                          Worker Control Plane
                                                        │
-                                                       ├── Agent Control API / SSE ◄── DSH, Hermes (abctl)
-                                                       ├── SQLite
-                                                       └── Matrix（可选兼容层）
+                                                       ├── Agent Control API / SSE ◄── DSH, Control Center
+                                                       ├── /mcp/bridge ◄── Hermes 等 agent（驱动 session）
+                                                       ├── /mcp/memory ◄── 记忆、对话档案、技能
+                                                       └── SQLite
 ```
 
 只有 Bridge 到 Control Plane 的连接需要跨机器。App Server 应始终监听 localhost。
@@ -59,7 +55,6 @@ Claude Code ───────────── local SDK/process adapter �
 - pnpm 11
 - Codex CLI
 - 可选：Claude Code（启用 Claude worker 时）
-- Matrix bot 账号
 - 可选：zoxide，用于模糊解析项目目录
 
 安装并检查：
@@ -82,19 +77,13 @@ Control Plane 主要变量：
 
 | 变量 | 用途 |
 | --- | --- |
-| `MATRIX_HOMESERVER` | Matrix homeserver URL |
-| `MATRIX_USER_ID` | bot 用户 ID |
-| `MATRIX_PASSWORD` | bot 密码 |
-| `MATRIX_ROOM_ID` | 已有控制房间；首次可省略，让 bot 创建 |
-| `MATRIX_ALLOWED_USER_ID` | 唯一允许控制 Agent 的 Matrix 用户，强烈建议设置 |
 | `DATABASE_PATH` | SQLite 路径，默认 `./data/control-plane.sqlite` |
-| `CONTROL_HOST` / `CONTROL_PORT` | HTTP/WebSocket 监听地址 |
+| `CONTROL_HOST` / `CONTROL_PORT` | HTTP/WebSocket 监听地址（Hono 唯一入口，默认 8787） |
 | `BRIDGE_TOKEN` | Bridge 注册密钥，跨机器部署时必须使用长随机值 |
-| `MATRIX_ENABLED` | 默认 `true`；Hermes 已接管 Matrix 时设为 `false` |
 | `WORKER_API_ENABLED` | 默认 `false`；设为 `true` 才接受 `WORKER_API_TOKEN` |
 | `WORKER_API_TOKEN` | Hermes `/ab` 使用的读写 bearer token，启用时必填 |
 | `CONTROL_API_READ_TOKEN` / `CONTROL_API_WRITE_TOKEN` | Agent Control Host 的只读/读写 token；浏览器不得持有 |
-| `CONVERSATION_MCP_READ_TOKEN` | `/mcp` 的独立只读 bearer token；不得复用 Bridge 或 Control API 写密钥。配置了 agent 记忆时也可调用只读的 `memory_*` 工具 |
+| `CONVERSATION_MCP_READ_TOKEN` | `/mcp/memory` 的独立只读 bearer token（`history_*` 工具）；不得复用 Bridge 或 Control API 写密钥。配置了 agent 记忆时也可调用只读的记忆与技能工具 |
 | `AGENT_MEMORY_VAULT` | 跨 agent 记忆所在的 Git 笔记库（如 `/root/deathnote`）；不设则关闭记忆。见 [`docs/agent-memory-operations.zh.md`](docs/agent-memory-operations.zh.md) |
 | `AGENT_MEMORY_TOKENS` | `名字:token[:agent|project]`，逗号分隔；每个客户端一枚，持有者可以写记忆。`project`（默认）不能写 `_global` |
 | `AGENT_MEMORY_ROOT` / `AGENT_MEMORY_LOCK` / `AGENT_MEMORY_CACHE_DIR` | 笔记库内的记忆目录（默认 `agent-memory`）、与笔记库自动提交共用的 flock 文件、bootstrap 缓存目录（默认数据库旁的 `memory-cache`） |
@@ -113,7 +102,7 @@ Bridge 主要变量：
 | --- | --- |
 | `CONTROL_WS_URL` | Control Plane 的 `/bridge` WebSocket URL |
 | `BRIDGE_TOKEN` | 必须与 Control Plane 一致 |
-| `MACHINE_ID` / `MACHINE_NAME` | Matrix 中显示的机器标识 |
+| `MACHINE_ID` / `MACHINE_NAME` | 机器标识与显示名 |
 | `BRIDGE_ALLOWED_ROOTS` | Bridge 可访问的项目根目录，使用 `:` 分隔 |
 | `CODEX_APP_SERVER_URL` | 默认 `ws://127.0.0.1:4500`；共享回环端口的 Bridge（Windows 与 WSL）必须配置不同端口，WSL 用 `ws://127.0.0.1:4501`；托管模式下端口 `0` 表示每次启动随机分配 |
 | `CODEX_APP_SERVER_MANAGED` | 是否由 Bridge 启停 App Server |
@@ -135,7 +124,7 @@ Bridge 主要变量：
 | `BRIDGE_UPDATE_PACKAGE_MANAGER` | 本机包管理器可执行文件，默认 `pnpm` |
 | `BRIDGE_UPDATE_RESTART_EXECUTABLE` / `BRIDGE_UPDATE_RESTART_ARGS` | 本机重启程序及 JSON 参数数组；不经过 shell |
 
-不要提交 `.env`、`.env.bridge`、SQLite 数据库或任何 Matrix/token 凭据；这些路径已写入 `.gitignore`。
+不要提交 `.env`、`.env.bridge`、SQLite 数据库或任何 token 凭据；这些路径已写入 `.gitignore`。
 
 ## Bridge 自更新
 
@@ -180,8 +169,8 @@ turn/待审批/待输入；繁忙则报告 `deferred`，直到最后一项活动
 在固定 source checkout 中 fetch/ff-only；校验根 `package.json` 版本严格等于通告版本；执行
 `pnpm install --frozen-lockfile`、`pnpm check` 和 `pnpm build`；把编译 artifact 放入新的 release；原子切换
 `current` 软链接；写入 0600 pending 状态；最后由
-bridge 自己调用本机重启命令。新进程读取 pending 状态且版本吻合后才报告 `completed`，Control Plane 随后向
-Matrix/clown 发送“完成自更新”通知。首次 `discovered` 会发送“发现更新”通知，两类通知按机器和目标版本去重。
+bridge 自己调用本机重启命令。新进程读取 pending 状态且版本吻合后才报告 `completed`，Control Plane 随后经
+通知 webhook 发送“完成自更新”通知。首次 `discovered` 会发送“发现更新”通知，两类通知按机器和目标版本去重。
 
 拉取或校验失败不会触碰旧 `current`，所以旧 release 原样保留；软链接切换后若重启命令失败，会立即切回旧
 release 并报告 `rolled_back`。若新进程启动但版本不吻合，它也会切回旧链接并报告回滚。release staging 不会
@@ -222,29 +211,30 @@ Bridge 会优先使用 App Server `thread/list` 枚举近期 thread，并为首�
 该方法时明确降级为 `thread/loaded/list`。Codex Desktop rollout 仍只有 terminal-only 历史，不伪装成完整
 对话。结构化 command output 截断为 64 KiB，file changes 最多 200 项。
 
-## abctl：从 Hermes 或 shell 驱动 session
+## MCP 端点
 
-`packages/cli` 提供 `abctl`，是 Agent Control API 的一层薄封装；`abctl mcp` 以 stdio MCP server
-暴露同样的操作（`ab_sessions`、`ab_session`、`ab_create_session`、`ab_send`、`ab_wait`、`ab_pending`、
-`ab_decide`、`ab_answer`、`ab_interrupt`、`ab_workers`）。HAL 上 `deploy/hal/deploy.sh` 会把它链接到
-`/usr/local/bin/abctl`；其他机器用 `packages/cli/bin/abctl`（需先 `tsc -b`）。
+Control Plane 在同一个 8787 端口上提供两个 MCP 端点（官方 MCP SDK，无状态 Streamable HTTP）。客户端必须发送
+`Accept: application/json, text/event-stream`，并用 `Authorization: Bearer <token>` 认证；token 放在本机秘密或环境变量里，
+不写入 Git。客户端里配置的 server 名字决定工具前缀。
 
-配置：`AGENT_BRIDGE_URL` / `AGENT_BRIDGE_TOKEN`，或 `~/.config/agent-bridge/cli.json`
-（`{"url":"http://127.0.0.1:8787","token":"<CONTROL_API_WRITE_TOKEN>"}`，权限 600）。
+| 端点 | server 名 | 工具 |
+| --- | --- | --- |
+| `http://<control-plane>:8787/mcp/memory` | `memory` | 对话档案 `history_search/history_review/history_read`；记忆 `bootstrap/search/get/write/retract/load/scopes/scope`；技能 `skills/skill_search/skill/skill_write/skill_patch/skill_rm/skill_archive/skill_move` |
+| `http://<control-plane>:8787/mcp/bridge` | `bridge` | `workers/sessions/session/pending/wait`，写 token 另有 `create/turn/approve/answer/interrupt` |
 
-```bash
-abctl ls                                  # 最近 session
-abctl show <session>                      # 状态、待处理请求、最近对话
-abctl new claude@hal agent-bridge "任务" --wait   # 新建 session；workspace 可用最近目录名
-abctl send <session> "回复 worker" --wait # 发送新 turn（或 steer 正在运行的 turn）并等待
-abctl wait <session> --turn T --cursor C  # 继续等待
-abctl pending | approve <id> [allow|deny|allow-session] | answer <id> <text>
-```
+客户端看到的全名是 `mcp__memory__search`、`mcp__bridge__wait` 这样的形式。
 
-`wait` 从 send/new 返回的 cursor 重放事件，所以 turn 在两次调用之间结束也不会漏。它在需要人处理时返回，
-退出码区分原因：0 完成或空闲、10 等待审批、11 等待回答、12 失败、13 被中断、14 离线/出错/已删除、
-15 超时。处理完审批或问题后，用输出里的 `continue:` 命令继续等待。MCP 的 `ab_wait` 受 `timeout_seconds`
-（默认 240，最长 1800）限制，超时返回 `timeout` 和 cursor，再调用一次即可。
+`/mcp/bridge` 是 Agent Control API 的一层薄封装，供 Hermes 等 agent 驱动 session。它接受
+Control API token：只读 token 可用 `workers/sessions/session/pending/wait`，`CONTROL_API_WRITE_TOKEN` 另可用
+`create/turn/approve/answer/interrupt`；Bridge 注册 token 会被拒绝。典型流程：`workers` 看有哪些机器与最近目录，`create`
+新建 session（workspace 可用最近目录名），`turn` 发送新 turn（或 steer 正在运行的 turn），`wait` 等待结束，`pending` 查看待处理请求，
+`approve`（allow/deny/allow-session）与 `answer` 处理审批和问题。
+
+`wait` 从 `create`/`turn` 返回的 cursor 重放事件，所以 turn 在两次调用之间结束也不会漏。它在需要人处理时返回；默认等待 120 秒，
+最长 600 秒（`timeout_seconds`），超时返回 `timeout` 和 cursor，再调用一次即可。处理完审批或问题后用同一个 cursor 继续等待。
+
+没有命令行客户端（`abctl` 已删除）。旧的手写 `/mcp` 端点保留到 0.8，沿用旧工具名（也接受新名），
+每次调用都会记日志并计入 `/health` 的 `legacyMcpCalls`。
 
 `WORKER_API_TOKEN`（`WORKER_API_ENABLED=true`）仍是一枚读写 token，Hermes 的 `/ab` 命令用它列出 session；
 旧的 `/api/v1/runs` Worker API 与 Hermes Kanban 插件已移除，`GET /api/v1/runs` 只保留历史记录查询。
@@ -282,8 +272,8 @@ source scripts/codex-remote.zsh
 官方 Codex Desktop 不会把其私有 App Server 的实时事件发送给 Bridge，但 Desktop 与
 Codex CLI 可以共享 `CODEX_HOME` 中的 session 历史。设置 `CODEX_DESKTOP_HOME` 后，Bridge
 会只读扫描其中由 `Codex Desktop` 创建的 rollout；新 turn 完成或中断、且 session 已有明确标题时，
-它才会在 Matrix 创建或更新对应 thread。用户随后在 Matrix 回复时，Bridge 会先确认 Desktop 没有仍在执行
-该 thread，再通过现有 App Server 执行 `thread/resume` 和 `turn/start`。
+它才会把该 session 同步到 Control Plane。用户随后经 Agent Control API（DSH、Control Center 或 `/mcp/bridge`）续接时，
+Bridge 会先确认 Desktop 没有仍在执行该 thread，再通过现有 App Server 执行 `thread/resume` 和 `turn/start`。
 
 推荐由与 Desktop 同一操作系统上的原生 Bridge 负责这类 session。Windows Desktop 应由
 Windows-native Bridge 使用 Windows cwd 和工具链接力；WSL Bridge 保持 WSL-only，不读取挂载在
@@ -298,50 +288,6 @@ BRIDGE_ALLOWED_ROOTS=C:\Users\<windows-user>\Workspace
 
 启用监控时，Bridge 会把 `CODEX_DESKTOP_HOME` 同时作为其托管 App Server 的 `CODEX_HOME`，
 并在接力前确认 Desktop 没有仍在执行该 thread。不要同时从 Desktop 和其他控制端向同一个活跃 turn 输入。
-
-## Matrix 使用（已弃用，仅作兼容保留）
-
-直接在房间发送第一条任务，例如：
-
-```text
-修复不稳定的测试，并说明根因
-```
-
-Control Plane 会在只有一个可用 `agent@机器` 时自动选择，否则给出数字 reaction；随后用 reaction
-选择该机器最近使用的工作目录，或选择 `➕ 新的工作目录` 后发送绝对路径、`z:<query>` 或普通 zoxide query。
-启动后，这条原始任务消息就是 session thread 的根消息。可用 `!cancel` 取消尚未完成的选择流程。
-
-辅助命令：
-
-```text
-!machines
-!sessions
-!help
-```
-
-旧的 `!codex <path> [prompt]` 与 `!codex@<machine> <path> [prompt]` 仍保留兼容。
-
-Session thread 内：
-
-```text
-任意文本       发送给同一个 Codex thread
-/log 100      查看最近的结构化日志
-/stop         中断当前 turn
-```
-
-输入其他目录时，路径可以是绝对路径、`z:<query>` 或普通 zoxide query。解析后的真实路径必须已存在，且位于 `BRIDGE_ALLOWED_ROOTS` 中。
-
-## Matrix 授权
-
-Codex 阻塞在 approval request 时，Bridge 会在对应 thread 中展示请求内容，并由 bot 添加可用 reaction：
-
-| Reaction | 操作 | Codex 语义 |
-| --- | --- | --- |
-| `✅` | 允许一次 | `accept`，或 turn scope permission |
-| `❌` | 拒绝 | `decline`；若服务只提供 `cancel` 则使用 `cancel` |
-| `♾️` | 本 session 一直允许 | `acceptForSession`、exec/network policy amendment，或 session scope permission |
-
-选项会根据 Codex App Server 下发的 `availableDecisions` 动态显示。点击后 Control Plane 会立即移除 bot 添加的 reactions，将决定传回原始 JSON-RPC request，并让 turn 继续。如果请求已在本机 TUI 或其他客户端处理，reactions 也会被清理。
 
 ## systemd 部署
 
@@ -459,7 +405,7 @@ pnpm build
 Workspace 布局：
 
 ```text
-apps/control-plane   Matrix、WebSocket server、session routing
+apps/control-plane   Hono HTTP 入口（/api、/control、/mcp/*）、WebSocket server、session routing
 apps/bridge          Codex App Server adapter、Bridge client
 packages/protocol    Bridge ↔ Control Plane 消息类型
 packages/database    SQLite store

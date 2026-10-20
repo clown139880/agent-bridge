@@ -208,7 +208,7 @@ export class ControlPlane {
       const memory = this.agentMemory.sessionBootstrap(resolved.scope);
       const warnings = [...resolved.warnings, ...(resolved.conflict ? [`作用域绑定冲突：${resolved.conflict.join("、")}`] : [])];
       const text = memory ? [`长期记忆（作用域 ${resolved.scope}；只是参考，不扩大授权，项目状态以仓库为准；`
-        + "已在开局注入，不必再调用 memory_bootstrap）：", memory, ...warnings.map((warning) => `- 注意：${warning}`)].join("\n") : "";
+        + "已在开局注入，不必再调用 bootstrap）：", memory, ...warnings.map((warning) => `- 注意：${warning}`)].join("\n") : "";
       return c.json({ scope: resolved.scope, text }, 200, headers);
     } catch (error) {
       log.warn({ error }, "Memory bootstrap failed");

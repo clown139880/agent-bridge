@@ -30,13 +30,13 @@ class FakeControlPlane:
         self.calls.append((tool, args))
         if self.down:
             raise plugin.Unavailable("down")
-        if tool == "memory_resolve_scope":
+        if tool == "scope":
             return {"scope": {"!jmyd:x": "jmyd", "!radio:x": "hui-radio"}.get(args["room_id"], "_global")}
-        if tool == "skill_index":
+        if tool == "skills":
             return {"skills": [item for scope in args["scopes"] for item in SKILLS.get(scope, [])]}
         if tool == "skill_search":
             return {"hits": []}
-        if tool == "skill_view":
+        if tool == "skill":
             pool = [item for items in SKILLS.values() for item in items] if args["scopes"] == "all" \
                 else [item for scope in args["scopes"] for item in SKILLS.get(scope, [])]
             entry = next((item for item in pool if item["name"] == args["name"]), None)
@@ -47,7 +47,7 @@ class FakeControlPlane:
                 raise ValueError(f"unknown_file: {file}")
             return {**entry, "dir": f"/root/agent-skills/{entry['path']}", "file": file, "content": f"{entry['name']}:{file}",
                     "version": "1.0.0", "slash": False}
-        if tool in ("skill_write", "skill_patch", "skill_remove_file", "skill_archive"):
+        if tool in ("skill_write", "skill_patch", "skill_rm", "skill_archive"):
             if "API_KEY=" in json.dumps(args):
                 raise ValueError("secret_rejected")
             return {"name": args["name"], "scope": args.get("scope", "jmyd"), "path": "scopes/x", "commit": "abc"}
@@ -91,10 +91,10 @@ def test_only_pilot_scopes_use_the_library(env, tmp_path):
     assert json.loads(wrapped["skills_list"]({}, session_id="s-cli"))["native"] == "skills_list"
     listed = json.loads(wrapped["skills_list"]({}, session_id="s-jmyd"))
     assert [item["name"] for item in listed["skills"]] == ["regcode-check", "navidrome", "openlist"]
-    assert ("skill_index", {"scopes": ["jmyd", "_agent-dorothy", "_global"]}) in fake.calls
-    resolves = [call for call in fake.calls if call[0] == "memory_resolve_scope"]
+    assert ("skills", {"scopes": ["jmyd", "_agent-dorothy", "_global"]}) in fake.calls
+    resolves = [call for call in fake.calls if call[0] == "scope"]
     wrapped["skills_list"]({}, session_id="s-jmyd")
-    assert [call for call in fake.calls if call[0] == "memory_resolve_scope"] == resolves  # cached
+    assert [call for call in fake.calls if call[0] == "scope"] == resolves  # cached
 
 
 def test_skill_view_reads_the_library_and_falls_back_for_local_skills(env, tmp_path):
@@ -122,7 +122,7 @@ def test_skill_manage_creates_in_the_room_scope_and_maps_actions(env, tmp_path):
         {"action": "delete", "name": "regcode-check", "absorbed_into": "stock-check"},
     ]}, session_id="s-jmyd"))
     assert result["success"] is True and len(result["results"]) == 5
-    sent = [(name, args) for name, args in fake.calls if name.startswith("skill_") and name not in ("skill_index", "skill_view")]
+    sent = [(name, args) for name, args in fake.calls if name.startswith("skill_") and name not in ("skills", "skill")]
     assert sent[0] == ("skill_write", {"scope": "jmyd", "name": "stock-check",
                                        "content": "---\nname: stock-check\ndescription: d\n---\n", "category": "business"})
     assert sent[1][0] == "skill_patch" and sent[1][1]["old_text"] == "a" and sent[1][1]["scopes"] == ["jmyd", "_agent-dorothy", "_global"]

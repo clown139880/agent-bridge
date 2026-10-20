@@ -20,7 +20,7 @@ class FakeMcp:
         handler = self._handler()
         self.server = HTTPServer(("127.0.0.1", 0), handler)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
-        self.url = f"http://127.0.0.1:{self.server.server_port}/mcp"
+        self.url = f"http://127.0.0.1:{self.server.server_port}/mcp/memory"
 
     def _handler(self):
         fake = self
@@ -34,19 +34,24 @@ class FakeMcp:
                     self.send_response(503); self.end_headers(); return
                 request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 assert self.headers["Authorization"] == "Bearer writer-token"
+                assert "text/event-stream" in self.headers["Accept"]
                 name, args = request["params"]["name"], request["params"]["arguments"]
                 fake.calls.append((name, args))
                 result = {
-                    "memory_resolve_scope": {"scope": "velvet-room" if args.get("room_id") == "!velvet:x" else "_global",
+                    "scope": {"scope": "velvet-room" if args.get("room_id") == "!velvet:x" else "_global",
                                              "prefetch": args.get("room_id") == "!velvet:x", "warnings": []},
-                    "memory_search": {"hits": [{"scope": "velvet-room", "text": "工作流/fact = 新值"},
+                    "search": {"hits": [{"scope": "velvet-room", "text": "工作流/fact = 新值"},
                                                {"scope": "_global", "text": "已注入/fact = 作用域 velvet-room"}]}
                     if args.get("mode") == "recall" else {"ok": True, "args": args},
-                    "memory_bootstrap": {"text": f"# 全局\n\n# 作用域 {args.get('scope')}"},
-                    "memory_load": {"text": f"# 自身 {args.get('scope')}"},
+                    "bootstrap": {"text": f"# 全局\n\n# 作用域 {args.get('scope')}"},
+                    "load": {"text": f"# 自身 {args.get('scope')}"},
                 }.get(name, {"ok": True, "args": args})
-                body = json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": {"structuredContent": result}}).encode()
-                self.send_response(200); self.send_header("Content-Length", str(len(body))); self.end_headers()
+                reply = {"jsonrpc": "2.0", "id": request["id"], "result": {"structuredContent": result}}
+                if name == "write" and args.get("topic") == "broken":
+                    reply["result"] = {"isError": True, "content": [{"type": "text", "text": "invalid_topic: bad slug"}]}
+                body = f"event: message\ndata: {json.dumps(reply)}\n\n".encode()
+                self.send_response(200); self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Content-Length", str(len(body))); self.end_headers()
                 self.wfile.write(body)
 
         return Handler
@@ -69,19 +74,21 @@ def test_room_scope_bootstrap_tools_and_handoff(mcp, tmp_path):
     assert "memory_write" in {tool["name"] for tool in provider.get_tool_schemas()}
     provider.initialize("s1", platform="matrix", chat_id="!velvet:x:$thread", chat_name="天鹅绒之馆",
                         hermes_home=str(tmp_path), agent_context="primary")
-    assert mcp.calls[0] == ("memory_resolve_scope", {"room_id": "!velvet:x", "room_name": "天鹅绒之馆", "create": True})
+    assert mcp.calls[0] == ("scope", {"room_id": "!velvet:x", "room_name": "天鹅绒之馆", "create": True})
     block = provider.system_prompt_block()
     assert "# 作用域 velvet-room" in block and "# 自身 _agent-dorothy" in block and block.startswith("长期记忆（当前房间：velvet-room；")
     assert {tool["name"] for tool in provider.get_tool_schemas()} >= {"memory_write", "memory_load"}
     assert "memory_log" not in {tool["name"] for tool in provider.get_tool_schemas()}
 
     json.loads(provider.handle_tool_call("memory_write", {"topic": "comfy", "kind": "fact", "value": "v"}))
-    assert mcp.calls[-1] == ("memory_write", {"topic": "comfy", "kind": "fact", "value": "v", "scope": "velvet-room"})
+    assert mcp.calls[-1] == ("write", {"topic": "comfy", "kind": "fact", "value": "v", "scope": "velvet-room"})
     provider.handle_tool_call("memory_search", {"query": "x", "scope": "all"})
     assert mcp.calls[-1][1]["scope"] == "all"
+    assert json.loads(provider.handle_tool_call("memory_write", {"topic": "broken", "kind": "fact", "value": "v"})) \
+        == {"error": "invalid_topic: bad slug"}
 
     recalled = provider.prefetch("上次那个工作流怎么配的")
-    assert mcp.calls[-1] == ("memory_search", {"query": "上次那个工作流怎么配的", "scope": "velvet-room,_global",
+    assert mcp.calls[-1] == ("search", {"query": "上次那个工作流怎么配的", "scope": "velvet-room,_global",
                                                "mode": "recall", "limit": 5})
     assert "工作流/fact = 新值" in recalled and "已注入" not in recalled
     assert provider.prefetch("/new") == ""

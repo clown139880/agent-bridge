@@ -6,11 +6,11 @@
 
 ## 1. 目标、假设与边界
 
-面向手机浏览器，提供最近 session 列表、详情和历史对话、运行中事件流、打断当前 turn、新建对话，以及已有 session 的继续对话。复用 `ab_*` 的业务语义和控制面 `/api/v1`，不另建执行状态来源。
+面向手机浏览器，提供最近 session 列表、详情和历史对话、运行中事件流、打断当前 turn、新建对话，以及已有 session 的继续对话。复用 `/mcp/bridge` 工具的业务语义和控制面 `/api/v1`，不另建执行状态来源。
 
 按当前代码作以下假设；存在取舍的地方明确保留限制：
 
-- “移动端网页”指独立浏览器入口，不依赖 TokensCowork Desktop、DSH Host 或 Matrix。0.6.100 起面向可通过内网或 Cloudflare Access 进入页面的操作者，不引入账户、多人权限或 OAuth。
+- “移动端网页”指独立浏览器入口，不依赖 TokensCowork Desktop 或 DSH Host。0.6.100 起面向可通过内网或 Cloudflare Access 进入页面的操作者，不引入账户、多人权限或 OAuth。
 - 手机通过已有可信网络入口访问控制面同源 HTTPS 地址；本方案不选择域名、不开放端口、不配置公网暴露。TLS 终止层必须支持 SSE、不缓冲响应。
 - “内容流”指已持久化的完整消息、工具结果、进度与 turn 事件。当前没有文本/token delta，因此不能承诺打字机式逐 token 展示。若该效果是硬要求，需要另立协议扩展任务。
 - “最近”默认指 `updatedAt` 降序，首屏 50 条，按需加载更多；不是只取今天，也不扫描所有会话。首版为平铺时间列表；以后增加项目分组时使用服务端 `/session-groups`，不在浏览器全量拉取后自行分组。
@@ -23,16 +23,16 @@
 
 | 来源 | 已确认内容 |
 | --- | --- |
-| `packages/cli/src/mcp.ts` | 实际工具名是 `ab_workers`、`ab_sessions`、`ab_session`、`ab_create_session`、`ab_send`、`ab_wait`、`ab_pending`、`ab_decide`、`ab_answer`、`ab_interrupt` |
-| `packages/cli/src/ops.ts`、`client.ts` | MCP/CLI 的操作层通过 HTTP 调用 `/api/v1`，包括建立 SSE；还做 workspace 名称解析、等待 action、组合详情和精简响应 |
+| `apps/control-plane/src/mcp/bridge.ts` | `/mcp/bridge` 的工具名是 `workers`、`sessions`、`session`、`create`、`turn`、`wait`、`pending`、`approve`、`answer`、`interrupt` |
+| `apps/control-plane/src/mcp/bridge-ops.ts`、`bridge-client.ts` | MCP 的操作层以调用方的 Bearer 通过 loopback HTTP 调用 `/api/v1`，包括建立 SSE；还做 workspace 名称解析、等待 action、组合详情和精简响应 |
 | `apps/control-plane/src/api/router.ts` | 列表、详情、历史事件、创建、提交 turn、interrupt、actions、pending 和 stream 均有 handler |
 | `apps/control-plane/src/api/sse.ts` | SSE 在 `/api/v1/stream`，可用 `sessionId` 过滤，支持 cursor / `Last-Event-ID` |
 | `apps/control-plane/src/config.ts` | 已有 read/write token 和 SSE 参数，默认监听 `0.0.0.0:8787` |
-| `apps/control-plane/src/server.ts` | 当前为 `node:http.createServer`，没有静态页托管；同一 server 处理 `/bridge` WebSocket upgrade、HTTP API、`/health`、memory 入口 |
+| `apps/control-plane/src/server.ts`、`http.ts`、`web/app.ts` | 一个 Hono 应用是唯一 HTTP 入口：`/api/v1`、`/control/api/v1`（浏览器）、`/control/*`（Control Center 静态页）、`/health`、`/memory/bootstrap`、`/mcp/*`；`/bridge` WebSocket upgrade 由 `ws` 在同一 server 上处理 |
 | `packages/database/src/control.ts` | session 状态投影、事件分页、快照水位、可恢复流、action 结果的真实实现 |
 | [Agent Control API 契约](agent-control-api.md) | `/api/v1` 的 wire types、错误、幂等和实时协议 |
 
-**结论：不需要“把 MCP 改成 HTTP”，也不需要浏览器运行 MCP 客户端。** 前端直接调用已有 `/api/v1`，在薄适配层处理组合请求、字段和 UI 状态即可。控制面根路径 `/mcp` 当前是 conversation/memory MCP，不是移动端操作 session 的入口。
+**结论：不需要“把 MCP 改成 HTTP”，也不需要浏览器运行 MCP 客户端。** 前端直接调用已有 `/api/v1`，在薄适配层处理组合请求、字段和 UI 状态即可。控制面的 `/mcp/memory` 是对话档案/记忆/技能 MCP，`/mcp/bridge` 供 agent 驱动 session；两者都不是浏览器操作 session 的入口。
 
 ### 2.1 MCP 语义到 HTTP 的对应
 
@@ -40,18 +40,18 @@
 
 | 业务 / MCP 语义 | 已有 HTTP | 移动端用法 |
 | --- | --- | --- |
-| `ab_workers` | `GET /workers` | 机器、agent、在线状态、能力、最近 workspace |
-| `ab_sessions` | `GET /sessions?sort=updatedAt&order=desc&limit=50` | 搜索、过滤、游标分页；不是历史 `/runs` |
+| `workers` | `GET /workers` | 机器、agent、在线状态、能力、最近 workspace |
+| `sessions` | `GET /sessions?sort=updatedAt&order=desc&limit=50` | 搜索、过滤、游标分页；不是历史 `/runs` |
 | 首屏一致性 | `GET /snapshot?sessionLimit=50` | 同一读事务的 workers / sessions / pending / `streamCursor` |
-| `ab_session` | `GET /sessions/:id`，`GET /sessions/:id/events`，两个 pending 列表 | 组合详情、消息和待办；HTTP 返回完整资源，MCP 返回精简组合结果 |
-| `ab_wait` | `GET /stream?cursor=…`，必要时加 `sessionId=…` | 前端消费事件和状态，不增加 `/wait` 轮询接口 |
-| `ab_create_session` | `POST /sessions` | 创建，可携带首条 `input` |
-| `ab_send` / submit_turn | `POST /sessions/:id/turns` | idle 开始新 turn；active 追加指令 |
-| `ab_interrupt` / interrupt_turn | `POST /sessions/:id/interrupt` | 附 `expectedTurnId`，只打断用户看到的 turn |
+| `session` | `GET /sessions/:id`，`GET /sessions/:id/events`，两个 pending 列表 | 组合详情、消息和待办；HTTP 返回完整资源，MCP 返回精简组合结果 |
+| `wait` | `GET /stream?cursor=…`，必要时加 `sessionId=…` | 前端消费事件和状态，不增加 `/wait` 轮询接口 |
+| `create` | `POST /sessions` | 创建，可携带首条 `input` |
+| `turn` / submit_turn | `POST /sessions/:id/turns` | idle 开始新 turn；active 追加指令 |
+| `interrupt` / interrupt_turn | `POST /sessions/:id/interrupt` | 附 `expectedTurnId`，只打断用户看到的 turn |
 | 异步回执 | `GET /actions/:actionId`，SSE `action.updated` | `accepted` 不等于完成，跟踪最终执行结果 |
-| `ab_pending` | `GET /approvals?sessionId=…`、`GET /user-input?sessionId=…` | 注意 HTTP 路径是单数 `user-input` |
-| `ab_decide` | `POST /approvals/:id/decision` | 已存在，后续 UI 传 `{choice}` |
-| `ab_answer` | `POST /user-input/:id/response` | 已存在，传 `{answers:{[questionId]:{answers:[…]}}}` |
+| `pending` | `GET /approvals?sessionId=…`、`GET /user-input?sessionId=…` | 注意 HTTP 路径是单数 `user-input` |
+| `approve` | `POST /approvals/:id/decision` | 已存在，后续 UI 传 `{choice}` |
+| `answer` | `POST /user-input/:id/response` | 已存在，传 `{answers:{[questionId]:{answers:[…]}}}` |
 
 `GET /sessions/:id/events` 返回 JSON 历史分页，**不是 SSE**。当前代码还支持 `tail=true&limit=100`，返回最近一页且页内仍为时间正序；向前加载用 `tail=true&before=<nextCursor>`。普通向后补读使用 `after`。这两个方向的 `nextCursor` 不能混用；它们也不能用于 `/stream`。该 tail/before 能力在契约正文中说明不完整，实施时应补文档，无需新增 handler。
 
@@ -79,9 +79,9 @@ apps/control-plane/src/web/
   static.ts                # 受限静态目录、SPA fallback
 ```
 
-由控制面原有 HTTP server 托管编译后的静态资源，使用 Hono + `@hono/node-server` 的 Node request listener 适配器承接新增网页路由。在现有 dispatcher 中，原有 API / memory / health 优先处理，其余符合网页前缀的请求交给 Hono；所有异步异常仍须收敛为 HTTP 错误。
+由控制面托管编译后的静态资源：一个 Hono 应用是唯一的 HTTP 入口（经 `@hono/node-server` 的 request listener 挂在 Node server 上），`/api/v1`、`/health`、`/memory/bootstrap`、`/mcp/*` 与 `/control/*` 网页路由同在这棵路由里；所有异步异常仍须收敛为 HTTP 错误。
 
-首版不把 `AgentControlApi`、原生 `IncomingMessage/ServerResponse` SSE 或 WebSocket 全部改写成 Hono。这样新增部分采用 Hono 后端结构，同时保留已验证的业务和流生命周期。API 请求体只由原 handler 消费，不先经 Hono body parser；SSE 不经过会缓冲整段响应的转换器。Hono 适配器挂在既有 server 上，不再调用一次 `listen()`。
+`AgentControlApi` 和原生 `IncomingMessage/ServerResponse` SSE 仍由原 handler 通过 `c.env.incoming/outgoing` 挂载，WebSocket upgrade 仍由 `ws` 处理，保留已验证的业务和流生命周期。API 请求体只由原 handler 消费，不先经 Hono body parser；SSE 不经过会缓冲整段响应的转换器。
 
 ### 3.2 参考 go-hikaru 的范围
 
@@ -91,7 +91,7 @@ apps/control-plane/src/web/
 - `src/player.ts` 托管兄弟包 `apps/player/dist`，hash 资源长缓存，HTML 重验证，非 API 页面可 SPA fallback。
 - `src/idle.ts` 用 hold/release 管理空闲退出，timer `unref`。
 
-本项目复用其“兄弟前端包 + 服务端同源托管”的组织方式和缓存策略。控制面还有长期 Bridge WebSocket、Matrix 和调度职责，不把整个控制面顺手迁成按网页访问启动/退出；本文也不新建后台索引、同步任务或服务。若以后确需拆出低频网页服务，再按 socket activation + idle-exit 设计，SSE 占用期间持有活动引用，服务端新增 timer 均 `unref`。
+本项目复用其“兄弟前端包 + 服务端同源托管”的组织方式和缓存策略。控制面还有长期 Bridge WebSocket 和调度职责，不把整个控制面顺手迁成按网页访问启动/退出；本文也不新建后台索引、同步任务或服务。若以后确需拆出低频网页服务，再按 socket activation + idle-exit 设计，SSE 占用期间持有活动引用，服务端新增 timer 均 `unref`。
 
 ### 3.3 路由与静态资源规则
 
@@ -156,7 +156,7 @@ assistant 消息
 网页入口只映射所需只读资源，以及 create_session / submit_turn / interrupt_turn 三类 POST，复用原
 `/api/v1` handler 和幂等/action 语义；删除、审批决策、回答等不在入口白名单。SSE 直接派发到原 node:http
 handler，维持断开清理和背压，不经过静态 Hono 适配器或缓冲反向代理。原 `/api/v1/*` 继续要求 Bearer，
-MCP/CLI/DSH 行为不变；不新增匿名 MCP。
+MCP/DSH 行为不变；不新增匿名 MCP。
 
 所有网页 API（含读取/SSE）要求自定义请求头；浏览器跨源请求必须预检，入口不授予 CORS，且显式拒绝
 非同源 Origin / Fetch Metadata。Origin 必须是 http(s)，host 与请求 Host 一致，反代需保留 Host。
@@ -277,7 +277,7 @@ maxBackpressure 是写失败计数，不是 MB 上限、队列长度或已确认
 {"input":"请补充错误处理","delivery":"steer","expectedTurnId":"当前看到的 turn ID"}
 ```
 
-业务与 `ab_send` 相同。idle 页面使用 `delivery:"start_turn"` 且不传 expectedTurnId，避免用户本来要新开一轮却竞态 steer 了别人刚启动的 turn；active 页面使用 `delivery:"steer"` 加当前 expectedTurnId。已有 `auto` 语义保留给明确允许自动分派的场景，不能把 stale UI 静默改投到新 turn。
+业务与 `/mcp/bridge` 的 `turn` 相同。idle 页面使用 `delivery:"start_turn"` 且不传 expectedTurnId，避免用户本来要新开一轮却竞态 steer 了别人刚启动的 turn；active 页面使用 `delivery:"steer"` 加当前 expectedTurnId。已有 `auto` 语义保留给明确允许自动分派的场景，不能把 stale UI 静默改投到新 turn。
 
 请求中禁用重复提交但保留草稿；回执失败继续保留。只有确认成功后清空对应发送草稿。pending approval / user input 先处理待办，不能用普通 input 代替结构化回答。
 
@@ -320,13 +320,13 @@ flowchart TD
     U[手机浏览器 React / Tailwind]
     T[页面内存中的操作者 token]
     E[已有 HTTPS 入口：SSE 不缓冲]
-    N[Control Plane：现有 node:http server]
-    H[新增 Hono 网页路由 /control/*]
+    N[Control Plane：Hono 唯一 HTTP 入口]
+    H[Hono 网页路由 /control/*]
     S[apps/control-center/dist 静态资源]
     A[现有 /api/v1 handlers + AgentControlSse]
     D[(SQLite：sessions / events / pending / actions)]
     B[owning Bridge / Agent adapter]
-    M[ab_* MCP → BridgeOps / HTTP client]
+    M["/mcp/bridge → BridgeOps / HTTP client"]
     T --> U
     U -->|页面 / JSON / fetch SSE| E
     E --> N

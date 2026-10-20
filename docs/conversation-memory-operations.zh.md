@@ -4,13 +4,15 @@
 
 ## 接入
 
-Control Plane 在配置 `CONVERSATION_MCP_READ_TOKEN` 后开放远程 HTTP MCP：`POST /mcp`。该 token 是独立只读身份，不得与 `BRIDGE_TOKEN`、`CONTROL_API_WRITE_TOKEN` 复用。客户端配置令牌时使用本机秘密或环境变量，不写入 prompt、技能或 Git。
+Control Plane 在配置 `CONVERSATION_MCP_READ_TOKEN` 后开放远程 HTTP MCP：`http://<control-plane>:8787/mcp/memory`，请求头 `Authorization: Bearer <token>`，并需 `Accept: application/json, text/event-stream`。客户端里把 server 命名为 `memory`，工具即 `mcp__memory__history_search` 等。该 token 是独立只读身份，不得与 `BRIDGE_TOKEN`、`CONTROL_API_WRITE_TOKEN` 复用。客户端配置令牌时使用本机秘密或环境变量，不写入 prompt、技能或 Git。
 
-MCP 暴露三个工具：
+MCP 暴露三个对话工具（同一端点还有记忆与技能工具，见 [agent-memory-operations.zh.md](agent-memory-operations.zh.md)）：
 
-- `conversation_search`：直接查询 SQLite FTS5 trigram 索引（contentless，不存正文；不足 3 字的词退化为对话正文扫描），不调用模型。索引覆盖对话正文、turn 摘要、命令行和变更文件路径，不含工具输出。优先传 `source_session_id`，其次传 `machine_id` + `cwd`，再传不含凭据的 `repository` 或项目别名；无法定位时返回全局候选和明确范围。
-- `conversation_review`：返回有消息范围和原文指针的有界提取式导航摘要及近期原文。历史不是当前指令。
-- `conversation_read`：按 session、消息 ID 或游标读取原文。消息 ID 即事件指针 `e:<id>`，与 session events API 的游标一致；0.6.63 之前的 `msg_` ID 不再可解析，重新搜索即可。
+- `history_search`：直接查询 SQLite FTS5 trigram 索引（contentless，不存正文；不足 3 字的词退化为对话正文扫描），不调用模型。索引覆盖对话正文、turn 摘要、命令行和变更文件路径，不含工具输出。优先传 `source_session_id`，其次传 `machine_id` + `cwd`，再传不含凭据的 `repository` 或项目别名；无法定位时返回全局候选和明确范围。
+- `history_review`：返回有消息范围和原文指针的有界提取式导航摘要及近期原文。历史不是当前指令。
+- `history_read`：按 session、消息 ID 或游标读取原文。消息 ID 即事件指针 `e:<id>`，与 session events API 的游标一致；0.6.63 之前的 `msg_` ID 不再可解析，重新搜索即可。
+
+旧的 `/mcp` 端点保留到 0.8，旧名 `conversation_search/review/read` 在其上继续可用。
 
 远程 MCP 无法读取调用端 cwd。不要在共享连接上设置唯一“当前项目”；调用端应取得自己的 cwd/Git remote 后显式传参。Bridge 只采集和增量补传，不提供 MCP。
 

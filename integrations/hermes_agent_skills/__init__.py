@@ -2,16 +2,16 @@
 
 Skills live in one Git repository organised by agent-memory scope (design:
 docs/agent-skills-design.zh.md). This plugin replaces the three built-in skill tools
-and forwards them to the Control Plane `skill_*` MCP tools, so every write is a reviewed
+and forwards them to the Control Plane /mcp/memory skill tools, so every write is a reviewed
 commit in the right scope. The session's scope comes from its Matrix room (read from the
-profile's state.db) resolved through `memory_resolve_scope`.
+profile's state.db) resolved through the `scope` tool.
 
 While piloting, only sessions whose scope is listed in AGENT_SKILLS_SCOPES use the
 library; every other session falls through to the original Hermes handlers.
 
 Configuration (profile .env):
   AGENT_MEMORY_TOKEN       writer token (shared with the memory provider; required)
-  AGENT_MEMORY_URL         default http://127.0.0.1:8787/mcp
+  AGENT_MEMORY_URL         default http://127.0.0.1:8787/mcp/memory
   AGENT_MEMORY_SELF_SCOPE  this agent's own scope, e.g. _agent-dorothy (always visible)
   AGENT_SKILLS_SCOPES      comma-separated pilot scopes, or "all"; unset/empty disables routing
   AGENT_SKILLS_LOAD_ALL    "true" lets skill_view/skill_manage reach every scope (Hermes)
@@ -37,7 +37,7 @@ except ImportError:  # unit tests run without the Hermes tree
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_URL = "http://127.0.0.1:8787/mcp"
+DEFAULT_URL = "http://127.0.0.1:8787/mcp/memory"
 TIMEOUT = 10.0
 GLOBAL = "_global"
 TOOLS = ("skills_list", "skill_view", "skill_manage")
@@ -85,15 +85,23 @@ class SkillLibrary:
         body = json.dumps({"jsonrpc": "2.0", "id": self._request_id, "method": "tools/call",
                            "params": {"name": tool, "arguments": arguments}}).encode("utf-8")
         request = urllib.request.Request(self.url, data=body, method="POST", headers={
-            "Authorization": f"Bearer {self.token}", "Content-Type": "application/json"})
+            "Authorization": f"Bearer {self.token}", "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream"})
         try:
             with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
-                reply = json.loads(response.read().decode("utf-8"))
+                text = response.read().decode("utf-8")
+                # Streamable HTTP answers one SSE `data:` event; the legacy /mcp answers plain JSON.
+                if "text/event-stream" in (response.headers.get("Content-Type") or ""):
+                    text = next((line[5:].strip() for line in text.splitlines() if line.startswith("data:")), "{}")
+                reply = json.loads(text)
         except Exception as exc:
             raise Unavailable(f"skill library unavailable: {exc}") from exc
         if "error" in reply:
             raise ValueError(reply["error"].get("message", "skill_error"))
-        return reply["result"]["structuredContent"]
+        result = reply["result"]
+        if result.get("isError"):
+            raise ValueError(" ".join(part.get("text", "") for part in result.get("content") or []) or "skill_error")
+        return result["structuredContent"]
 
     def call(self, tool: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         return self._call_impl(tool, arguments)
@@ -126,7 +134,7 @@ class SkillLibrary:
         scope = GLOBAL
         if chat_id:
             try:
-                scope = self.call("memory_resolve_scope", {"room_id": room_key(chat_id)}).get("scope", GLOBAL)
+                scope = self.call("scope", {"room_id": room_key(chat_id)}).get("scope", GLOBAL)
             except Exception as exc:
                 logger.warning("agent-skills: scope lookup failed for %s: %s", session_id, exc)
                 return GLOBAL  # do not cache a failure
@@ -151,7 +159,7 @@ class SkillLibrary:
     # ---- tools ----
 
     def skills_list(self, args: Dict[str, Any], scope: str) -> str:
-        skills = self.call("skill_index", {"scopes": self.visible(scope)})["skills"]
+        skills = self.call("skills", {"scopes": self.visible(scope)})["skills"]
         category = args.get("category")
         if category:
             skills = [item for item in skills if item["category"] == category or item["category"].startswith(f"{category}/")]
@@ -165,13 +173,13 @@ class SkillLibrary:
         name = str(args.get("name") or "")
         file_path = args.get("file_path") or "SKILL.md"
         try:
-            view = self.call("skill_view", {"name": name, "scopes": self.reach(scope), "file": file_path})
+            view = self.call("skill", {"name": name, "scopes": self.reach(scope), "file": file_path})
         except ValueError as exc:
             message = str(exc)
             if "unknown_skill" in message:
                 return None
             if "unknown_file" in message or "invalid_file_path" in message:
-                files = self.call("skill_view", {"name": name, "scopes": self.reach(scope)})["files"]
+                files = self.call("skill", {"name": name, "scopes": self.reach(scope)})["files"]
                 return _fail(f"File '{file_path}' not found in skill '{name}'.", available_files=files,
                              hint="Use one of the available file paths listed above")
             return _fail(message)
@@ -188,7 +196,7 @@ class SkillLibrary:
             operations = [{key: value for key, value in args.items() if key != "operations"}]
         if not isinstance(operations, list) or not operations:
             return _fail("operations must be a non-empty array")
-        known = {item["name"] for item in self.call("skill_index", {"scopes": self.visible(scope)})["skills"]}
+        known = {item["name"] for item in self.call("skills", {"scopes": self.visible(scope)})["skills"]}
         reach = self.reach(scope)
         if self.load_all:
             known |= {item["name"] for item in self.call("skill_search", {"query": " ".join(
@@ -212,7 +220,7 @@ class SkillLibrary:
                     result = self.call("skill_write", {"scope": self._scope_of(name, reach), "name": name,
                                                        "file": op.get("file_path", ""), "content": op.get("file_content", "")})
                 elif action == "remove_file":
-                    result = self.call("skill_remove_file", {"name": name, "scopes": reach, "file": op.get("file_path", "")})
+                    result = self.call("skill_rm", {"name": name, "scopes": reach, "file": op.get("file_path", "")})
                 elif action == "delete":
                     reason = f"absorbed into {op['absorbed_into']}" if op.get("absorbed_into") else "deleted via skill_manage"
                     result = self.call("skill_archive", {"name": name, "scopes": reach, "reason": reason})
@@ -225,7 +233,7 @@ class SkillLibrary:
         return _ok(message=f"{len(results)} operation(s) applied to the skill library", results=results)
 
     def _scope_of(self, name: str, reach: Any) -> str:
-        return self.call("skill_view", {"name": name, "scopes": reach})["scope"]
+        return self.call("skill", {"name": name, "scopes": reach})["scope"]
 
 
 def _wrap(tool: str, lib: SkillLibrary, original: Callable[..., Any]) -> Callable[..., Any]:

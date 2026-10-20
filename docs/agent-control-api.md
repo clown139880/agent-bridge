@@ -2,7 +2,7 @@
 
 > 状态：**已随 Agent Bridge 0.5.0 发布并部署**；后续 0.5.x 保持本页 v1 兼容契约。
 > 0.6.96 起 Hermes Worker API（`POST /runs` 与 `/runs/{runId}/*`）和 Hermes Kanban 插件已移除；
-> `GET /runs` 与 `GET /sessions/{sessionId}/runs` 只读历史 run。Hermes 改用本 API（经 `abctl`）驱动 session。
+> `GET /runs` 与 `GET /sessions/{sessionId}/runs` 只读历史 run。Hermes 经 `/mcp/bridge`（本 API 的 MCP 封装，工具 `workers/sessions/session/pending/wait/create/turn/approve/answer/interrupt`）驱动 session。
 
 ## 1. 范围与原则
 
@@ -167,7 +167,7 @@ export interface SessionSummary {
 export interface Session extends SessionSummary {
   capabilities: Capability[];
   runs: RunLink[];            // newest first; detail response may cap this list
-  matrixRoomId: string | null;   // compatibility metadata, not a UI control channel
+  matrixRoomId: string | null;   // legacy field, empty for new sessions; not a control channel
   matrixThreadId: string | null;
   error: ApiErrorBody | null;
 }
