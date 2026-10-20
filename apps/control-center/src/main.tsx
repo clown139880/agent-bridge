@@ -49,6 +49,19 @@ function Login({ onLogin, notice }: { onLogin: (token: string, writable: boolean
   const [busy, setBusy] = useState(false), [error, setError] = useState("");
   const pending = useRef<ControlClient>();
   useEffect(() => () => pending.current?.dispose(), []);
+  // Optional convenience: prefill the token from a URL fragment (#token=..[&write=1])
+  // and immediately scrub it from the address bar and history. The fragment is client-side
+  // only — it is never sent to the server or logged there.
+  useEffect(() => {
+    const m = location.hash.match(/^#token=([^&]*)(&write=1)?/);
+    if (!m || m[1] === undefined) return;
+    let t = "";
+    try { t = decodeURIComponent(m[1]); } catch { return; }
+    if (!t) return;
+    setToken(t);
+    if (m[2]) setWritable(true);
+    history.replaceState(null, "", location.pathname + location.search);
+  }, []);
   return <main className="login-shell">
     <div className="brand"><span className="brand-mark">ab</span><span>AGENT BRIDGE</span></div>
     <div className="eyebrow">CONTROL CENTER</div><h1>随时，接上对话。</h1>
