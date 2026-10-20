@@ -390,6 +390,8 @@ function readDesktopSessionMetadata(path: string, allowedRoots: string[]): Deskt
   }
   const payload = entry.payload ?? {};
   if (entry.type !== "session_meta" || payload.originator !== "Codex Desktop") return undefined;
+  // Guardian reviews and other subagents run as child threads of a conversation; they are not sessions.
+  if (payload.parent_thread_id || isSubagentSource(payload.source)) return undefined;
   if (typeof payload.id !== "string" || typeof payload.cwd !== "string") return undefined;
   const cwd = normalizeDesktopPath(payload.cwd);
   if (!isAllowedProjectPath(cwd, allowedRoots)) return undefined;
@@ -400,6 +402,10 @@ function readDesktopSessionMetadata(path: string, allowedRoots: string[]): Deskt
     createdAt: rolloutTimestamp(entry) ?? Math.floor(statSync(path).birthtimeMs || statSync(path).mtimeMs),
     updatedAt: rolloutTimestamp(entry) ?? Math.floor(statSync(path).mtimeMs),
   };
+}
+
+function isSubagentSource(source: unknown): boolean {
+  return Boolean(source && typeof source === "object" && "subagent" in source);
 }
 
 function rolloutTimestamp(entry: RolloutEntry): number | undefined {

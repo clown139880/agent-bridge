@@ -56,6 +56,9 @@ interface CodexThread {
   createdAt?: number;
   updatedAt?: number;
   parentThreadId?: string | null;
+  /** Never materialized on disk, e.g. the threads a client starts to generate a title. */
+  ephemeral?: boolean;
+  source?: string | { subAgent?: unknown } | { custom?: string };
   status?: { type?: string; activeFlags?: string[] };
   model?: string;
   projectIdentity?: string;
@@ -378,7 +381,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
 
   stateSnapshot(): { sessions: SessionState[]; approvals: Array<Record<string, unknown>>; userInputs: Array<Record<string, unknown>> } {
     const now=Date.now();
-    const sessions=[...this.threadsById.values()].filter(thread=>!thread.parentThreadId).map(thread=>({
+    const sessions=[...this.threadsById.values()].filter(isConversationThread).map(thread=>({
       sessionId:thread.id,nativeSessionId:thread.id,agentType:"codex-cli" as const,projectPath:thread.cwd,
       projectName:basename(thread.cwd),title:thread.name??undefined,activityStatus:this.pendingUserInput.has(thread.id)
         ? "waiting_for_input" as const : [...this.pendingApprovals.values()].some(item=>item.sessionId===thread.id&&!item.answered)
@@ -857,9 +860,9 @@ export class CodexAppServerAdapter implements AgentAdapter {
   private async handleNotification(method: string, params: Record<string, unknown>): Promise<void> {
     if (method === "thread/started") {
       const thread = params.thread as CodexThread | undefined;
-      if (thread) {
+      // Its session event would create a row in Control Plane, so only follow threads discovery accepted.
+      if (thread && await this.discoverThread(thread, this.pendingStartPrompts.get(thread.cwd))) {
         this.subscribedThreads.add(thread.id);
-        await this.discoverThread(thread, this.pendingStartPrompts.get(thread.cwd));
         this.emitSessionEvent("session.discovered",thread.id,`app-server:${thread.id}:started`,
           {...(thread.model?{model:thread.model}:{})});
       }
@@ -1040,7 +1043,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
   }
 
   private async discoverThread(thread: CodexThread, initialPrompt?: string, requestId?: string): Promise<boolean> {
-    if (!thread.id || !thread.cwd || thread.parentThreadId) return false;
+    if (!thread.id || !thread.cwd || !isConversationThread(thread)) return false;
     let projectPath: string;
     try {
       projectPath = await resolveProjectPath(thread.cwd, this.options.allowedRoots);
@@ -1221,6 +1224,12 @@ export class CodexAppServerAdapter implements AgentAdapter {
       turnId, itemId, payload });
   }
 
+}
+
+/** Subagents (Guardian reviews included) and ephemeral threads have no conversation of their own to sync. */
+function isConversationThread(thread: CodexThread): boolean {
+  return !thread.parentThreadId && !thread.ephemeral
+    && !(thread.source && typeof thread.source === "object" && "subAgent" in thread.source);
 }
 
 function threadTimestamp(thread: CodexThread): number {

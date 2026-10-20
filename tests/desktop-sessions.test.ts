@@ -72,7 +72,7 @@ test("Desktop scanner baselines history, reports new completions, and tracks act
   rmSync(root, { recursive: true, force: true });
 });
 
-test("Desktop scanner ignores non-Desktop and out-of-scope rollouts", async () => {
+test("Desktop scanner ignores non-Desktop, subagent and out-of-scope rollouts", async () => {
   const root = join(tmpdir(), `agent-bridge-desktop-${randomUUID()}`);
   const allowed = join(root, "allowed");
   const outside = join(root, "outside");
@@ -83,6 +83,11 @@ test("Desktop scanner ignores non-Desktop and out-of-scope rollouts", async () =
   writeFileSync(join(sessions, "rollout-cli.jsonl"), [
     line({ type: "session_meta", payload: { id: "cli", cwd: allowed, originator: "codex_cli_rs" } }),
     line({ type: "event_msg", payload: { type: "task_complete", turn_id: "turn-1" } }),
+  ].join(""));
+  writeFileSync(join(sessions, "rollout-guardian.jsonl"), [
+    line({ type: "session_meta", payload: { id: "guardian", cwd: allowed, originator: "Codex Desktop",
+      parent_thread_id: "parent", source: { subagent: { other: "guardian" } }, thread_source: "guardian_review" } }),
+    line({ type: "event_msg", payload: { type: "task_complete", turn_id: "turn-3" } }),
   ].join(""));
   writeFileSync(join(sessions, "rollout-outside.jsonl"), [
     line({ type: "session_meta", payload: { id: "outside", cwd: outside, originator: "Codex Desktop" } }),

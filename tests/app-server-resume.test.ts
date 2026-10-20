@@ -223,6 +223,23 @@ test("restoration only hydrates unique threads inside the allowed roots", async 
   }
 });
 
+test("Guardian reviews, other subagents and ephemeral threads are not discovered as sessions", async () => {
+  const emitted: BridgeToControlMessage[] = [];
+  const adapter = new CodexAppServerAdapter({
+    command: "codex", url: "ws://127.0.0.1:4500", allowedRoots: [process.cwd()],
+    manageServer: false, reconnectMs: 3_000,
+  }, (message) => emitted.push(message));
+  const internals = adapter as unknown as { handleNotification(method: string, params: Record<string, unknown>): Promise<void> };
+  const thread = (id: string, extra: Record<string, unknown> = {}) => ({ id, cwd: process.cwd(), status: { type: "idle" }, ...extra });
+  for (const t of [
+    thread("guardian", { source: { subAgent: { other: "guardian" } }, threadSource: "guardian_review" }),
+    thread("spawned", { parentThreadId: "parent", source: { subAgent: { thread_spawn: { depth: 1, parent_thread_id: "parent" } } } }),
+    thread("title", { ephemeral: true, source: "vscode" }),
+    thread("conversation", { ephemeral: false, source: "vscode", threadSource: "user" }),
+  ]) await internals.handleNotification("thread/started", { thread: t });
+  assert.deepEqual([...new Set(emitted.flatMap(m => "sessionId" in m ? [m.sessionId] : []))], ["conversation"]);
+});
+
 test("reconnect synchronizes active turns after completion notifications were lost", async () => {
   const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
   const adapter = new CodexAppServerAdapter({
