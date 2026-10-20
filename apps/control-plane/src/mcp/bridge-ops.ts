@@ -1,11 +1,11 @@
 import { isAbsolute } from "node:path";
 import { win32 } from "node:path";
-import { ApiError, type ControlClient, type Json } from "./client.js";
+import { ApiError, type ControlClient, type Json } from "./bridge-client.js";
 
 /**
  * Driving Agent Bridge sessions from another agent (Hermes, Claude, Codex): list,
- * read, create, send a turn, wait for it, answer approvals and questions. The CLI
- * and the MCP server are both thin shells over these operations.
+ * read, create, send a turn, wait for it, answer approvals and questions. /mcp/bridge
+ * is a thin shell over these operations, which call the Control API as the caller.
  */
 
 const TERMINAL = new Set(["turn.completed", "turn.failed", "turn.interrupted"]);

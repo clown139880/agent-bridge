@@ -29,6 +29,7 @@ import { AgentMemory, AgentSkills, type Writer } from "@agent-bridge/agent-memor
 import { ConversationMcpServer } from "./memory-mcp.js";
 import { memoryEndpoint } from "./mcp/memory.js";
 import { mcpRoute } from "./mcp/route.js";
+import { bridgeEndpoint } from "./mcp/bridge.js";
 import { compareBridgeVersions } from "./bridge-version.js";
 import { PostDeployResumer } from "./post-deploy.js";
 import { createHttpApp, type HttpEnv } from "./http.js";
@@ -132,13 +133,17 @@ export class ControlPlane {
           sessionId, input, delivery: "auto", resume: this.resumeContext(sessionId) });
       },
     });
+    const apiEnabled = Boolean(options.workerApiEnabled || options.controlApiReadToken || options.controlApiWriteToken);
     const app = createHttpApp({
       health: () => ({ ok: true, bridges: this.bridges.size, legacyMcpCalls: this.memoryMcp?.legacyCalls ?? 0 }),
       memoryBootstrap: (c) => this.handleMemoryBootstrap(c),
-      mcp: memoryEndpointOptions && { memory: mcpRoute(memoryEndpoint(...memoryEndpointOptions)) },
+      mcp: {
+        ...(memoryEndpointOptions ? { memory: mcpRoute(memoryEndpoint(...memoryEndpointOptions)) } : {}),
+        ...(apiEnabled ? { bridge: mcpRoute(bridgeEndpoint(this.controlApi, () => this.loopbackBase())) } : {}),
+      },
       legacyMcp: this.memoryMcp && ((request, response) => this.memoryMcp!.handle(request, response)),
       controlApi: this.controlApi,
-      apiEnabled: Boolean(options.workerApiEnabled || options.controlApiReadToken || options.controlApiWriteToken),
+      apiEnabled,
       browserTokens: { read: options.controlApiReadToken, write: options.controlApiWriteToken },
     });
     this.http = createServer(getRequestListener(app.fetch, { overrideGlobalObjects: false }));
@@ -172,6 +177,14 @@ export class ControlPlane {
     clearInterval(this.cleanupTimer);
     for (const bridge of this.bridges.values()) bridge.socket.close(1001, "server shutdown");
     await new Promise<void>((resolve) => this.http.close(() => resolve()));
+  }
+
+  /** This process's own HTTP origin, for /mcp/bridge calling /api/v1 as its caller. */
+  private loopbackBase(): string {
+    const address = this.http.address();
+    if (!address || typeof address === "string") throw new Error("control plane is not listening");
+    const host = ["0.0.0.0", "::", ""].includes(address.address) ? "127.0.0.1" : address.address;
+    return `http://${host.includes(":") ? `[${host}]` : host}:${address.port}`;
   }
 
   private deleteSessionRecord(sessionId: string): void {

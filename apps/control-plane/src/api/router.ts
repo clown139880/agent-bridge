@@ -130,8 +130,14 @@ export class AgentControlApi {
   }
 
   private authenticate(request:IncomingMessage):Principal {
-    const header=request.headers.authorization;
-    if(!header?.startsWith("Bearer "))throw new ApiProblem(401,"unauthorized","valid bearer token required");
+    const principal=this.principalFor(request.headers.authorization);
+    if(!principal)throw new ApiProblem(401,"unauthorized","valid bearer token required");
+    return principal;
+  }
+
+  /** The principal an Authorization header grants on /api/v1, if any. */
+  principalFor(header:string|undefined):Principal|undefined {
+    if(!header?.startsWith("Bearer "))return undefined;
     const token=header.slice(7);
     if(this.options.writeToken&&equalSecret(token,this.options.writeToken))return{id:"control:write",read:true,write:true};
     if(this.options.readToken&&equalSecret(token,this.options.readToken))return{id:"control:read",read:true,write:false};
@@ -139,7 +145,7 @@ export class AgentControlApi {
     if(this.options.workerToken&&equalSecret(token,this.options.workerToken))return{id:"worker:legacy",read:true,write:true};
     // The bridge authenticates with its registration token to fetch attachment bytes.
     if(this.options.bridgeToken&&equalSecret(token,this.options.bridgeToken))return{id:"bridge",read:true,write:false};
-    throw new ApiProblem(401,"unauthorized","valid bearer token required");
+    return undefined;
   }
 
   private workerJson(machine:ReturnType<Store["listMachines"]>[number],agentType:AgentType,label:string):Record<string,unknown>{

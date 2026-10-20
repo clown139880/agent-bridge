@@ -89,10 +89,10 @@ for dropin in "${legacy_dropins[@]}"; do
   reload=true
 done
 "$reload" && systemctl daemon-reload
-# abctl (packages/cli) drives Bridge sessions from Hermes and shells on HAL.
-if [ "$(readlink /usr/local/bin/abctl 2>/dev/null)" != "$repo/packages/cli/bin/abctl" ]; then
-  ln -sfn "$repo/packages/cli/bin/abctl" /usr/local/bin/abctl
-  log "linked /usr/local/bin/abctl"
+# 0.7 replaced abctl (packages/cli) with /mcp/bridge; drop the link this script used to create.
+if [ "$(readlink /usr/local/bin/abctl 2>/dev/null)" = "$repo/packages/cli/bin/abctl" ]; then
+  rm -f /usr/local/bin/abctl
+  log "removed /usr/local/bin/abctl"
 fi
 
 version=$(node -p 'require("./package.json").version')

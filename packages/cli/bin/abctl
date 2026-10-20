@@ -1,5 +1,0 @@
-#!/usr/bin/env node
-// Runs the compiled CLI; `tsc -b` (deploy/hal/deploy.sh) produces dist/.
-import { main } from "../dist/main.js";
-
-process.exitCode = await main(process.argv.slice(2));

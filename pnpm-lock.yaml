@@ -198,8 +198,6 @@ importers:
         specifier: ^2.9.0
         version: 2.9.0
 
-  packages/cli: {}
-
   packages/database:
     dependencies:
       '@agent-bridge/protocol':

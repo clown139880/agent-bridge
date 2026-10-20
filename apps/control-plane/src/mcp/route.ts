@@ -16,7 +16,7 @@ export interface McpTool<P> {
   inputSchema: JsonSchema;
   /** Whether this principal may see and call the tool. */
   allowed(principal: P): boolean;
-  run(args: Record<string, unknown>, principal: P): unknown;
+  run(args: Record<string, unknown>, principal: P, signal?: AbortSignal): unknown;
 }
 
 export interface McpEndpoint<P> {
@@ -53,7 +53,14 @@ export function mcpRoute<P>(endpoint: McpEndpoint<P>) {
     for (const tool of endpoint.tools) {
       if (!tool.allowed(principal)) continue;
       server.registerTool(tool.name, { description: tool.description, inputSchema: fromJsonSchema<Record<string, unknown>>(tool.inputSchema) },
-        async (args) => toolResult(await tool.run(args ?? {}, principal)));
+        async (args, ctx) => {
+          try { return toolResult(await tool.run(args ?? {}, principal, ctx.mcpReq.signal)); }
+          catch (error) {
+            // A coded API error keeps its code, so the caller can tell workspace_unknown from forbidden.
+            const code = (error as { code?: unknown }).code;
+            throw typeof code === "string" && error instanceof Error ? new Error(`${code}: ${error.message}`) : error;
+          }
+        });
     }
     return server;
   }, { legacy: "stateless", maxRequestBodySize: 1_048_576, onerror: (error) => log.warn({ error, endpoint: endpoint.name }, "MCP request rejected") });
