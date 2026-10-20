@@ -20,7 +20,7 @@ function capabilityForAgent(agentType: AgentType): string {
   return "codex-cli";
 }
 
-interface Principal { id: string; read: boolean; write: boolean; }
+export interface Principal { id: string; read: boolean; write: boolean; }
 interface ApiOptions {
   /** WORKER_API_TOKEN: a full-access (read+write) API token used by Hermes (its /ab command). Not a worker-run API. */
   workerToken?: string;
@@ -71,12 +71,17 @@ export class AgentControlApi {
 
   actionsForBridge():SessionActionService{return this.actions;}
 
-  async handle(request: IncomingMessage,response: ServerResponse): Promise<boolean> {
-    const url=new URL(request.url??"/","http://localhost");
+  /**
+   * Serves /api/v1. A caller that has already authenticated the request (the
+   * Control Center browser entrance) passes its principal and the /api/v1 URL.
+   */
+  async handle(request: IncomingMessage,response: ServerResponse,
+    preauthorized?:{principal:Principal;url:URL}): Promise<boolean> {
+    const url=preauthorized?.url??new URL(request.url??"/","http://localhost");
     if(!url.pathname.startsWith("/api/v1/"))return false;
     const requestId=randomUUID();
     try {
-      const principal=this.authenticate(request);
+      const principal=preauthorized?.principal??this.authenticate(request);
       if(request.method!=="GET"&&!principal.write)throw new ApiProblem(403,"forbidden","write scope is required");
       if(request.method==="GET"&&!principal.read)throw new ApiProblem(403,"forbidden","read scope is required");
       if(request.method==="GET"&&url.pathname==="/api/v1/workers"){this.workers(response);return true;}

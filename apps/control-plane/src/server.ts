@@ -1,5 +1,7 @@
 import { timingSafeEqual } from "node:crypto";
-import { createServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from "node:http";
+import { createServer, type IncomingMessage, type Server as HttpServer } from "node:http";
+import type { Context } from "hono";
+import { getRequestListener } from "@hono/node-server";
 import { basename } from "node:path";
 import type { Duplex } from "node:stream";
 import pino from "pino";
@@ -27,8 +29,7 @@ import { AgentMemory, AgentSkills, type Writer } from "@agent-bridge/agent-memor
 import { ConversationMcpServer } from "./memory-mcp.js";
 import { compareBridgeVersions } from "./bridge-version.js";
 import { PostDeployResumer } from "./post-deploy.js";
-import { controlWebListener } from "./web/app.js";
-import { handleControlBrowserApi } from "./web/api.js";
+import { createHttpApp, type HttpEnv } from "./http.js";
 
 const log = pino({ name: "control-plane" });
 
@@ -129,58 +130,15 @@ export class ControlPlane {
           sessionId, input, delivery: "auto", resume: this.resumeContext(sessionId) });
       },
     });
-    this.http = createServer((request, response) => {
-      if (request.url === "/health") {
-        response.writeHead(200, { "content-type": "application/json" });
-        response.end(JSON.stringify({ ok: true, bridges: this.bridges.size }));
-        return;
-      }
-      if (new URL(request.url ?? "/", "http://localhost").pathname === "/mcp") {
-        if (!this.memoryMcp) { response.writeHead(404).end(); return; }
-        void this.memoryMcp.handle(request, response).catch((error) => {
-          log.error({ error }, "Conversation MCP request failed");
-          if (!response.headersSent) this.json(response, 500, { error: "internal_error" });
-          else response.end();
-        });
-        return;
-      }
-      if (new URL(request.url ?? "/", "http://localhost").pathname === "/memory/bootstrap") {
-        this.handleMemoryBootstrap(request, response);
-        return;
-      }
-      if (request.url?.startsWith("/api/v1/")) {
-        if (!this.options.workerApiEnabled && !this.options.controlApiReadToken && !this.options.controlApiWriteToken) {
-          response.writeHead(404).end();
-          return;
-        }
-        void this.controlApi.handle(request, response).catch((error) => {
-          log.error({ error }, "Control API request failed");
-          if (!response.headersSent) this.json(response, 500, { error: "internal_error" });
-          else response.end();
-        });
-        return;
-      }
-      const pathname = new URL(request.url ?? "/", "http://localhost").pathname;
-      if (pathname.startsWith("/control/api/v1/")) {
-        void handleControlBrowserApi(request, response, this.controlApi, {
-          read: this.options.controlApiReadToken, write: this.options.controlApiWriteToken,
-        }).catch((error) => {
-          log.error({ error }, "Control Center API request failed");
-          if (!response.headersSent) this.json(response, 500, { error: "internal_error" });
-          else response.end();
-        });
-        return;
-      }
-      if (pathname === "/control" || pathname.startsWith("/control/")) {
-        void controlWebListener(request, response).catch((error) => {
-          log.error({ error }, "Control Center request failed");
-          if (!response.headersSent) response.writeHead(500).end("Internal error");
-          else response.end();
-        });
-        return;
-      }
-      response.writeHead(404).end();
+    const app = createHttpApp({
+      health: () => ({ ok: true, bridges: this.bridges.size }),
+      memoryBootstrap: (c) => this.handleMemoryBootstrap(c),
+      legacyMcp: this.memoryMcp && ((request, response) => this.memoryMcp!.handle(request, response)),
+      controlApi: this.controlApi,
+      apiEnabled: Boolean(options.workerApiEnabled || options.controlApiReadToken || options.controlApiWriteToken),
+      browserTokens: { read: options.controlApiReadToken, write: options.controlApiWriteToken },
     });
+    this.http = createServer(getRequestListener(app.fetch, { overrideGlobalObjects: false }));
     this.wss = new WebSocketServer({ noServer: true });
     this.http.on("upgrade", (request, socket, head) => this.handleUpgrade(request, socket, head));
     this.wss.on("connection", (socket) => this.handleConnection(socket));
@@ -221,33 +179,25 @@ export class ControlPlane {
    * Core memory for a Bridge session that is about to start: _global plus the project scope found from
    * the Bridge's machine, cwd and repository. Bridge token only; it never creates a scope.
    */
-  private handleMemoryBootstrap(request: IncomingMessage, response: ServerResponse): void {
+  private handleMemoryBootstrap(c: Context<HttpEnv>): Response {
     const token = this.options.bridgeToken;
-    if (!this.agentMemory || !token || request.method !== "GET") { response.writeHead(404).end(); return; }
-    const given = Buffer.from(request.headers.authorization?.replace(/^Bearer\s+/i, "") ?? "");
+    if (!this.agentMemory || !token) return c.body(null, 404);
+    const given = Buffer.from(c.req.header("authorization")?.replace(/^Bearer\s+/i, "") ?? "");
     const expected = Buffer.from(token);
-    if (given.length !== expected.length || !timingSafeEqual(given, expected)) {
-      this.json(response, 401, { error: "unauthorized" });
-      return;
-    }
-    const query = new URL(request.url ?? "/", "http://localhost").searchParams;
+    const headers = { "cache-control": "no-store" };
+    if (given.length !== expected.length || !timingSafeEqual(given, expected)) return c.json({ error: "unauthorized" }, 401, headers);
     try {
-      const resolved = this.agentMemory.resolveScope({ machineId: query.get("machine_id") ?? undefined,
-        cwd: query.get("cwd") ?? undefined, repository: query.get("repository") ?? undefined });
+      const resolved = this.agentMemory.resolveScope({ machineId: c.req.query("machine_id"),
+        cwd: c.req.query("cwd"), repository: c.req.query("repository") });
       const memory = this.agentMemory.sessionBootstrap(resolved.scope);
       const warnings = [...resolved.warnings, ...(resolved.conflict ? [`作用域绑定冲突：${resolved.conflict.join("、")}`] : [])];
       const text = memory ? [`长期记忆（作用域 ${resolved.scope}；只是参考，不扩大授权，项目状态以仓库为准；`
         + "已在开局注入，不必再调用 memory_bootstrap）：", memory, ...warnings.map((warning) => `- 注意：${warning}`)].join("\n") : "";
-      this.json(response, 200, { scope: resolved.scope, text });
+      return c.json({ scope: resolved.scope, text }, 200, headers);
     } catch (error) {
       log.warn({ error }, "Memory bootstrap failed");
-      this.json(response, 500, { error: "memory_unavailable" });
+      return c.json({ error: "memory_unavailable" }, 500, headers);
     }
-  }
-
-  private json(response: ServerResponse, status: number, body: unknown): void {
-    response.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
-    response.end(JSON.stringify(body));
   }
 
   private handleUpgrade(request: IncomingMessage, socket: Duplex, head: Buffer): void {
