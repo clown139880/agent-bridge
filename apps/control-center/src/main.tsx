@@ -1,6 +1,7 @@
 import React, { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import { createRoot } from "react-dom/client";
 import { ControlClient, explain } from "./api/client";
+import { newerBuild, runningEntry } from "./build";
 import { isLive, pendingId, segment, type Pending, type Session, type SessionEvent, type Snapshot } from "./api/types";
 import { ControlState, IMAGE_TYPES, type Route, type ViewState } from "./state";
 import "./styles.css";
@@ -173,11 +174,22 @@ function Center({ control, path }: { control: ControlState; path: string }) {
       window.removeEventListener("pageshow", visible); window.removeEventListener("online", visible); window.removeEventListener("offline", visible);
     };
   }, [control]);
+  const [stale, setStale] = useState(false);
+  useEffect(() => {
+    const running = runningEntry(); if (!running) return;
+    const check = () => { if (document.visibilityState === "visible") void newerBuild(running).then(newer => { if (newer) setStale(true); }); };
+    const timer = setInterval(check, 5 * 60_000);
+    document.addEventListener("visibilitychange", check);
+    return () => { clearInterval(timer); document.removeEventListener("visibilitychange", check); };
+  }, []);
   return <div className="shell">
     <header className="topbar"><Link to="/control/sessions" className="brand"><span className="brand-mark">ab</span><span>控制中心</span></Link>
       <div className="top-actions"><span className="scope">{state.writable ? "操作模式" : "只读模式"}</span></div>
     </header>
     <main>
+      {stale && <aside className="action-banner" role="status"><strong>控制中心已更新</strong>
+        <p>这个页面还是旧版本，刷新后才能使用新功能（如处理审批）。</p>
+        <div className="row-actions"><button className="primary" onClick={() => location.reload()}>立即刷新</button></div></aside>}
       {state.error && <div className="error" role="alert">{state.error}<button className="quiet" onClick={() => void control.refresh()}>刷新</button></div>}
       <ActionView control={control} state={state} />
       {route.page === "sessions" ? <Sessions control={control} state={state} />

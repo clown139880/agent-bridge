@@ -226,3 +226,15 @@ test("unauthorized response invalidates authentication, forbidden remains a scop
   t.mock.method(globalThis, "fetch", async () => json({ error: { code: "unauthorized", message: "expired" } }, 401));
   await assert.rejects(client.request("/workers"), ApiError); assert.equal(logout, 1);
 });
+
+test("stale-build check compares the running entry with the served one", async () => {
+  const { entryOf, newerBuild } = await import("../apps/control-center/src/build.js");
+  const html = (name: string) => `<!doctype html><script type="module" crossorigin src="/control/assets/${name}.js"></script>`;
+  assert.equal(entryOf(html("index-new")), "/control/assets/index-new.js");
+  assert.equal(entryOf("<title>dev</title><script type=\"module\" src=\"/src/main.tsx\"></script>"), undefined);
+  const serve = (body: string, status = 200) => (async () => new Response(body, { status })) as typeof fetch;
+  assert.equal(await newerBuild("/control/assets/index-old.js", serve(html("index-new"))), true);
+  assert.equal(await newerBuild("/control/assets/index-new.js", serve(html("index-new"))), false);
+  assert.equal(await newerBuild("/control/assets/index-old.js", serve(html("index-new"), 503)), false);
+  assert.equal(await newerBuild("/control/assets/index-old.js", (async () => { throw new TypeError("redirect"); }) as typeof fetch), false);
+});
