@@ -47,3 +47,48 @@ provider 定义(baseUrl / 有哪些模型)与模型元数据(context window、ma
 
 - 版本 admission / 车队收敛机制见 `references/run-admission-and-version.md`(Hermes 技能 `agent-bridge-ops`)。
 - DSH 侧目前的模型目录只有 `remote`(跟随远端 session),尚未把 worker-specific model catalog 映射为原生 DSH provider catalog —— 见 [`current-state.md`](current-state.md) 的「当前边界」。
+
+## X(Twitter)搜索工具:OpenRouter + Grok 的 `x_search`
+
+### 动机
+
+想让 agent 在 X 上查实时讨论(例:2026-10-20 BTC 在 13:30–14:15 UTC 从 81.4k 急拉到 83.4k,想知道 X 上怎么解释)。Grok Build CLI 那条路走不通:没有会员,抓 X 就弹升级提示,还会被限流。共享浏览器也没有登录 X。
+
+### 已验证可行(2026-10-20,HAL,用 Hermes `.env` 里的 `OPENROUTER_API_KEY`)
+
+OpenRouter Chat Completions 加服务端工具即可,**不需要 X 会员或 SuperGrok**:
+
+```json
+"tools": [{ "type": "openrouter:web_search",
+  "parameters": { "engine": "native", "x_search": { "from_date": "2026-10-20" } } }]
+```
+
+| 模型 | 提示 | 引用 | 用时 | 费用 |
+|---|---|---|---|---|
+| `x-ai/grok-4.7` | 只给时间窗口 | 61 | 51 s | $0.457 |
+| `x-ai/grok-4.3` | 只给时间窗口 | 0(没搜到) | 28 s | $0.0075 |
+| `x-ai/grok-4.3` | 列出几个关键词 | 7(正文约 15 条) | 18 s | $0.135 |
+
+- 费用大头是 X 搜索**按条计费**($5 / 1,000 条帖子,$10 / 1,000 个用户资料;OpenRouter 把它算进 completion cost),不是模型 token。
+- grok-4.3 便宜但要喂具体关键词;它承认部分链接是用帖子 ID 拼出来的,不全是带标注的引用。
+- `GET /api/v1/generation?id=` 当时返回空,cost 以响应里的 `usage.cost`(需 `usage: {include: true}`)为准。
+
+### 要做的
+
+- 做成一个 MCP 工具 `x_search(question, from, to, handles?)`,挂到中央 MCP,所有 agent 可用。
+- 默认 `x-ai/grok-4.3`,工具内部把问题展开成 3–5 个关键词;用 `from_date` / `to_date` 收窄范围控制条数。
+- 返回总结 + 原帖链接 + 本次 `usage.cost`;按次记账,设单次与每日上限。
+- key 从获准的凭据配置读取(现在在 Hermes `.env`),不进参数、不进记忆。
+- 普通网页搜索可同一工具里切 `engine`(`exa` / `parallel` / `perplexity` / `firecrawl`),见下。
+
+### OpenRouter 其他搜索引擎(同一个 `openrouter:web_search` 工具,`engine` 字段切换;费用另加模型 token)
+
+| engine | 说明 | 价格 |
+|---|---|---|
+| `native` | 模型自带搜索(OpenAI GPT-4.1/5+、Claude 3.5 Haiku/3.7/4+、Gemini 3+、Grok 4+、Perplexity),没有则回退 Exa;只有 Grok 能搜 X | 透传 provider 价 |
+| `exa` | 关键词 + 向量混合,返回摘录 | $0.007/次(deep $0.012、deep-reasoning $0.015),10 条以内含,超出 $0.001/条 |
+| `parallel` | Parallel Search API | turbo/fast $0.001/次,basic/advanced $0.005/次,10 条以内含 |
+| `perplexity` | Perplexity Search API 排序结果(不做 LLM 合成) | $0.005/次 |
+| `firecrawl` | Firecrawl 搜索 | $0.005/次 + $0.0125/条结果 |
+
+通用参数:`max_results`(默认 5,1–25)、`search_context_size`、`max_characters`、`allowed_domains` / `excluded_domains`、`max_total_results`。
