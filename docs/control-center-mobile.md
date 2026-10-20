@@ -1,6 +1,6 @@
 # Control Center 移动端网页设计
 
-状态：Phase 1 + Phase 2 已在 `0.6.99` 上线（部署提交 `e9664ef`），实际服务只读验收通过；证据与待验收项目见 [交付记录](control-center-mobile-delivery.md)。设计核对基线：2026-10-19，仓库根版本 `0.6.98`。
+状态：Phase 1 + Phase 2 已在 `0.6.99` 上线；后续获批将认证改为内网直达/外网 CF Access，`0.6.100` 实施中。原版实际服务只读验收通过；证据与待验收项目见 [交付记录](control-center-mobile-delivery.md)。设计核对基线：2026-10-19，仓库根版本 `0.6.98`。
 
 本文最初作为仅设计任务产出；后续已获批准实施 Phase 1 + Phase 2。下文保留设计决策，实际使用与构建见 [Control Center README](../apps/control-center/README.md)。前端首版合并为 `src/main.tsx`、`src/state.ts` 和 `src/api/`，正文采用安全纯文本；没有实现逐 token delta 或 Phase 3。本次已通过获准的 HAL 部署脚本上线；真机和真实 HTTPS 验收尚未完成。
 
@@ -10,7 +10,7 @@
 
 按当前代码作以下假设；存在取舍的地方明确保留限制：
 
-- “移动端网页”指独立浏览器入口，不依赖 TokensCowork Desktop、DSH Host 或 Matrix。首版面向持有现有 Control token 的操作者，不引入账户、多人权限或 OAuth。
+- “移动端网页”指独立浏览器入口，不依赖 TokensCowork Desktop、DSH Host 或 Matrix。0.6.100 起面向可通过内网或 Cloudflare Access 进入页面的操作者，不引入账户、多人权限或 OAuth。
 - 手机通过已有可信网络入口访问控制面同源 HTTPS 地址；本方案不选择域名、不开放端口、不配置公网暴露。TLS 终止层必须支持 SSE、不缓冲响应。
 - “内容流”指已持久化的完整消息、工具结果、进度与 turn 事件。当前没有文本/token delta，因此不能承诺打字机式逐 token 展示。若该效果是硬要求，需要另立协议扩展任务。
 - “最近”默认指 `updatedAt` 降序，首屏 50 条，按需加载更多；不是只取今天，也不扫描所有会话。首版为平铺时间列表；以后增加项目分组时使用服务端 `/session-groups`，不在浏览器全量拉取后自行分组。
@@ -98,7 +98,8 @@ apps/control-plane/src/web/
 | 路由 | 行为 |
 | --- | --- |
 | `/control/` | 重定向到 `/control/sessions` |
-| `/control/login` | token 输入、连接验证、退出入口 |
+| `/control/login` | 兼容旧地址，自动连接并进入会话列表 |
+| `/control/api/v1/*` | 同源网页入口，服务端持有 token，包含 SSE；与静态路由分流 |
 | `/control/sessions` | 最近会话列表；筛选可写入不含敏感内容的 query |
 | `/control/sessions/:sessionId` | 详情、历史、实时状态、输入框、interrupt |
 | `/control/new` | 选择 worker / workspace、首条消息 |
@@ -141,32 +142,34 @@ assistant 消息
 - 输入区使用 `dvh` 和 safe-area，兼容软键盘。Enter 默认换行，点击发送；请求中防重复点击，失败保留草稿。idle 文案“发送”，active 文案“追加指令”，待审批/待回答时显示具体阻塞原因。
 - 初版不含 session 删除、worker 删除、任意文件浏览、桌面控制或后台推送。
 
-## 5. 认证与 token 存放
+## 5. 认证与 token 存放（0.6.100 经批准调整）
 
-### 5.1 首版选择：用户输入 Bearer，只保存在页面内存
+原版内存 token 登录已被明确批准替换：内网直接进入，外网使用现有 Cloudflare Access。`/control/`、旧
+`/control/login` 和详情深链都自动连接；浏览器没有 Control token 输入、存储、Bearer header 或 scope 勾选。
+旧 fragment token 链接只清除 fragment，不读取/传递凭据。刷新直接重建页面状态，不自动重发操作。
 
-控制面已有 `controlApiReadToken` / `controlApiWriteToken`，分别来自 `CONTROL_API_READ_TOKEN` / `CONTROL_API_WRITE_TOKEN`。write token 同时可读。它们是共享 scope 的凭据，没有独立用户身份、refresh token 或服务端浏览器登录会话。
+新增同进程 `/control/api/v1/*` 网页入口，浏览器使用 `X-Control-Center: 1` 与同源 fetch，自动携带 CF Access
+现有 cookie（如有）。服务器从现有配置选择 `controlApiWriteToken`，缺少 write 时选择 `controlApiReadToken`；
+两者均无时 503，不使用 `BRIDGE_TOKEN` / legacy `WORKER_API_TOKEN`。GET `/control/api/v1/access` 仅返回
+`{writable:boolean}` 决定 UI；后端每次仍独立限制只读。token 不进入浏览器、构建产物、URL、日志或 SSE query。
 
-登录流程：
+网页入口只映射所需只读资源，以及 create_session / submit_turn / interrupt_turn 三类 POST，复用原
+`/api/v1` handler 和幂等/action 语义；删除、审批决策、回答等不在入口白名单。SSE 直接派发到原 node:http
+handler，维持断开清理和背压，不经过静态 Hono 适配器或缓冲反向代理。原 `/api/v1/*` 继续要求 Bearer，
+MCP/CLI/DSH 行为不变；不新增匿名 MCP。
 
-1. 打开同源 `/control/login`，用户粘贴已有 token，选择“只读浏览”或“启用操作”。输入字段遮罩，不保留在 URL。
-2. 用 Bearer 调 `GET /api/v1/snapshot?sessionLimit=50` 验证可读性；成功后清空表单字段，将 token 放在 React 外的短生命周期内存凭据容器，返回目标页面。
-3. 所有 JSON 请求和 fetch SSE 都带 `Authorization: Bearer …`。初版只用当前 origin，不接受任意 API 地址，避免把 token 发给第三方。
-4. 退出时 abort 请求/流、取消退避、清除 token、会话缓存和草稿。token 不进入日志、遥测或错误详情。
+所有网页 API（含读取/SSE）要求自定义请求头；浏览器跨源请求必须预检，入口不授予 CORS，且显式拒绝
+非同源 Origin / Fetch Metadata。Origin 必须是 http(s)，host 与请求 Host 一致，反代需保留 Host。
+不信任 CF/X-Forwarded-* 头作为授权，不在应用内额外验证 CF JWT，不签发浏览器登录 cookie。
 
-默认不写 `localStorage`、`sessionStorage`、IndexedDB、Service Worker cache、cookie 或构建产物。刷新页面/系统回收标签页后须重新输入；切到后台但进程仍在时可保留内存凭据。这是首版安全性与登录便利性的取舍，不声称内存 token 能抵抗页面 XSS。
+**网络边界**：可直达 `/control/api/v1/*` 的访问者即被视为操作者（write token 配置时可执行操作）。CF Access
+必须覆盖整个 `/control/*`，含 JSON/SSE；公网不能绕过 CF 直接连源站。这是用户指定的部署前提，本次不配置
+CF、防火墙、域名或公网端口。真实 HTTPS/Access/源站直连限制须由实际入口验收。浏览器来源检查防跨站请求，
+不替代网络授权。
 
-用户选择的操作模式只是 UI 意图，**不是 scope 证明**：现有 API 没有 scope 查询端点，GET 成功不能判断 read/write。只读模式隐藏写按钮；操作模式第一次写入仍由后端鉴权，403 提示需要 write token，不能通过一次“探测写入”验证权限。不使用 `BRIDGE_TOKEN` 或 legacy `WORKER_API_TOKEN` 作为网页登录凭据。
-
-401 停止所有请求和重连，转回登录；403 保留已加载的只读页面，引导更换凭据。已有 token 未配置导致 `/api/v1` 404 时说明 API 未启用，不尝试读取配置文件，也不新增匿名访问。
-
-### 5.2 与现有契约的 DSH 限制
-
-`docs/agent-control-api.md` §2 的“浏览器 Client 不得读取 token、不得直连”描述的是 DSH 插件 Host/Client 边界；移动端没有该 Host。此方案增加一个明确的独立网页信任模型：操作者主动输入 Control token，同源网页持有内存凭据。实施时须在契约中补充该例外，DSH 的限制继续成立，不能把 DSH Host 保存的 token 暴露给 renderer。
-
-HTTPS、同源和不把凭据写进前端产物是上线条件。新增网页响应建议使用 CSP（脚本仅同源、`connect-src 'self'`、禁止 frame/object）、`Referrer-Policy: no-referrer`，以及对 session 内容的严格转义；不加载第三方 CDN 脚本。静态登录页本身可匿名读取，所有业务 API 仍需 Bearer。
-
-若以后要求长时间记住登录，优先另设计同进程 Hono 的短期 HttpOnly / Secure / SameSite 会话和服务端 token 代理，补登录、退出、过期、CSRF 与所有权边界；这属于新 HTTP 认证能力，不是补 MCP，也不在首版暗中加入。
+CSP（脚本/connect 同源，禁止 frame/object）、`Referrer-Policy: no-referrer`、nosniff 及内容纯文本转义继续保留。
+DSH Host/Client 凭据限制继续成立，本入口不读取 DSH Host 凭据。其他章节提到的前端直接 Bearer 属原版方案；
+0.6.100 网页调用统一使用此节的同源服务端入口，底层 API/SSE 契约与请求生命周期不变。
 
 ## 6. 状态判定与请求生命周期
 

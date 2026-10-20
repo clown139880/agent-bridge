@@ -63,8 +63,8 @@ export class ControlState {
   private state: ViewState;
 
   constructor(token: string, writable: boolean, snapshot: Snapshot, unauthorized: () => void,
-    private navigate: (path: string) => void) {
-    this.api = new ControlClient(token, unauthorized);
+    private navigate: (path: string) => void, base: "/api/v1" | "/control/api/v1" = "/api/v1") {
+    this.api = new ControlClient(token, unauthorized, base);
     this.cursor = snapshot.streamCursor;
     this.state = { route: { page: "sessions" }, sessions: snapshot.sessions, workers: snapshot.workers,
       events: [], approvals: [], inputs: [], loading: false, moreLoading: false,

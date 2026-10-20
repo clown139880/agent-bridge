@@ -29,6 +29,7 @@ import { ConversationMcpServer } from "./memory-mcp.js";
 import { compareBridgeVersions } from "./bridge-version.js";
 import { PostDeployResumer } from "./post-deploy.js";
 import { controlWebListener } from "./web/app.js";
+import { handleControlBrowserApi } from "./web/api.js";
 
 const log = pino({ name: "control-plane" });
 
@@ -198,6 +199,16 @@ export class ControlPlane {
         return;
       }
       const pathname = new URL(request.url ?? "/", "http://localhost").pathname;
+      if (pathname.startsWith("/control/api/v1/")) {
+        void handleControlBrowserApi(request, response, this.controlApi, {
+          read: this.options.controlApiReadToken, write: this.options.controlApiWriteToken,
+        }).catch((error) => {
+          log.error({ error }, "Control Center API request failed");
+          if (!response.headersSent) this.json(response, 500, { error: "internal_error" });
+          else response.end();
+        });
+        return;
+      }
       if (pathname === "/control" || pathname.startsWith("/control/")) {
         void controlWebListener(request, response).catch((error) => {
           log.error({ error }, "Control Center request failed");

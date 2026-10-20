@@ -5,16 +5,19 @@ export class ApiError extends Error {
     readonly retryable = false, readonly requestId?: string, readonly retryAfterMs?: number) { super(message); }
 }
 
-// The credential exists only in this instance; never serialize it or put it in a URL.
+// Browser mode uses the same-origin server entrance; only direct API clients hold a token.
 export class ControlClient {
   private lifetime = new AbortController();
-  constructor(private token: string, private unauthorized: () => void) {}
+  constructor(private token: string, private unauthorized: () => void,
+    private base: "/api/v1" | "/control/api/v1" = "/api/v1") {}
+  private headers(): Record<string, string> { return this.base === "/control/api/v1" ? { "X-Control-Center": "1" }
+    : { Authorization: `Bearer ${this.token}` }; }
   dispose() { this.token = ""; this.lifetime.abort(); }
   async request<T>(path: string, options: { signal?: AbortSignal; body?: unknown; key?: string } = {}): Promise<T> {
-    const response = await fetch(`/api/v1${path}`, {
-      method: options.body === undefined ? "GET" : "POST", cache: "no-store", credentials: "omit",
+    const response = await fetch(`${this.base}${path}`, {
+      method: options.body === undefined ? "GET" : "POST", cache: "no-store", credentials: this.base === "/control/api/v1" ? "same-origin" : "omit",
       signal: AbortSignal.any([this.lifetime.signal, AbortSignal.timeout(30_000), ...(options.signal ? [options.signal] : [])]),
-      headers: { Authorization: `Bearer ${this.token}`, ...(options.body === undefined ? {} : {
+      headers: { ...this.headers(), ...(options.body === undefined ? {} : {
         "Content-Type": "application/json", "Idempotency-Key": options.key!,
       }) },
       body: options.body === undefined ? undefined : JSON.stringify(options.body),
@@ -24,9 +27,9 @@ export class ControlClient {
   }
   post(path: string, body: unknown, key: string) { return this.request<Action>(path, { body, key }); }
   async stream(cursor: string, signal: AbortSignal): Promise<Response> {
-    const response = await fetch("/api/v1/stream", {
-      headers: { Authorization: `Bearer ${this.token}`, Accept: "text/event-stream", "Last-Event-ID": cursor },
-      cache: "no-store", credentials: "omit", signal: AbortSignal.any([signal, this.lifetime.signal]),
+    const response = await fetch(`${this.base}/stream`, {
+      headers: { ...this.headers(), Accept: "text/event-stream", "Last-Event-ID": cursor },
+      cache: "no-store", credentials: this.base === "/control/api/v1" ? "same-origin" : "omit", signal: AbortSignal.any([signal, this.lifetime.signal]),
     });
     if (!response.ok) throw await this.failure(response);
     if (!response.body || !response.headers.get("content-type")?.includes("text/event-stream")) {
@@ -50,6 +53,9 @@ export function explain(error: unknown): string {
   if (error instanceof ApiError) {
     const messages: Record<string, string> = {
       forbidden: "此操作需要 write token，请更换凭据。已加载的内容仍可只读查看。",
+      browser_read_only: "控制面未配置网页写入凭据，当前仅可只读查看。",
+      browser_origin_required: "请求来源校验失败，请从控制中心同源页面重试。",
+      browser_api_unconfigured: "控制面未配置网页 API 凭据，请联系管理员。",
       turn_changed: "当前 turn 已变化，请检查会话后重新操作。", no_active_turn: "当前 turn 已结束。",
       turn_already_active: "已有新的 turn 正在运行，请检查会话后操作。",
       approval_pending: "请先在原客户端处理审批。", user_input_pending: "请先在原客户端回答待办问题。",

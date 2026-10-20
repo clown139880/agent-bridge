@@ -10,13 +10,13 @@ import { getRequestListener } from "../apps/control-plane/node_modules/@hono/nod
 import { createControlWeb } from "../apps/control-plane/src/web/app.js";
 
 // Browser validation uses only fixture HTTP data and a repository-local Chromium profile.
-test("mobile browser on non-secure HTTP: tap login, paging, history/SSE, send, steer, interrupt, create, and memory-only credentials", {
+test("mobile browser on non-secure HTTP: no-login entry, paging, history/SSE, send, steer, interrupt, create, and server-only credentials", {
   skip: !existsSync("/usr/bin/chromium") || !existsSync("apps/control-center/dist/index.html"), timeout: 60_000,
 }, async t => {
   await mkdir(resolve(".runtime/tests"), { recursive: true });
   const directory = await mkdtemp(resolve(".runtime/tests/browser-"));
   const writes: { path: string; body: any; key?: string }[] = [], streams = new Set<import("node:http").ServerResponse>();
-  let streamId = 0, turn = "turn-one", busy = true;
+  let streamId = 0, turn = "turn-one", busy = true, writable = true;
   const worker = { id: "claude@test", name: "Claude @ Test", status: "online", capabilities: ["session-actions", "turn-steer", "turn-interrupt"],
     workspaces: ["/work/repo"], recentWorkspaces: [{ name: "repo", path: "/work/repo" }] };
   const summary = (id = "s-active") => ({ sessionId: id, workerId: worker.id, machineId: "test", agent: "claude-code",
@@ -33,10 +33,12 @@ test("mobile browser on non-secure HTTP: tap login, paging, history/SSE, send, s
   const web = getRequestListener(createControlWeb().fetch, { overrideGlobalObjects: false });
   const server = createServer((req, res) => {
     const url = new URL(req.url!, "http://test");
-    if (!url.pathname.startsWith("/api/v1/")) { void web(req, res); return; }
+    if (!url.pathname.startsWith("/control/api/v1/")) { void web(req, res); return; }
+    url.pathname = url.pathname.replace("/control/api/v1/", "/api/v1/");
     const send = (value: unknown, status = 200) => { res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(value)); };
-    const auth = req.headers.authorization;
-    if (auth !== "Bearer browser-fixture-token") { send({ error: { code: "unauthorized", message: "Invalid token" } }, 401); return; }
+    assert.equal(req.headers.authorization, undefined, "browser must never send a Control token");
+    assert.equal(req.headers["x-control-center"], "1");
+    if (url.pathname === "/api/v1/access") return send({ writable });
     if (url.pathname === "/api/v1/stream") {
       assert.ok(!url.search.includes("token")); assert.ok(req.headers["last-event-id"]);
       res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache, no-transform", "x-accel-buffering": "no" });
@@ -128,13 +130,11 @@ test("mobile browser on non-secure HTTP: tap login, paging, history/SSE, send, s
   await command("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
   await command("Emulation.setTouchEmulationEnabled", { enabled: true });
   await command("Page.navigate", { url: `http://control-center.test:${address.port}/control/login` });
-  await wait("!!document.querySelector('#token')");
+  await wait("document.querySelectorAll('.session-row').length===50");
   assert.equal(await js("window.isSecureContext"), false);
   assert.equal(await js("typeof crypto.randomUUID"), "undefined", "must reproduce remote HTTP, unlike trustworthy localhost");
-  console.log("390px HTTP reproduction: isSecureContext=false; crypto.randomUUID unavailable; touch hit targets checked");
-  assert.equal(await js("document.querySelector('.login-form button.primary').disabled"), true);
-  await fill("#token", "browser-fixture-token"); await js("document.querySelector('input[type=checkbox]').click()");
-  await tap(".login-form button.primary");
+  assert.equal(await js("!!document.querySelector('#token')"), false, "entry must not ask for a token");
+  console.log("390px HTTP entry: no login or browser token; touch hit targets checked");
   await wait("document.querySelectorAll('.session-row').length===50");
   await capture("sessions.png");
   await js("document.querySelector('.load-more').click()"); await wait("document.querySelectorAll('.session-row').length===53");
@@ -180,13 +180,14 @@ test("mobile browser on non-secure HTTP: tap login, paging, history/SSE, send, s
   assert.equal(await js("document.documentElement.scrollWidth<=innerWidth"), true);
   const screenshot = await command("Page.captureScreenshot", { format: "png" });
   await writeFile(resolve(directory, "mobile.png"), Buffer.from(screenshot.data, "base64"));
-  await command("Page.reload"); await wait("!!document.querySelector('#token')");
-  await fill("#token", "browser-fixture-token"); await tap(".login-form button.primary");
+  writable = false;
+  await command("Page.reload");
   await wait("!!document.querySelector('#message') && document.body.innerText.includes('只读模式')");
+  assert.equal(await js("!!document.querySelector('#token')"), false, "reload connects without login");
   await fill("#message", "只读不能发送", true);
   assert.equal(await js("document.querySelector('.composer button.primary').disabled"), true);
   assert.equal(await js("document.querySelector('.interrupt').disabled"), true);
-  assert.equal(writes.length, 5, "read-only login must not submit writes");
+  assert.equal(writes.length, 5, "read-only server configuration must not submit writes");
   assert.deepEqual(exceptions, []);
   console.log(`Mobile screenshot: ${directory}/mobile.png`);
 });

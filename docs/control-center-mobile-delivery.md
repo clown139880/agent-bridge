@@ -1,6 +1,8 @@
 # Control Center 移动端实施记录
 
-版本：根 `package.json` **0.6.99**。Phase 1 和 Phase 2 已上线，构建、相关测试与线上只读验收通过。功能提交 `5f8a0ad`，部署脚本提交及本次部署源提交 `e9664ef9b57adbc5ac9ce231321e84156faa3c8d`。逐 token delta 和 Phase 3 未实施；真机、真实 HTTPS 与通知房回执的验收边界见下文。
+当前变更：根 `package.json` **0.6.100**，网页免 token 登录实现完成，待本次部署与线上验证。新增网页入口及网络信任边界见设计文档 §5；不取消 `/api/v1` 的 Bearer 鉴权。
+
+以下为 **0.6.99** 已交付记录：Phase 1 和 Phase 2 已上线，构建、相关测试与线上只读验收通过。功能提交 `5f8a0ad`，部署脚本提交及本次部署源提交 `e9664ef9b57adbc5ac9ce231321e84156faa3c8d`。逐 token delta 和 Phase 3 未实施；真机、真实 HTTPS 与通知房回执的验收边界见下文。
 
 ## 文件清单
 
@@ -88,3 +90,22 @@
 - 真实 HTTPS 入口/反代：TLS、同源资源、SSE 不缓冲、网络中断和慢客户端场景。本次线上验证仅走 HAL 本机 HTTP；移动端输入操作 token 前应完成真实 HTTPS 验收。
 - 通知房两条既定消息（`🟢 控制面已启动 · 版本 0.6.99`、`🔄 更新完成：hal · old → 0.6.99`）未取得可独立读取的房间回执；journal 已确认启动/注册，但不能据此声称两条通知已收到，需人工核对。
 - 自动 post-deploy 续跑未触发：本次已通过用户恢复完成验证；是否另行调查续跑链路由人工确认，不属于本次代码收尾。
+
+## 0.6.100：网页免 token 登录（部署前记录）
+
+用户批准“网页免 token、API 保留鉴权”，并批准本次后端升级和指定脚本部署。前端自动连接 `/control/api/v1`；
+服务端从现有 Control read/write 配置读取凭据并直接派发到原 handler，不把 token 返回浏览器，SSE 不缓冲。
+新增 `apps/control-plane/src/web/api.ts`；修改 server 分流、前端 App/client/state、开发代理和说明文档；根版本升至
+0.6.100。未修改原 `/api/v1` 的鉴权/业务 handler、SSE、审批规则、部署脚本或外部 Cloudflare 配置。
+
+安全范围：网页入口只开放需要的 GET 和新建/发送/打断 POST；要求自定义头，检查同源 Origin/Fetch Metadata，不提供
+CORS。配置缺少 write 时服务端和网页都只读，两个 Control token 均未配置时返回 503。可直达入口即被信任，
+外网必须由 CF Access 覆盖整个 `/control/*`，源站直连应受网络限制；本次不会声称已验证外部 Access/TLS 配置。
+
+部署后需只读确认：服务版本/提交与健康、免登录页面/深链/资源 hash、无 token 的网页 snapshot 和活动详情 SSE、
+网页来源拦截、原 `/api/v1` 无 token 401/带 read token 200。不得用生产会话写操作做冒烟。最后记录真实部署结果。
+
+部署前验证：`pnpm check`、`pnpm --filter @agent-bridge/control-center build` 通过；针对性回归 **39/39** 通过，
+包含原 API/SSE、网页来源/白名单/只读/未配置场景和非安全 HTTP 390px Chromium 触摸操作。浏览器无需登录即可
+进入与刷新，未发出 Authorization header；模拟 API 下新建、发送、追加与打断请求正常，待办/只读仍禁用写操作。
+测试日志：本机忽略目录 `.runtime/control-center-access-validation.log`。

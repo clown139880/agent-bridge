@@ -36,11 +36,21 @@ DSH 原生 Session。API 中的 `taskId`、`conversationId` 只是关联标识�
 `WORKER_API_TOKEN` 也是一枚读写 token（Hermes `/ab` 命令使用）。生产应给 DSH Host 使用独立 Control token。
 DSH Host 插件保存 Control token 并代理请求/事件；浏览器 Client 不得读取 token，也不得直连 Control Plane。
 
-以上 Host/Client 限制针对 DSH 插件。独立 Control Center 网页（`/control/`）由操作者主动输入已有 Control
-read/write token，同源直连 `/api/v1`，仅在当前页面内存保存凭据；刷新或关闭后需重新登录。token 不进入
-localStorage、sessionStorage、cookie、构建产物、日志或 SSE query；fetch SSE 使用 Authorization header。
-“启用操作”只是 UI 意图，GET 成功不证明 write scope，真实写权限仍由本 API 校验。生产入口使用 HTTPS。
-详见 [移动端设计](control-center-mobile.md)。此入口不会读取或暴露 DSH Host 保存的 token。
+以上 Host/Client 限制针对 DSH 插件。0.6.100 起，独立 Control Center 网页（`/control/`）不再要求输入
+Control token；它经同源 `/control/api/v1/*` 网页入口调用本 API 的相同 handler。token 仅由服务端从现有
+`CONTROL_API_WRITE_TOKEN` / `CONTROL_API_READ_TOKEN` 配置读取并内部使用，不下发给浏览器，亦不使用 DSH
+Host、Bridge 或 legacy token。优先 write token；只有 read token 时网页只读，两者均无则返回 503。
+
+这是独立的网络信任入口：内网可直接访问，外网由现有 Cloudflare Access 保护整个 `/control/*`；应用本身
+不验证 Access JWT，源站端口须限制直连以免绕过 Access。此变化不取消任何 `/api/v1/*` Bearer 鉴权。
+网页 API 必须带 `X-Control-Center: 1`，拒绝非同源 Origin/Fetch Metadata，拒绝 CORS 预检；反代须保留原始 Host。
+请求中的 CF/X-Forwarded-* 头不作为授权凭证。前端同源 fetch 携带 Access 的现有 cookie，服务端不新增登录 cookie。
+
+网页入口有独立 GET `/control/api/v1/access` 返回 `{writable:boolean}`，不返回凭据。其余路径去除 `/control`
+后复用原 handler：只允许 snapshot、workers、sessions、session detail/events、actions、approvals、user-input、stream
+的 GET；仅允许 sessions 创建及 session turns/interrupt 的 POST，不开放删除、审批决策、回答或其他 API 写操作。
+SSE 直接派发到现有 node:http handler，不经过 Hono Response 或 fetch 转发，不改变游标/背压契约。
+详见 [移动端设计](control-center-mobile.md)。
 
 ## 3. Endpoint 总表
 

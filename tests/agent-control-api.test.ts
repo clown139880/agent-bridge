@@ -19,13 +19,13 @@ class HeadlessGateway {
 type Internals={http:HttpServer;bridges:Map<string,{machineId:string;name:string;capabilities:string[];features?:string[];bridgeVersion?:string;socket:WebSocket}>;
   controlStore:AgentControlStore;handleBridgeMessage(machineId:string,message:BridgeToControlMessage):Promise<void>};
 
-async function fixture() {
+async function fixture(tokens: { read?: string; write?: string } = { read: "read", write: "write" }) {
   const path=join(tmpdir(),`agent-control-api-${randomUUID()}.sqlite`),store=new Store(path);
   store.upsertMachine({id:"dev",name:"Workstation",platform:"linux",hostname:"dev.local",capabilities:["codex-cli","codex-app-server"]});
   const sent:ControlToBridgeMessage[]=[];const socket={readyState:WebSocket.OPEN,OPEN:WebSocket.OPEN,
     send(value:string){sent.push(JSON.parse(value) as ControlToBridgeMessage);},close(){}} as unknown as WebSocket;
   const control=new ControlPlane(store,new HeadlessGateway(),{host:"127.0.0.1",port:0,workerApiEnabled:true,
-    workerApiToken:"worker",controlApiReadToken:"read",controlApiWriteToken:"write",
+    workerApiToken:"worker",controlApiReadToken:tokens.read,controlApiWriteToken:tokens.write,
     sse:{keepaliveMs:50,pollMs:5,maxBackpressure:3}});
   const internals=control as unknown as Internals;internals.bridges.set("dev",{machineId:"dev",name:"Workstation",
     capabilities:["codex-cli","codex-app-server"],features:["session-actions","session-events"],bridgeVersion:"0.4.2",socket});
@@ -63,6 +63,71 @@ test("Control Center shares the listener without swallowing API, assets or healt
     assert.match(missing.headers.get("content-type")!, /application\/json/);
     await missing.arrayBuffer();
   } finally { await f.close(); }
+});
+
+test("browser entrance keeps credentials server-side, preserves Bearer API, blocks cross-origin and limits operations", async () => {
+  const f = await fixture();
+  try {
+    const origin = f.base.replace(/\/api\/v1$/, ""), browser = `${origin}/control/api/v1`;
+    const headers = { "X-Control-Center": "1" };
+    const access = await fetch(`${browser}/access`, { headers });
+    assert.deepEqual(await access.json(), { writable: true });
+    const snapshot = await fetch(`${browser}/snapshot`, { headers });
+    assert.equal(snapshot.status, 200);
+    const snap = await snapshot.json() as any;
+    assert.ok(snap.sessions.some((s: any) => s.sessionId === "thread-1"));
+    assert.equal((await fetch(`${f.base}/snapshot`)).status, 401);
+    assert.equal((await fetch(`${f.base}/snapshot`, { headers: { authorization: "Bearer read" } })).status, 200);
+    assert.equal((await fetch(`${browser}/snapshot`)).status, 403);
+    for (const extra of [{ origin: "https://evil.example" }, { origin: "null" }, { "sec-fetch-site": "cross-site" }, { "sec-fetch-site": "same-site" }]) {
+      const blocked = await fetch(`${browser}/snapshot`, { headers: { ...headers, ...extra } });
+      assert.equal(blocked.status, 403); assert.equal(blocked.headers.get("access-control-allow-origin"), null);
+    }
+    assert.equal((await fetch(`${browser}/snapshot`, { method: "OPTIONS", headers: { origin: "https://evil.example", "access-control-request-headers": "x-control-center" } })).status, 403);
+    assert.equal((await fetch(`${browser}/missing`, { headers })).status, 404);
+    assert.equal((await fetch(`${browser}/workers/codex%40dev`, { method: "DELETE", headers })).status, 404);
+    assert.equal((await fetch(`${browser}/approvals/any/decision`, { method: "POST", headers })).status, 404);
+    const postHeaders = { ...headers, "content-type": "application/json", "idempotency-key": "browser-turn", origin };
+    const body = JSON.stringify({ input: "fixture only", delivery: "start_turn" });
+    const submitted = await fetch(`${browser}/sessions/thread-1/turns`, { method: "POST", headers: postHeaders, body });
+    assert.equal(submitted.status, 202);
+    const action = await submitted.json() as any;
+    const replay = await fetch(`${browser}/sessions/thread-1/turns`, { method: "POST", headers: postHeaders, body });
+    assert.equal((await replay.json() as any).actionId, action.actionId);
+    assert.equal(f.sent.filter(message => message.type === "action.submit_turn").length, 1);
+    const abort = new AbortController();
+    const stream = await fetch(`${browser}/stream?sessionId=thread-1`, { headers: { ...headers, "Last-Event-ID": snap.streamCursor }, signal: abort.signal });
+    try {
+      assert.equal(stream.status, 200);
+      assert.match(stream.headers.get("content-type")!, /text\/event-stream/);
+      assert.equal(stream.headers.get("x-accel-buffering"), "no");
+      const reader = stream.body!.getReader();
+      const first = await reader.read(); assert.match(new TextDecoder().decode(first.value), /retry: 3000/);
+      await f.internals.handleBridgeMessage("dev", { type: "session.event", sessionId: "thread-1", eventId: "browser-stream-test",
+        eventType: "message.completed", timestamp: Date.now(), payload: { role: "assistant", text: "fixture SSE" } });
+      let text = "";
+      const timeout = setTimeout(() => abort.abort(), 2000);
+      try { while (!text.includes("browser-stream-test")) { const part = await reader.read(); if (part.done) break; text += new TextDecoder().decode(part.value); } }
+      finally { clearTimeout(timeout); }
+      assert.match(text, /browser-stream-test/);
+    } finally { abort.abort(); }
+  } finally { await f.close(); }
+});
+
+test("browser entrance uses read-only configuration and never falls back to legacy credentials", async () => {
+  for (const tokens of [{ read: "read" }, {}]) {
+    const f = await fixture(tokens);
+    try {
+      const browser = f.base.replace("/api/v1", "/control/api/v1"), headers = { "X-Control-Center": "1" };
+      const access = await fetch(`${browser}/access`, { headers });
+      if (tokens.read) {
+        assert.deepEqual(await access.json(), { writable: false });
+        assert.equal((await fetch(`${browser}/snapshot`, { headers })).status, 200);
+        assert.equal((await fetch(`${browser}/sessions`, { method: "POST", headers, body: "{}" })).status, 403);
+      } else assert.equal(access.status, 503);
+      assert.equal(f.sent.filter(message => message.type.startsWith("action.")).length, 0);
+    } finally { await f.close(); }
+  }
 });
 
 test("orphaned archive replay records a gap and is acknowledged instead of retrying forever", async () => {

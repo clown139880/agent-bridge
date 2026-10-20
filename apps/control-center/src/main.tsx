@@ -25,70 +25,45 @@ function Status({ status }: { status: string }) {
 function App() {
   const [path, setPath] = useState(location.pathname);
   const [control, setControl] = useState<ControlState>();
-  const [notice, setNotice] = useState("");
+  const [error, setError] = useState(""), [attempt, setAttempt] = useState(0);
   const active = useRef<ControlState>();
-  function logout(message = "") {
-    active.current?.dispose(); active.current = undefined; setControl(undefined); setNotice(message);
-    history.replaceState(null, "", "/control/login"); setPath("/control/login");
-  }
   useEffect(() => {
     const change = () => setPath(location.pathname);
     window.addEventListener("popstate", change);
-    return () => { window.removeEventListener("popstate", change); active.current?.dispose(); };
+    // Discard legacy token links without reading or forwarding the credential.
+    if (location.hash) history.replaceState(null, "", location.pathname + location.search);
+    return () => window.removeEventListener("popstate", change);
   }, []);
-  if (!control) return <Login notice={notice} onLogin={(token, writable, snapshot) => {
-    const instance = new ControlState(token, writable, snapshot, () => logout("凭据已失效，请重新登录"), navigate);
-    active.current = instance; setControl(instance); setNotice("");
-    if (!/^\/control\/(sessions(?:\/[^/]+)?|new)\/?$/.test(path)) navigate("/control/sessions");
-  }} />;
-  return <Center control={control} path={path} logout={() => logout()} />;
-}
-
-function Login({ onLogin, notice }: { onLogin: (token: string, writable: boolean, snapshot: Snapshot) => void; notice: string }) {
-  const [token, setToken] = useState(""), [writable, setWritable] = useState(false);
-  const [busy, setBusy] = useState(false), [error, setError] = useState("");
-  const pending = useRef<ControlClient>();
-  useEffect(() => () => pending.current?.dispose(), []);
-  // Optional convenience: prefill the token from a URL fragment (#token=..[&write=1])
-  // and immediately scrub it from the address bar and history. The fragment is client-side
-  // only — it is never sent to the server or logged there.
   useEffect(() => {
-    const m = location.hash.match(/^#token=([^&]*)(&write=1)?/);
-    if (!m || m[1] === undefined) return;
-    let t = "";
-    try { t = decodeURIComponent(m[1]); } catch { return; }
-    if (!t) return;
-    setToken(t);
-    if (m[2]) setWritable(true);
-    history.replaceState(null, "", location.pathname + location.search);
-  }, []);
-  return <main className="login-shell">
-    <div className="brand"><span className="brand-mark">ab</span><span>AGENT BRIDGE</span></div>
-    <div className="eyebrow">CONTROL CENTER</div><h1>随时，接上对话。</h1>
-    <p className="muted intro">查看会话进展，继续交谈，<br />把正在发生的事握在手里。</p>
-    <form className="panel login-form" onSubmit={async e => {
-      e.preventDefault(); if (busy || !token.trim()) return;
-      setBusy(true); setError("");
-      const client = new ControlClient(token.trim(), () => {}); pending.current = client;
+    let cancelled = false;
+    const client = new ControlClient("", () => {}, "/control/api/v1");
+    setError("");
+    void (async () => {
       try {
+        const access = await client.request<{ writable: boolean }>("/access");
         const snapshot = await client.request<Snapshot>("/snapshot?sessionLimit=50");
-        const secret = token.trim(); setToken(""); onLogin(secret, writable, snapshot);
-      } catch (e) { setError(explain(e)); }
-      finally { client.dispose(); pending.current = undefined; setBusy(false); }
-    }}>
-      <label htmlFor="token">Control token</label>
-      <input id="token" type="password" value={token} onChange={e => setToken(e.target.value)}
-        autoComplete="off" autoCapitalize="none" spellCheck={false} required placeholder="粘贴 read 或 write token" />
-      <label className="checkbox"><input type="checkbox" checked={writable} onChange={e => setWritable(e.target.checked)} />启用发送、新建和打断</label>
-      <p className="hint">操作需 write token，最终权限由服务器验证。</p>
-      {(error || notice) && <div role="alert" className="error">{error || notice}</div>}
-      <button className="primary" disabled={busy || !token.trim()}>{busy ? "正在连接…" : "进入控制中心 →"}</button>
-    </form>
-    <p className="hint login-note">凭据只保存在当前页面内存。<br />刷新页面或关闭后，需要重新登录。</p>
+        if (cancelled) return;
+        const instance = new ControlState("", access.writable, snapshot, () => {
+          active.current?.dispose(); active.current = undefined; setControl(undefined);
+          setError("连接已失效，请重新连接；外网访问请先完成 Cloudflare Access 验证。");
+        }, navigate, "/control/api/v1");
+        active.current = instance; setControl(instance);
+        if (!/^\/control\/(sessions(?:\/[^/]+)?|new)\/?$/.test(location.pathname)) navigate("/control/sessions");
+      } catch (e) { if (!cancelled) setError(explain(e)); }
+      finally { client.dispose(); }
+    })();
+    return () => { cancelled = true; client.dispose(); active.current?.dispose(); active.current = undefined; };
+  }, [attempt]);
+  if (!control) return <main className="login-shell">
+    <div className="brand"><span className="brand-mark">ab</span><span>AGENT BRIDGE</span></div>
+    <h1>控制中心</h1>
+    {error ? <><div role="alert" className="error">{error}</div><button className="primary" onClick={() => setAttempt(n => n + 1)}>重新连接</button></>
+      : <p role="status" className="muted">正在连接…</p>}
   </main>;
+  return <Center control={control} path={path} />;
 }
 
-function Center({ control, path, logout }: { control: ControlState; path: string; logout: () => void }) {
+function Center({ control, path }: { control: ControlState; path: string }) {
   const state = useSyncExternalStore(control.subscribe, control.snapshot);
   let route: Route;
   const match = path.match(/^\/control\/sessions\/([^/]+)\/?$/);
@@ -108,7 +83,7 @@ function Center({ control, path, logout }: { control: ControlState; path: string
   }, [control]);
   return <div className="shell">
     <header className="topbar"><Link to="/control/sessions" className="brand"><span className="brand-mark">ab</span><span>控制中心</span></Link>
-      <div className="top-actions"><span className="scope">{state.writable ? "操作模式" : "只读模式"}</span><button className="quiet" onClick={logout}>退出</button></div>
+      <div className="top-actions"><span className="scope">{state.writable ? "操作模式" : "只读模式"}</span></div>
     </header>
     <main>
       {state.error && <div className="error" role="alert">{state.error}<button className="quiet" onClick={() => void control.refresh()}>刷新</button></div>}
@@ -117,7 +92,7 @@ function Center({ control, path, logout }: { control: ControlState; path: string
         : route.page === "new" ? <NewSession control={control} state={state} />
           : <Detail key={route.id} control={control} state={state} id={route.id!} />}
     </main>
-    <footer>AGENT BRIDGE <span>·</span> 当前页面内存登录</footer>
+    <footer>AGENT BRIDGE <span>·</span> 内网直达 · 外网 Access</footer>
   </div>;
 }
 
