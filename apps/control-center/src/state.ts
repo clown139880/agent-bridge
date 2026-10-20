@@ -31,6 +31,11 @@ export function mergeTail(existing: SessionEvent[], tail: SessionEvent[]) {
 }
 const upsert = <T,>(rows: T[], item: T, id: (v: T) => string) => [...rows.filter(v => id(v) !== id(item)), item];
 
+// Unlike randomUUID(), getRandomValues() is available on ordinary HTTP origins too.
+// The API accepts opaque keys; 128 random bits keep independent actions distinct.
+const newIdempotencyKey = () => Array.from(crypto.getRandomValues(new Uint8Array(16)),
+  byte => byte.toString(16).padStart(2, "0")).join("");
+
 /** One in-memory authenticated browser tab, one stream, no background polling. */
 export class ControlState {
   readonly api: ControlClient;
@@ -303,7 +308,7 @@ export class ControlState {
     const old = this.state.intent;
     if (!this.state.writable || old && (old.submitting || old.uncertain || old.receipt?.status === "accepted")) return;
     this.projectionHold = false;
-    this.patch({ intent: { path, body, key: crypto.randomUUID(), submitting: true, uncertain: false }, error: "" });
+    this.patch({ intent: { path, body, key: newIdempotencyKey(), submitting: true, uncertain: false }, error: "" });
     await this.transmit(draftId);
   }
   async retry() {
@@ -311,7 +316,7 @@ export class ControlState {
     if (!i || i.submitting || i.receipt?.status === "accepted") return;
     if (i.receipt?.status === "failed") {
       if (!i.receipt.error?.error.retryable) return;
-      this.patch({ intent: { ...i, key: crypto.randomUUID(), receipt: undefined, error: undefined } });
+      this.patch({ intent: { ...i, key: newIdempotencyKey(), receipt: undefined, error: undefined } });
     }
     await this.transmit();
   }

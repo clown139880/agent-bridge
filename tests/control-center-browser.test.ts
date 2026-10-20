@@ -10,7 +10,7 @@ import { getRequestListener } from "../apps/control-plane/node_modules/@hono/nod
 import { createControlWeb } from "../apps/control-plane/src/web/app.js";
 
 // Browser validation uses only fixture HTTP data and a repository-local Chromium profile.
-test("mobile browser: login, paging, history/SSE, steer, interrupt, create, and memory-only credentials", {
+test("mobile browser on non-secure HTTP: tap login, paging, history/SSE, send, steer, interrupt, create, and memory-only credentials", {
   skip: !existsSync("/usr/bin/chromium") || !existsSync("apps/control-center/dist/index.html"), timeout: 60_000,
 }, async t => {
   await mkdir(resolve(".runtime/tests"), { recursive: true });
@@ -77,6 +77,7 @@ test("mobile browser: login, paging, history/SSE, steer, interrupt, create, and 
   t.after(() => { streams.forEach(r => r.end()); server.closeAllConnections(); server.close(); });
   const address = server.address() as { port: number };
   const chrome = spawn("/usr/bin/chromium", ["--headless=new", "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage", "--remote-debugging-port=0",
+    "--host-resolver-rules=MAP control-center.test 127.0.0.1", "--no-proxy-server",
     `--user-data-dir=${directory}/profile`, `--disk-cache-dir=${directory}/cache`, "--no-first-run", "--no-default-browser-check", "about:blank"], {
     env: { ...process.env, TMPDIR: directory, XDG_CONFIG_HOME: `${directory}/config`, XDG_CACHE_HOME: `${directory}/cache` }, stdio: ["ignore", "ignore", "pipe"],
   });
@@ -109,18 +110,31 @@ test("mobile browser: login, paging, history/SSE, steer, interrupt, create, and 
   const wait = async (expression: string) => {
     const end = Date.now() + 8000;
     while (Date.now() < end) { if (await js(expression)) return; await new Promise(r => setTimeout(r, 50)); }
-    throw new Error(`UI condition timed out: ${expression}\n${await js("document.body.innerText")}`);
+    throw new Error(`UI condition timed out: ${expression}\n${await js("document.body.innerText")}\n${exceptions.join("\n")}`);
   };
   const fill = (selector: string, value: string, textarea = false) => js(`(()=>{const el=document.querySelector(${JSON.stringify(selector)});Object.getOwnPropertyDescriptor(${textarea ? "HTMLTextAreaElement" : "HTMLInputElement"}.prototype,'value').set.call(el,${JSON.stringify(value)});el.dispatchEvent(new Event('input',{bubbles:true}));})()`);
+  const tap = async (selector: string) => {
+    const point = await js(`(()=>{const el=document.querySelector(${JSON.stringify(selector)});el.scrollIntoView({block:'center'});const r=el.getBoundingClientRect(),x=r.x+r.width/2,y=r.y+r.height/2;return {x,y,disabled:el.disabled,hit:el.contains(document.elementFromPoint(x,y))};})()`);
+    assert.equal(point.disabled, false, `${selector} must be enabled`);
+    assert.equal(point.hit, true, `${selector} must not be covered`);
+    await command("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: point.x, y: point.y }] });
+    await command("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  };
   const capture = async (name: string) => {
     const image = await command("Page.captureScreenshot", { format: "png" });
     await writeFile(resolve(directory, name), Buffer.from(image.data, "base64"));
   };
   await command("Runtime.enable"); await command("Page.enable");
   await command("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
-  await command("Page.navigate", { url: `http://127.0.0.1:${address.port}/control/login` });
+  await command("Emulation.setTouchEmulationEnabled", { enabled: true });
+  await command("Page.navigate", { url: `http://control-center.test:${address.port}/control/login` });
   await wait("!!document.querySelector('#token')");
-  await fill("#token", "browser-fixture-token"); await js("document.querySelector('input[type=checkbox]').click();document.querySelector('form').requestSubmit()");
+  assert.equal(await js("window.isSecureContext"), false);
+  assert.equal(await js("typeof crypto.randomUUID"), "undefined", "must reproduce remote HTTP, unlike trustworthy localhost");
+  console.log("390px HTTP reproduction: isSecureContext=false; crypto.randomUUID unavailable; touch hit targets checked");
+  assert.equal(await js("document.querySelector('.login-form button.primary').disabled"), true);
+  await fill("#token", "browser-fixture-token"); await js("document.querySelector('input[type=checkbox]').click()");
+  await tap(".login-form button.primary");
   await wait("document.querySelectorAll('.session-row').length===50");
   await capture("sessions.png");
   await js("document.querySelector('.load-more').click()"); await wait("document.querySelectorAll('.session-row').length===53");
@@ -130,21 +144,49 @@ test("mobile browser: login, paging, history/SSE, steer, interrupt, create, and 
   events.push(newest); emit("session.event.appended", newest); await wait("document.body.innerText.includes('SSE 实时消息已到达')");
   await js("document.querySelector('.transcript .load-more').click()"); await wait("document.body.innerText.includes('历史消息 0')");
   assert.equal(await js("document.documentElement.scrollWidth<=innerWidth"), true, "390px layout must not overflow horizontally");
-  await fill("#message", "补充一个要求", true); await js("document.querySelector('.composer').requestSubmit()");
+  await fill("#message", " \n ", true);
+  assert.equal(await js("document.querySelector('.composer button.primary').disabled"), true, "whitespace draft must stay disabled");
+  await fill("#message", "补充一个要求", true); await tap(".composer button.primary");
   await wait("document.body.innerText.includes('操作已被接受')"); assert.equal(writes[0].body.expectedTurnId, "turn-one"); assert.equal(writes[0].body.delivery, "steer");
-  await js("document.querySelector('.interrupt').click()"); await wait("document.body.innerText.includes('本轮已打断')");
+  await tap(".interrupt"); await wait("document.body.innerText.includes('本轮已打断')");
   assert.equal(writes[1].body.expectedTurnId, "turn-one");
+  await command("Emulation.setDeviceMetricsOverride", { width: 390, height: 500, deviceScaleFactor: 1, mobile: true });
+  await fill("#message", "继续已空闲的会话", true);
+  await wait("document.querySelector('.composer button.primary').textContent.includes('发送') && !document.querySelector('.composer button.primary').disabled");
+  await tap(".composer button.primary"); await wait("!document.querySelector('#message').value");
+  assert.equal(writes[2].body.delivery, "start_turn"); assert.equal(writes[2].body.expectedTurnId, undefined);
   await js("document.querySelector('.back').click()"); await wait("!!document.querySelector('a[href=\"/control/new\"]')");
   await js("document.querySelector('a[href=\"/control/new\"]').click()"); await wait("!!document.querySelector('#new-worker')");
+  assert.equal(await js("document.querySelector('.new-form button.primary').disabled"), true, "new session needs worker and workspace");
   await js("(()=>{const e=document.querySelector('#new-worker');e.value='claude@test';e.dispatchEvent(new Event('change',{bubbles:true}));})()");
   await fill("#workspace", "/work/repo"); await fill("#first-message", "创建验收", true);
-  await js("document.querySelector('.new-form').requestSubmit()"); await wait("location.pathname.endsWith('/created') && !!document.querySelector('.composer')");
-  assert.equal(writes[2].body.workerId, worker.id); assert.equal(writes[2].body.workspace, "/work/repo"); assert.ok(writes.every(w => w.key));
+  await tap(".new-form button.primary"); await wait("location.pathname.endsWith('/created') && !!document.querySelector('.composer')");
+  assert.equal(writes[3].body.workerId, worker.id); assert.equal(writes[3].body.workspace, "/work/repo");
+  await fill("#message", "新会话的追加指令", true);
+  await wait("!document.querySelector('.composer button.primary').disabled");
+  await tap(".composer button.primary"); await wait("!document.querySelector('#message').value");
+  assert.equal(writes[4].path, "/api/v1/sessions/created/turns");
+  assert.equal(writes[4].body.delivery, "steer"); assert.equal(writes[4].body.expectedTurnId, "created-turn");
+  assert.ok(writes.every(w => w.key));
+  assert.ok(writes.every(w => /^[\x21-\x7e]{1,128}$/.test(w.key!)), "keys must satisfy the API contract, even on HTTP");
+  assert.equal(new Set(writes.map(w => w.key)).size, writes.length, "separate actions need distinct idempotency keys");
+  await fill("#message", "等待待办后发送", true);
+  emit("session.updated", { ...summary("created"), status: "waiting_for_approval", pendingApprovalCount: 1 }, "created");
+  await wait("document.querySelector('.composer button.primary').disabled && document.body.innerText.includes('等待处理待办')");
+  emit("session.updated", { ...summary("created"), status: "waiting_for_input", pendingUserInputCount: 1 }, "created");
+  await wait("document.body.innerText.includes('等待回答') && document.querySelector('.composer button.primary').disabled");
+  assert.equal(writes.length, 5, "pending interactions must not submit messages");
   assert.equal(await js("localStorage.length+sessionStorage.length"), 0); assert.equal(await js("document.cookie"), "");
   assert.equal(await js("document.documentElement.scrollWidth<=innerWidth"), true);
   const screenshot = await command("Page.captureScreenshot", { format: "png" });
   await writeFile(resolve(directory, "mobile.png"), Buffer.from(screenshot.data, "base64"));
   await command("Page.reload"); await wait("!!document.querySelector('#token')");
+  await fill("#token", "browser-fixture-token"); await tap(".login-form button.primary");
+  await wait("!!document.querySelector('#message') && document.body.innerText.includes('只读模式')");
+  await fill("#message", "只读不能发送", true);
+  assert.equal(await js("document.querySelector('.composer button.primary').disabled"), true);
+  assert.equal(await js("document.querySelector('.interrupt').disabled"), true);
+  assert.equal(writes.length, 5, "read-only login must not submit writes");
   assert.deepEqual(exceptions, []);
   console.log(`Mobile screenshot: ${directory}/mobile.png`);
 });
