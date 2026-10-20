@@ -81,8 +81,16 @@ test("browser entrance keeps credentials server-side, preserves Bearer API, bloc
     assert.equal((await fetch(`${browser}/snapshot`, { method: "OPTIONS", headers: { origin: "https://evil.example", "access-control-request-headers": "x-control-center" } })).status, 403);
     assert.equal((await fetch(`${browser}/missing`, { headers })).status, 404);
     assert.equal((await fetch(`${browser}/workers/codex%40dev`, { method: "DELETE", headers })).status, 404);
-    assert.equal((await fetch(`${browser}/approvals/any/decision`, { method: "POST", headers })).status, 404);
+    assert.equal((await fetch(`${browser}/sessions/thread-1`, { method: "DELETE", headers })).status, 404);
     const postHeaders = { ...headers, "content-type": "application/json", "idempotency-key": "browser-turn", origin };
+    // Pending resolution, uploads and the model catalog pass through to the API handler.
+    const decision = await fetch(`${browser}/approvals/any/decision`, { method: "POST", headers: postHeaders, body: JSON.stringify({ choice: "allow" }) });
+    assert.equal(decision.status, 404); assert.equal((await decision.json() as any).error.code, "approval_not_found");
+    const answer = await fetch(`${browser}/user-input/any/response`, { method: "POST", headers: postHeaders, body: JSON.stringify({ answers: {} }) });
+    assert.equal((await answer.json() as any).error.code, "user_input_not_found");
+    const upload = await fetch(`${browser}/attachments`, { method: "POST", headers: postHeaders,
+      body: JSON.stringify({ filename: "a.png", mimeType: "image/png", content: Buffer.from("png").toString("base64") }) });
+    assert.equal(upload.status, 201);
     const body = JSON.stringify({ input: "fixture only", delivery: "start_turn" });
     const submitted = await fetch(`${browser}/sessions/thread-1/turns`, { method: "POST", headers: postHeaders, body });
     assert.equal(submitted.status, 202);

@@ -1,19 +1,27 @@
 import { ApiError, ControlClient, explain } from "./api/client";
 import { consumeStream, delay, StreamLimitError } from "./api/stream";
-import { isLive, pendingId, segment, type Action, type Envelope, type Page, type Pending,
+import { isLive, pendingId, segment, type Action, type AttachmentRef, type Envelope, type ModelInfo, type Page, type Pending,
   type Session, type SessionEvent, type Snapshot, type Worker } from "./api/types";
 
 export type Route = { page: "sessions" | "new" | "detail"; id?: string };
 export interface Intent {
   path: string; body: Record<string, unknown>; key: string; receipt?: Action;
-  submitting: boolean; uncertain: boolean; error?: string; navigateTo?: string;
+  submitting: boolean; uncertain: boolean; error?: string; navigateTo?: string; draftId?: string;
 }
+export interface Upload { localId: string; name: string; preview: string; status: "uploading" | "ready" | "error"; ref?: AttachmentRef; error?: string }
+export interface ModelCatalog { status: "loading" | "ready" | "error"; models: ModelInfo[]; error?: string }
+/** Mirrors the API's upload limits so obvious rejections never leave the phone. */
+export const IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"], MAX_IMAGE_BYTES = 15_000_000, MAX_ATTACHMENTS = 8;
 export interface ViewState {
   route: Route; sessions: Session[]; workers: Worker[]; session?: Session; events: SessionEvent[];
   approvals: Pending[]; inputs: Pending[]; loading: boolean; moreLoading: boolean; hasMore: boolean;
   historyMore: boolean; error: string; connection: string; updatedAt: number; query: string;
   workerFilter: string; intent?: Intent; drafts: Record<string, string>; writable: boolean;
+  uploads: Record<string, Upload[]>; models: Record<string, ModelCatalog>;
+  /** Partly answered questions by pending id, then question id; survives detail reloads. */
+  answers: Record<string, Record<string, AnswerDraft>>;
 }
+export interface AnswerDraft { choice: string; other?: string }
 export const mergeEvents = (first: SessionEvent[], second: SessionEvent[]) => {
   const seen = new Set<string>();
   return [...first, ...second].filter(e => !seen.has(e.eventId) && Boolean(seen.add(e.eventId)));
@@ -69,7 +77,7 @@ export class ControlState {
     this.state = { route: { page: "sessions" }, sessions: snapshot.sessions, workers: snapshot.workers,
       events: [], approvals: [], inputs: [], loading: false, moreLoading: false,
       hasMore: snapshot.truncated.sessions, historyMore: false, error: "", connection: "按需更新",
-      updatedAt: Date.now(), query: "", workerFilter: "", writable, drafts: {} };
+      updatedAt: Date.now(), query: "", workerFilter: "", writable, drafts: {}, uploads: {}, models: {}, answers: {} };
   }
   snapshot = () => this.state;
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => this.listeners.delete(listener); };
@@ -83,11 +91,52 @@ export class ControlState {
   }
   dispose() {
     this.disposed = true; this.scope.abort(); this.streamAbort?.abort(); this.api.dispose();
-    this.state = { ...this.state, sessions: [], workers: [], events: [], drafts: {}, intent: undefined, session: undefined, approvals: [], inputs: [] };
+    Object.values(this.state.uploads).flat().forEach(u => URL.revokeObjectURL(u.preview));
+    this.state = { ...this.state, sessions: [], workers: [], events: [], drafts: {}, uploads: {}, answers: {}, intent: undefined, session: undefined, approvals: [], inputs: [] };
     this.seen.clear(); this.listeners.clear();
   }
   setDraft(id: string, text: string) { this.patch({ drafts: { ...this.state.drafts, [id]: text } }); }
+  setAnswer(pendingId: string, questionId: string, value: AnswerDraft) {
+    this.patch({ answers: { ...this.state.answers, [pendingId]: { ...this.state.answers[pendingId], [questionId]: value } } });
+  }
   setFilters(query: string, workerFilter: string) { this.patch({ query, workerFilter }); }
+  /** One catalog request per worker per tab; a failed one may be retried. */
+  async loadModels(workerId: string) {
+    if (!workerId || this.state.models[workerId] && this.state.models[workerId].status !== "error") return;
+    const set = (catalog: ModelCatalog) => this.patch({ models: { ...this.state.models, [workerId]: catalog } });
+    set({ status: "loading", models: [] });
+    try {
+      const result = await this.api.request<{ models?: ModelInfo[]; error?: string }>(`/workers/${segment(workerId)}/models`);
+      set(result.error ? { status: "error", models: [], error: result.error } : { status: "ready", models: result.models ?? [] });
+    } catch (e) { set({ status: "error", models: [], error: explain(e) }); }
+  }
+  private setUploads(id: string, change: (rows: Upload[]) => Upload[]) {
+    this.patch({ uploads: { ...this.state.uploads, [id]: change(this.state.uploads[id] ?? []) } });
+  }
+  addFiles(id: string, files: File[]) {
+    if (!this.state.writable) return;
+    const room = MAX_ATTACHMENTS - (this.state.uploads[id]?.length ?? 0);
+    for (const [index, file] of files.entries()) {
+      const localId = newIdempotencyKey();
+      const error = index >= room ? `最多 ${MAX_ATTACHMENTS} 张图片` : !IMAGE_TYPES.includes(file.type) ? "仅支持 PNG、JPEG、WebP、GIF"
+        : file.size > MAX_IMAGE_BYTES ? "图片超过 15 MB" : undefined;
+      if (index >= room) { this.patch({ error: error! }); break; }
+      this.setUploads(id, rows => [...rows, { localId, name: file.name, preview: URL.createObjectURL(file), status: error ? "error" : "uploading", error }]);
+      if (error) continue;
+      void this.api.upload(file).then(ref => this.setUploads(id, rows => rows.map(u => u.localId === localId ? { ...u, status: "ready", ref } : u)),
+        e => this.setUploads(id, rows => rows.map(u => u.localId === localId ? { ...u, status: "error", error: explain(e) } : u)));
+    }
+  }
+  removeUpload(id: string, localId: string) {
+    const row = this.state.uploads[id]?.find(u => u.localId === localId);
+    if (row) URL.revokeObjectURL(row.preview);
+    this.setUploads(id, rows => rows.filter(u => u.localId !== localId));
+  }
+  private clearUploads(id: string, sent: unknown) {
+    const ids = new Set(Array.isArray(sent) ? sent.map(a => (a as AttachmentRef).id) : []);
+    if (!ids.size) return;
+    (this.state.uploads[id] ?? []).filter(u => u.ref && ids.has(u.ref.id)).forEach(u => this.removeUpload(id, u.localId));
+  }
   private needsStream() {
     const i = this.state.intent;
     return this.visible && !this.streamStopped && (this.bootstrap || this.finalizing || this.projectionHold && this.state.route.page === "detail" ||
@@ -308,8 +357,8 @@ export class ControlState {
     const old = this.state.intent;
     if (!this.state.writable || old && (old.submitting || old.uncertain || old.receipt?.status === "accepted")) return;
     this.projectionHold = false;
-    this.patch({ intent: { path, body, key: newIdempotencyKey(), submitting: true, uncertain: false }, error: "" });
-    await this.transmit(draftId);
+    this.patch({ intent: { path, body, key: newIdempotencyKey(), submitting: true, uncertain: false, draftId }, error: "" });
+    await this.transmit();
   }
   async retry() {
     const i = this.state.intent;
@@ -320,7 +369,7 @@ export class ControlState {
     }
     await this.transmit();
   }
-  private async transmit(draftId?: string) {
+  private async transmit() {
     const intent = this.state.intent!;
     this.patch({ intent: { ...intent, submitting: true, error: undefined } }); this.syncStream();
     try {
@@ -347,9 +396,9 @@ export class ControlState {
       error: receipt.status === "failed" ? receipt.error?.error.message ?? "操作失败" : undefined } });
     if (receipt.status === "succeeded") {
       if (receipt.kind === "submit_turn" || receipt.kind === "create_session") this.projectionHold = true;
-      if (intent.path.endsWith("/turns")) {
-        const id = decodeURIComponent(intent.path.split("/")[2]);
-        if (this.state.drafts[id] === intent.body.input) this.setDraft(id, "");
+      if (intent.draftId && newlySucceeded) {
+        if (this.state.drafts[intent.draftId] === intent.body.input) this.setDraft(intent.draftId, "");
+        this.clearUploads(intent.draftId, intent.body.attachments);
       }
       if (receipt.kind === "create_session" && receipt.sessionId && intent.navigateTo !== receipt.sessionId) {
         this.patch({ intent: { ...this.state.intent!, navigateTo: receipt.sessionId } });

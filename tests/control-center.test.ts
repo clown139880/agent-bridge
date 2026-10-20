@@ -168,6 +168,45 @@ test("uncertain POST retries preserve the body/key; turn conflict refreshes with
   assert.equal(writes, 2);
 });
 
+test("uploads are sent as refs, cleared only after the turn succeeds, and the model catalog is fetched once", async t => {
+  const f = fixture(t);
+  t.mock.method(URL, "createObjectURL", () => "blob:preview"); t.mock.method(URL, "revokeObjectURL", () => {});
+  const original = globalThis.fetch as unknown as (path: string, init: RequestInit) => Promise<Response>;
+  let catalogCalls = 0;
+  t.mock.method(globalThis, "fetch", async (path: string, init: RequestInit) => {
+    if (path === "/api/v1/attachments") {
+      const body = JSON.parse(String(init.body));
+      assert.equal(new Headers(init.headers).get("idempotency-key"), null);
+      return json({ id: "sha", filename: body.filename, mimeType: body.mimeType, size: 3 }, 201);
+    }
+    if (path.endsWith("/models")) { catalogCalls++; return json({ models: [{ id: "m", model: "m", displayName: "M" }] }); }
+    return original(path, init);
+  });
+  await f.state.open({ page: "detail", id: "s" });
+  f.state.addFiles("s", [new File(["png"], "a.png", { type: "image/png" }), new File(["x"], "a.txt", { type: "text/plain" })]);
+  await flush();
+  assert.deepEqual(f.state.snapshot().uploads.s.map(u => u.status), ["ready", "error"]);
+  await Promise.all([f.state.loadModels("claude@test"), f.state.loadModels("claude@test")]);
+  assert.equal(catalogCalls, 1); assert.equal(f.state.snapshot().models["claude@test"].models[0].model, "m");
+  const ref = f.state.snapshot().uploads.s[0].ref!;
+  f.state.setDraft("s", "看图");
+  await f.state.submit("/sessions/s/turns", { input: "看图", delivery: "start_turn", model: "m", attachments: [ref] }, "s"); await flush();
+  const post = f.requests.find(r => r.path === "/api/v1/sessions/s/turns")!;
+  assert.deepEqual(JSON.parse(String(post.init.body)).attachments, [ref]);
+  assert.deepEqual(f.state.snapshot().uploads.s.map(u => u.status), ["error"], "sent uploads clear; rejected ones stay visible");
+  assert.equal(f.state.snapshot().drafts.s, "");
+});
+
+test("approval decisions and answers go through the tracked action flow", async t => {
+  const f = fixture(t, { write: () => json({ actionId: "a", kind: "resolve_approval", status: "succeeded", sessionId: "s", turnId: null }) });
+  await f.state.open({ page: "detail", id: "s" });
+  await f.state.submit("/approvals/p%201/decision", { choice: "allow" });
+  const post = f.requests.find(r => r.init.method === "POST")!;
+  assert.equal(post.path, "/api/v1/approvals/p%201/decision"); assert.deepEqual(JSON.parse(String(post.init.body)), { choice: "allow" });
+  assert.ok(new Headers(post.init.headers).get("idempotency-key"));
+  assert.equal(f.state.snapshot().intent?.receipt?.status, "succeeded");
+});
+
 test("read mode refuses writes without probing server permission", async t => {
   let calls = 0; t.mock.method(globalThis, "fetch", async () => { calls++; return json({}); });
   const state = new ControlState("read", false, snapshot, () => {}, () => {}); t.after(() => state.dispose());

@@ -14,10 +14,19 @@ export interface SessionEvent {
   eventId: string; cursor: string; sessionId: string; type: string; turnId: string | null;
   timestamp: number; payload: Record<string, unknown>;
 }
+export interface Question {
+  id: string; header?: string; question: string; isOther?: boolean; isSecret?: boolean;
+  options?: { label: string; description?: string }[] | null;
+}
 export interface Pending {
   id?: string; approvalId?: string; requestId?: string; sessionId: string; status: string;
-  summary?: string; kind?: string; questions?: { id: string; question: string; isSecret?: boolean }[];
+  summary?: string; kind?: string; choices?: string[]; questions?: Question[];
 }
+export interface ModelInfo {
+  id: string; model: string; displayName: string; isDefault?: boolean; defaultReasoningEffort?: string;
+  supportedReasoningEfforts?: { reasoningEffort: string; description?: string }[];
+}
+export interface AttachmentRef { id: string; filename: string; mimeType: string; size: number }
 export interface Action {
   actionId: string; kind: string; status: "accepted" | "succeeded" | "failed";
   sessionId: string | null; turnId: string | null;

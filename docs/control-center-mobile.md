@@ -2,7 +2,7 @@
 
 状态：Phase 1 + Phase 2 已在 `0.6.99` 上线；后续获批的内网直达/外网 CF Access 方案已在 `0.6.100` 上线（部署提交 `c56127e`），实际服务免登录/只读验收通过；证据与待验收项目见 [交付记录](control-center-mobile-delivery.md)。设计核对基线：2026-10-19，仓库根版本 `0.6.98`。
 
-本文最初作为仅设计任务产出；后续已获批准实施 Phase 1 + Phase 2。下文保留设计决策，实际使用与构建见 [Control Center README](../apps/control-center/README.md)。前端首版合并为 `src/main.tsx`、`src/state.ts` 和 `src/api/`，正文采用安全纯文本；没有实现逐 token delta 或 Phase 3。本次已通过获准的 HAL 部署脚本上线；真机和真实 HTTPS 验收尚未完成。
+本文最初作为仅设计任务产出；后续已获批准实施 Phase 1 + Phase 2。下文保留设计决策，实际使用与构建见 [Control Center README](../apps/control-center/README.md)。前端首版合并为 `src/main.tsx`、`src/state.ts` 和 `src/api/`，正文采用安全纯文本；没有实现逐 token delta。Phase 3 中的审批/回答处理、图片上传和模型/思考程度选择已实现（0.7.1）。本次已通过获准的 HAL 部署脚本上线；真机和真实 HTTPS 验收尚未完成。
 
 ## 1. 目标、假设与边界
 
@@ -153,8 +153,8 @@ assistant 消息
 两者均无时 503，不使用 `BRIDGE_TOKEN` / legacy `WORKER_API_TOKEN`。GET `/control/api/v1/access` 仅返回
 `{writable:boolean}` 决定 UI；后端每次仍独立限制只读。token 不进入浏览器、构建产物、URL、日志或 SSE query。
 
-网页入口只映射所需只读资源，以及 create_session / submit_turn / interrupt_turn 三类 POST，复用原
-`/api/v1` handler 和幂等/action 语义；删除、审批决策、回答等不在入口白名单。SSE 直接派发到原 node:http
+网页入口只映射所需只读资源（含 `workers/:id/models`），以及 create_session / submit_turn / interrupt_turn、
+`attachments`、审批决策、回答 POST，复用原 `/api/v1` handler 和幂等/action 语义；删除不在入口白名单。SSE 直接派发到原 node:http
 handler，维持断开清理和背压，不经过静态 Hono 适配器或缓冲反向代理。原 `/api/v1/*` 继续要求 Bearer，
 MCP/DSH 行为不变；不新增匿名 MCP。
 

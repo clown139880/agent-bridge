@@ -19,12 +19,14 @@ Vite 开发代理默认转发 `/control/api/v1` 到 `127.0.0.1:8787`，不包含
 
 入口 `/control/`，直接进入会话列表；旧 `/control/login` 地址也直接进入，不再输入 token。内网依赖网络访问边界，外网由现有 Cloudflare Access 保护整个 `/control/*`（包括 API 与 SSE）。浏览器不持有 Control token，服务器使用现有 `CONTROL_API_WRITE_TOKEN`，仅配置 read token 时网页自动只读；两者均无则返回 503，不回退使用 Bridge/legacy token。刷新会重新连接，无需登录。
 
-`/api/v1/*` 仍要求 Bearer，不改变 MCP/CLI/DSH 鉴权。网页入口仅允许所需 GET，以及新建、提交 turn、interrupt 三类 POST，不开放删除或待办处理写入。所有网页 API 请求包含 `X-Control-Center: 1`；拒绝跨源 Origin/Fetch Metadata，不授予 CORS，反代必须保留原 Host。Cloudflare 身份 cookie 由浏览器随同源请求携带，服务端不签发新的登录 cookie，也不把 token 发回网页。
+`/api/v1/*` 仍要求 Bearer，不改变 MCP/CLI/DSH 鉴权。网页入口仅允许所需 GET（含 worker 模型目录），以及新建、提交 turn、interrupt、图片上传、审批决策和回答问题这些 POST，不开放删除。所有网页 API 请求包含 `X-Control-Center: 1`；拒绝跨源 Origin/Fetch Metadata，不授予 CORS，反代必须保留原 Host。Cloudflare 身份 cookie 由浏览器随同源请求携带，服务端不签发新的登录 cookie，也不把 token 发回网页。
 
 此模式不在应用里验证 CF JWT，不根据可伪造的 CF/X-Forwarded-* 头提权：能直达网页入口即被视为操作者。公网不能绕过 Access 直连源站端口；该网络限制及 Cloudflare 配置由现有部署负责，本次未修改。
 
 - 最近会话：按更新时间降序，搜索与 Worker 筛选通过搜索按钮提交，游标加载更多。
-- 详情：尾页历史、加载更早、工具按需展开、待办只读；正文安全地按纯文本呈现，不执行消息中的 HTML。历史覆盖范围取自服务端。
+- 详情：尾页历史、加载更早、工具按需展开；审批可允许/拒绝/本会话始终允许（后者放行整个工具，需二次确认），结构化问题可选项或填写，保密问题仍需本机回答。
+- 输入：可选或粘贴图片（PNG/JPEG/WebP/GIF，单张 15 MB，最多 8 张），先上传为引用、随消息发送；新建或开始 turn 时可选模型与思考程度，运行中追加指令不能切换。
+- 正文安全地按纯文本呈现，不执行消息中的 HTML。历史覆盖范围取自服务端。
 - 活动详情：共享 fetch SSE，已应用 cursor 续接、断线退避、前后台暂停。仅显示已完成消息/事件，不包含 token delta。idle 页面只按进入、前台恢复或手动刷新更新。
 - 发送：idle 使用 `start_turn`，active 使用 `steer + expectedTurnId`。打断也绑定 expectedTurnId，冲突后刷新并由用户重新决策。
 - 新建：在线 Worker、目标机器绝对目录、可选首条消息；跟踪异步 action，成功后打开实际 session。
