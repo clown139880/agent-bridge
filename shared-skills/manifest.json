@@ -3,9 +3,9 @@
   "skills": [
     {
       "name": "conversation-recall",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "files": {
-        "SKILL.md": "942030d1ad9479e900714df8822aab7695ba388c15362553b4a637905c8588cf",
+        "SKILL.md": "5090b599f837e2e674234e4856fbded3a31c4532d8c2900afa7ef79cc12e23ed",
         "agents/openai.yaml": "16998bc4d92069b653939bbe4b9a1740968af772ff8d8ed2f614450110ac898e"
       },
       "dependencies": [
@@ -38,9 +38,9 @@
     },
     {
       "name": "agent-memory",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "files": {
-        "SKILL.md": "de926cbde44631c8c2b40d33d0dba7c19e5762bc86f908b52244772f856fdf9c",
+        "SKILL.md": "20f72a983355f842f7af17f2cb2e2674fa8917b8e63952cb6becccea5c1b6a22",
         "agents/openai.yaml": "9898e403a9ec90d6a5fb702433d41c47754962b7464622d2e5d8766909295f0d"
       },
       "dependencies": [

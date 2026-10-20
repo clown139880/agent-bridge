@@ -72,19 +72,19 @@ test("conversation memory reads the session event history: one copy, scoped sear
   } finally { f.store.db.close(); }
 });
 
-test("conversation MCP exposes the read-only search tool contract", () => {
+test("conversation MCP exposes the read-only search tool contract", async () => {
   const f = fixture();
   f.control.appendSessionEvent(message("design-session", "evt-mcp", "user", "中心提供 MCP，项目不持有 projectId。", f.now));
   const mcp = new ConversationMcpServer(f.memory, "memory-secret");
   try {
     const reader = { conversation: true, memory: false };
     const dispatch = (request: unknown) =>
-      (mcp as unknown as { dispatch(request: unknown, principal: unknown): unknown }).dispatch(request, reader);
-    const listed = dispatch({ jsonrpc: "2.0", id: 1, method: "tools/list" }) as
+      (mcp as unknown as { dispatch(request: unknown, principal: unknown): Promise<unknown> }).dispatch(request, reader);
+    const listed = await dispatch({ jsonrpc: "2.0", id: 1, method: "tools/list" }) as
       { result: { tools: Array<{ name: string }> } };
     assert.deepEqual(listed.result.tools.map((tool) => tool.name),
       ["conversation_search", "conversation_review", "conversation_read"]);
-    const body = dispatch({ jsonrpc: "2.0", id: 2, method: "tools/call",
+    const body = await dispatch({ jsonrpc: "2.0", id: 2, method: "tools/call",
       params: { name: "conversation_search", arguments: { query: "projectId", source_session_id: "native-design" } } }) as
       { result: { structuredContent: { results: Array<{ sessionId: string; messageId: string }> } } };
     assert.equal(body.result.structuredContent.results[0]!.sessionId, "design-session");

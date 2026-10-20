@@ -1,6 +1,6 @@
 # 设计：跨 Agent 的房间/项目作用域记忆
 
-- 状态：设计稿第 3 版（整合版），Kanban t_878c7584。阶段 0 已上线；阶段 1（`packages/agent-memory` + Control Plane `memory_*` 工具 + `agent-memory` 技能）于 0.6.86 实现，运行说明见 [agent-memory-operations.zh.md](agent-memory-operations.zh.md)。阶段 2 已在 dorothy profile 上线（插件 `integrations/hermes_agent_memory`，2026-10-12）：Dorothy 的 USER.md 迁入 `_global`，她自己的职责规则迁入隐藏作用域 `_agent-dorothy`（只注入给 Dorothy），Navi 日报规则迁入 `crypto`；dorothy-service-policy 放行 7 个 memory_* 工具。2026-10-12 default profile 也已切换：Hermes 的自我规则迁入隐藏作用域 `_agent-hermes`，其余并入 `_global`、`household`、`travel`；旅游助手房间改由 Dorothy 接管，记忆随房间继承。0.6.90 起 SOUL 与角色卡统一为「人设」作用域（`soul.md`，记忆工具不写；用户和 Hermes 可改，见运行说明）；0.6.88 增加整句召回（`mode: recall`，关键词无命中时自动退回），插件 0.2.0 在 `prefetch: true` 的作用域（目前是 travel）启用每轮召回。WSL/Windows 上的 agent 已装好写入 token 并接入。0.6.98（2026-10-19）：去掉 `memory_log` 和 bootstrap 的「最近进展」；`_global` 只留所有 agent 都该知道的画像、偏好和通用规则，Hermes 和 Dorothy 共用的记忆移到隐藏作用域 `_assistants`；Bridge 新会话由 Bridge 自动注入 bootstrap（见运行说明）。5 张角色卡（cc、kristina、megumi、negumi、rdorothy）已迁到 `card-<名字>` 作用域：原 `references/intimate-memory.md` 并入该卡的 `soul.md`（备份在 `~/.hermes/backups/`），新的私密记忆用 `memory_write` 写入该作用域；角色卡技能只剩一句加载，`character-card-skills` 已按新结构改写（2026-10-14）。
+- 状态：设计稿第 3 版（整合版），Kanban t_878c7584。阶段 0 已上线；阶段 1（`packages/agent-memory` + Control Plane 记忆工具 + `agent-memory` 技能）于 0.6.86 实现，运行说明见 [agent-memory-operations.zh.md](agent-memory-operations.zh.md)。阶段 2 已在 dorothy profile 上线（插件 `integrations/hermes_agent_memory`，2026-10-12）：Dorothy 的 USER.md 迁入 `_global`，她自己的职责规则迁入隐藏作用域 `_agent-dorothy`（只注入给 Dorothy），Navi 日报规则迁入 `crypto`；dorothy-service-policy 放行 7 个记忆工具。2026-10-12 default profile 也已切换：Hermes 的自我规则迁入隐藏作用域 `_agent-hermes`，其余并入 `_global`、`household`、`travel`；旅游助手房间改由 Dorothy 接管，记忆随房间继承。0.6.90 起 SOUL 与角色卡统一为「人设」作用域（`soul.md`，记忆工具不写；用户和 Hermes 可改，见运行说明）；0.6.88 增加整句召回（`mode: recall`，关键词无命中时自动退回），插件 0.2.0 在 `prefetch: true` 的作用域（目前是 travel）启用每轮召回。WSL/Windows 上的 agent 已装好写入 token 并接入。0.6.98（2026-10-19）：去掉 `memory_log` 和 bootstrap 的「最近进展」；`_global` 只留所有 agent 都该知道的画像、偏好和通用规则，Hermes 和 Dorothy 共用的记忆移到隐藏作用域 `_assistants`；Bridge 新会话由 Bridge 自动注入 bootstrap（见运行说明）。5 张角色卡（cc、kristina、megumi、negumi、rdorothy）已迁到 `card-<名字>` 作用域：原 `references/intimate-memory.md` 并入该卡的 `soul.md`（备份在 `~/.hermes/backups/`），新的私密记忆用 `write` 写入该作用域；角色卡技能只剩一句加载，`character-card-skills` 已按新结构改写（2026-10-14）。
 - 关联：[conversation-memory-design.zh.md](conversation-memory-design.zh.md)、[conversation-memory-operations.zh.md](conversation-memory-operations.zh.md)。
 - 基线：agent-bridge `0.6.85`；Hermes `v2026.8.19-14230-g532f83aaf1`；笔记库 `/root/deathnote`；格式参考 OMA v4.1（`jrcruciani/obsidian-memory-for-ai@f87548a`，仅作参考，不依赖）。
 
@@ -9,7 +9,7 @@
 - **记忆是什么**：存在 `/root/deathnote/agent-memory/` 下的 Markdown 文件。每个房间或项目一个目录，叫作用域（scope）。另有一个 `_global`，存所有 agent 共用的、关于你本人和环境的记忆。
 - **格式**：吸收 OMA v4.1 的一个子集。一条事实一个文件，frontmatter 就是结构；改值时旧值另存，可以查当时的值；进展用只追加的事件记录；开局注入的核心记忆由程序在字符预算内确定性地生成。
 - **代码**：在 agent-bridge 的 `packages/agent-memory` 里用 TypeScript 按规范重写这个子集。**不复制 OMA 源码**，因为 OMA 没有许可证，而 agent-bridge 是公开仓库。之后不再跟随 OMA 项目。
-- **谁来写**：Control Plane 是唯一写入方，通过已有的 `/mcp` 提供 `memory_*` 工具。Hermes 和 Dorothy 用一个薄的 MemoryProvider 插件接入，同时关掉内置的 MEMORY.md/USER.md。Bridge 下的 Codex/Claude/pi 用 MCP 配置加共享技能接入。
+- **谁来写**：Control Plane 是唯一写入方，通过 `/mcp/memory` 提供记忆工具（短名 `bootstrap/search/get/write/retract/load/scopes/scope`，客户端里是 `mcp__memory__<工具>`）。Hermes 和 Dorothy 用一个薄的 MemoryProvider 插件接入，同时关掉内置的 MEMORY.md/USER.md。Bridge 下的 Codex/Claude/pi 用 MCP 配置加共享技能接入。
 - **跨房间**：任何房间的记忆都能搜索，也能像加载技能一样在本次对话中**临时加载**。
 - **同步**：修好 deathnote 的自动提交脚本，再加一个 Syncthing 冲突处理器。有事要你处理时，通过 Hermes webhook 发到 Hermes 私聊。
 - **依赖**：全部在本地运行，不需要模型、向量库或外部 SaaS。
@@ -35,9 +35,9 @@
  Matrix 房间 ──chat_id──► Hermes / Dorothy ── agent-bridge-memory 插件 ──┐ HTTP（本机）
  仓库 cwd/remote ───────► Codex / Claude / pi ── MCP 配置 + agent-memory 技能 ──┤ 远程 MCP
                                                                           ▼
-                            Control Plane  POST /mcp（按 token 分权）
-                              ├─ conversation_*（已有，只读）
-                              └─ memory_*  → packages/agent-memory（TS，OMA v4.1 子集）
+                            Control Plane  /mcp/memory（按 token 分权）
+                              ├─ history_*（只读）
+                              └─ 记忆与技能工具 → packages/agent-memory（TS，OMA v4.1 子集）
                                    解析作用域 · 读写校验 · 凭据扫描 · bootstrap · 检索
                                    flock → 原子写入 → git commit -- 本作用域路径
                                                                           │
@@ -135,8 +135,8 @@ bootstrap_budget: 1500          # _global 用 3600
 
 ### 4.3 跨房间：搜索和加载
 
-- `memory_search(scope="all" | "<slug>")`：结果标注来源作用域；不包含 `discoverable: false` 的作用域。
-- `memory_load(scope)`：把那个作用域的 bootstrap 作为**工具返回**放进当前对话，本次对话内有效，新开对话后就没了。不进系统提示词，所以不影响缓存。之后对这个作用域的写入要显式指定 `scope`。
+- `search(scope="all" | "<slug>")`：结果标注来源作用域；不包含 `discoverable: false` 的作用域。
+- `load(scope)`：把那个作用域的 bootstrap 作为**工具返回**放进当前对话，本次对话内有效，新开对话后就没了。不进系统提示词，所以不影响缓存。之后对这个作用域的写入要显式指定 `scope`。
 - 加载由你说一句或 agent 提议触发，并在回复中说明。角色卡私密记忆这类场景：在卡对应的技能里写一句「加载 `card-<名字>`」，加载卡的时候顺带加载它的记忆，正好和技能的工作方式一致。
 
 ## 5. 写入权限
@@ -165,7 +165,7 @@ memory:
 | --- | --- |
 | `initialize` | 用 `chat_id`、`platform`、`cwd`、`agent_context` 解析作用域。cron 和 subagent 只读 |
 | `system_prompt_block` | `_global` bootstrap（3600 字符，约等于现在 MEMORY+USER 的总量）+ 当前作用域 bootstrap（1500 字符；私聊没有这一段）+ 约 6 行使用说明。会话内不变 |
-| 工具 | `memory_search/get/write/retract/load/scope` |
+| 工具 | `memory_search/get/write/retract/load/scope`（Hermes 里的名字，转发到 `/mcp/memory` 的 `search/get/write/retract/load/scopes`） |
 | `prefetch` | 默认关；先在一个房间开启试用。每轮最多 5 条、800 字符、1.5 秒超时 |
 | `sync_turn` | 空实现，不把每轮写进笔记 |
 | `on_session_end` | 不做任何事（2026-10-15 去掉了机械交接：首句标题信息量低，还挤占「最近进展」的名额；0.6.98 连「最近进展」也去掉了） |
@@ -176,9 +176,9 @@ memory:
 
 ## 7. Bridge 下的 agent
 
-- **MCP**：沿用 `POST /mcp`。新增 `AGENT_MEMORY_TOKENS`（`名字:token` 列表），持有者可以用写工具；已有的只读 token 能用读工具；人用 `CONTROL_API_WRITE_TOKEN` 调 lint 等管理接口。调用方要自己传 cwd 和 remote，共享连接上不保存「当前作用域」。
-- **技能 `agent-memory`**：Bridge 开的会话已带核心记忆，不再调 `memory_bootstrap`（其他情况每个会话最多一次）；形成决定或偏好时 `memory_write`；进度写在项目里。不写代码事实、AGENTS.md 里已有的规则、一次性状态或秘密。
-- **Hermes 派活**：Hermes 用 `abctl` 发 turn 时，在消息里写明要用的记忆作用域（0.6.96 移除了 Kanban 卡面指令）。
+- **MCP**：`http://<control-plane>:8787/mcp/memory`，Bearer token，客户端 server 名用 `memory`（旧的 `/mcp` 与旧工具名保留到 0.8）。新增 `AGENT_MEMORY_TOKENS`（`名字:token` 列表），持有者可以用写工具；已有的只读 token 能用读工具；人用 `CONTROL_API_WRITE_TOKEN` 调 lint 等管理接口。调用方要自己传 cwd 和 remote，共享连接上不保存「当前作用域」。
+- **技能 `agent-memory`**：Bridge 开的会话已带核心记忆，不再调 `bootstrap`（其他情况每个会话最多一次）；形成决定或偏好时 `write`；进度写在项目里。不写代码事实、AGENTS.md 里已有的规则、一次性状态或秘密。
+- **Hermes 派活**：Hermes 经 `/mcp/bridge` 的 `turn` 发 turn 时，在消息里写明要用的记忆作用域（0.6.96 移除了 Kanban 卡面指令）。
 - **开局注入**（0.6.98）：Bridge 开新会话前向 Control Plane 取 `_global` + 项目作用域的 bootstrap，Codex 放进 `thread/start.developerInstructions`，Claude 放进 `--append-system-prompt`。见运行说明「Bridge 会话的开局注入」。
 
 ## 8. deathnote 同步

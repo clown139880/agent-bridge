@@ -61,23 +61,24 @@
 | Bridge 下的 Codex/Claude（以后） | `_global` + 项目作用域 | 同左 |
 
 - 私聊的当前作用域是 `_global`；`_global` 和 `_agent-*` 不算房间，只列其中置顶的技能。
-- 角色卡 `card-*` 不列进提示词，只通过斜杠命令或 `memory_load` 进入。
+- 角色卡 `card-*` 不列进提示词，只通过斜杠命令或 `load` 进入。
 - **作用域管「谁能用」，置顶管「开局列不列」**（2026-10-14）：提示词里只列当前房间作用域的技能和 frontmatter 标了 `metadata.agent_skills.pinned: true` 的技能，每个一行，6000 字符以内；其余可见技能只给一行「另有 N 个技能，用 `skills_list` 查找」，照样能搜到、加载。新沉淀的技能默认不置顶。
 - 初始置顶：`_global` 的 `agent-memory`、`conversation-recall`、`deathnote-vault`、`openlist`；`_agent-dorothy` 的 `service-use-boundaries`。
 
 ## 5. Control Plane 技能模块
 
-在 `packages/agent-memory` 旁新增技能模块（或同包内的 `skills.ts`），由 Control Plane 的 `/mcp` 暴露：
+在 `packages/agent-memory` 旁新增技能模块（或同包内的 `skills.ts`），由 Control Plane 的 `/mcp/memory` 暴露（旧的 `/mcp` 保留到 0.8，沿用旧名）：
 
 | 工具 | 说明 | 权限 |
 | --- | --- | --- |
-| `skill_index` | 按调用方身份和作用域返回可见技能的名字、描述、作用域 | 读 |
+| `skills` | 按调用方身份和作用域返回可见技能的名字、描述、作用域 | 读 |
 | `skill_search` | 按名字、描述、正文关键词搜索，结果标注作用域 | 读 |
-| `skill_view` | 读 `SKILL.md` 或某个附属文件，返回技能目录的绝对路径和文件列表 | 读 |
+| `skill` | 读 `SKILL.md` 或某个附属文件，返回技能目录的绝对路径和文件列表 | 读 |
 | `skill_write` | 新建技能或整文件写入（含附属文件），默认写到调用方的当前作用域 | 写 |
 | `skill_patch` | 按「旧文本 → 新文本」修补，语义与 Hermes `skill_manage(action=patch)` 一致 | 写 |
 | `skill_archive` | 删除改为归档：移到仓库外的归档目录并在提交信息里记录 | 写 |
 | `skill_move` | 在作用域之间移动（例如提到 `_global`） | 写 |
+| `skill_rm` | 删除技能目录里的某个附属文件（不能删 `SKILL.md`） | 写 |
 
 - **鉴权**：沿用 `AGENT_MEMORY_TOKENS`。写入者身份取自 token；`agent` 角色可写任何作用域，`project` 角色只写项目作用域。
 - **写入流程**：`flock` → 校验（frontmatter、单 `SKILL.md`、路径不越界）→ 凭据扫描（允许清单之外的命中就拒写）→ 写文件 → `git commit -- <技能路径>`（作者 `agent-skills (<写入者>)`）→ 异步 `git push`。
@@ -106,7 +107,7 @@
 
 ## 7. Bridge 下的 agent（后续阶段）
 
-- 远程 agent 通过 MCP 的 `skill_index` / `skill_view` 按需读取纯文本技能。
+- 远程 agent 通过 MCP 的 `skills` / `skill` 按需读取纯文本技能。
 - 带脚本的技能需要本地副本：由 Bridge 拉取 agent-skills，按作用域装进 `~/.codex/skills`、`~/.claude/skills`，并沿用现有的安装状态上报（`BRIDGE_SHARED_SKILLS_MANIFEST`）。
 
 ## 8. 实施与验收
@@ -139,4 +140,4 @@ Hermes 原生列表里剩 21 个自带和 hub 技能；不用的可以在 `skill
 | 2 | `skill_manage(action=patch)` 的模糊匹配等细节要与 Hermes 一致，否则模型会用错 | 照 Hermes 实现和测试用例对齐 |
 | 3 | `skill_view` 原生支持的模板变量、环境变量声明 | 现存技能里几乎没用（Dorothy 2 个、Hermes 5 个声明环境变量，0 个用模板变量），只实现用到的部分 |
 | 4 | Hermes 升级后自带技能可能和技能库同名 | 同名时以技能库为准，在插件日志里提示 |
-| 5 | 技能使用统计 | 第一版不做；以后由 `skill_view` 记录 |
+| 5 | 技能使用统计 | 第一版不做；以后由 `skill` 记录 |

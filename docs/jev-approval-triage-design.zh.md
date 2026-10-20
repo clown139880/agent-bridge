@@ -41,7 +41,7 @@
 ```
 Bridge(任意机器)                         Control Plane (HAL)
 approval_request ──ws──▶ handleApprovalRequest
-  (+ 结构化 request 字段)    │ upsertApproval(pending, status=triaging)  ← 不推 Matrix、不出现在 /approvals 列表
+  (+ 结构化 request 字段)    │ upsertApproval(pending, status=triaging)  ← 不通知、不出现在 /approvals 列表
                              ▼
                         ① 确定性分类器 (packages/approval-policy)
                            HARD_HUMAN ─────────────────────────────┐
@@ -50,7 +50,7 @@ approval_request ──ws──▶ handleApprovalRequest
                                        │              记录 resolver=triage:jev
                                        human/超时/出错/熔断 ─────────┤
                                                                    ▼
-                                                    现有流程：status=pending，推 Matrix、DSH、Hermes 转发
+                                                    现有流程：status=pending，推 DSH、Hermes 转发
 ```
 
 选这一层的理由：
@@ -110,7 +110,7 @@ request?: {
 | Git 不可逆或外发 | `push`、`reset --hard`、`clean -f`、`checkout -- .`/`restore`、`rebase`、`branch -D`、`tag -d`、`stash drop/clear`、`filter-*`、`update-ref`、`gc --prune` |
 | 远程和跨机 | `ssh`/`scp`/`rsync` 到别的主机；任何**写到 Windows 或在 Windows 上执行**的操作：`/mnt/c/**`、`powershell.exe`、`cmd.exe`、`wsl.exe`、Windows 路径；`host=windows` 的 Bridge 上的写操作 |
 | 有副作用的网络请求 | `curl`/`wget`/`http` 带上 `-X POST/PUT/PATCH/DELETE`、`-d`、`--data*`、`-F`、`-T`，包括**真实模型加载的 POST**（modeldeck、GQX 推理服务、TokensAPI 等） |
-| 平台生命周期 | `hermes kanban` 的状态变更命令、会话控制 API（`/api/v1/sessions/*` 的写操作、`abctl`）、WoL |
+| 平台生命周期 | `hermes kanban` 的状态变更命令、会话控制 API（`/api/v1/sessions/*` 的写操作、`/mcp/bridge` 的 `create/turn/approve/answer/interrupt`）、WoL |
 | 数据库 | 对 `*.sqlite`/`*.db` 的写入或 `sqlite3` 非只读调用 |
 | 动态代码 | `eval`、`source` 工作区外文件；`bash -c`/`sh -c`/`python -c`/`node -e` 的内联代码会**递归分类**，解析不了的整体判为 HARD_HUMAN |
 | 文件工具 | `Edit`/`Write` 的目标在工作区外，并且不在 `/tmp/**`、`$TMPDIR/**` 里 |
@@ -214,11 +214,11 @@ APPROVAL_TRIAGE_SCOPE=["claude:Bash"]         # 分阶段放开
 
 Key 的做法（复用 call-bridge 的 key 源，但收得更紧）：
 - **复用**：`OPENROUTER_API_KEY` 仍然只存在 `/root/.hermes/.env` 一个地方，和 Hermes、call-bridge 共用。轮换时只改这一处。
-- **不把整个 Hermes env 灌进 Control Plane**。call-bridge 的 unit 用 `EnvironmentFile=-/root/.hermes/.env` 整体加载，但 Control Plane 的变量名可能和它冲突（例如 `API_SERVER_KEY`、Matrix 相关变量）。所以由一个小 loader 从 `APPROVAL_TRIAGE_KEY_FILE` **只解析 `OPENROUTER_API_KEY` 这一行**，放在内存里；文件 mtime 变化时重新读取。
+- **不把整个 Hermes env 灌进 Control Plane**。call-bridge 的 unit 用 `EnvironmentFile=-/root/.hermes/.env` 整体加载，但 Control Plane 的变量名可能和它冲突（例如 `API_SERVER_KEY`、Hermes 自己的 Matrix 变量）。所以由一个小 loader 从 `APPROVAL_TRIAGE_KEY_FILE` **只解析 `OPENROUTER_API_KEY` 这一行**，放在内存里；文件 mtime 变化时重新读取。
 - **不暴露**：key 不进 SQLite、不进日志、不进 `/healthz` 或任何 API 返回（只给出 `keyConfigured: true/false`），不发给任何 Bridge，不传进任何子进程环境，也不进 repo（`.env.example` 只放变量名）。
 - **发给第三方的内容**：命令文本会经过 OpenRouter。发送前，Bridge 和 Control Plane 两侧都按 token 模式（`sk-…`、`Bearer …`、`password=`、`-u user:pass` 等）脱敏。**只要脱敏命中就直接判为 HARD_HUMAN**，含秘密的命令本来就该人看，于是含秘密的内容根本不会发出去。→ 是否接受把命令发给 OpenRouter，列为待决 D5。
 
-**运行时开关**：AGENTS.md 规定不能手工重启服务，所以要做到不重启也能回滚。模式值存在 controlStore 的 settings 表里，优先级高于 env。可以通过 Matrix 管理命令 `!triage off|shadow|enforce` 或 `POST /api/v1/admin/approval-triage`（需要管理员 principal）切换，切换后立即生效，并在通知房间回执。
+**运行时开关**：AGENTS.md 规定不能手工重启服务，所以要做到不重启也能回滚。模式值存在 controlStore 的 settings 表里，优先级高于 env。可以通过 `POST /api/v1/admin/approval-triage`（需要管理员 principal，模式 `off|shadow|enforce`）切换，切换后立即生效，并在通知房间回执。
 
 ## 8. 落地顺序与回滚
 
@@ -227,7 +227,7 @@ Key 的做法（复用 call-bridge 的 key 源，但收得更紧）：
 | **P0 文档与数据**（本卡及紧随其后） | 写现状文档（本次已完成）；从 controlStore 导出最近的审批记录（summary 和人工 choice），加上那段 27 次审批的会话，由 clown 标注"该不该问"，形成种子集 | — | 不涉及 |
 | **P1 shadow** | 协议加 `request` 字段（Bridge 和 Control Plane 升版本）；实现 `packages/approval-policy` 和 Jev 客户端；`APPROVAL_TRIAGE=shadow`：照常交给人，同时记录分类器和 Jev 的结论 | 单元测试覆盖 §3.1 每一类和 §6 每种故障；离线回放种子集，HARD_HUMAN 漏判为 0 | 运行时切到 `off`；或者回退 commit 后走 deploy.sh。shadow 不改变任何审批行为 |
 | **P2 标定** | 积累 1~2 周 shadow 数据，标定 T_allow/T_human，输出报告：覆盖率（能省掉多少次打扰）和误放率；统计 UNPARSEABLE 占比 | 误放率 ≤ 1%，并且误放的都是 clown 认可的"无所谓"类；clown 拍板 | 不涉及（只是离线分析） |
-| **P3 enforce（窄）** | 只对一台 Bridge（噪声最大的 WSL Claude）、只对 `claude:Bash` 开启；每次自动放行在会话流里留 `approval.auto_resolved` 事件，通知房间每天发一次摘要 | P2 通过 | `!triage shadow` 立即生效；熔断自动兜底 |
+| **P3 enforce（窄）** | 只对一台 Bridge（噪声最大的 WSL Claude）、只对 `claude:Bash` 开启；每次自动放行在会话流里留 `approval.auto_resolved` 事件，通知房间每天发一次摘要 | P2 通过 | 把模式切到 `shadow` 立即生效；熔断自动兜底 |
 | **P4 扩面** | 依次加入工作区外 Edit/Write → Codex commandExecution → MCP 工具（先把只读 MCP 工具加进确定性白名单，剩下的才进 GRAY） | 每扩一项重复 P1→P3 的 shadow 加标定 | 从 `APPROVAL_TRIAGE_SCOPE` 里去掉该项 |
 
 P1 及以后的步骤会改动 Control Plane 和协议，按 AGENTS.md 要提升根 `package.json` 版本，并通过 `deploy/hal/deploy.sh` 部署；WSL 和 Windows Bridge 通过自更新器升级。

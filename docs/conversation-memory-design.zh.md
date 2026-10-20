@@ -1,6 +1,6 @@
 # 中央对话检索、回顾与共享技能设计
 
-日期：2026-09-18。状态：已实现（中央对话档案与 `conversation_*` 工具已上线；跨 agent 记忆另见 [agent-memory-design.zh.md](agent-memory-design.zh.md)）。
+日期：2026-09-18。状态：已实现（中央对话档案与 `history_*` 工具已上线；跨 agent 记忆另见 [agent-memory-design.zh.md](agent-memory-design.zh.md)）。
 
 ## 目标与边界
 
@@ -39,7 +39,7 @@ Control Plane
 
 各端 Bridge 不提供 MCP。查询不经过原会话所在机器：Windows 休眠后，HAL 上的客户端仍可直接访问中心已经收到的历史。中央服务不可用时第一版明确报告不可用，不承诺离线全库搜索。
 
-MCP 采用远程 HTTP 接入；具体传输、认证和客户端配置在实施时验证兼容性。确实不支持远程 MCP 的客户端可用薄传输代理，不在每个 Bridge 重建 MCP 服务。MCP 必须配置到实际执行的 agent，DSH 的工具配置不会自动传给远端执行端。
+MCP 采用远程 HTTP 接入：`http://<control-plane>:8787/mcp/memory`（Bearer 只读 token，客户端 server 名 `memory`，工具显示为 `mcp__memory__history_*`；旧的 `/mcp` 与 `conversation_*` 旧名保留到 0.8）。确实不支持远程 MCP 的客户端可用薄传输代理，不在每个 Bridge 重建 MCP 服务。MCP 必须配置到实际执行的 agent，DSH 的工具配置不会自动传给远端执行端。
 
 第一版 MCP 只暴露读取能力。查询使用独立的只读身份，不复用 Bridge 注册密钥或控制操作的写权限。凭据通过客户端配置提供，不放进 prompt、技能或 Git。中心统一管理权限、撤销和查询限额；目录或 repository 参数只用于检索，不构成授权。
 
@@ -64,13 +64,13 @@ MCP 采用远程 HTTP 接入；具体传输、认证和客户端配置在实施�
 
 | 工具 | 输入 | 输出 |
 | --- | --- | --- |
-| conversation_search | query、可选 cwd/machine_id/repository/source_session_id、scope、时间/agent 过滤、cursor、limit | 会话 ID、标题、时间、匹配原文片段、消息 ID、解析后的范围、下一页游标 |
-| conversation_review | session_id、可选关注主题和输出预算 | 目标、约束、已确认决策、未接受建议、未决问题、近期消息、摘要覆盖范围、原文指针 |
-| conversation_read | session_id、消息位置或 cursor、方向、limit | 原始消息、角色、时间、来源位置、前后页游标、完整度 |
+| history_search | query、可选 cwd/machine_id/repository/source_session_id、scope、时间/agent 过滤、cursor、limit | 会话 ID、标题、时间、匹配原文片段、消息 ID、解析后的范围、下一页游标 |
+| history_review | session_id、可选关注主题和输出预算 | 目标、约束、已确认决策、未接受建议、未决问题、近期消息、摘要覆盖范围、原文指针 |
+| history_read | session_id、消息位置或 cursor、方向、limit | 原始消息、角色、时间、来源位置、前后页游标、完整度 |
 
 搜索直接读取索引，不调用模型。回顾优先使用缓存摘要；缺少或落后时返回状态及预算内近期消息，允许后续后台整理。原文分页读取不改变正文，过长消息提供分段位置和明确截断标记，不悄悄省略。
 
-所有结果包含适用的 source、collected_through、summary_through 和 completeness 信息。归档已过期时返回明确状态，不提供虚假的恢复指针。未来的 conversation_link 写能力单独设计和授权，不混入第一版只读接口。
+所有结果包含适用的 source、collected_through、summary_through 和 completeness 信息。归档已过期时返回明确状态，不提供虚假的恢复指针。未来的 history_link 写能力单独设计和授权，不混入第一版只读接口。
 
 ## 采集、存储与摘要
 

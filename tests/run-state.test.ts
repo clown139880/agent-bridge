@@ -10,17 +10,6 @@ import { Store } from "../packages/database/src/index.js";
 import { ControlPlane } from "../apps/control-plane/src/server.js";
 import type { BridgeToControlMessage, ControlToBridgeMessage } from "../packages/protocol/src/index.js";
 
-class HeadlessGateway {
-  readonly enabled = false;
-  async start(): Promise<string> { return ""; }
-  stop(): void {}
-  async sendRoot(): Promise<string> { return ""; }
-  async sendThread(): Promise<string> { return ""; }
-  async sendReaction(): Promise<string> { return ""; }
-  async removeReaction(): Promise<void> {}
-  async sendNotice(): Promise<string> { return ""; }
-}
-
 type ControlInternals = {
   http: HttpServer;
   bridges: Map<string, { machineId: string; name: string; capabilities: string[]; socket: WebSocket }>;
@@ -30,7 +19,7 @@ type ControlInternals = {
 test("the legacy worker-run routes are gone but the WORKER_API_TOKEN principal still reads the Control API", async () => {
   const databasePath = join(tmpdir(), `agent-bridge-worker-api-${randomUUID()}.sqlite`);
   const store = new Store(databasePath);
-  const control = new ControlPlane(store, new HeadlessGateway(), {
+  const control = new ControlPlane(store, {
     host: "127.0.0.1", port: 0, workerApiEnabled: true, workerApiToken: "test-secret",
   });
   const internals = control as unknown as ControlInternals;
@@ -73,7 +62,7 @@ test("a run follows its session through heartbeats, approvals and agent events",
     id: "dev", name: "Workstation", platform: "linux", hostname: "dev.local",
     capabilities: ["codex-cli", "codex-app-server"],
   });
-  const control = new ControlPlane(store, new HeadlessGateway(), {
+  const control = new ControlPlane(store, {
     host: "127.0.0.1", port: 0, workerApiEnabled: true, workerApiToken: "test-secret",
   });
   const internals = control as unknown as ControlInternals;

@@ -89,9 +89,7 @@ test("the Control Plane continues the deploying session and announces the in-pla
     projectPath: "/root/agent-bridge", matrixRoomId: "", matrixThreadId: null, nativeSessionId: "38a014a3-0c4d-47c7-83de-a3c47b2bd743",
     status: "completed", createdAt: 1, updatedAt: 1 });
   const dir = intentsDir({ deploy: intent() });
-  const gateway = { start: async () => "!room", stop() {}, sendRoot: async () => "", sendThread: async () => "",
-    sendReaction: async () => "", removeReaction: async () => {}, sendNotice: async () => "" };
-  const control = new ControlPlane(store, gateway as never, { host: "127.0.0.1", port: 0, postDeployDir: dir });
+  const control = new ControlPlane(store, { host: "127.0.0.1", port: 0, postDeployDir: dir });
   const webhooks: Array<Record<string, unknown>> = [];
   (control as unknown as { webhook: { notify(event: Record<string, unknown>): void } }).webhook = { notify: (event) => webhooks.push(event) };
   await control.start();

@@ -1,5 +1,4 @@
-import { Hono } from "hono";
-import { getRequestListener } from "@hono/node-server";
+import { Hono, type MiddlewareHandler } from "hono";
 import { readFile, realpath, stat } from "node:fs/promises";
 import { extname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,13 +9,16 @@ const MIME: Record<string, string> = { ".html": "text/html; charset=utf-8", ".js
 
 export function createControlWeb(directory = DEFAULT_DIR) {
   const app = new Hono();
-  app.use("*", async (c, next) => {
+  // Scoped to the Control Center so the CSP never lands on API or MCP responses.
+  const security: MiddlewareHandler = async (c, next) => {
     c.header("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; font-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'");
     c.header("Referrer-Policy", "no-referrer");
     c.header("X-Content-Type-Options", "nosniff");
     c.header("Cache-Control", "no-store");
     await next();
-  });
+  };
+  app.use("/control", security);
+  app.use("/control/*", security);
   app.on(["GET", "HEAD"], "/control", c => c.redirect("/control/sessions", 302));
   app.on(["GET", "HEAD"], "/control/", c => c.redirect("/control/sessions", 302));
   app.on(["GET", "HEAD"], "/control/*", async c => {
@@ -47,5 +49,3 @@ export function createControlWeb(directory = DEFAULT_DIR) {
   return app;
 }
 
-// Reuse the existing node:http listener; API bodies and SSE never enter Hono.
-export const controlWebListener = getRequestListener(createControlWeb().fetch, { overrideGlobalObjects: false });

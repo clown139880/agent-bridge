@@ -8,7 +8,7 @@
 
 ```
 claude 进程内（原生权限引擎）          Bridge（claude-adapter）               Control Plane / 人
-deny 规则 → allow 规则 → permissionMode ─▶ canCallTool → handleToolPermission ─▶ approval_request ─▶ Matrix 反应 / DSH / Hermes 审批转发
+deny 规则 → allow 规则 → permissionMode ─▶ canCallTool → handleToolPermission ─▶ approval_request ─▶ Control Center / DSH / Hermes（/mcp/bridge）
 ```
 
 ## 1. Claude 原生权限（claude 进程内）
@@ -43,19 +43,19 @@ claude 进程还会读取所在机器的 `~/.claude/settings.json`（Bridge 没�
   - `all`：全部放行。
 - `CLAUDE_AUTO_APPROVE_TOOLS`：额外按**工具名**整体放行，例如 `["Bash"]` 会放行所有 Bash 命令。
 - **Bash、Edit/Write/MultiEdit/NotebookEdit、所有 MCP 工具**在 `readonly` 模式下一律弹审批，不看命令内容。
-- 例外（2026-10-15，clown 决定）：中央记忆 MCP 服务 `conversation-memory` 的全部工具（`conversation_*`、`memory_*`、`skill_*`，含写入）由原生规则 `mcp__conversation-memory` 放行，不再弹审批。写入都是 Git 提交，可撤回或归档。HAL 写在 `/root/.claude/settings.json` 的 `permissions.allow`（新会话即生效，不必重启 Bridge）；其他机器加在各自的 `~/.claude/settings.json`，或用第 6 节的 env 规则档。
+- 例外（2026-10-15，clown 决定）：中央记忆 MCP 服务（0.7 起是 `/mcp/memory`，客户端配置名 `memory`）的全部工具（`history_*`、记忆和技能工具，含写入）由原生规则 `mcp__memory` 放行，不再弹审批。写入都是 Git 提交，可撤回或归档。还没把配置名从 `conversation-memory` 改过来的机器继续靠 `mcp__conversation-memory`，两条规则在 0.8 去掉旧 `/mcp` 前并存。`/mcp/bridge`（`mcp__bridge__*`）不在例外里，照常弹审批。HAL 写在 `/root/.claude/settings.json` 的 `permissions.allow`（新会话即生效，不必重启 Bridge）；其他机器加在各自的 `~/.claude/settings.json`，或用第 6 节的 env 规则档。
 - 审批选项是 `allow` / `deny` / `allow-session`。`allow-session` 把**工具名**加入 `session.sessionAllowedTools`：点一次之后，本会话里**所有** Bash 都不会再问，不区分具体命令。
 - Codex app-server 的审批（`apps/bridge/src/app-server.ts`）由 Codex 自己的 approval policy 决定什么时候请求，Bridge 只负责转发。
 
 ## 3. Control Plane 与人工
 
-- `apps/control-plane/src/server.ts` 里的 `handleApprovalRequest` 会落库（controlStore pending），把会话标记成 `blocked`，然后发到 Matrix 线程（用表情反应作答）。DSH 和 API 的 `/api/v1/approvals` 也能作答，通过 `reservePending` 保证只被处理一次。
+- `apps/control-plane/src/server.ts` 里的 `handleApprovalRequest` 会落库（controlStore pending），把会话标记成 `blocked`，然后推送给 Control Center 和 DSH。Control Center、DSH 和 API 的 `/api/v1/approvals` 都能作答，通过 `reservePending` 保证只被处理一次。
 - Bridge 重连时，会在 snapshot 里重新上报还没处理的审批，所以不会丢请求。
 
-## 4. Hermes 代为审批（`abctl`）
+## 4. Hermes 代为审批（`/mcp/bridge`）
 
-- 0.6.96 移除了 Kanban 插件里的审批转发（`approval_relay.py`）。Hermes 现在用 `abctl wait` 盯住自己派出的 turn：审批到来时 `wait` 以退出码 10（MCP 为 `state: "approval"`）返回，Hermes 用 `abctl approve/deny` 作答，拿不准的问用户。
-- Hermes 不回答时审批保持 pending，不会超时变成 `deny`；Matrix 线程和 DSH 仍可作答，`reservePending` 保证只处理一次。
+- 0.6.96 移除了 Kanban 插件里的审批转发（`approval_relay.py`）。Hermes 现在用 `/mcp/bridge` 的 `wait` 盯住自己派出的 turn：审批到来时 `wait` 返回 `state: "approval"`，Hermes 用 `approve`（`allow` / `deny` / `allow-session`）作答，拿不准的问用户。0.7 之前这套能力由 `abctl` 命令行提供（`wait` 退出码 10）。
+- Hermes 不回答时审批保持 pending，不会超时变成 `deny`；Control Center 和 DSH 仍可作答，`reservePending` 保证只处理一次。
 - 旧版转发把超时和无法识别的回复映射成 `deny`，排查 0.6.96 之前的 "denied" 时要先区分是不是超时。
 
 ## 5. 已知问题
@@ -95,6 +95,6 @@ claude 进程还会读取所在机器的 `~/.claude/settings.json`（Bridge 没�
 1. env 文件只在 Bridge 启动时读取，claude 的启动参数也只在会话进程启动时传入。所以改完要重启加载 `.env.bridge` 的那个 user unit。已经在跑的 claude 子进程沿用旧规则，直到空闲回收（默认 5 分钟）或 Bridge 重启。
 2. 用 `ps -o args= -C claude`（或 `/proc/<pid>/cmdline`）看新会话的 claude 进程，确认带上了新的 `--allowedTools` 和 `--disallowedTools`。
 3. 在新会话里依次试 `ps aux`、`git status`、`python3 -m unittest -h`：应该不弹审批。`git push --dry-run`：应该弹审批。`git reset --hard`：应该立即返回 “Permission … has been denied”，不弹审批。
-4. 观察一段和基准差不多的会话，数 Matrix 线程或 `/api/v1/approvals` 里的审批次数，再和 27 比。
+4. 观察一段和基准差不多的会话，数 `/api/v1/approvals` 里的审批次数，再和 27 比。
 
 回滚：恢复原来的 `CLAUDE_PERMISSION_ALLOW`，删掉 `CLAUDE_PERMISSION_DENY`，再重启同一个 unit。

@@ -336,36 +336,9 @@ export class BridgeClient {
             log.error({ error }, "Unable to process bridge update announcement");
           });
           break;
-        case "start_agent":
-          if (!this.admitNewWork()) {
-            this.send({ type: "error", sessionId: message.sessionId, code: "update_required",
-              message: this.admissionMessage() });
-            break;
-          }
-          void this.adapterForType(message.agentType).startSession(message.sessionId, message.projectPath, message.prompt,
-            message.resumeSessionId ? { sessionId: message.resumeSessionId, nativeSessionId: message.resumeNativeSessionId } : undefined,
-            message.model, message.attachments)
-            .catch((error) => this.send({ type: "error", sessionId: message.sessionId, message: error instanceof Error ? error.message : String(error) }));
-          break;
-        case "agent_input":
-          if (!this.admitNewWork()) {
-            this.send({ type: "error", sessionId: message.sessionId, code: "update_required",
-              message: this.admissionMessage() });
-            break;
-          }
-          void this.adapterForSession(message.sessionId).input(message.sessionId, message.text, message.model, message.attachments)
-            .catch((error) => this.send({ type: "error", sessionId: message.sessionId, message: error instanceof Error ? error.message : String(error) }));
-          break;
         case "approval_response":
           void this.adapterForSession(message.sessionId).approve(message.sessionId, message.approvalId, message.choice)
             .catch((error) => this.send({ type: "error", sessionId: message.sessionId, message: error instanceof Error ? error.message : String(error) }));
-          break;
-        case "stop_agent":
-          void this.adapterForSession(message.sessionId).stopSession(message.sessionId)
-            .catch((error) => this.send({ type: "error", sessionId: message.sessionId, message: error instanceof Error ? error.message : String(error) }));
-          break;
-        case "log_request":
-          this.send({ type: "log_response", sessionId: message.sessionId, text: this.adapterForSession(message.sessionId).logs(message.sessionId, message.lines) });
           break;
         case "model_catalog_request":
           void this.adapterForType(message.agentType).models().then(models => this.send({ type: "model_catalog_response", requestId: message.requestId, models }))

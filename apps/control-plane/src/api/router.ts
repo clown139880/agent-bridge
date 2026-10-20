@@ -20,7 +20,7 @@ function capabilityForAgent(agentType: AgentType): string {
   return "codex-cli";
 }
 
-interface Principal { id: string; read: boolean; write: boolean; }
+export interface Principal { id: string; read: boolean; write: boolean; }
 interface ApiOptions {
   /** WORKER_API_TOKEN: a full-access (read+write) API token used by Hermes (its /ab command). Not a worker-run API. */
   workerToken?: string;
@@ -71,12 +71,17 @@ export class AgentControlApi {
 
   actionsForBridge():SessionActionService{return this.actions;}
 
-  async handle(request: IncomingMessage,response: ServerResponse): Promise<boolean> {
-    const url=new URL(request.url??"/","http://localhost");
+  /**
+   * Serves /api/v1. A caller that has already authenticated the request (the
+   * Control Center browser entrance) passes its principal and the /api/v1 URL.
+   */
+  async handle(request: IncomingMessage,response: ServerResponse,
+    preauthorized?:{principal:Principal;url:URL}): Promise<boolean> {
+    const url=preauthorized?.url??new URL(request.url??"/","http://localhost");
     if(!url.pathname.startsWith("/api/v1/"))return false;
     const requestId=randomUUID();
     try {
-      const principal=this.authenticate(request);
+      const principal=preauthorized?.principal??this.authenticate(request);
       if(request.method!=="GET"&&!principal.write)throw new ApiProblem(403,"forbidden","write scope is required");
       if(request.method==="GET"&&!principal.read)throw new ApiProblem(403,"forbidden","read scope is required");
       if(request.method==="GET"&&url.pathname==="/api/v1/workers"){this.workers(response);return true;}
@@ -125,8 +130,14 @@ export class AgentControlApi {
   }
 
   private authenticate(request:IncomingMessage):Principal {
-    const header=request.headers.authorization;
-    if(!header?.startsWith("Bearer "))throw new ApiProblem(401,"unauthorized","valid bearer token required");
+    const principal=this.principalFor(request.headers.authorization);
+    if(!principal)throw new ApiProblem(401,"unauthorized","valid bearer token required");
+    return principal;
+  }
+
+  /** The principal an Authorization header grants on /api/v1, if any. */
+  principalFor(header:string|undefined):Principal|undefined {
+    if(!header?.startsWith("Bearer "))return undefined;
     const token=header.slice(7);
     if(this.options.writeToken&&equalSecret(token,this.options.writeToken))return{id:"control:write",read:true,write:true};
     if(this.options.readToken&&equalSecret(token,this.options.readToken))return{id:"control:read",read:true,write:false};
@@ -134,7 +145,7 @@ export class AgentControlApi {
     if(this.options.workerToken&&equalSecret(token,this.options.workerToken))return{id:"worker:legacy",read:true,write:true};
     // The bridge authenticates with its registration token to fetch attachment bytes.
     if(this.options.bridgeToken&&equalSecret(token,this.options.bridgeToken))return{id:"bridge",read:true,write:false};
-    throw new ApiProblem(401,"unauthorized","valid bearer token required");
+    return undefined;
   }
 
   private workerJson(machine:ReturnType<Store["listMachines"]>[number],agentType:AgentType,label:string):Record<string,unknown>{

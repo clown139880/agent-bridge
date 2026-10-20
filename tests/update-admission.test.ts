@@ -10,16 +10,6 @@ import { Store } from "../packages/database/src/index.js";
 import { ControlPlane } from "../apps/control-plane/src/server.js";
 import type { BridgeToControlMessage, ControlToBridgeMessage } from "../packages/protocol/src/index.js";
 
-class HeadlessGateway {
-  async start(): Promise<string> { return ""; }
-  stop(): void {}
-  async sendRoot(): Promise<string> { return ""; }
-  async sendThread(): Promise<string> { return ""; }
-  async sendReaction(): Promise<string> { return ""; }
-  async removeReaction(): Promise<void> {}
-  async sendNotice(): Promise<string> { return ""; }
-}
-
 type Internals = {
   http: HttpServer;
   bridges: Map<string, {
@@ -37,7 +27,7 @@ test("an available bridge update is announced on registration and replayed when 
   }, close() {} } as unknown as WebSocket;
   store.upsertMachine({ id: "hal", name: "HAL", platform: "linux", hostname: "hal",
     capabilities: ["codex-cli"] });
-  const control = new ControlPlane(store, new HeadlessGateway(), {
+  const control = new ControlPlane(store, {
     host: "127.0.0.1", port: 0, workerApiEnabled: true, workerApiToken: "secret",
     bridgeUpdate: { latestVersion: "0.5.0", source: "mock://release", publishedAt: 7 },
   });

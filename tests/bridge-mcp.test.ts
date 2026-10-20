@@ -4,30 +4,25 @@ import { rmSync } from "node:fs";
 import type { Server as HttpServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PassThrough } from "node:stream";
 import test from "node:test";
 import { WebSocket } from "ws";
 import { Store } from "../packages/database/src/index.js";
 import { ControlPlane } from "../apps/control-plane/src/server.js";
-import { BridgeOps, ControlClient, serveMcp } from "../packages/cli/src/index.js";
+import { ControlClient } from "../apps/control-plane/src/mcp/bridge-client.js";
+import { BridgeOps } from "../apps/control-plane/src/mcp/bridge-ops.js";
 import type { BridgeToControlMessage, ControlToBridgeMessage } from "../packages/protocol/src/index.js";
-
-class HeadlessGateway {
-  readonly enabled = false; async start() { return ""; } stop() {} async sendRoot() { return ""; }
-  async sendThread() { return ""; } async sendReaction() { return ""; } async removeReaction() {} async sendNotice() { return ""; }
-}
 
 type Internals = { http: HttpServer; bridges: Map<string, unknown>;
   handleBridgeMessage(machineId: string, message: BridgeToControlMessage): Promise<void> };
 
 async function fixture() {
-  const path = join(tmpdir(), `abctl-${randomUUID()}.sqlite`), store = new Store(path);
+  const path = join(tmpdir(), `bridge-mcp-${randomUUID()}.sqlite`), store = new Store(path);
   store.upsertMachine({ id: "dev", name: "Workstation", platform: "linux", hostname: "dev.local", capabilities: ["codex-cli", "codex-app-server"] });
   const sent: ControlToBridgeMessage[] = [];
   const socket = { readyState: WebSocket.OPEN, OPEN: WebSocket.OPEN,
     send(value: string) { sent.push(JSON.parse(value) as ControlToBridgeMessage); }, close() {} } as unknown as WebSocket;
-  const control = new ControlPlane(store, new HeadlessGateway(), { host: "127.0.0.1", port: 0,
-    controlApiReadToken: "read", controlApiWriteToken: "write", sse: { keepaliveMs: 50, pollMs: 5, maxBackpressure: 3 } });
+  const control = new ControlPlane(store, { host: "127.0.0.1", port: 0,
+    controlApiReadToken: "read", controlApiWriteToken: "write", bridgeToken: "bridge-registration", sse: { keepaliveMs: 50, pollMs: 5, maxBackpressure: 3 } });
   const internals = control as unknown as Internals;
   internals.bridges.set("dev", { machineId: "dev", name: "Workstation", capabilities: ["codex-cli", "codex-app-server"],
     features: ["session-actions", "session-events"], bridgeVersion: "0.4.2", socket });
@@ -41,7 +36,8 @@ async function fixture() {
     sessions: [session("thread-1", "/work/repo"), session("thread-2", "/work/other")] });
   await bridge({ type: "session.event", eventId: "old-done", eventType: "turn.completed", sessionId: "thread-1", turnId: "turn-0",
     timestamp: 2000, payload: { status: "completed", summary: "earlier answer" } });
-  const ops = new BridgeOps(new ControlClient({ url: `http://127.0.0.1:${address.port}`, token: "write" }));
+  const base = `http://127.0.0.1:${address.port}`;
+  const ops = new BridgeOps(new ControlClient({ url: base, token: "write" }));
   /** Answer the next dispatched action of `type` the way a Bridge would. */
   const ack = async (type: string, result: Record<string, unknown>) => {
     let action: any;
@@ -52,7 +48,17 @@ async function fixture() {
       timestamp: Date.now(), ...result } as BridgeToControlMessage);
     return action;
   };
-  return { ops, bridge, ack, sent, async close() { await control.stop(); store.db.close(); rmSync(path, { force: true }); } };
+  let id = 0;
+  /** One JSON-RPC call to /mcp/bridge; the SDK answers in SSE frames. */
+  const mcp = async (token: string, method: string, params: unknown = {}) => {
+    const response = await fetch(`${base}/mcp/bridge`, { method: "POST", headers: { authorization: `Bearer ${token}`,
+      "content-type": "application/json", accept: "application/json, text/event-stream" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: ++id, method, params }) });
+    const text = await response.text();
+    const data = text.split("\n").find((line) => line.startsWith("data: "));
+    return { status: response.status, body: (text && JSON.parse(data ? data.slice(6) : text)) as any };
+  };
+  return { ops, mcp, bridge, ack, sent, async close() { await control.stop(); store.db.close(); rmSync(path, { force: true }); } };
 }
 
 test("send then wait returns the turn's final message, even when it finished before the wait", async () => {
@@ -129,24 +135,34 @@ test("create resolves a recent workspace by name and returns the new session", a
   } finally { await f.close(); }
 });
 
-test("abctl mcp lists the tools and answers a call", async () => {
+test("/mcp/bridge scopes its tools to the caller's Control token and acts as that caller", async () => {
   const f = await fixture();
   try {
-    const input = new PassThrough(), output = new PassThrough();
-    const serving = serveMcp(f.ops, input, output, "test");
-    const replies: any[] = [];
-    let buffer = "";
-    output.on("data", (chunk) => { buffer += chunk; let end; while ((end = buffer.indexOf("\n")) >= 0) { replies.push(JSON.parse(buffer.slice(0, end))); buffer = buffer.slice(end + 1); } });
-    input.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" })}\n`);
-    input.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`);
-    input.write(`${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "ab_sessions", arguments: { limit: 5 } } })}\n`);
-    input.write(`${JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "ab_session", arguments: {} } })}\n`);
-    input.end();
-    await serving;
-    const byId = new Map(replies.map((reply) => [reply.id, reply]));
-    assert.equal(replies.length, 3);
-    assert.ok(byId.get(1).result.tools.some((tool: any) => tool.name === "ab_wait"));
-    assert.deepEqual(byId.get(2).result.structuredContent.sessions.map((s: any) => s.sessionId).sort(), ["thread-1", "thread-2"]);
-    assert.equal(byId.get(3).result.isError, true);
+    assert.equal((await f.mcp("bridge-registration", "tools/list")).status, 401, "the Bridge registration token is not a driver");
+    assert.equal((await f.mcp("nope", "tools/list")).status, 401);
+    const names = async (token: string) => (await f.mcp(token, "tools/list")).body.result.tools.map((tool: any) => tool.name).sort();
+    assert.deepEqual(await names("read"), ["pending", "session", "sessions", "wait", "workers"]);
+    assert.deepEqual(await names("write"), ["answer", "approve", "create", "interrupt", "pending", "session", "sessions", "turn", "wait", "workers"]);
+
+    const listed = await f.mcp("read", "tools/call", { name: "sessions", arguments: { limit: 5 } });
+    assert.deepEqual(listed.body.result.structuredContent.sessions.map((s: any) => s.sessionId).sort(), ["thread-1", "thread-2"]);
+    const invalid = await f.mcp("read", "tools/call", { name: "session", arguments: {} });
+    assert.ok(invalid.body.error || invalid.body.result?.isError, "schema validation rejects a missing session_id");
+    const forbidden = await f.mcp("read", "tools/call", { name: "turn", arguments: { session_id: "thread-1", input: "x" } });
+    assert.ok(forbidden.body.error || forbidden.body.result?.isError, "a read token cannot call a write tool");
+    const unknown = await f.mcp("write", "tools/call", { name: "create", arguments: { worker_id: "codex@dev", workspace: "nope" } });
+    assert.equal(unknown.body.result.isError, true);
+    assert.match(unknown.body.result.content[0].text, /^workspace_unknown: /);
+
+    const sending = f.mcp("write", "tools/call", { name: "turn", arguments: { session_id: "thread-1", input: "via mcp" } });
+    const action = await f.ack("action.submit_turn", { sessionId: "thread-1", turnId: "turn-1", resolvedAction: "start_turn" });
+    assert.equal(action.input, "via mcp");
+    const sent = (await sending).body.result.structuredContent;
+    assert.equal(sent.turnId, "turn-1");
+    const waiting = f.mcp("read", "tools/call", { name: "wait", arguments: { session_id: "thread-1", turn_id: "turn-1", cursor: sent.cursor } });
+    await f.bridge({ type: "session.event", eventId: "t1-done", eventType: "turn.completed", sessionId: "thread-1", turnId: "turn-1",
+      timestamp: Date.now(), payload: { status: "completed", summary: "done via mcp" } });
+    const waited = (await waiting).body.result.structuredContent;
+    assert.deepEqual([waited.state, waited.summary], ["completed", "done via mcp"]);
   } finally { await f.close(); }
 });

@@ -183,49 +183,6 @@ export interface AttachmentRef {
   size: number;
 }
 
-export interface StartAgentMessage {
-  type: "start_agent";
-  sessionId: string;
-  /** Public id of the session to continue; the run reports under this id. */
-  resumeSessionId?: string;
-  /**
-   * The agent's own resumable id for `resumeSessionId` (Claude/pi uuid, Codex
-   * thread id), as recorded by the control-plane. The two ids differ for Claude
-   * and pi: passing the public id to `claude --resume` fails at startup.
-   */
-  resumeNativeSessionId?: string;
-  agentType: AgentType;
-  projectPath: string;
-  prompt?: string;
-  model?: string;
-  attachments?: AttachmentRef[];
-}
-
-export interface AgentInputMessage {
-  type: "agent_input";
-  sessionId: string;
-  text: string;
-  model?: string;
-  attachments?: AttachmentRef[];
-}
-
-export interface StopAgentMessage {
-  type: "stop_agent";
-  sessionId: string;
-}
-
-export interface LogRequestMessage {
-  type: "log_request";
-  sessionId: string;
-  lines: number;
-}
-
-export interface LogResponseMessage {
-  type: "log_response";
-  sessionId: string;
-  text: string;
-}
-
 export interface CodexModelInfo {
   id: string;
   model: string;
@@ -508,7 +465,6 @@ export type BridgeToControlMessage =
   | SessionDeletedMessage
   | ActionProgressMessage
   | ActionResultMessage
-  | LogResponseMessage
   | ModelCatalogResponseMessage
   | ArchiveGapMessage
   | ErrorMessage;
@@ -516,8 +472,6 @@ export type BridgeToControlMessage =
 export type ControlToBridgeMessage =
   | RegisteredMessage
   | BridgeUpdateAnnouncementMessage
-  | StartAgentMessage
-  | AgentInputMessage
   | ApprovalResponseMessage
   | CreateSessionActionMessage
   | SubmitTurnActionMessage
@@ -525,8 +479,6 @@ export type ControlToBridgeMessage =
   | ResolveApprovalActionMessage
   | ResolveUserInputActionMessage
   | DeleteSessionActionMessage
-  | StopAgentMessage
-  | LogRequestMessage
   | ModelCatalogRequestMessage
   | ArchiveAckMessage
   | ArchiveGapAckMessage

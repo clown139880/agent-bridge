@@ -1,6 +1,6 @@
 {
   "name": "agent-bridge",
-  "version": "0.6.100",
+  "version": "0.7.0",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@11.3.0",
@@ -24,7 +24,6 @@
   },
   "dependencies": {
     "dotenv": "^17.2.2",
-    "matrix-js-sdk": "^39.3.0",
     "pino": "^9.9.4",
     "ws": "^8.18.3"
   },

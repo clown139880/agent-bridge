@@ -1,10 +1,12 @@
-import { randomUUID, timingSafeEqual } from "node:crypto";
-import { createServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from "node:http";
+import { timingSafeEqual } from "node:crypto";
+import { createServer, type IncomingMessage, type Server as HttpServer } from "node:http";
+import type { Context } from "hono";
+import { getRequestListener } from "@hono/node-server";
 import { basename } from "node:path";
 import type { Duplex } from "node:stream";
 import pino from "pino";
 import { WebSocket, WebSocketServer } from "ws";
-import { AgentControlStore, ConversationMemoryStore, Store, type SessionRecord } from "@agent-bridge/database";
+import { AgentControlStore, ConversationMemoryStore, Store } from "@agent-bridge/database";
 import {
   parseMessage,
   statusForEvent,
@@ -20,53 +22,26 @@ import {
   type SessionActivityStatus,
   type SessionState,
 } from "@agent-bridge/protocol";
-import type { ControlGateway } from "./matrix.js";
 import { AgentControlApi } from "./api/router.js";
 import { BridgeRegistry } from "./bridge-registry.js";
 import { WebhookNotifier, type WebhookOptions } from "./webhook.js";
 import { AgentMemory, AgentSkills, type Writer } from "@agent-bridge/agent-memory";
 import { ConversationMcpServer } from "./memory-mcp.js";
+import { memoryEndpoint } from "./mcp/memory.js";
+import { mcpRoute } from "./mcp/route.js";
+import { bridgeEndpoint } from "./mcp/bridge.js";
 import { compareBridgeVersions } from "./bridge-version.js";
 import { PostDeployResumer } from "./post-deploy.js";
-import { controlWebListener } from "./web/app.js";
-import { handleControlBrowserApi } from "./web/api.js";
+import { createHttpApp, type HttpEnv } from "./http.js";
 
 const log = pino({ name: "control-plane" });
 
-interface PendingLaunch {
-  sender: string;
-  prompt: string;
-  sourceEventId: string;
-  machineId?: string;
-  agentType: AgentType;
-}
-
-interface PendingLaunchSelection {
-  launch: PendingLaunch;
-  messageEventId: string;
-  reactionEventIds: string[];
-  choices: Map<string, { machineId?: string; projectPath?: string; manualPath?: boolean }>;
-}
-
+/** An approval request this process has seen and not yet resolved; dedupes replays. */
 interface PendingApproval {
   approvalId: string;
   sessionId: string;
-  machineId: string;
-  threadId?: string;
-  messageEventId?: string;
-  reactionEventIds: string[];
-  choices: ApprovalChoice[];
-  kind: ApprovalRequestMessage["kind"];
-  summary: string;
 }
 
-const APPROVAL_REACTIONS: ReadonlyArray<{ key: string; choice: ApprovalChoice; label: string }> = [
-  { key: "✅", choice: "allow", label: "允许一次" },
-  { key: "❌", choice: "deny", label: "拒绝" },
-  { key: "♾️", choice: "allow-session", label: "本 Session 一直允许" },
-];
-
-const NUMBER_REACTIONS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣"] as const;
 const ORPHANED_RUN_REASON = "The worker's Bridge restarted and no longer holds this run's session; its turn was interrupted";
 
 export class ControlPlane {
@@ -80,25 +55,16 @@ export class ControlPlane {
   private readonly memory: ConversationMemoryStore;
   private readonly memoryMcp?: ConversationMcpServer;
   private readonly agentMemory?: AgentMemory;
-  private readonly approvalsByEvent = new Map<string, PendingApproval>();
   private readonly approvalsById = new Map<string, PendingApproval>();
   private readonly resolvedApprovalIds = new Set<string>();
-  private readonly progressNotifiedSessions = new Set<string>();
   private readonly seenAgentEvents = new Set<string>();
-  private readonly launchSelectionsByEvent = new Map<string, PendingLaunchSelection>();
-  private readonly launchSelectionsBySender = new Map<string, PendingLaunchSelection>();
-  private readonly launchesAwaitingPath = new Map<string, PendingLaunch>();
-  private readonly launchesByRequestId = new Map<string, PendingLaunch & { machineId: string; projectPath: string }>();
-  private readonly updateNotifications = new Set<string>();
   /** Bridge version this process already announced per machine, so a self-update's own report is not repeated. */
   private readonly announcedBridgeVersions = new Map<string, string>();
   private readonly postDeploy: PostDeployResumer;
-  private roomId = "";
   private cleanupTimer?: NodeJS.Timeout;
 
   constructor(
     private readonly store: Store,
-    private readonly matrix: ControlGateway,
     private readonly options: {
       /** Where deploy/hal/deploy.sh leaves post-deploy intents (see PostDeployResumer). */
       postDeployDir?: string;
@@ -139,10 +105,10 @@ export class ControlPlane {
       catch (error) { log.error({ error }, "Skill library disabled: repository unavailable"); }
     }
     this.agentMemory = agentMemory;
-    if (options.conversationMemory?.mcpReadToken || agentMemory) {
-      this.memoryMcp = new ConversationMcpServer(this.memory, options.conversationMemory?.mcpReadToken,
-        agentMemory && { store: agentMemory, skills: agentSkills, writers: options.agentMemory!.writers });
-    }
+    const memoryEndpointOptions = options.conversationMemory?.mcpReadToken || agentMemory
+      ? [this.memory, options.conversationMemory?.mcpReadToken,
+        agentMemory && { store: agentMemory, skills: agentSkills, writers: options.agentMemory!.writers }] as const : undefined;
+    if (memoryEndpointOptions) this.memoryMcp = new ConversationMcpServer(...memoryEndpointOptions);
     this.controlStore = new AgentControlStore(store.db, options.retention ?? {
       actionsMs: 86_400_000, attachmentsMs: 7 * 86_400_000,
     });
@@ -167,58 +133,20 @@ export class ControlPlane {
           sessionId, input, delivery: "auto", resume: this.resumeContext(sessionId) });
       },
     });
-    this.http = createServer((request, response) => {
-      if (request.url === "/health") {
-        response.writeHead(200, { "content-type": "application/json" });
-        response.end(JSON.stringify({ ok: true, bridges: this.bridges.size, roomId: this.roomId }));
-        return;
-      }
-      if (new URL(request.url ?? "/", "http://localhost").pathname === "/mcp") {
-        if (!this.memoryMcp) { response.writeHead(404).end(); return; }
-        void this.memoryMcp.handle(request, response).catch((error) => {
-          log.error({ error }, "Conversation MCP request failed");
-          if (!response.headersSent) this.json(response, 500, { error: "internal_error" });
-          else response.end();
-        });
-        return;
-      }
-      if (new URL(request.url ?? "/", "http://localhost").pathname === "/memory/bootstrap") {
-        this.handleMemoryBootstrap(request, response);
-        return;
-      }
-      if (request.url?.startsWith("/api/v1/")) {
-        if (!this.options.workerApiEnabled && !this.options.controlApiReadToken && !this.options.controlApiWriteToken) {
-          response.writeHead(404).end();
-          return;
-        }
-        void this.controlApi.handle(request, response).catch((error) => {
-          log.error({ error }, "Control API request failed");
-          if (!response.headersSent) this.json(response, 500, { error: "internal_error" });
-          else response.end();
-        });
-        return;
-      }
-      const pathname = new URL(request.url ?? "/", "http://localhost").pathname;
-      if (pathname.startsWith("/control/api/v1/")) {
-        void handleControlBrowserApi(request, response, this.controlApi, {
-          read: this.options.controlApiReadToken, write: this.options.controlApiWriteToken,
-        }).catch((error) => {
-          log.error({ error }, "Control Center API request failed");
-          if (!response.headersSent) this.json(response, 500, { error: "internal_error" });
-          else response.end();
-        });
-        return;
-      }
-      if (pathname === "/control" || pathname.startsWith("/control/")) {
-        void controlWebListener(request, response).catch((error) => {
-          log.error({ error }, "Control Center request failed");
-          if (!response.headersSent) response.writeHead(500).end("Internal error");
-          else response.end();
-        });
-        return;
-      }
-      response.writeHead(404).end();
+    const apiEnabled = Boolean(options.workerApiEnabled || options.controlApiReadToken || options.controlApiWriteToken);
+    const app = createHttpApp({
+      health: () => ({ ok: true, bridges: this.bridges.size, legacyMcpCalls: this.memoryMcp?.legacyCalls ?? 0 }),
+      memoryBootstrap: (c) => this.handleMemoryBootstrap(c),
+      mcp: {
+        ...(memoryEndpointOptions ? { memory: mcpRoute(memoryEndpoint(...memoryEndpointOptions)) } : {}),
+        ...(apiEnabled ? { bridge: mcpRoute(bridgeEndpoint(this.controlApi, () => this.loopbackBase())) } : {}),
+      },
+      legacyMcp: this.memoryMcp && ((request, response) => this.memoryMcp!.handle(request, response)),
+      controlApi: this.controlApi,
+      apiEnabled,
+      browserTokens: { read: options.controlApiReadToken, write: options.controlApiWriteToken },
     });
+    this.http = createServer(getRequestListener(app.fetch, { overrideGlobalObjects: false }));
     this.wss = new WebSocketServer({ noServer: true });
     this.http.on("upgrade", (request, socket, head) => this.handleUpgrade(request, socket, head));
     this.wss.on("connection", (socket) => this.handleConnection(socket));
@@ -228,13 +156,12 @@ export class ControlPlane {
     // No bridge is live yet after a control-plane restart. Reset transient state
     // without changing the timestamp of the session's last real activity.
     this.controlStore.resetTransientSessionActivity();
-    this.roomId = await this.matrix.start();
     await new Promise<void>((resolve) => this.http.listen(this.options.port, this.options.host, resolve));
     setInterval(() => this.store.markStaleMachinesOffline(Date.now() - 45_000), 15_000).unref();
     this.controlStore.cleanup();
     this.cleanupTimer = setInterval(() => this.controlStore.cleanup(), 60 * 60_000);
     this.cleanupTimer.unref();
-    log.info({ host: this.options.host, port: this.options.port, roomId: this.roomId }, "Control plane listening");
+    log.info({ host: this.options.host, port: this.options.port }, "Control plane listening");
     // Announce the control-plane restart and the version it is advertising to the fleet.
     // This is the operator's "control-plane upgraded / broadcasting version" signal.
     this.webhook.notify({
@@ -247,159 +174,46 @@ export class ControlPlane {
   }
 
   async stop(): Promise<void> {
-    this.matrix.stop();
     clearInterval(this.cleanupTimer);
     for (const bridge of this.bridges.values()) bridge.socket.close(1001, "server shutdown");
     await new Promise<void>((resolve) => this.http.close(() => resolve()));
+  }
+
+  /** This process's own HTTP origin, for /mcp/bridge calling /api/v1 as its caller. */
+  private loopbackBase(): string {
+    const address = this.http.address();
+    if (!address || typeof address === "string") throw new Error("control plane is not listening");
+    const host = ["0.0.0.0", "::", ""].includes(address.address) ? "127.0.0.1" : address.address;
+    return `http://${host.includes(":") ? `[${host}]` : host}:${address.port}`;
   }
 
   private deleteSessionRecord(sessionId: string): void {
     this.controlStore.deleteSession(sessionId);
   }
 
-  async onRoomMessage(body: string, sender = "", eventId = ""): Promise<void> {
-    const input = body.trim();
-    if (input === "!help" || input === "/help") {
-      await this.matrix.sendNotice([
-        "Agent Control commands:",
-        "直接在频道发送任务即可开始；按表情选择 agent@机器 和工作目录。",
-        "选择“其他目录”后，发送绝对路径或 zoxide 查询（例如 z:agent-bridge）。",
-        "!codex / !codex@machine 仍保留兼容。",
-        "!machines",
-        "!sessions",
-        "Inside a session thread: send text, /log [N], or /stop",
-      ].join("\n"));
-      return;
-    }
-    if (input === "!machines") {
-      const machines = this.store.listMachines();
-      await this.matrix.sendNotice(machines.length
-        ? machines.map((item) => `${item.status === "online" ? "🟢" : "⚫"} ${item.id} · ${item.platform} · ${item.hostname}`).join("\n")
-        : "No bridges have registered yet.");
-      return;
-    }
-    if (input === "!sessions") {
-      const sessions = this.store.listSessions();
-      await this.matrix.sendNotice(sessions.length
-        ? sessions.map((item) => `${statusIcon(item.status)} ${item.projectName} · ${item.status} · ${item.machineId}`).join("\n")
-        : "No sessions yet.");
-      return;
-    }
-    if (input === "!cancel" && sender) {
-      await this.cancelLaunch(sender);
-      await this.matrix.sendNotice("已取消启动。", { kind: "launch.cancelled" });
-      return;
-    }
-    const match = input.match(/^!codex(?:@([^\s]+))?\s+(\S+)(?:\s+([\s\S]+))?$/);
-    if (match) {
-      await this.createCodexSession(match[1], match[2], match[3]);
-      return;
-    }
-    if (input.startsWith("!")) {
-      await this.matrix.sendNotice("Unknown command. Send !help for usage.");
-      return;
-    }
-    if (!input || !sender || !eventId) return;
-    const awaitingPath = this.launchesAwaitingPath.get(sender);
-    if (awaitingPath) {
-      this.launchesAwaitingPath.delete(sender);
-      await this.startLaunch(awaitingPath, input);
-      return;
-    }
-    if (this.launchSelectionsBySender.has(sender)) {
-      await this.matrix.sendNotice("请先点击上一条选择消息下的表情，或发送 !cancel。", { kind: "launch.reminder" });
-      return;
-    }
-    await this.beginLaunch({ sender, prompt: body, sourceEventId: eventId, agentType: "codex-cli" });
-  }
-
-  async onThreadMessage(roomId: string, threadId: string, body: string): Promise<void> {
-    const session = this.store.getSessionByThread(roomId, threadId);
-    if (!session) return;
-    const bridge = this.bridges.get(session.machineId);
-    if (!bridge) {
-      await this.matrix.sendThread(threadId, `🔴 Bridge ${session.machineId} is offline.`);
-      return;
-    }
-    const command = body.trim();
-    if (command === "/stop") {
-      this.send(bridge.socket, { type: "stop_agent", sessionId: session.id });
-    } else if (command.startsWith("/log")) {
-      const lines = Math.min(500, Math.max(1, Number(command.split(/\s+/)[1] ?? "100") || 100));
-      this.send(bridge.socket, { type: "log_request", sessionId: session.id, lines });
-    } else {
-      this.send(bridge.socket, { type: "agent_input", sessionId: session.id, text: body });
-      await this.matrix.sendThread(threadId, "📨 Sent to Codex.");
-    }
-  }
-
-  async onReaction(targetEventId: string, key: string, sender = ""): Promise<void> {
-    const launchSelection = this.launchSelectionsByEvent.get(targetEventId);
-    const launchChoice = launchSelection?.choices.get(key);
-    if (launchSelection && launchChoice && (!sender || launchSelection.launch.sender === sender)) {
-      await this.resolveLaunchSelection(launchSelection, launchChoice);
-      return;
-    }
-    const pending = this.approvalsByEvent.get(targetEventId);
-    const action = APPROVAL_REACTIONS.find((candidate) => candidate.key === key);
-    if (!pending || !action || !pending.choices.includes(action.choice)) return;
-    this.forgetApproval(pending);
-    await this.removeApprovalReactions(pending);
-    const bridge = this.bridges.get(pending.machineId);
-    if (!bridge) {
-      if (pending.threadId) await this.matrix.sendThread(pending.threadId, `🔴 Bridge ${pending.machineId} is offline; the approval could not be submitted.`);
-      return;
-    }
-    const projected=this.controlStore.pending(pending.approvalId);
-    if(projected&&!this.controlStore.reservePending(pending.approvalId,`matrix:${targetEventId}`)) {
-      if(pending.threadId)await this.matrix.sendThread(pending.threadId,"ℹ️ This approval was already handled by another client.");
-      return;
-    }
-    this.send(bridge.socket, {
-      type: "approval_response",
-      sessionId: pending.sessionId,
-      approvalId: pending.approvalId,
-      choice: action.choice,
-    });
-    this.controlStore.resolvePending(pending.approvalId,
-      action.choice === "deny" ? "denied" : "accepted", { choice: action.choice });
-    this.store.updateSessionStatus(pending.sessionId, "working");
-    const workerRun = this.store.getWorkerRunBySession(pending.sessionId);
-    if (workerRun) this.store.updateWorkerRun(workerRun.id, "working");
-    if (pending.threadId) await this.matrix.sendThread(pending.threadId, `🔐 已选择：${action.label}。Codex 正在继续。`);
-  }
-
   /**
    * Core memory for a Bridge session that is about to start: _global plus the project scope found from
    * the Bridge's machine, cwd and repository. Bridge token only; it never creates a scope.
    */
-  private handleMemoryBootstrap(request: IncomingMessage, response: ServerResponse): void {
+  private handleMemoryBootstrap(c: Context<HttpEnv>): Response {
     const token = this.options.bridgeToken;
-    if (!this.agentMemory || !token || request.method !== "GET") { response.writeHead(404).end(); return; }
-    const given = Buffer.from(request.headers.authorization?.replace(/^Bearer\s+/i, "") ?? "");
+    if (!this.agentMemory || !token) return c.body(null, 404);
+    const given = Buffer.from(c.req.header("authorization")?.replace(/^Bearer\s+/i, "") ?? "");
     const expected = Buffer.from(token);
-    if (given.length !== expected.length || !timingSafeEqual(given, expected)) {
-      this.json(response, 401, { error: "unauthorized" });
-      return;
-    }
-    const query = new URL(request.url ?? "/", "http://localhost").searchParams;
+    const headers = { "cache-control": "no-store" };
+    if (given.length !== expected.length || !timingSafeEqual(given, expected)) return c.json({ error: "unauthorized" }, 401, headers);
     try {
-      const resolved = this.agentMemory.resolveScope({ machineId: query.get("machine_id") ?? undefined,
-        cwd: query.get("cwd") ?? undefined, repository: query.get("repository") ?? undefined });
+      const resolved = this.agentMemory.resolveScope({ machineId: c.req.query("machine_id"),
+        cwd: c.req.query("cwd"), repository: c.req.query("repository") });
       const memory = this.agentMemory.sessionBootstrap(resolved.scope);
       const warnings = [...resolved.warnings, ...(resolved.conflict ? [`作用域绑定冲突：${resolved.conflict.join("、")}`] : [])];
       const text = memory ? [`长期记忆（作用域 ${resolved.scope}；只是参考，不扩大授权，项目状态以仓库为准；`
-        + "已在开局注入，不必再调用 memory_bootstrap）：", memory, ...warnings.map((warning) => `- 注意：${warning}`)].join("\n") : "";
-      this.json(response, 200, { scope: resolved.scope, text });
+        + "已在开局注入，不必再调用 bootstrap）：", memory, ...warnings.map((warning) => `- 注意：${warning}`)].join("\n") : "";
+      return c.json({ scope: resolved.scope, text }, 200, headers);
     } catch (error) {
       log.warn({ error }, "Memory bootstrap failed");
-      this.json(response, 500, { error: "memory_unavailable" });
+      return c.json({ error: "memory_unavailable" }, 500, headers);
     }
-  }
-
-  private json(response: ServerResponse, status: number, body: unknown): void {
-    response.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
-    response.end(JSON.stringify(body));
   }
 
   private handleUpgrade(request: IncomingMessage, socket: Duplex, head: Buffer): void {
@@ -620,11 +434,6 @@ export class ControlPlane {
       this.memory.upsertSessionProject(message.sessionId, message.projectIdentity);
       return;
     }
-    if (message.type === "log_response") {
-      const session = this.store.getSession(message.sessionId);
-      if (session?.matrixThreadId) await this.matrix.sendThread(session.matrixThreadId, `📄 Recent log\n\n${truncate(message.text, 6000)}`);
-      return;
-    }
     if (message.type === "approval_request") {
       await this.handleApprovalRequest(machineId, message);
       return;
@@ -635,8 +444,7 @@ export class ControlPlane {
         message.choice ? { choice: message.choice } : undefined);
       const pending = this.approvalsById.get(message.approvalId);
       if (pending) {
-        this.forgetApproval(pending);
-        await this.removeApprovalReactions(pending);
+        this.approvalsById.delete(pending.approvalId);
         const run = this.store.getWorkerRunBySession(message.sessionId);
         if (run) this.store.updateWorkerRun(run.id, "working");
       } else {
@@ -656,15 +464,7 @@ export class ControlPlane {
             message.message);
           if (!workerRun.sessionId) return;
         }
-        const launch = this.launchesByRequestId.get(message.sessionId);
-        if (launch) {
-          this.launchesByRequestId.delete(message.sessionId);
-          await this.matrix.sendThread(launch.sourceEventId, `❌ 启动失败：${message.message}`, { kind: "launch.failed" });
-          return;
-        }
-        const session = this.store.getSession(message.sessionId);
-        if (session?.matrixThreadId) await this.matrix.sendThread(session.matrixThreadId, `❌ ${message.message}`);
-        else log.warn({ machineId, sessionId: message.sessionId, message: message.message }, "Bridge error for unknown session");
+        log.warn({ machineId, sessionId: message.sessionId, message: message.message }, "Bridge error for a session");
       } else {
         log.warn({ machineId, message: message.message }, "Bridge error");
       }
@@ -797,33 +597,8 @@ export class ControlPlane {
       const bridge = this.bridges.get(machineId);
       if (bridge) bridge.bridgeVersion = message.currentVersion;
     }
-    if (message.phase !== "discovered" && message.phase !== "completed") {
-      log.info({ machineId, phase: message.phase, currentVersion: message.currentVersion,
-        latestVersion: message.latestVersion, reason: message.reason }, "Bridge self-update status");
-      return;
-    }
-    const key = `${message.phase}:${machineId}:${message.latestVersion}`;
-    if (this.updateNotifications.has(key)) return;
-    this.updateNotifications.add(key);
-    if (message.phase === "discovered") {
-      await this.matrix.sendNotice([
-        `🔔 Bridge 更新已发现：${machineId}`,
-        `${message.currentVersion} → ${message.latestVersion}`,
-        message.updatable ? "该 bridge 将按本机策略自行更新。" : `不会自动更新：${message.reason ?? "本机策略不允许"}`,
-      ].join("\n"), {
-        kind: "bridge.update.discovered", machine_id: machineId,
-        current_version: message.currentVersion, latest_version: message.latestVersion,
-        updatable: message.updatable,
-      });
-    } else {
-      await this.matrix.sendNotice([
-        `✅ Bridge 已完成自更新：${machineId}`,
-        `当前版本 ${message.currentVersion}`,
-      ].join("\n"), {
-        kind: "bridge.update.completed", machine_id: machineId,
-        current_version: message.currentVersion, latest_version: message.latestVersion,
-      });
-    }
+    log.info({ machineId, phase: message.phase, currentVersion: message.currentVersion,
+      latestVersion: message.latestVersion, reason: message.reason }, "Bridge self-update status");
   }
 
   private async handleAgentEvent(event: AgentEvent): Promise<void> {
@@ -848,17 +623,6 @@ export class ControlPlane {
       const reason = status === "blocked" ? event.summary || event.text || "Bridge reported that the agent is blocked" : undefined;
       this.store.updateWorkerRun(workerRun.id, status, reason);
     }
-    if (!session.matrixThreadId) return;
-    if (event.type === "agent.started") this.progressNotifiedSessions.delete(event.sessionId);
-    if (event.type === "agent.progress") {
-      if (this.progressNotifiedSessions.has(event.sessionId)) return;
-      this.progressNotifiedSessions.add(event.sessionId);
-    }
-    if (["agent.completed", "agent.failed", "agent.stopped"].includes(event.type)) {
-      this.progressNotifiedSessions.delete(event.sessionId);
-    }
-    const formatted = formatEvent(event);
-    if (formatted) await this.matrix.sendThread(session.matrixThreadId, formatted);
   }
 
   private async handleApprovalRequest(machineId: string, message: ApprovalRequestMessage): Promise<void> {
@@ -876,47 +640,7 @@ export class ControlPlane {
     this.store.updateSessionStatus(message.sessionId, "blocked");
     const workerRun = this.store.getWorkerRunBySession(message.sessionId);
     if (workerRun) this.store.updateWorkerRun(workerRun.id, "blocked");
-    const pending: PendingApproval = {
-      approvalId: message.approvalId,
-      sessionId: message.sessionId,
-      machineId,
-      threadId: session.matrixThreadId ?? undefined,
-      reactionEventIds: [],
-      choices: message.choices,
-      kind: message.kind,
-      summary: message.summary,
-    };
-    this.approvalsById.set(message.approvalId, pending);
-    if (!session.matrixThreadId) return;
-    const messageEventId = await this.matrix.sendThread(session.matrixThreadId, [
-      `🔐 Codex 请求授权 · ${approvalKindLabel(message.kind)}`,
-      "",
-      message.summary,
-      "",
-      "点击下面的表情选择操作：",
-      ...approvalActions(message).map((action) => `${action.key} ${action.label}`),
-    ].join("\n"));
-    pending.messageEventId = messageEventId;
-    this.approvalsByEvent.set(messageEventId, pending);
-    for (const action of approvalActions(message)) {
-      try {
-        pending.reactionEventIds.push(await this.matrix.sendReaction(messageEventId, action.key));
-      } catch (error) {
-        log.warn({ error, approvalId: message.approvalId, reaction: action.key }, "Unable to add approval reaction");
-      }
-    }
-  }
-
-  private forgetApproval(pending: PendingApproval): void {
-    if (pending.messageEventId) this.approvalsByEvent.delete(pending.messageEventId);
-    this.approvalsById.delete(pending.approvalId);
-  }
-
-  private async removeApprovalReactions(pending: PendingApproval): Promise<void> {
-    const results = await Promise.allSettled(pending.reactionEventIds.map((eventId) => this.matrix.removeReaction(eventId)));
-    if (results.some((result) => result.status === "rejected")) {
-      log.warn({ approvalId: pending.approvalId }, "Unable to remove one or more approval reactions");
-    }
+    this.approvalsById.set(message.approvalId, { approvalId: message.approvalId, sessionId: message.sessionId });
   }
 
   private async handleSessionDiscovered(machineId: string, message: SessionDiscoveredMessage): Promise<void> {
@@ -930,13 +654,11 @@ export class ControlPlane {
       this.store.updateSessionStatus(session.id, message.status);
       const workerRun = message.requestId ? this.store.getWorkerRun(message.requestId) : undefined;
       if (workerRun && !workerRun.sessionId) this.store.attachWorkerRun(workerRun.id, session.id, message.status);
-      if (!workerRun && !session.matrixThreadId && message.title?.trim()) await this.publishPassiveSession(session, message);
       const previousUpdatedAt=this.controlStore.session(session.id)?.updatedAt;
       this.controlStore.upsertSession(machineId, stateForDiscovery({ ...message, sessionId: session.id },
         typeof previousUpdatedAt==="number"?previousUpdatedAt:undefined));
       return;
     }
-    const launch = message.requestId ? this.launchesByRequestId.get(message.requestId) : undefined;
     const workerRun = message.requestId ? this.store.getWorkerRun(message.requestId) : undefined;
     const now = Date.now();
     session = {
@@ -945,8 +667,8 @@ export class ControlPlane {
       agentType: message.agentType,
       projectName: message.projectName || basename(message.projectPath.replace(/[\\/]$/, "")) || message.projectPath,
       projectPath: message.projectPath,
-      matrixRoomId: this.roomId,
-      matrixThreadId: launch?.sourceEventId ?? null,
+      matrixRoomId: "",
+      matrixThreadId: null,
       nativeSessionId: message.nativeSessionId ?? null,
       status: message.status,
       createdAt: message.createdAt || now,
@@ -954,147 +676,10 @@ export class ControlPlane {
     };
     this.store.createSession(session);
     if (workerRun) this.store.attachWorkerRun(workerRun.id, session.id, message.status);
-    if (launch) {
-      this.launchesByRequestId.delete(message.requestId!);
-      const bridge = this.bridges.get(machineId);
-      await this.matrix.sendThread(launch.sourceEventId, [
-        `${statusIcon(message.status)} Codex CLI @ ${bridge?.name ?? machineId}`,
-        session.projectPath,
-      ].join("\n"), sessionMetadata(session));
-    } else if (!workerRun && message.title?.trim()) {
-      await this.publishPassiveSession(session, message);
-    }
     const previousUpdatedAt=this.controlStore.session(message.sessionId)?.updatedAt;
     this.controlStore.upsertSession(machineId, stateForDiscovery(message,
       typeof previousUpdatedAt==="number"?previousUpdatedAt:undefined));
     log.info({ machineId, sessionId: session.id, nativeSessionId: message.nativeSessionId }, "Local Codex thread attached");
-  }
-
-  private async publishPassiveSession(session: SessionRecord, message: SessionDiscoveredMessage): Promise<void> {
-    const agentLabel = message.agentType === "codex-desktop" ? "Codex Desktop" : "Codex CLI";
-    const bridge = this.bridges.get(session.machineId);
-    const matrixThreadId = await this.matrix.sendRoot([
-      `${statusIcon(message.status)} ${message.title!.trim()}`,
-      `${agentLabel} @ ${bridge?.name ?? session.machineId} · ${session.projectName}`,
-    ].join("\n"), sessionMetadata(session));
-    this.store.setThread(session.id, matrixThreadId);
-  }
-
-  private async beginLaunch(launch: PendingLaunch): Promise<void> {
-    const targets = [...this.bridges.values()].filter((bridge) => bridge.capabilities.includes("codex-cli"));
-    if (!targets.length) {
-      await this.matrix.sendNotice("当前没有可用的 Codex bridge。", { kind: "launch.unavailable" });
-      return;
-    }
-    if (targets.length === 1) {
-      launch.machineId = targets[0]!.machineId;
-      await this.chooseWorkspace(launch);
-      return;
-    }
-    const choices = new Map<string, { machineId: string }>();
-    const lines = targets.slice(0, NUMBER_REACTIONS.length).map((target, index) => {
-      const key = NUMBER_REACTIONS[index]!;
-      choices.set(key, { machineId: target.machineId });
-      return `${key} Codex CLI @ ${target.name}`;
-    });
-    await this.offerLaunchSelection(launch, "把任务交给谁？\n\n" + lines.join("\n"), choices, "launch.agent-choice");
-  }
-
-  private async chooseWorkspace(launch: PendingLaunch): Promise<void> {
-    const paths = this.store.listProjectPaths(launch.machineId!, NUMBER_REACTIONS.length - 1);
-    if (!paths.length) {
-      this.launchesAwaitingPath.set(launch.sender, launch);
-      await this.matrix.sendNotice("📁 还没有最近目录，请发送绝对路径或 zoxide 查询。", {
-        kind: "launch.path-input", machine_id: launch.machineId,
-      });
-      return;
-    }
-    const choices = new Map<string, { projectPath?: string; manualPath?: boolean }>();
-    const lines = paths.map((path, index) => {
-      const key = NUMBER_REACTIONS[index]!;
-      choices.set(key, { projectPath: path });
-      return `${key} ${path}`;
-    });
-    choices.set("➕", { manualPath: true });
-    lines.push("➕ 新的工作目录（输入路径）");
-    await this.offerLaunchSelection(launch, "在哪个目录工作？\n\n" + lines.join("\n"), choices, "launch.workspace-choice");
-  }
-
-  private async offerLaunchSelection(
-    launch: PendingLaunch,
-    body: string,
-    choices: Map<string, { machineId?: string; projectPath?: string; manualPath?: boolean }>,
-    kind: string,
-  ): Promise<void> {
-    const messageEventId = await this.matrix.sendNotice(body, { kind, source_event_id: launch.sourceEventId });
-    const selection: PendingLaunchSelection = { launch, messageEventId, reactionEventIds: [], choices };
-    this.launchSelectionsByEvent.set(messageEventId, selection);
-    this.launchSelectionsBySender.set(launch.sender, selection);
-    for (const key of choices.keys()) {
-      try {
-        selection.reactionEventIds.push(await this.matrix.sendReaction(messageEventId, key));
-      } catch (error) {
-        log.warn({ error, reaction: key }, "Unable to add launch reaction");
-      }
-    }
-  }
-
-  private async resolveLaunchSelection(
-    selection: PendingLaunchSelection,
-    choice: { machineId?: string; projectPath?: string; manualPath?: boolean },
-  ): Promise<void> {
-    this.launchSelectionsByEvent.delete(selection.messageEventId);
-    this.launchSelectionsBySender.delete(selection.launch.sender);
-    await Promise.allSettled(selection.reactionEventIds.map((eventId) => this.matrix.removeReaction(eventId)));
-    if (choice.machineId) {
-      selection.launch.machineId = choice.machineId;
-      await this.chooseWorkspace(selection.launch);
-    } else if (choice.manualPath) {
-      this.launchesAwaitingPath.set(selection.launch.sender, selection.launch);
-      await this.matrix.sendNotice("📁 请发送绝对路径或 zoxide 查询。", {
-        kind: "launch.path-input", machine_id: selection.launch.machineId,
-      });
-    } else if (choice.projectPath) {
-      await this.startLaunch(selection.launch, choice.projectPath);
-    }
-  }
-
-  private async startLaunch(launch: PendingLaunch, projectPath: string): Promise<void> {
-    const bridge = launch.machineId ? this.bridges.get(launch.machineId) : undefined;
-    if (!bridge) {
-      await this.matrix.sendThread(launch.sourceEventId, "❌ 所选 bridge 已离线。", { kind: "launch.failed" });
-      return;
-    }
-    const requestId = randomUUID();
-    this.launchesByRequestId.set(requestId, { ...launch, machineId: bridge.machineId, projectPath });
-    this.send(bridge.socket, {
-      type: "start_agent", sessionId: requestId, agentType: launch.agentType, projectPath, prompt: launch.prompt,
-    });
-    await this.matrix.sendThread(launch.sourceEventId, `⏳ Codex CLI @ ${bridge.name} · ${projectPath}`, {
-      kind: "launch.starting", request_id: requestId, machine_id: bridge.machineId, project_path: projectPath,
-    });
-  }
-
-  private async cancelLaunch(sender: string): Promise<void> {
-    this.launchesAwaitingPath.delete(sender);
-    const selection = this.launchSelectionsBySender.get(sender);
-    if (!selection) return;
-    this.launchSelectionsBySender.delete(sender);
-    this.launchSelectionsByEvent.delete(selection.messageEventId);
-    await Promise.allSettled(selection.reactionEventIds.map((eventId) => this.matrix.removeReaction(eventId)));
-  }
-
-  private async createCodexSession(requestedMachine: string | undefined, projectPath: string, prompt?: string): Promise<void> {
-    const bridge = requestedMachine
-      ? this.bridges.get(requestedMachine)
-      : [...this.bridges.values()][0];
-    if (!bridge) {
-      await this.matrix.sendNotice(requestedMachine ? `Bridge ${requestedMachine} is offline.` : "No online bridge is available.");
-      return;
-    }
-    const requestId = randomUUID();
-    this.send(bridge.socket, { type: "start_agent", sessionId: requestId, agentType: "codex-cli", projectPath, prompt });
-    await this.matrix.sendNotice(`🟢 Starting Codex on ${bridge.machineId}: ${projectPath}`);
   }
 
   private send(socket: WebSocket, message: ControlToBridgeMessage): void {
@@ -1111,57 +696,6 @@ function attachmentsFromBody(body: Record<string, unknown>): AttachmentRef[] | u
     .map((item) => ({ id: String(item.id ?? ""), filename: String(item.filename ?? ""),
       mimeType: String(item.mimeType ?? ""), size: typeof item.size === "number" ? item.size : 0 }))
     .filter((ref) => ref.id && ref.mimeType);
-}
-
-function statusIcon(status: string): string {
-  return ({ starting: "🟢", update_waiting: "🟠", update_required: "🟠", update_failed: "🔴",
-    working: "🔵", waiting: "🟡", blocked: "🔴", completed: "✅", failed: "❌", stopped: "⚫" } as Record<string, string>)[status] ?? "⚪";
-}
-
-
-function sessionMetadata(session: SessionRecord): Record<string, string> {
-  return {
-    kind: "session",
-    session_id: session.id,
-    native_session_id: session.nativeSessionId ?? "",
-    machine_id: session.machineId,
-    agent_type: session.agentType,
-    project_path: session.projectPath,
-  };
-}
-
-function approvalKindLabel(kind: ApprovalRequestMessage["kind"]): string {
-  return ({ command: "执行命令", "file-change": "修改文件", permissions: "额外权限" })[kind];
-}
-
-function approvalActions(message: ApprovalRequestMessage): ReadonlyArray<{ key: string; choice: ApprovalChoice; label: string }> {
-  return APPROVAL_REACTIONS.filter((action) => message.choices.includes(action.choice));
-}
-
-export function formatEvent(event: AgentEvent): string | undefined {
-  const text = event.summary ?? event.text ?? "";
-  switch (event.type) {
-    // Native Codex is the primary interface. Keep transient events in SQLite and
-    // /log without generating a new Matrix notification for every update.
-    case "agent.started":
-    case "agent.output": return undefined;
-    case "agent.progress": return text ? `🔵 Progress\n\n${truncate(text, 3500)}` : `🔵 Progress\n\nCodex is responding.`;
-    case "agent.waiting": return `🟡 Needs input${text ? `\n\n${text}` : ""}`;
-    case "agent.blocked": return `🔴 Agent blocked${text ? `\n\n${text}` : ""}`;
-    case "agent.completed": return `✅ Completed${text ? `\n\n${text}` : ""}${event.durationMs ? `\nDuration: ${formatDuration(event.durationMs)}` : ""}`;
-    case "agent.failed": return `❌ Failed${text ? `\n\n${text}` : ""}${event.exitCode !== undefined ? `\nExit code: ${event.exitCode}` : ""}`;
-    case "agent.stopped": return "⚫ Stopped";
-  }
-}
-
-function truncate(text: string, limit: number): string {
-  return text.length <= limit ? text : `…${text.slice(-(limit - 1))}`;
-}
-
-function formatDuration(ms: number): string {
-  const seconds = Math.round(ms / 1000);
-  const minutes = Math.floor(seconds / 60);
-  return minutes ? `${minutes}m ${seconds % 60}s` : `${seconds}s`;
 }
 
 function stateForDiscovery(message: SessionDiscoveredMessage, previousUpdatedAt?: number): SessionState {

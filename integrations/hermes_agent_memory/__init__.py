@@ -3,12 +3,12 @@
 Memory lives as Markdown in one scope per Matrix room or project (design:
 docs/agent-memory-design.zh.md). This provider resolves the scope from the
 gateway ``chat_id``, injects a fixed core-memory block at session start (so the
-prompt cache stays warm), and forwards memory_* tools.
+prompt cache stays warm), and forwards memory_* tools to the /mcp/memory tools.
 It never writes files itself and records nothing on its own when a session ends.
 
 Configuration (profile .env):
   AGENT_MEMORY_TOKEN       writer token from the Control Plane AGENT_MEMORY_TOKENS (required)
-  AGENT_MEMORY_URL         default http://127.0.0.1:8787/mcp
+  AGENT_MEMORY_URL         default http://127.0.0.1:8787/mcp/memory
   AGENT_MEMORY_SELF_SCOPE  optional hidden scope with this agent's own rules (e.g. _agent-dorothy)
   AGENT_MEMORY_SHARED_SCOPE optional hidden scope shared by the assistants (e.g. _assistants); a DM's
                            default for reads and writes, so _global keeps only what every agent should know
@@ -30,8 +30,11 @@ try:
     from agent.memory_provider import MemoryProvider, is_trivial_prompt
     from agent.secret_scope import get_secret
 except ImportError:  # unit tests run without the Hermes tree
-    from abc import ABC as MemoryProvider  # type: ignore[assignment]
     import os
+
+    class MemoryProvider:  # type: ignore[no-redef]
+        def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
+            return None
 
     def is_trivial_prompt(text: Optional[str]) -> bool:  # type: ignore[misc]
         return not (text or "").strip() or (text or "").strip().startswith("/")
@@ -41,7 +44,7 @@ except ImportError:  # unit tests run without the Hermes tree
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_URL = "http://127.0.0.1:8787/mcp"
+DEFAULT_URL = "http://127.0.0.1:8787/mcp/memory"
 SKILL_INDEX_BUDGET = 6000
 TIMEOUT = 5.0
 PREFETCH_TIMEOUT = 1.5
@@ -81,7 +84,9 @@ WRITE_TOOLS: List[Dict[str, Any]] = [
                                                      "reason": {"type": "string"}, "scope": {"type": "string"}},
                     "required": ["topic", "kind", "reason"]}},
 ]
-FORWARDED = {"memory_search", "memory_get", "memory_load", "memory_write", "memory_retract"}
+# Hermes tool name -> /mcp/memory tool name.
+FORWARDED = {"memory_search": "search", "memory_get": "get", "memory_load": "load", "memory_write": "write",
+             "memory_retract": "retract"}
 
 
 class MemoryUnavailable(RuntimeError):
@@ -99,6 +104,13 @@ def _content_text(content: Any) -> str:
     if isinstance(content, list):
         return " ".join(part.get("text", "") for part in content if isinstance(part, dict))
     return ""
+
+
+def _decode(text: str, content_type: str) -> Dict[str, Any]:
+    """A Streamable HTTP reply is one SSE `data:` event; the legacy /mcp answers plain JSON."""
+    if "text/event-stream" in content_type:
+        text = next((line[5:].strip() for line in text.splitlines() if line.startswith("data:")), "{}")
+    return json.loads(text)
 
 
 def _one_line(text: str, limit: int) -> str:
@@ -150,14 +162,17 @@ class AgentBridgeMemoryProvider(MemoryProvider):
         body = json.dumps({"jsonrpc": "2.0", "id": self._request_id, "method": "tools/call",
                            "params": {"name": tool, "arguments": arguments}}).encode("utf-8")
         request = urllib.request.Request(self._url, data=body, method="POST", headers={
-            "Authorization": f"Bearer {self._token}", "Content-Type": "application/json"})
+            "Authorization": f"Bearer {self._token}", "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream"})
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
-                reply = json.loads(response.read().decode("utf-8"))
+                reply = _decode(response.read().decode("utf-8"), response.headers.get("Content-Type") or "")
         except Exception as exc:  # network, HTTP or JSON failure
             raise MemoryUnavailable(f"memory_unavailable: {exc}") from exc
         if "error" in reply:
             raise ValueError(reply["error"].get("message", "memory_error"))
+        if reply["result"].get("isError"):
+            raise ValueError(_content_text(reply["result"].get("content")) or "memory_error")
         return reply["result"]["structuredContent"]
 
     # ---- lifecycle ----
@@ -184,7 +199,7 @@ class AgentBridgeMemoryProvider(MemoryProvider):
         if "room_id" in locator and self._writable:
             locator["create"] = True  # a new room is a new direction; repo scopes wait for a first write
         try:
-            resolved = self._call("memory_resolve_scope", locator)
+            resolved = self._call("scope", locator)
             self._scope = resolved.get("scope", "_global")
             self._prefetch = bool(resolved.get("prefetch"))
             if resolved.get("conflict"):
@@ -199,11 +214,11 @@ class AgentBridgeMemoryProvider(MemoryProvider):
             self._block = self._read_cache()
 
     def _fetch_bootstrap(self) -> str:
-        parts = [self._call("memory_bootstrap", {"scope": self._scope})["text"]]
+        parts = [self._call("bootstrap", {"scope": self._scope})["text"]]
         for extra in dict.fromkeys(item for item in (self._shared_scope, self._self_scope) if item):
             try:
                 # The self scope's persona is already SOUL.md (a symlink to its soul.md); only its memory here.
-                parts.append(self._call("memory_load", {"scope": extra, "include_persona": False})["text"])
+                parts.append(self._call("load", {"scope": extra, "include_persona": False})["text"])
             except ValueError as exc:
                 logger.warning("agent-memory: scope %s unavailable: %s", extra, exc)
         return "\n".join(part for part in parts if part)
@@ -220,7 +235,7 @@ class AgentBridgeMemoryProvider(MemoryProvider):
             return ""
         scopes = list(dict.fromkeys(item for item in (self._scope, self._self_scope, self._shared_scope, "_global") if item))
         try:
-            skills = self._call("skill_index", {"scopes": scopes})["skills"]
+            skills = self._call("skills", {"scopes": scopes})["skills"]
         except Exception as exc:
             logger.warning("agent-memory: skill list unavailable: %s", exc)
             return ""
@@ -290,7 +305,7 @@ class AgentBridgeMemoryProvider(MemoryProvider):
             return ""
         try:
             scopes = ",".join(dict.fromkeys(item for item in (self._scope, self._shared_scope, "_global") if item))
-            hits = self._call("memory_search", {"query": query[:500], "scope": scopes, "mode": "recall",
+            hits = self._call("search", {"query": query[:500], "scope": scopes, "mode": "recall",
                                                 "limit": PREFETCH_HITS}, timeout=PREFETCH_TIMEOUT).get("hits", [])
         except Exception:
             return ""
@@ -320,7 +335,7 @@ class AgentBridgeMemoryProvider(MemoryProvider):
     def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
         try:
             if tool_name == "memory_scope":
-                listed = self._call("memory_scopes", {})
+                listed = self._call("scopes", {})
                 return json.dumps({"current_scope": self._scope, **listed}, ensure_ascii=False)
             if tool_name not in FORWARDED:
                 return json.dumps({"error": f"unknown tool {tool_name}"})
@@ -332,7 +347,7 @@ class AgentBridgeMemoryProvider(MemoryProvider):
                 home = self._home_scope()
                 # A DM searches its shared scope and _global together; the room's own scope otherwise.
                 arguments["scope"] = f"{home},_global" if tool_name == "memory_search" and home != self._scope else home
-            return json.dumps(self._call(tool_name, arguments), ensure_ascii=False)
+            return json.dumps(self._call(FORWARDED[tool_name], arguments), ensure_ascii=False)
         except Exception as exc:
             return json.dumps({"error": str(exc)}, ensure_ascii=False)
 

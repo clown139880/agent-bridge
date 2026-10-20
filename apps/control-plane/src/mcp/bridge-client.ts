@@ -1,25 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
 
+/** The Control API base (http://host:port, no /api/v1) and the caller's own Bearer token. */
 export interface ClientConfig { url: string; token: string }
-
-/**
- * Where the Control Plane is and how to authenticate:
- * AGENT_BRIDGE_URL / AGENT_BRIDGE_TOKEN, else $XDG_CONFIG_HOME/agent-bridge/cli.json
- * ({"url","token"}). The URL defaults to the local Control Plane, which is right on HAL.
- */
-export function loadConfig(env: NodeJS.ProcessEnv = process.env): ClientConfig {
-  let file: Partial<ClientConfig> = {};
-  const path = join(env.XDG_CONFIG_HOME || join(homedir(), ".config"), "agent-bridge", "cli.json");
-  try { file = JSON.parse(readFileSync(path, "utf8")) as Partial<ClientConfig>; }
-  catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw new Error(`cannot read ${path}: ${(error as Error).message}`); }
-  const url = env.AGENT_BRIDGE_URL || file.url || "http://127.0.0.1:8787";
-  const token = env.AGENT_BRIDGE_TOKEN || file.token;
-  if (!token) throw new Error(`no API token: set AGENT_BRIDGE_TOKEN or write {"url","token"} to ${path}`);
-  return { url: url.replace(/\/+$/, ""), token };
-}
 
 export class ApiError extends Error {
   constructor(readonly status: number, readonly code: string, message: string, readonly details?: unknown) { super(message); }
