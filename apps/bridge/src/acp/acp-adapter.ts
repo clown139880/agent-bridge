@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { basename } from "node:path";
 import pino from "pino";
 import {
@@ -201,8 +201,9 @@ export class AcpAdapter implements AgentAdapter {
 
   private spawnSession(sessionId: string, cwd: string): AcpSession {
     // AGENT_BRIDGE_SESSION_ID lets a tool the agent runs name its own Bridge session (deploy/hal/deploy.sh).
+    // A systemd unit without User= sets no HOME, and agents keep their login under it (~/.grok).
     const proc = spawn(this.profile.command, this.profile.args(cwd), { cwd, stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env, AGENT_BRIDGE_SESSION_ID: sessionId } });
+      env: { ...process.env, HOME: process.env.HOME || homedir(), AGENT_BRIDGE_SESSION_ID: sessionId } });
     const session = {
       sessionId, cwd, proc, createdAt: Date.now(), updatedAt: Date.now(), settledAt: Date.now(), discovered: false,
       capabilities: {}, config: [], replaying: false, turnSeq: 0, queued: [], logs: [], messageText: "",
