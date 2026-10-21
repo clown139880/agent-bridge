@@ -79,7 +79,7 @@ OpenRouter Chat Completions 加服务端工具即可,**不需要 X 会员或 Sup
 - 默认 `x-ai/grok-4.3`,工具内部把问题展开成 3–5 个关键词;用 `from_date` / `to_date` 收窄范围控制条数。
 - 返回总结 + 原帖链接 + 本次 `usage.cost`;按次记账,设单次与每日上限。
 - key 从获准的凭据配置读取(现在在 Hermes `.env`),不进参数、不进记忆。
-- 普通网页搜索可同一工具里切 `engine`(`exa` / `parallel` / `perplexity` / `firecrawl`),见下。
+- 普通网页搜索可同一工具里切 `engine`,默认 `exa`(`mode: "auto"`, `max_results: 10`),依据见下面的实测。
 
 ### OpenRouter 其他搜索引擎(同一个 `openrouter:web_search` 工具,`engine` 字段切换;费用另加模型 token)
 
@@ -92,3 +92,58 @@ OpenRouter Chat Completions 加服务端工具即可,**不需要 X 会员或 Sup
 | `firecrawl` | Firecrawl 搜索 | $0.005/次 + $0.0125/条结果 |
 
 通用参数:`max_results`(默认 5,1–25)、`search_context_size`、`max_characters`、`allowed_domains` / `excluded_domains`、`max_total_results`。
+
+### 引擎实测(2026-10-21,HAL)
+
+同一问题("10-20 13:30–14:15 UTC BTC 81.4k→83.4k 的新闻解释,列来源和发布时间"),模型统一 `x-ai/grok-4.3`,每个配置各跑一次(n=1,结果有随机性)。费用取 `usage.cost`(含搜索费和 token);`/generation` 的 `total_cost` 对非 native 引擎常返回 0,不可用。当天实际原因(多源交叉):美伊协议传闻 + 美股 Q3 财报/油价回落 + 空头爆仓。
+
+| 配置 | 用时 | 费用 | 结果 |
+|---|---|---|---|
+| `parallel` fast | 23 s | $0.010 | ✗ 说没找到,引的是 10-14、10-19 旧文 |
+| `parallel` advanced | 30 s | $0.019 | ✗ 把 10-19 的反弹当主因并标"高置信" |
+| `perplexity` | 25 s | $0.012 | △ 只有新闻首页、行情页,美伊传闻一笔带过 |
+| `exa` auto | 21 s | $0.015 | ✓ Cointelegraph / Benzinga / Bitcoin.com 当天报道 |
+| `exa` deep | 30 s | $0.035 | ✓ 最完整(美伊传闻→澄清回落),引 CoinDesk 当天两篇 |
+| `firecrawl` | 30 s | $0.141 | ✗ 最贵最差,全是行情/历史价格页 |
+| `native`(xAI 网页) | 31 s | $0.097 | ✓ 找到 Dow Jones "unverified report";输入 52k token 所以贵 |
+| `native` + `x_search` | 32 s | $0.132 | △ 提示没说"搜 X",归因偏宏观,多引 10-19 文章 |
+
+结论:差别主要在引擎召回,不在模型。新闻类问题用 `exa`;`firecrawl` 不用;X 讨论单独走 grok + `x_search`,提示里要明确"搜 X"并给关键词。
+
+### Exa 详细
+
+**经 OpenRouter 用(现在唯一可用的方式,没有 Exa 自己的 key)**
+
+- 能传的只有 `mode`、`max_results`(1–25,10 条以内不另收费)、`search_context_size`(low/medium/high → 每条 5K/15K/30K 字符;不传则 Exa 自适应约 2–4K)、`max_characters`、`allowed_domains` + `excluded_domains`(只有 Exa 两者可同时用)。
+- **不能传日期过滤和 `category`**:时间窗口只能写进问题里靠模型生成的查询词。
+- OpenRouter 取的是 Exa 的 highlights(按查询抽取的段落,多段用 `[...]` 分隔),不是全文。摘录放在 `annotations[].url_citation.content` 里,开头带 `Author:` / `Published: 2026-10-20T16:14:09Z`,发布时间可直接解析。
+- `engine: "auto"` 和不支持原生搜索的模型配 `native` 时,也会回退到 Exa。
+
+模式实测(同一问题,grok-4.3,n=1;"命中"指答案里有美伊传闻 / 财报 / 爆仓三条原因):
+
+| mode | 用时 | 费用 | 命中 | 当天文章 / 引用 |
+|---|---|---|---|---|
+| `instant` | 14 s | $0.015 | 财报、爆仓 | 3/5 |
+| `fast` | 13 s | $0.014 | 三条 | 3/5 |
+| `auto` | 17 s | $0.025 | 三条 | 5/7 |
+| `deep-lite` | 20 s | $0.035 | 三条 | 6/9 |
+| `deep` | 20 s | $0.019 | 财报、爆仓 | 3/5 |
+| `deep-reasoning` | 28 s | $0.041 | 三条 | 4/7 |
+| `auto` + `max_results: 10` | 14 s | $0.016 | 三条 | 7/10 |
+| `auto` + `search_context_size: low` | 17 s | $0.024 | 三条 | 6/8 |
+| `auto` + 加密新闻站白名单 | 16 s | $0.026 | 三条 | 4/7 |
+
+- 各模式标价只差几厘钱($0.007 / $0.012 / $0.015),总费用主要由摘录塞进模型的 token 决定(4.7k–8k 输入),所以 deep 并不一定更贵,波动大于模式差。
+- 所有模式都找到了当天的 Cointelegraph 报道。deep 系列不明显更好,只是更慢,上面那轮 deep 最好、这轮 deep 反而漏了美伊传闻。默认用 `auto` + `max_results: 10`,要快用 `fast`。
+- 域名白名单把结果收窄到主流媒体,但会丢掉 TradingView 观点、聚合站这类同样有用的来源,不建议默认开。
+- 结果里会混入 `exa.ai/library/markets/...` 这类 Exa 自建行情页。
+
+**直接调 Exa API 多出来的能力(需要单独申请 key,目前没有)**
+
+- 类型:`auto`(~1 s)、`lite`(~0.45 s,只用缓存,替代旧 `instant`/`fast`)、`deep-lite`(~4 s,带综合)、`deep`(4–15 s,多步检索+综合);旧 `deep-reasoning` 由 `deep` 替代。
+- 过滤:`startPublishedDate` / `endPublishedDate`(真正的发布时间窗口)、`category`(`news`、`financial report`、`company`、`people` 等)、`includeDomains` / `excludeDomains`(最多 1200 个,支持通配符和路径前缀)、`userLocation`。
+- 内容:`text`(全文,可限长、按区块取舍)、`highlights`、`summary`(可带 JSON schema);新鲜度用 `maxAgeHours`(0 = 强制实时抓取)。
+- deep 专属:`additionalQueries`(1–10 条查询变体)、`outputSchema`(结构化输出,每个字段带 `grounding` 引用和置信度)、`systemPrompt`。
+- 返回 `costDollars`,直接拿到每次花费。
+- 价格(每千次,10 条以内):lite / instant $4,auto / fast $7,deep-lite / deep $12,deep-reasoning $15;超出 10 条每千条 $1;summary 每千页 $1。注册送 $20,每月再送 $10。deep 类限速 5 QPS,其他 10 QPS。
+- 价值:日期过滤加 `category: news` 正好补上 OpenRouter 的短板。`deep` + `outputSchema` 一次调用就能拿到带引用的结构化结论,不必再过一道 LLM。如果做 MCP 工具时要精确时间窗口,值得申请一个 Exa key。
