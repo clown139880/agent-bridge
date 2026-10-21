@@ -147,3 +147,31 @@ OpenRouter Chat Completions 加服务端工具即可,**不需要 X 会员或 Sup
 - 返回 `costDollars`,直接拿到每次花费。
 - 价格(每千次,10 条以内):lite / instant $4,auto / fast $7,deep-lite / deep $12,deep-reasoning $15;超出 10 条每千条 $1;summary 每千页 $1。注册送 $20,每月再送 $10。deep 类限速 5 QPS,其他 10 QPS。
 - 价值:日期过滤加 `category: news` 正好补上 OpenRouter 的短板。`deep` + `outputSchema` 一次调用就能拿到带引用的结构化结论,不必再过一道 LLM。如果做 MCP 工具时要精确时间窗口,值得申请一个 Exa key。
+
+**直接调用实测(2026-10-21,经 Exa 官方托管 MCP `https://mcp.exa.ai/mcp`,匿名免 key)**
+
+托管 MCP 默认工具是 `web_search_exa`(只收 `query` / `objective` / `numResults`)和 `web_fetch_exa`。加 `?tools=web_search_exa,web_fetch_exa,web_search_advanced_exa` 能打开高级搜索,支持日期、`category`、域名、`includeText`、`additionalQueries`、`maxAgeHours`、`summary` 等参数,匿名也能用(`type` 只开放 auto / lite / fast / instant,没有 deep)。匿名限流不公开,并发 3 次就返回 429;带 `Authorization: Bearer <key>` 或 OAuth(`?login`)走自己的额度。匿名调用的响应里没有 `costDollars`。
+
+同一问题"Bitcoin price jumped above 83,000 on October 20 2026, news explaining why",每次返回 10 条,只做检索、不经 LLM:
+
+| 配置 | 服务端 `searchTime` | 结果 |
+|---|---|---|
+| `auto` + `category: news` + 10-20~10-21 | 2.2 s | 10/10 是当天文章:Cointelegraph、Benzinga(美伊)、Bitcoin.com(爆仓)、CoinDesk、Decrypt、德文 Boltwise(美伊) |
+| `lite` + 10-20~10-21 | 0.27 s | 10/10 当天,质量和 auto 相当,多了 CoinEdition(美伊)、韩、土站点 |
+| `auto` 不限日期 | 0.30 s | 9/10 当天,混入 1 篇 10-19 的 CoinDesk |
+| 第一组 + `additionalQueries`(美伊、爆仓两条变体) | 2.0 s | 与第一组完全相同,没有带来新结果 |
+| `web_search_exa` + `objective` | 2.0 s(含网络) | 首两条即 Cointelegraph、Bitcoin.com |
+
+- 日期过滤有效,但很多结果的 `publishedDate` 只有日期(`T00:00`),做小时级窗口要靠正文里的时间或后续 `web_fetch_exa`。
+- 结果有镜像重复(`ct.com` 和 `cointelegraph.com` 是同一篇),需要按标题去重。
+- `text` 是清洗好的 markdown 正文,开头带 `Author` / `Published` / `Source`;`textMaxCharacters` 可以截短。
+- 成本:直接调用 `lite` 每次 $0.004、`auto` $0.007,只有检索费用。经 OpenRouter 每次 1.5–4 美分,其中大部分是模型 token。如果工具自己用便宜模型做总结,或者直接把结果交给调用方的 agent,直接调用便宜一个量级。
+
+**Exa 背景**
+
+- 公司:Will Bryk、Jeff Wang 2021 年创立,原名 Metaphor(YC S21),2024-01 改名 Exa。2026-05 完成 C 轮 2.5 亿美元(a16z 领投,估值 22 亿)。客户包括 Cursor、Cognition、HubSpot 等。
+- 原理:自建爬虫和索引,不转包 Google 或 Bing。核心是用"预测下一个链接"训练的 transformer 嵌入模型:网页和查询嵌入到同一个向量空间,做近邻检索,再叠加关键词混合检索和重排。向量库用 Rust 自研(Matryoshka 嵌入、二值压缩、SIMD)。官方说法是索引几百亿网页、按分钟刷新,训练用自家 144 张 H200 的集群。deep 类型是在快速检索上做多轮"搜索→阅读→再搜"。
+- 2026-10-19 发布 Exa 3.0:推荐类型收敛为 lite / auto / deep,新增 $4 的 lite 档;官方称 8 个基准全部第一,并号称 highlights 比整页正文省 95% token。这些都是自报数字,其中 ATLAS 是 Exa 自己发布的基准,BrowseComp 等几项领先不到 1.5 分。
+- 开源:**搜索引擎、模型和索引都闭源**。开源(MIT)的只有客户端和周边:`exa-mcp-server`(约 5.1k star,可以自部署,但仍要 key)、`exa-py`、`exa-js`、`agent-skills`、`benchmarks`(搜索 API 评测代码),以及一些示例应用。没办法自建 Exa。
+- 社区反馈:Hacker News 上普遍认为结果质量好,能找到被 SEO 垃圾埋没的长尾优质页面,LLM 评测里 Exa 和 Parallel、Tavily 同属第一梯队。批评集中在:价格高于 Linkup、ceramic 等;Websets 在商品、地域、非英语内容上偏弱;第三方指出它在 FreshQA 这类时效性基准上分数偏低;零数据保留(ZDR)要额外付费;有用户反映退订要发邮件给客服。
+- 社区常见用法:查询写成"理想页面的描述"(例如 "blog post comparing X and Y"),而不是关键词;用 `objective` 说明要哪类文档、排除什么;先用 `web_search_exa` 拿摘录,不够再用 `web_fetch_exa` 读全文;用 `category: news` 加日期窗口做新闻溯源;在 Claude Code、Cursor 里直接挂托管 MCP。
