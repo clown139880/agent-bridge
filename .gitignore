@@ -32,3 +32,7 @@ pnpm-debug.log*
 .DS_Store
 .idea/
 .vscode/
+
+# Control Center build staging (deploy/hal/deploy.sh --frontend-only)
+apps/control-center/dist.next/
+apps/control-center/dist.prev/

@@ -14,9 +14,13 @@
 # registers on the deployed version the Control Plane sends that session a turn
 # saying so, with the --note it left. That turn finishes the work and reports.
 #
-# Usage: deploy/hal/deploy.sh [--force] [--note TEXT]
-#   --force      restart even when up to date
-#   --note TEXT  what the continued session should verify or finish
+# Usage: deploy/hal/deploy.sh [--force] [--note TEXT] [--frontend-only]
+#   --force          restart even when up to date
+#   --note TEXT      what the continued session should verify or finish
+#   --frontend-only  rebuild only the Control Center and restart nothing. The Control
+#                    Plane reads its dist from disk on every request, so the new page
+#                    is live at once. Refused unless everything since the commit the
+#                    services run is Control Center, tests, docs or the root version.
 set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/../.." && pwd)
@@ -30,9 +34,11 @@ intents=${AGENT_BRIDGE_POST_DEPLOY_DIR:-$(dirname "$marker")/post-deploy}
 bridge_env=/etc/agent-bridge/bridge.env
 force=false
 note=""
+frontend_only=false
 while [ $# -gt 0 ]; do
   case "$1" in
     --force) force=true ;;
+    --frontend-only) frontend_only=true ;;
     --note) [ $# -ge 2 ] || { echo "[deploy] --note needs a value" >&2; exit 2; }; note=$2; shift ;;
     *) echo "[deploy] unknown argument: $1" >&2; exit 2 ;;
   esac
@@ -54,6 +60,38 @@ fi
 
 previous=$(git rev-parse HEAD)
 git fetch --quiet origin "$branch"
+
+if "$frontend_only"; then
+  # Checked before fast-forwarding, against what the services run (earlier
+  # frontend-only deploys leave the marker), so a refusal leaves the checkout as it was.
+  target=$(git rev-parse "origin/$branch")
+  running=$(cat "$marker" 2>/dev/null) || die "no deployed-commit marker; run a full deploy"
+  others=$(git diff --name-only "$running" "$target" \
+    | grep -Ev '^(apps/control-center/|tests/|docs/)|\.md$' | grep -vx package.json || true)
+  # The root package.json may change only its version (the page shows it).
+  if git diff -U0 "$running" "$target" -- package.json | grep -E '^[-+] ' | grep -qv '"version":'; then
+    others="$others package.json"
+  fi
+  [ -z "$others" ] || die "not frontend-only since $running (services would run stale code); changed: $(echo $others)"
+  git merge --ff-only --quiet "origin/$branch"
+  if [ ! -d node_modules ] || ! git diff --quiet "$previous" "$target" -- pnpm-lock.yaml; then
+    CI=true pnpm install --frozen-lockfile --filter '!dsh-agent-control-plugin'
+  fi
+  # Build beside the live dist and swap it in, so requests never see a half-written build.
+  dist=apps/control-center/dist
+  rm -rf "$dist.next" "$dist.prev"
+  pnpm --filter @agent-bridge/control-center exec sh -c 'tsc --noEmit && vite build --outDir dist.next --emptyOutDir' \
+    || die "frontend build failed; the live page is unchanged"
+  [ -d "$dist" ] && mv "$dist" "$dist.prev"
+  mv "$dist.next" "$dist"
+  rm -rf "$dist.prev"
+  entry=$(grep -o '/control/assets/[^"]*\.js' "$dist/index.html" | head -n 1)
+  served=$(curl -fsS --max-time 5 "${health_url%/health}/control/sessions" | grep -o '/control/assets/[^"]*\.js' | head -n 1 || true)
+  [ -n "$entry" ] && [ "$served" = "$entry" ] || die "built $entry but the Control Plane serves ${served:-nothing}"
+  log "frontend $(node -p 'require("./package.json").version') ($target) is live: $entry; services untouched at $running"
+  exit 0
+fi
+
 git merge --ff-only --quiet "origin/$branch"
 target=$(git rev-parse HEAD)
 if ! "$force" && [ "$(cat "$marker" 2>/dev/null)" = "$target" ]; then
