@@ -300,6 +300,8 @@ function Detail({ control, state, id }: { control: ControlState; state: ViewStat
   const canOperate = state.writable && online && caps.includes("session-actions") && !state.loading && !busy;
   const blocked = Boolean(session && (session.pendingApprovalCount || session.pendingUserInputCount || session.status.startsWith("waiting")));
   const running = isLive(session);
+  const canInterrupt = Boolean(session && canOperate && session.activeTurnId && running && caps.includes("turn-interrupt"));
+  const interrupt = () => void control.submit(`/sessions/${segment(id)}/interrupt`, { expectedTurnId: session!.activeTurnId });
   const draft = state.drafts[id] ?? "", [model, setModel] = useState<ModelChoice>({ model: "", effort: "" });
   const [optionsOpen, setOptionsOpen] = useState(false), canResolve = state.writable && online && !busy;
   const bottom = useRef<HTMLDivElement>(null), transcript = useRef<HTMLDivElement>(null);
@@ -325,8 +327,7 @@ function Detail({ control, state, id }: { control: ControlState; state: ViewStat
     <div className="detail-heading"><div className="eyebrow">CONVERSATION</div><h1>{session ? title(session) : state.loading ? "正在读取会话…" : "会话详情"}</h1></div>
     {session && <>
       <div className="detail-status"><div><Status status={session.status} /><small aria-live="polite">{state.connection}</small></div>
-        <button className="interrupt" disabled={!canOperate || !session.activeTurnId || !running || !caps.includes("turn-interrupt")}
-          onClick={() => void control.submit(`/sessions/${segment(id)}/interrupt`, { expectedTurnId: session.activeTurnId })}>■ 打断</button></div>
+        <button className="interrupt" disabled={!canInterrupt} onClick={interrupt}>■ 打断</button></div>
       <details className="session-info"><summary>{session.agent} <span>·</span> {session.machineId} <span>·</span> {session.projectName}</summary>
         <p className="break-all">{session.workspace}</p><small className="break-all">Session · {id}</small>
         <p className="hint">历史覆盖：{session.historyCompleteness ?? "未知"} · {session.source ?? "未知来源"}</p></details>
@@ -360,7 +361,8 @@ function Detail({ control, state, id }: { control: ControlState; state: ViewStat
       {!running && <details className="composer-options" onToggle={e => setOptionsOpen(e.currentTarget.open)}><summary>模型 {model.model ? state.models[session.workerId]?.models.find(m => m.model === model.model)?.displayName ?? model.model : "默认"} ·思考 {model.effort ? effortLabels[model.effort] ?? model.effort : "默认"}</summary>
         {optionsOpen && <ModelPicker control={control} state={state} workerId={session.workerId} value={model} onChange={setModel} />}</details>}
       <div className="composer-actions"><small>{!state.writable ? "只读模式" : blocked ? "等待处理待办" : !online ? "Worker 离线" : uploading(state, id) ? "图片上传中…" : running && !session.activeTurnId ? "等待 turn 信息" : "Enter 换行"}</small>
-        <button className="primary" disabled={!canOperate || !draft.trim() || blocked || uploading(state, id) || Boolean(running && (!session.activeTurnId || !caps.includes("turn-steer"))) || !["idle", "active"].includes(session.status)}>{running ? "追加指令 ↑" : "发送 ↑"}</button></div>
+        <div className="row-actions">{running && <button type="button" className="danger" disabled={!canInterrupt} onClick={interrupt}>■ 中断</button>}
+        <button className="primary" disabled={!canOperate || !draft.trim() || blocked || uploading(state, id) || Boolean(running && (!session.activeTurnId || !caps.includes("turn-steer"))) || !["idle", "active"].includes(session.status)}>{running ? "追加指令 ↑" : "发送 ↑"}</button></div></div>
     </form>}
   </section>;
 }
