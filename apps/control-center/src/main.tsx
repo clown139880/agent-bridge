@@ -1,7 +1,7 @@
 import React, { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import { createRoot } from "react-dom/client";
 import { ControlClient, explain } from "./api/client";
-import { newerBuild, runningEntry } from "./build";
+import { BUILD_VERSION, newerBuild, runningEntry } from "./build";
 import { isLive, pendingId, segment, type Pending, type Session, type SessionEvent, type Snapshot } from "./api/types";
 import { ControlState, IMAGE_TYPES, type Route, type ViewState } from "./state";
 import "./styles.css";
@@ -118,7 +118,7 @@ function InputCard({ control, state, pending, disabled }: { control: ControlStat
 function App() {
   const [path, setPath] = useState(location.pathname);
   const [control, setControl] = useState<ControlState>();
-  const [error, setError] = useState(""), [attempt, setAttempt] = useState(0);
+  const [error, setError] = useState(""), [attempt, setAttempt] = useState(0), [serverVersion, setServerVersion] = useState("unknown");
   const active = useRef<ControlState>();
   useEffect(() => {
     const change = () => setPath(location.pathname);
@@ -133,14 +133,14 @@ function App() {
     setError("");
     void (async () => {
       try {
-        const access = await client.request<{ writable: boolean }>("/access");
+        const access = await client.request<{ writable: boolean; version?: string }>("/access");
         const snapshot = await client.request<Snapshot>("/snapshot?sessionLimit=50");
         if (cancelled) return;
         const instance = new ControlState("", access.writable, snapshot, () => {
           active.current?.dispose(); active.current = undefined; setControl(undefined);
           setError("连接已失效，请重新连接；外网访问请先完成 Cloudflare Access 验证。");
         }, navigate, "/control/api/v1");
-        active.current = instance; setControl(instance);
+        active.current = instance; setServerVersion(access.version ?? "unknown"); setControl(instance);
         if (!/^\/control\/(sessions(?:\/[^/]+)?|new)\/?$/.test(location.pathname)) navigate("/control/sessions");
       } catch (e) { if (!cancelled) setError(explain(e)); }
       finally { client.dispose(); }
@@ -153,10 +153,10 @@ function App() {
     {error ? <><div role="alert" className="error">{error}</div><button className="primary" onClick={() => setAttempt(n => n + 1)}>重新连接</button></>
       : <p role="status" className="muted">正在连接…</p>}
   </main>;
-  return <Center control={control} path={path} />;
+  return <Center control={control} path={path} serverVersion={serverVersion} />;
 }
 
-function Center({ control, path }: { control: ControlState; path: string }) {
+function Center({ control, path, serverVersion }: { control: ControlState; path: string; serverVersion: string }) {
   const state = useSyncExternalStore(control.subscribe, control.snapshot);
   let route: Route;
   const match = path.match(/^\/control\/sessions\/([^/]+)\/?$/);
@@ -196,7 +196,8 @@ function Center({ control, path }: { control: ControlState; path: string }) {
         : route.page === "new" ? <NewSession control={control} state={state} />
           : <Detail key={route.id} control={control} state={state} id={route.id!} />}
     </main>
-    <footer>AGENT BRIDGE <span>·</span> 内网直达 · 外网 Access</footer>
+    <footer>AGENT BRIDGE <span>·</span> 页面 v{BUILD_VERSION} <span>·</span> 服务 v{serverVersion}
+      {(stale || serverVersion !== BUILD_VERSION && BUILD_VERSION !== "dev") && <button className="quiet" onClick={() => location.reload()}>页面不是最新，刷新</button>}</footer>
   </div>;
 }
 
@@ -331,11 +332,6 @@ function Detail({ control, state, id }: { control: ControlState; state: ViewStat
         <p className="hint">历史覆盖：{session.historyCompleteness ?? "未知"} · {session.source ?? "未知来源"}</p></details>
       <div className="detail-tools"><small>完整消息与事件实时更新</small><button className="quiet" disabled={state.loading} onClick={() => void control.refresh()}>↻ 刷新</button></div>
       {session.error && <p className="error">{session.error.error.message}</p>}
-      {(state.approvals.length > 0 || state.inputs.length > 0 || blocked) && <aside className="pending-panel"><strong>等待你处理</strong>
-        {state.approvals.map(p => <ApprovalCard key={pendingId(p)} control={control} pending={p} disabled={!canResolve} />)}
-        {state.inputs.map(p => <InputCard key={pendingId(p)} control={control} state={state} pending={p} disabled={!canResolve} />)}
-        {!state.approvals.length && !state.inputs.length && <small>正在读取待办…</small>}
-        {!canResolve && <small>{!state.writable ? "只读模式，无法处理。" : !online ? "Worker 离线，暂不能处理。" : "正在提交…"}</small>}</aside>}
     </>}
     <div className="transcript" ref={transcript}>
       {state.historyMore && <button className="load-more" disabled={state.moreLoading} onClick={() => {
@@ -343,6 +339,12 @@ function Detail({ control, state, id }: { control: ControlState; state: ViewStat
       }}>{state.moreLoading ? "读取中…" : "↑ 加载更早内容"}</button>}
       {state.events.map(e => <EventView key={e.eventId} event={e} />)}
       {!state.loading && !state.events.length && <div className="empty">还没有已记录的内容。</div>}
+      {/* At the end of the transcript, beside the composer the page follows, not above the history. */}
+      {session && (state.approvals.length > 0 || state.inputs.length > 0 || blocked) && <aside className="pending-panel"><strong>等待你处理</strong>
+        {state.approvals.map(p => <ApprovalCard key={pendingId(p)} control={control} pending={p} disabled={!canResolve} />)}
+        {state.inputs.map(p => <InputCard key={pendingId(p)} control={control} state={state} pending={p} disabled={!canResolve} />)}
+        {!state.approvals.length && !state.inputs.length && <small>正在读取待办…</small>}
+        {!canResolve && <small>{!state.writable ? "只读模式，无法处理。" : !online ? "Worker 离线，暂不能处理。" : "正在提交…"}</small>}</aside>}
       <div ref={bottom} className="transcript-end" />
     </div>
     {unread > 0 && <button className="new-content" onClick={() => { follow.current = true; setUnread(0); bottom.current?.scrollIntoView({ block: "end", behavior: "smooth" }); }}>↓ {unread} 条新内容</button>}

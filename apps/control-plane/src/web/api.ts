@@ -9,7 +9,7 @@ const SECURITY = { "cache-control": "no-store", "x-content-type-options": "nosni
 // This browser entrance trusts network reachability (LAN / Cloudflare Access).
 // The public /api/v1 entrance still requires its original Bearer credentials.
 // Configured tokens only decide what the browser may do; it never sees them.
-export function controlBrowserApi(api: AgentControlApi, tokens: { read?: string; write?: string }) {
+export function controlBrowserApi(api: AgentControlApi, tokens: { read?: string; write?: string }, version = "unknown") {
   const principal: Principal | undefined = tokens.write ? { id: "control:write", read: true, write: true }
     : tokens.read ? { id: "control:read", read: true, write: false } : undefined;
   return async (c: Context<{ Bindings: HttpBindings }>): Promise<Response> => {
@@ -29,7 +29,7 @@ export function controlBrowserApi(api: AgentControlApi, tokens: { read?: string;
     const write = method === "POST" && /^(?:sessions|sessions\/[^/]+\/(?:turns|interrupt)|attachments|approvals\/[^/]+\/decision|user-input\/[^/]+\/response)$/.test(path);
     if (!read && !write) return fail(404, "not_found");
     if (!principal) return fail(503, "browser_api_unconfigured");
-    if (path === "access") return c.json({ writable: principal.write }, 200, { "cache-control": "no-store" });
+    if (path === "access") return c.json({ writable: principal.write, version }, 200, { "cache-control": "no-store" });
     if (write && !principal.write) return fail(403, "browser_read_only");
     // Direct dispatch retains native SSE flushing, disconnect and backpressure.
     await api.handle(c.env.incoming, c.env.outgoing, { principal, url: new URL(`/api/v1/${path}${url.search}`, url) });

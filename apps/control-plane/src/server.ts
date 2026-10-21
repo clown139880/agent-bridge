@@ -145,6 +145,7 @@ export class ControlPlane {
       controlApi: this.controlApi,
       apiEnabled,
       browserTokens: { read: options.controlApiReadToken, write: options.controlApiWriteToken },
+      version: options.version,
     });
     this.http = createServer(getRequestListener(app.fetch, { overrideGlobalObjects: false }));
     this.wss = new WebSocketServer({ noServer: true });

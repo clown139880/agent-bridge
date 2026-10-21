@@ -1,6 +1,10 @@
 // Long-lived tabs (phones, home-screen apps) keep running the bundle they first loaded,
 // so after a deployment they silently miss new features. Compare the running entry
 // with the one the server serves now.
+declare const __APP_VERSION__: string | undefined;
+/** Injected by vite at build time; absent under the dev server and in tests. */
+export const BUILD_VERSION = typeof __APP_VERSION__ === "string" ? __APP_VERSION__ : "dev";
+
 const ENTRY = /<script\b[^>]*\bsrc="(\/control\/assets\/[^"]+\.js)"/;
 
 export const entryOf = (html: string) => html.match(ENTRY)?.[1];

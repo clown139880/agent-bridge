@@ -155,6 +155,12 @@ interface ClaudeSession {
  */
 export class ClaudeCodeAdapter implements AgentAdapter {
   private readonly sessions = new Map<string, ClaudeSession>();
+  /**
+   * "allow-session" grants by public session id. They outlive the session object,
+   * which idle reaping, a dead subprocess or a resume replaces; only deleting the
+   * session (or restarting the bridge) forgets them.
+   */
+  private readonly allowedTools = new Map<string, Set<string>>();
   private ready = false;
   private modelCatalog: CodexModelInfo[] | undefined;
 
@@ -339,6 +345,12 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     return relaunched;
   }
 
+  private grantsFor(sessionId: string): Set<string> {
+    let grants = this.allowedTools.get(sessionId);
+    if (!grants) this.allowedTools.set(sessionId, (grants = new Set()));
+    return grants;
+  }
+
   private close(session: ClaudeSession): void {
     session.ended = true;
     session.abort.abort();
@@ -379,7 +391,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       toolUses: new Map(),
       tasks: new Map(),
       pendingApprovals: new Map(),
-      sessionAllowedTools: new Set(),
+      sessionAllowedTools: this.grantsFor(sessionId),
       ended: false,
     };
     this.sessions.set(sessionId, session);
@@ -996,6 +1008,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       }
       this.sessions.delete(sessionId);
     }
+    this.allowedTools.delete(sessionId);
     return { sessionId };
   }
 

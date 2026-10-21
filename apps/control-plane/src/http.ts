@@ -22,6 +22,8 @@ export interface HttpAppDeps {
   /** Whether the public /api/v1 entrance has any credential configured. */
   apiEnabled: boolean;
   browserTokens: { read?: string; write?: string };
+  /** Shown by the Control Center next to its own build version. */
+  version?: string;
   webDirectory?: string;
 }
 
@@ -52,7 +54,7 @@ export function createHttpApp(deps: HttpAppDeps) {
   for (const [name, route] of Object.entries(deps.mcp ?? {})) app.all(`/mcp/${name}`, route);
   if (deps.legacyMcp) app.all("/mcp", nodeRoute("Conversation MCP", deps.legacyMcp));
   if (deps.apiEnabled) app.all("/api/v1/*", nodeRoute("Control API", (request, response) => deps.controlApi.handle(request, response)));
-  app.all("/control/api/v1/*", controlBrowserApi(deps.controlApi, deps.browserTokens));
+  app.all("/control/api/v1/*", controlBrowserApi(deps.controlApi, deps.browserTokens, deps.version));
   app.route("/", createControlWeb(deps.webDirectory));
   app.notFound((c) => c.body(null, 404));
   app.onError((error, c) => {

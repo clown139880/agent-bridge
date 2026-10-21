@@ -19,7 +19,7 @@ async function fixture(tokens: { read?: string; write?: string } = { read: "read
   store.upsertMachine({id:"dev",name:"Workstation",platform:"linux",hostname:"dev.local",capabilities:["codex-cli","codex-app-server"]});
   const sent:ControlToBridgeMessage[]=[];const socket={readyState:WebSocket.OPEN,OPEN:WebSocket.OPEN,
     send(value:string){sent.push(JSON.parse(value) as ControlToBridgeMessage);},close(){}} as unknown as WebSocket;
-  const control=new ControlPlane(store, {host:"127.0.0.1",port:0,workerApiEnabled:true,
+  const control=new ControlPlane(store, {host:"127.0.0.1",port:0,workerApiEnabled:true,version:"9.9.9",
     workerApiToken:"worker",controlApiReadToken:tokens.read,controlApiWriteToken:tokens.write,
     sse:{keepaliveMs:50,pollMs:5,maxBackpressure:3}});
   const internals=control as unknown as Internals;internals.bridges.set("dev",{machineId:"dev",name:"Workstation",
@@ -66,7 +66,7 @@ test("browser entrance keeps credentials server-side, preserves Bearer API, bloc
     const origin = f.base.replace(/\/api\/v1$/, ""), browser = `${origin}/control/api/v1`;
     const headers = { "X-Control-Center": "1" };
     const access = await fetch(`${browser}/access`, { headers });
-    assert.deepEqual(await access.json(), { writable: true });
+    assert.deepEqual(await access.json(), { writable: true, version: "9.9.9" });
     const snapshot = await fetch(`${browser}/snapshot`, { headers });
     assert.equal(snapshot.status, 200);
     const snap = await snapshot.json() as any;
@@ -124,7 +124,7 @@ test("browser entrance uses read-only configuration and never falls back to lega
       const browser = f.base.replace("/api/v1", "/control/api/v1"), headers = { "X-Control-Center": "1" };
       const access = await fetch(`${browser}/access`, { headers });
       if (tokens.read) {
-        assert.deepEqual(await access.json(), { writable: false });
+        assert.deepEqual(await access.json(), { writable: false, version: "9.9.9" });
         assert.equal((await fetch(`${browser}/snapshot`, { headers })).status, 200);
         assert.equal((await fetch(`${browser}/sessions`, { method: "POST", headers, body: "{}" })).status, 403);
       } else assert.equal(access.status, 503);
