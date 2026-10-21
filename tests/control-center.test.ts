@@ -238,3 +238,20 @@ test("stale-build check compares the running entry with the served one", async (
   assert.equal(await newerBuild("/control/assets/index-old.js", serve(html("index-new"), 503)), false);
   assert.equal(await newerBuild("/control/assets/index-old.js", (async () => { throw new TypeError("redirect"); }) as typeof fetch), false);
 });
+
+test("installable app: manifest and service worker are served with their types and allowed by the CSP", async () => {
+  await mkdir(resolve(".runtime/tests"), { recursive: true });
+  const directory = await mkdtemp(resolve(".runtime/tests/pwa-"));
+  await writeFile(resolve(directory, "index.html"), "<!doctype html><title>shell</title>");
+  await writeFile(resolve(directory, "manifest.webmanifest"), "{}");
+  await writeFile(resolve(directory, "sw.js"), "self.addEventListener('fetch', () => {});");
+  const app = createControlWeb(directory);
+  const manifest = await app.request("/control/manifest.webmanifest");
+  assert.equal(manifest.status, 200);
+  assert.match(manifest.headers.get("content-type")!, /^application\/manifest\+json/);
+  const worker = await app.request("/control/sw.js");
+  assert.match(worker.headers.get("content-type")!, /javascript/);
+  assert.equal(worker.headers.get("cache-control"), "no-cache");
+  const csp = (await app.request("/control/sessions")).headers.get("content-security-policy")!;
+  assert.match(csp, /manifest-src 'self'/); assert.match(csp, /worker-src 'self'/);
+});

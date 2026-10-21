@@ -197,7 +197,7 @@ function Center({ control, path, serverVersion }: { control: ControlState; path:
           : <Detail key={route.id} control={control} state={state} id={route.id!} />}
     </main>
     <footer>AGENT BRIDGE <span>·</span> 页面 v{BUILD_VERSION} <span>·</span> 服务 v{serverVersion}
-      {(stale || serverVersion !== BUILD_VERSION && BUILD_VERSION !== "dev") && <button className="quiet" onClick={() => location.reload()}>页面不是最新，刷新</button>}</footer>
+      {stale && <button className="quiet" onClick={() => location.reload()}>页面不是最新，刷新</button>}</footer>
   </div>;
 }
 
@@ -368,3 +368,5 @@ function Detail({ control, state, id }: { control: ControlState; state: ViewStat
 }
 
 createRoot(document.getElementById("root")!).render(<App />);
+// Installability only: the worker caches nothing (see public/sw.js). Not under the vite dev server.
+if ("serviceWorker" in navigator && BUILD_VERSION !== "dev") void navigator.serviceWorker.register("/control/sw.js", { scope: "/control/" }).catch(() => {});

@@ -5,13 +5,14 @@ import { fileURLToPath } from "node:url";
 
 const DEFAULT_DIR = fileURLToPath(new URL("../../../control-center/dist/", import.meta.url));
 const MIME: Record<string, string> = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
-  ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png", ".ico": "image/x-icon" };
+  ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png", ".ico": "image/x-icon",
+  ".webmanifest": "application/manifest+json; charset=utf-8" };
 
 export function createControlWeb(directory = DEFAULT_DIR) {
   const app = new Hono();
   // Scoped to the Control Center so the CSP never lands on API or MCP responses.
   const security: MiddlewareHandler = async (c, next) => {
-    c.header("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; font-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'");
+    c.header("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; font-src 'self'; manifest-src 'self'; worker-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'");
     c.header("Referrer-Policy", "no-referrer");
     c.header("X-Content-Type-Options", "nosniff");
     c.header("Cache-Control", "no-store");
