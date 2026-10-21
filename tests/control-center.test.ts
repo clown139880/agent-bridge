@@ -87,7 +87,7 @@ test("stream decoder preserves split UTF-8 and refuses an oversized unapplied qu
   assert.equal(applied, 0, "unapplied cursors must remain available for replay");
 });
 
-function fixture(t: test.TestContext, options: { live?: boolean; write?: (init: RequestInit) => Response | Promise<Response>; detail?: () => Promise<Response> } = {}) {
+function fixture(t: test.TestContext, options: { live?: boolean; write?: (init: RequestInit) => Response | Promise<Response>; detail?: () => Promise<Response>; action?: () => Promise<Response> } = {}) {
   let wire: ReadableStreamDefaultController<Uint8Array> | undefined;
   let streamCalls = 0, cancels = 0, current = { ...session, ...(options.live ? { status: "active", activeTurnId: "t1" } : {}) };
   const requests: { path: string; init: RequestInit }[] = [];
@@ -103,7 +103,7 @@ function fixture(t: test.TestContext, options: { live?: boolean; write?: (init: 
     if (path.includes("/events")) return json({ data: [{ eventId: "history", cursor: "e:1", sessionId: "s", type: "message.completed", payload: { role: "assistant", text: "History" } }], nextCursor: null, hasMore: false });
     if (path.startsWith("/api/v1/sessions?")) return json({ data: [current], hasMore: false, nextCursor: null });
     if (path === "/api/v1/workers") return json({ workers: snapshot.workers });
-    if (path.startsWith("/api/v1/actions/")) return json({ actionId: "a", kind: "submit_turn", status: "accepted", sessionId: "s" });
+    if (path.startsWith("/api/v1/actions/")) return options.action ? options.action() : json({ actionId: "a", kind: "submit_turn", status: "accepted", sessionId: "s" });
     return json({ data: [], hasMore: false, nextCursor: null });
   });
   const state = new ControlState("test-token", true, snapshot, () => {}, () => {});
@@ -149,6 +149,20 @@ test("idle detail does not leave a permanent stream and a successful start retai
   f.setSession({ status: "idle", activeTurnId: null });
   f.emit(event("3", "session.updated", session)); await flush();
   assert.equal(f.stats().cancels, 2); assert.equal(f.state.snapshot().drafts.s, "");
+});
+
+test("a reconcile answer older than action.updated cannot undo the action's result", async t => {
+  let answer!: (r: Response) => void;
+  const accepted = { actionId: "a", kind: "submit_turn", status: "accepted", sessionId: "s" };
+  const f = fixture(t, { live: true, write: () => json(accepted, 202),
+    action: () => new Promise(resolve => { answer = resolve; }) });
+  await f.state.open({ page: "detail", id: "s" });
+  const submitting = f.state.submit("/sessions/s/turns", { input: "more", delivery: "steer", expectedTurnId: "t1" }, "s");
+  await flush(); // POST answered "accepted"; the reconcile GET is in flight
+  f.emit(event("9", "action.updated", { ...accepted, status: "succeeded" })); await flush();
+  assert.equal(f.state.snapshot().intent?.receipt?.status, "succeeded");
+  answer(json(accepted)); await submitting; await flush();
+  assert.equal(f.state.snapshot().intent?.receipt?.status, "succeeded");
 });
 
 test("uncertain POST retries preserve the body/key; turn conflict refreshes without issuing another interrupt", async t => {
@@ -254,4 +268,18 @@ test("installable app: manifest and service worker are served with their types a
   assert.equal(worker.headers.get("cache-control"), "no-cache");
   const csp = (await app.request("/control/sessions")).headers.get("content-security-policy")!;
   assert.match(csp, /manifest-src 'self'/); assert.match(csp, /worker-src 'self'/);
+});
+
+test("agent markdown renders GFM and CJK emphasis but keeps raw HTML as text", async () => {
+  const { createElement, renderToStaticMarkup } = await import("../apps/control-center/test/render.js");
+  const { MessageText } = await import("../apps/control-center/src/markdown.js");
+  const html = renderToStaticMarkup(createElement(MessageText, { markdown: true,
+    text: "<img src=x onerror=alert(1)> **结论。**后文 [a](https://example.com)\n\n| x |\n|---|\n| 1 |" }));
+  assert.doesNotMatch(html, /<img/);
+  assert.match(html, /&lt;img/);
+  assert.match(html, /<strong>结论。<\/strong>后文/);
+  assert.match(html, /<a href="https:\/\/example.com" target="_blank" rel="noopener noreferrer">/);
+  assert.match(html, /<table>/);
+  const plain = renderToStaticMarkup(createElement(MessageText, { markdown: false, text: "**as typed**" }));
+  assert.match(plain, /\*\*as typed\*\*/);
 });

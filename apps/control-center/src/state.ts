@@ -391,6 +391,10 @@ export class ControlState {
   private receiveAction(receipt: Action) {
     const intent = this.state.intent;
     if (!intent) return;
+    // A reconcile GET sent before the action finished can answer after action.updated
+    // reported its end; a stale "accepted" must not undo a terminal result.
+    if (receipt.status === "accepted" && intent.receipt?.actionId === receipt.actionId
+      && intent.receipt.status !== "accepted") return;
     const newlySucceeded = receipt.status === "succeeded" && intent.receipt?.status !== "succeeded";
     this.patch({ intent: { ...intent, receipt, submitting: false, uncertain: false,
       error: receipt.status === "failed" ? receipt.error?.error.message ?? "操作失败" : undefined } });

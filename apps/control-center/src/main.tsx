@@ -2,6 +2,7 @@ import React, { useEffect, useLayoutEffect, useRef, useState, useSyncExternalSto
 import { createRoot } from "react-dom/client";
 import { ControlClient, explain } from "./api/client";
 import { BUILD_VERSION, newerBuild, runningEntry } from "./build";
+import { MessageText } from "./markdown";
 import { isLive, pendingId, segment, type Pending, type Session, type SessionEvent, type Snapshot } from "./api/types";
 import { ControlState, IMAGE_TYPES, type Route, type ViewState } from "./state";
 import "./styles.css";
@@ -279,7 +280,7 @@ function EventView({ event }: { event: SessionEvent }) {
   const p = event.payload;
   if (event.type === "message.completed") return <article className={`message ${p.role === "user" ? "user" : "assistant"}`}>
     <div className="message-label">{p.role === "user" ? "你" : p.role === "assistant" ? "AGENT" : "SYSTEM"}<time>{time(event.timestamp)}</time></div>
-    <div className="message-text">{typeof p.text === "string" ? p.text : "（无文本消息）"}</div>
+    {typeof p.text === "string" ? <MessageText text={p.text} markdown={p.role !== "user"} /> : <div className="message-text">（无文本消息）</div>}
   </article>;
   if (["tool.started", "tool.completed", "command.completed", "file_change.completed", "task.started", "task.progress", "task.completed"].includes(event.type)) {
     const summary = String(p.command ?? p.summary ?? p.description ?? p.name ?? event.type);

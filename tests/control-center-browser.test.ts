@@ -16,6 +16,7 @@ test("mobile browser on non-secure HTTP: no-login entry, paging, history/SSE, se
   await mkdir(resolve(".runtime/tests"), { recursive: true });
   const directory = await mkdtemp(resolve(".runtime/tests/browser-"));
   const writes: { path: string; body: any; key?: string }[] = [], streams = new Set<import("node:http").ServerResponse>();
+  const actions = new Map<string, Record<string, unknown>>();
   let streamId = 0, turn = "turn-one", busy = true, writable = true;
   const worker = { id: "claude@test", name: "Claude @ Test", status: "online", capabilities: ["session-actions", "turn-steer", "turn-interrupt"],
     workspaces: ["/work/repo"], recentWorkspaces: [{ name: "repo", path: "/work/repo" }] };
@@ -48,13 +49,15 @@ test("mobile browser on non-secure HTTP: no-login entry, paging, history/SSE, se
       const chunks: Buffer[] = []; req.on("data", chunk => chunks.push(chunk)); req.on("end", () => {
         const body = JSON.parse(Buffer.concat(chunks).toString()); writes.push({ path: url.pathname, body, key: req.headers["idempotency-key"] as string });
         const actionId = `action-${writes.length}`, kind = url.pathname.endsWith("/interrupt") ? "interrupt_turn" : url.pathname.endsWith("/turns") ? "submit_turn" : "create_session";
-        send({ actionId, kind, status: "accepted", sessionId: kind === "create_session" ? null : "s-active", turnId: turn }, 202);
+        actions.set(actionId, { actionId, kind, status: "accepted", sessionId: kind === "create_session" ? null : "s-active", turnId: turn });
+        send(actions.get(actionId), 202);
         setTimeout(() => {
           busy = kind !== "interrupt_turn";
           if (kind === "create_session") turn = "created-turn";
           const id = kind === "create_session" ? "created" : "s-active";
           emit("session.updated", summary(id), id);
-          emit("action.updated", { actionId, kind, status: "succeeded", sessionId: id, turnId: turn }, id);
+          actions.set(actionId, { actionId, kind, status: "succeeded", sessionId: id, turnId: turn });
+          emit("action.updated", actions.get(actionId), id);
           if (kind === "interrupt_turn") emit("session.event.appended", { eventId: "interrupted", cursor: "e:999", type: "turn.interrupted", turnId: turn, sessionId: id, timestamp: 4000, payload: {} }, id);
         }, 80).unref();
       }); return;
@@ -72,7 +75,8 @@ test("mobile browser on non-secure HTTP: no-login entry, paging, history/SSE, se
       return send({ data: events.slice(start, end), hasMore: start > 0, nextCursor: start > 0 ? "before-30" : null });
     }
     if (url.pathname.startsWith("/api/v1/sessions/")) return send(summary(url.pathname.split("/")[4]));
-    if (url.pathname.startsWith("/api/v1/actions/")) return send({ actionId: url.pathname.split("/").at(-1), status: "accepted", kind: "submit_turn", sessionId: "s-active" });
+    // Like the Control Plane: the client reconciles here when action.updated beats the POST response.
+    if (url.pathname.startsWith("/api/v1/actions/")) return send(actions.get(url.pathname.split("/").at(-1)!) ?? { actionId: url.pathname.split("/").at(-1), status: "accepted", kind: "submit_turn", sessionId: "s-active" });
     return send({ data: [], hasMore: false, nextCursor: null });
   });
   await new Promise<void>(r => server.listen(0, "127.0.0.1", r));
@@ -116,7 +120,9 @@ test("mobile browser on non-secure HTTP: no-login entry, paging, history/SSE, se
   };
   const fill = (selector: string, value: string, textarea = false) => js(`(()=>{const el=document.querySelector(${JSON.stringify(selector)});Object.getOwnPropertyDescriptor(${textarea ? "HTMLTextAreaElement" : "HTMLInputElement"}.prototype,'value').set.call(el,${JSON.stringify(value)});el.dispatchEvent(new Event('input',{bubbles:true}));})()`);
   const tap = async (selector: string) => {
-    const point = await js(`(()=>{const el=document.querySelector(${JSON.stringify(selector)});el.scrollIntoView({block:'center'});const r=el.getBoundingClientRect(),x=r.x+r.width/2,y=r.y+r.height/2;return {x,y,disabled:el.disabled,hit:el.contains(document.elementFromPoint(x,y))};})()`);
+    // Let the scroll event land before measuring: until it does, the transcript still
+    // follows new content and may scroll the target away between measure and touch.
+    const point = await js(`(async()=>{const el=document.querySelector(${JSON.stringify(selector)});el.scrollIntoView({block:'center'});await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));const r=el.getBoundingClientRect(),x=r.x+r.width/2,y=r.y+r.height/2;return {x,y,disabled:el.disabled,hit:el.contains(document.elementFromPoint(x,y))};})()`);
     assert.equal(point.disabled, false, `${selector} must be enabled`);
     assert.equal(point.hit, true, `${selector} must not be covered`);
     await command("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: point.x, y: point.y }] });
@@ -148,6 +154,7 @@ test("mobile browser on non-secure HTTP: no-login entry, paging, history/SSE, se
   assert.equal(await js("document.querySelector('.composer button.primary').disabled"), true, "whitespace draft must stay disabled");
   await fill("#message", "补充一个要求", true); await tap(".composer button.primary");
   await wait("document.body.innerText.includes('操作已被接受')"); assert.equal(writes[0].body.expectedTurnId, "turn-one"); assert.equal(writes[0].body.delivery, "steer");
+  await wait("!document.querySelector('.interrupt').disabled");
   await tap(".interrupt"); await wait("document.body.innerText.includes('本轮已打断')");
   assert.equal(writes[1].body.expectedTurnId, "turn-one");
   await command("Emulation.setDeviceMetricsOverride", { width: 390, height: 500, deviceScaleFactor: 1, mobile: true });
