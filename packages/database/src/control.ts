@@ -243,6 +243,14 @@ export class AgentControlStore {
         this.db.prepare("DELETE FROM deleted_workers WHERE worker_id=?").run(String(wire.id));
         markChanged(this.db, "worker", String(wire.id));
       }
+      // A disconnect marks every session of the machine offline, but most can be
+      // resumed (Claude/pi revive from their transcript) and their workers report
+      // only the sessions they hold in memory. Back online, they are idle again; the
+      // following snapshot overrides live ones and settles any with a lost turn.
+      const restored = this.db.prepare("SELECT id FROM sessions WHERE machine_id=? AND activity_status='offline' AND active_turn_id IS NULL")
+        .all(machineId) as Array<{ id: string }>;
+      this.db.prepare("UPDATE sessions SET activity_status='idle' WHERE machine_id=? AND activity_status='offline' AND active_turn_id IS NULL").run(machineId);
+      for (const session of restored) markChanged(this.db, "session", session.id);
     });
   }
 

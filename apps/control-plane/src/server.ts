@@ -331,7 +331,8 @@ export class ControlPlane {
             eventId: `snapshot:${session.id}:${session.active_turn_id}:interrupted`,
             eventType: "turn.interrupted", timestamp: Date.now(), payload: {reason:"worker no longer owns this turn"},
           });
-          this.controlStore.updateSessionActivity(session.id, "offline", undefined, "interrupted");
+          // The worker is online and can still resume the session; only its turn is gone.
+          this.controlStore.updateSessionActivity(session.id, "idle", undefined, "interrupted");
         }
         this.reclaimOrphanedRuns(machineId, present);
         const pendingIds = new Set([...message.approvals.map((item) => item.approvalId),

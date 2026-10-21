@@ -282,8 +282,25 @@ test("complete worker inventory clears a vanished live turn and its approval", a
     await f.internals.handleBridgeMessage('dev',{type:'state.snapshot',generation:'restart',complete:true,sessions:[],approvals:[],userInputs:[]});
     const session=f.internals.controlStore.session('thread-1');
     assert.equal(session?.activeTurnId,null);
-    assert.equal(session?.status,'offline');
+    assert.equal(session?.status,'idle');
     assert.equal(session?.lastTurnStatus,'interrupted');
+  } finally { await f.close(); }
+});
+
+test("a reconnecting worker brings its resumable sessions back from offline", async () => {
+  const f = await fixture();
+  try {
+    const store=f.internals.controlStore;
+    store.updateSessionActivity('thread-1','waiting_for_approval','live-turn');
+    store.markMachineOffline('dev');
+    assert.equal(store.session('thread-1')?.status,'offline');
+    // A turn that was running is left for the complete snapshot to settle.
+    store.updateMachineConnection('dev','1.0.0',2,[]);
+    assert.equal(store.session('thread-1')?.status,'offline');
+    store.updateSessionActivity('thread-1','idle');
+    store.markMachineOffline('dev');
+    store.updateMachineConnection('dev','1.0.0',2,[]);
+    assert.equal(store.session('thread-1')?.status,'idle');
   } finally { await f.close(); }
 });
 
