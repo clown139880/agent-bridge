@@ -24,7 +24,7 @@ plugins:
       allow_tool_override: true
 ```
 
-profile `.env`（与记忆插件共用 `AGENT_MEMORY_TOKEN`、`AGENT_MEMORY_SELF_SCOPE`）：
+profile `.env`（与记忆插件共用 `AGENT_TOKEN`、`AGENT_MEMORY_SELF_SCOPE`）：
 
 ```bash
 AGENT_SKILLS_SCOPES=jmyd   # 逗号分隔，或 all

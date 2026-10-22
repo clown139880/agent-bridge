@@ -75,7 +75,7 @@ test("conversation memory reads the session event history: one copy, scoped sear
 test("conversation MCP exposes the read-only search tool contract", async () => {
   const f = fixture();
   f.control.appendSessionEvent(message("design-session", "evt-mcp", "user", "中心提供 MCP，项目不持有 projectId。", f.now));
-  const mcp = new ConversationMcpServer(f.memory, "memory-secret");
+  const mcp = new ConversationMcpServer(f.memory, { writers: [] });
   try {
     const reader = { conversation: true, memory: false };
     const dispatch = (request: unknown) =>

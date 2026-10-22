@@ -22,7 +22,8 @@ async function fixture() {
   const socket = { readyState: WebSocket.OPEN, OPEN: WebSocket.OPEN,
     send(value: string) { sent.push(JSON.parse(value) as ControlToBridgeMessage); }, close() {} } as unknown as WebSocket;
   const control = new ControlPlane(store, { host: "127.0.0.1", port: 0,
-    controlApiReadToken: "read", controlApiWriteToken: "write", bridgeToken: "bridge-registration", sse: { keepaliveMs: 50, pollMs: 5, maxBackpressure: 3 } });
+    controlApiReadToken: "read", controlApiWriteToken: "write", bridgeToken: "bridge-registration",
+    agents: [{ name: "claude@hal", role: "project", token: "agent-claude-hal" }], sse: { keepaliveMs: 50, pollMs: 5, maxBackpressure: 3 } });
   const internals = control as unknown as Internals;
   internals.bridges.set("dev", { machineId: "dev", name: "Workstation", capabilities: ["codex-cli", "codex-app-server"],
     features: ["session-actions", "session-events"], bridgeVersion: "0.4.2", socket });
@@ -58,7 +59,7 @@ async function fixture() {
     const data = text.split("\n").find((line) => line.startsWith("data: "));
     return { status: response.status, body: (text && JSON.parse(data ? data.slice(6) : text)) as any };
   };
-  return { ops, mcp, bridge, ack, sent, async close() { await control.stop(); store.db.close(); rmSync(path, { force: true }); } };
+  return { ops, mcp, bridge, ack, sent, store, async close() { await control.stop(); store.db.close(); rmSync(path, { force: true }); } };
 }
 
 test("send then wait returns the turn's final message, even when it finished before the wait", async () => {
@@ -164,5 +165,20 @@ test("/mcp/bridge scopes its tools to the caller's Control token and acts as tha
       timestamp: Date.now(), payload: { status: "completed", summary: "done via mcp" } });
     const waited = (await waiting).body.result.structuredContent;
     assert.deepEqual([waited.state, waited.summary], ["completed", "done via mcp"]);
+  } finally { await f.close(); }
+});
+
+test("an agent token drives sessions through /mcp/bridge and every action names the agent", async () => {
+  const f = await fixture();
+  try {
+    const names = (await f.mcp("agent-claude-hal", "tools/list")).body.result.tools.map((tool: any) => tool.name).sort();
+    assert.deepEqual(names, ["answer", "approve", "create", "interrupt", "pending", "session", "sessions", "turn", "wait", "workers"]);
+    const creating = f.mcp("agent-claude-hal", "tools/call", { name: "create",
+      arguments: { worker_id: "codex@dev", workspace: "repo", input: "from another agent" } });
+    const action = await f.ack("action.create_session", { sessionId: "thread-new", turnId: "turn-new" });
+    assert.equal(action.input, "from another agent");
+    assert.equal((await creating).body.result.structuredContent.sessionId, "thread-new");
+    const row = f.store.db.prepare("SELECT principal FROM actions WHERE id=?").get(action.actionId) as { principal: string };
+    assert.equal(row.principal, "agent:claude@hal");
   } finally { await f.close(); }
 });

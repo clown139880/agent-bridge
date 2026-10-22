@@ -19,8 +19,8 @@ async function fixture(tokens: { read?: string; write?: string } = { read: "read
   store.upsertMachine({id:"dev",name:"Workstation",platform:"linux",hostname:"dev.local",capabilities:["codex-cli","codex-app-server"]});
   const sent:ControlToBridgeMessage[]=[];const socket={readyState:WebSocket.OPEN,OPEN:WebSocket.OPEN,
     send(value:string){sent.push(JSON.parse(value) as ControlToBridgeMessage);},close(){}} as unknown as WebSocket;
-  const control=new ControlPlane(store, {host:"127.0.0.1",port:0,workerApiEnabled:true,version:"9.9.9",
-    workerApiToken:"worker",controlApiReadToken:tokens.read,controlApiWriteToken:tokens.write,
+  const control=new ControlPlane(store, {host:"127.0.0.1",port:0,version:"9.9.9",
+    controlApiReadToken:tokens.read,controlApiWriteToken:tokens.write,
     sse:{keepaliveMs:50,pollMs:5,maxBackpressure:3}});
   const internals=control as unknown as Internals;internals.bridges.set("dev",{machineId:"dev",name:"Workstation",
     capabilities:["codex-cli","codex-app-server"],features:["session-actions","session-events"],bridgeVersion:"0.4.2",socket});

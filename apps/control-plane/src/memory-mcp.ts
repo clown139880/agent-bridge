@@ -38,8 +38,8 @@ export class ConversationMcpServer {
   private readonly tools: Array<McpTool<MemoryPrincipal>>;
   private readonly byName = new Map<string, McpTool<MemoryPrincipal>>();
 
-  constructor(memory: ConversationMemoryStore, token: string | undefined, agentMemory?: AgentMemoryMcpOptions) {
-    this.authenticate = memoryAuthenticator(token, agentMemory);
+  constructor(memory: ConversationMemoryStore, agentMemory: AgentMemoryMcpOptions) {
+    this.authenticate = memoryAuthenticator(agentMemory);
     this.tools = memoryTools(memory, agentMemory);
     for (const tool of this.tools) { this.byName.set(tool.name, tool); if (tool.legacy) this.byName.set(tool.legacy, tool); }
   }

@@ -137,7 +137,7 @@ test("archive moves a skill out of the library and move changes its scope", () =
   assert.equal(git(repo, "status", "--porcelain"), "");
 });
 
-test("MCP exposes skill reads to memory readers and skill writes only to writer tokens", async () => {
+test("MCP exposes skill tools to agent tokens and keeps project agents out of the shared scopes", async () => {
   const { skills } = fixture();
   const vault = mkdtempSync(join(tmpdir(), "agent-skills-vault-"));
   put(vault, "agent-memory/scopes/_global/scope.md", "---\ntype: scope\nid: _global\ntitle: 全局\nstatus: active\n---\n");
@@ -145,11 +145,10 @@ test("MCP exposes skill reads to memory readers and skill writes only to writer 
   const { ConversationMcpServer } = await import("../apps/control-plane/src/memory-mcp.js");
   const { ConversationMemoryStore, Store } = await import("../packages/database/src/index.js");
   const store = new Store(join(mkdtempSync(join(tmpdir(), "agent-skills-db-")), "control.sqlite"));
-  const writers = [{ name: "dorothy", role: "agent" as const, token: "dorothy-token-0123456789" }];
-  const withSkills = new ConversationMcpServer(new ConversationMemoryStore(store.db), "reader-token-0123456789",
-    { store: memory, skills, writers });
-  const withoutSkills = new ConversationMcpServer(new ConversationMemoryStore(store.db), "reader-token-0123456789",
-    { store: memory, writers });
+  const writers = [{ name: "dorothy", role: "agent" as const, token: "dorothy-token-0123456789" },
+    { name: "codex@wsl", role: "project" as const, token: "codex-token-0123456789" }];
+  const withSkills = new ConversationMcpServer(new ConversationMemoryStore(store.db), { store: memory, skills, writers });
+  const withoutSkills = new ConversationMcpServer(new ConversationMemoryStore(store.db), { store: memory, writers });
   const dispatch = (server: unknown, token: string, method: string, params?: unknown) => {
     const target = server as { authenticate(header: string): unknown; dispatch(raw: unknown, principal: unknown): Promise<any> };
     return target.dispatch({ jsonrpc: "2.0", id: 1, method, params }, target.authenticate(`Bearer ${token}`));
@@ -157,22 +156,21 @@ test("MCP exposes skill reads to memory readers and skill writes only to writer 
   const names = async (server: unknown, token: string) =>
     (await dispatch(server, token, "tools/list")).result.tools.map((tool: { name: string }) => tool.name) as string[];
   try {
-    assert.ok((await names(withSkills, "reader-token-0123456789")).includes("skill_view"));
-    assert.ok(!(await names(withSkills, "reader-token-0123456789")).includes("skill_write"));
+    assert.ok((await names(withSkills, "codex-token-0123456789")).includes("skill_view"));
     assert.ok((await names(withSkills, "dorothy-token-0123456789")).includes("skill_write"));
     assert.ok(!(await names(withoutSkills, "dorothy-token-0123456789")).some((name) => name.startsWith("skill_")));
 
     const call = (token: string, name: string, args: Record<string, unknown>) =>
       dispatch(withSkills, token, "tools/call", { name, arguments: args });
-    const index = await call("reader-token-0123456789", "skill_index", { scopes: ["_agent-dorothy", "_global"] });
+    const index = await call("codex-token-0123456789", "skill_index", { scopes: ["_agent-dorothy", "_global"] });
     assert.deepEqual(index.result.structuredContent.skills.map((item: { name: string }) => item.name), ["navidrome", "openlist"]);
-    const view = await call("reader-token-0123456789", "skill_view", { name: "navidrome", scopes: ["velvet-room"] });
+    const view = await call("codex-token-0123456789", "skill_view", { name: "navidrome", scopes: ["velvet-room"] });
     assert.match(view.result.structuredContent.content, /房间里的同名技能/);
-    assert.match((await call("reader-token-0123456789", "skill_write",
-      { scope: "travel", name: "x", content: skillMd("x", "d") })).error.message, /unknown_tool/);
+    assert.match((await call("codex-token-0123456789", "skill_write",
+      { scope: "_global", name: "x", content: skillMd("x", "d") })).error.message, /forbidden/);
     const written = await call("dorothy-token-0123456789", "skill_write", { scope: "travel", name: "x", content: skillMd("x", "d") });
     assert.equal(written.result.structuredContent.path, "scopes/travel/general/x");
-    assert.match((await call("reader-token-0123456789", "skill_search", { query: "x", scopes: "nope" })).error.message,
+    assert.match((await call("codex-token-0123456789", "skill_search", { query: "x", scopes: "nope" })).error.message,
       /invalid_string_array_argument/);
   } finally {
     store.db.close();

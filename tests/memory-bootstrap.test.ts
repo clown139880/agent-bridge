@@ -33,7 +33,7 @@ test("a Bridge gets _global plus its project's memory for a new session, and not
   execFileSync("git", ["remote", "add", "origin", "git@github.com:Example/demo.git"], { cwd: repo });
   const path = join(tmpdir(), `memory-bootstrap-${randomUUID()}.sqlite`), store = new Store(path);
   const control = new ControlPlane(store, { host: "127.0.0.1", port: 0, bridgeToken: "bridge-secret",
-    agentMemory: { vault: dir, writers: [] } });
+    agentMemory: { vault: dir } });
   await control.start();
   try {
     const address = (control as unknown as { http: HttpServer }).http.address();

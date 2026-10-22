@@ -3,6 +3,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Store, AgentControlStore, PendingRow, ActionRow } from "@agent-bridge/database";
 import { parseWorkerId, workerId as buildWorkerId, type AgentType, type ActionKind, type ControlToBridgeMessage } from "@agent-bridge/protocol";
 import { BridgeRegistry } from "../bridge-registry.js";
+import type { MemoryReviewRoutes } from "../memory-review.js";
 import { AgentControlSse, SseCursorError } from "./sse.js";
 import { ActionServiceError, SessionActionService } from "./session-actions.js";
 import { ApiProblem, integerParam as integer, jsonBody, stringField as string, attachmentsField, uploadRequest } from "./validation.js";
@@ -24,9 +25,11 @@ function capabilityForAgent(agentType: AgentType): string {
 
 export interface Principal { id: string; read: boolean; write: boolean; }
 interface ApiOptions {
-  /** WORKER_API_TOKEN: a full-access (read+write) API token used by Hermes (its /ab command). Not a worker-run API. */
-  workerToken?: string;
+  /** CONTROL_API_*: the human's tokens (Control Center, DSH). */
   readToken?: string; writeToken?: string; bridgeToken?: string;
+  /** AGENT_TOKENS: each agent drives sessions as `agent:<name>`, recorded on every action it starts. */
+  agents?: Array<{ name: string; token: string }>;
+  memoryReviews?: MemoryReviewRoutes;
   sseKeepaliveMs: number; ssePollMs: number; sseMaxBackpressure: number; actionTimeoutMs: number; }
 
 function equalSecret(left: string, right: string): boolean {
@@ -125,10 +128,31 @@ export class AgentControlApi {
       if(session){await this.sessionRoute(request,response,url,principal,decodeURIComponent(session[1]!),session[2]);return true;}
       const approval=url.pathname.match(/^\/api\/v1\/approvals\/([^/]+)(?:\/(decision))?$/);
       if(approval){await this.pendingRoute("approval",request,response,principal,decodeURIComponent(approval[1]!),approval[2]);return true;}
+      const review=url.pathname.match(/^\/api\/v1\/memory-reviews(?:\/([^/]+)(?:\/(decision))?)?$/);
+      if(review&&this.options.memoryReviews){await this.memoryReviewRoute(request,response,url,principal,review[1]&&decodeURIComponent(review[1]),review[2]);return true;}
       const input=url.pathname.match(/^\/api\/v1\/user-input\/([^/]+)(?:\/(response))?$/);
       if(input){await this.pendingRoute("user_input",request,response,principal,decodeURIComponent(input[1]!),input[2]);return true;}
       throw new ApiProblem(404,"not_found","endpoint not found");
     } catch(error){this.problem(response,error,requestId);return true;}
+  }
+
+  /** Memory reviews: anyone may read them; only the human decides one the reviewer handed over. */
+  private async memoryReviewRoute(request:IncomingMessage,response:ServerResponse,url:URL,principal:Principal,id:string|undefined,sub:string|undefined):Promise<void>{
+    const reviews=this.options.memoryReviews!;
+    if(request.method==="GET"&&!id){const status=url.searchParams.get("status")??undefined;
+      this.ok(response,{data:reviews.list({status,limit:integer(url.searchParams.get("limit"),"limit",50,1,200)})});return;}
+    if(request.method==="GET"&&id&&!sub){const row=reviews.get(id);if(!row)throw new ApiProblem(404,"review_not_found","memory review not found");this.ok(response,row);return;}
+    if(request.method==="POST"&&id&&sub==="decision"){
+      if(!principal.id.startsWith("control:"))throw new ApiProblem(403,"forbidden","only the human decides a memory review");
+      const body=await jsonBody(request) as Record<string,unknown>;
+      if(body.choice!=="allow"&&body.choice!=="deny")throw new ApiProblem(400,"invalid_choice","choice must be allow or deny");
+      const reason=typeof body.reason==="string"?body.reason:undefined;
+      try{this.ok(response,await reviews.decide(id,body.choice,reason));}
+      catch(error){const code=error instanceof Error?error.message:String(error);
+        if(code==="review_not_found")throw new ApiProblem(404,code,"memory review not found");
+        throw new ApiProblem(409,code,"memory review is not waiting for a human decision");}
+      return;}
+    throw new ApiProblem(404,"not_found","endpoint not found");
   }
 
   private authenticate(request:IncomingMessage):Principal {
@@ -143,8 +167,8 @@ export class AgentControlApi {
     const token=header.slice(7);
     if(this.options.writeToken&&equalSecret(token,this.options.writeToken))return{id:"control:write",read:true,write:true};
     if(this.options.readToken&&equalSecret(token,this.options.readToken))return{id:"control:read",read:true,write:false};
-    // WORKER_API_TOKEN: full-access token used by Hermes (/ab gateway command), not a worker-run API.
-    if(this.options.workerToken&&equalSecret(token,this.options.workerToken))return{id:"worker:legacy",read:true,write:true};
+    const agent=this.options.agents?.find(item=>equalSecret(token,item.token));
+    if(agent)return{id:`agent:${agent.name}`,read:true,write:true};
     // The bridge authenticates with its registration token to fetch attachment bytes.
     if(this.options.bridgeToken&&equalSecret(token,this.options.bridgeToken))return{id:"bridge",read:true,write:false};
     return undefined;

@@ -7,7 +7,7 @@ prompt cache stays warm), and forwards memory_* tools to the /mcp/memory tools.
 It never writes files itself and records nothing on its own when a session ends.
 
 Configuration (profile .env):
-  AGENT_MEMORY_TOKEN       writer token from the Control Plane AGENT_MEMORY_TOKENS (required)
+  AGENT_TOKEN              this agent's token from the Control Plane AGENT_TOKENS (required; old name AGENT_MEMORY_TOKEN)
   AGENT_MEMORY_URL         default http://127.0.0.1:8787/mcp/memory
   AGENT_MEMORY_SELF_SCOPE  optional hidden scope with this agent's own rules (e.g. _agent-dorothy)
   AGENT_MEMORY_SHARED_SCOPE optional hidden scope shared by the assistants (e.g. _assistants); a DM's
@@ -142,7 +142,7 @@ class AgentBridgeMemoryProvider(MemoryProvider):
 
     def _load_config(self) -> None:
         self._url = get_secret("AGENT_MEMORY_URL", "") or DEFAULT_URL
-        self._token = get_secret("AGENT_MEMORY_TOKEN", "") or ""
+        self._token = get_secret("AGENT_TOKEN", "") or get_secret("AGENT_MEMORY_TOKEN", "") or ""
         self._self_scope = get_secret("AGENT_MEMORY_SELF_SCOPE", "") or ""
         self._shared_scope = get_secret("AGENT_MEMORY_SHARED_SCOPE", "") or ""
         self._machine_id = get_secret("AGENT_MEMORY_MACHINE_ID", "") or "hal"
@@ -153,7 +153,7 @@ class AgentBridgeMemoryProvider(MemoryProvider):
         return bool(self._token)
 
     def unavailable_reason(self) -> str:
-        return "set AGENT_MEMORY_TOKEN (a writer token from the Control Plane AGENT_MEMORY_TOKENS) in this profile's .env"
+        return "set AGENT_TOKEN (this agent's token from the Control Plane AGENT_TOKENS) in this profile's .env"
 
     # ---- MCP transport ----
 

@@ -66,7 +66,7 @@ def make_home(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def env(monkeypatch):
-    monkeypatch.setenv("AGENT_MEMORY_TOKEN", "writer-token")
+    monkeypatch.setenv("AGENT_TOKEN", "writer-token")
     monkeypatch.setenv("AGENT_MEMORY_SELF_SCOPE", "_agent-dorothy")
     monkeypatch.setenv("AGENT_SKILLS_SCOPES", "jmyd")
     monkeypatch.delenv("AGENT_SKILLS_LOAD_ALL", raising=False)
@@ -151,7 +151,7 @@ def test_skill_manage_reports_rejections_and_outages(env, tmp_path):
 
 
 def test_disabled_without_token_or_scopes(monkeypatch, tmp_path):
-    monkeypatch.setenv("AGENT_MEMORY_TOKEN", "writer-token")
+    monkeypatch.setenv("AGENT_TOKEN", "writer-token")
     monkeypatch.delenv("AGENT_SKILLS_SCOPES", raising=False)
     assert not plugin.SkillLibrary(tmp_path, {}, call=FakeControlPlane()).enabled()
     monkeypatch.setenv("AGENT_SKILLS_SCOPES", "all")

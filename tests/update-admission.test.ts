@@ -28,7 +28,7 @@ test("an available bridge update is announced on registration and replayed when 
   store.upsertMachine({ id: "hal", name: "HAL", platform: "linux", hostname: "hal",
     capabilities: ["codex-cli"] });
   const control = new ControlPlane(store, {
-    host: "127.0.0.1", port: 0, workerApiEnabled: true, workerApiToken: "secret",
+    host: "127.0.0.1", port: 0, agents: [{ name: "hermes", role: "agent", token: "secret" }],
     bridgeUpdate: { latestVersion: "0.5.0", source: "mock://release", publishedAt: 7 },
   });
   const internals = control as unknown as Internals;

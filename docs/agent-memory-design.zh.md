@@ -144,9 +144,9 @@ bootstrap_budget: 1500          # _global 用 3600
 | 写入方 | `_global` | 当前作用域 | 已加载的其他作用域 | `scope.md` 绑定和类别表 |
 | --- | --- | --- | --- | --- |
 | Hermes、Dorothy | 可以 | 可以 | 可以（显式指定 `scope`） | 只有人改 |
-| Bridge 下的 agent | 只读（`_assistants`、`_agent-*` 也不能写） | 可以（它的项目作用域） | 可以 | 只有人改 |
+| Bridge 下的 agent | 经审核（`_assistants`、`_agent-*` 同样） | 可以（它的项目作用域） | 可以 | 只有人改 |
 
-没有提案审批流程，你在 Obsidian 里能看到全部内容，也能直接改或删。凭据扫描命中就拒写。每次写入都是一次 git 提交，写入者记在 `by` 字段。
+Bridge 下的 agent 写下划线开头的作用域时，写入先暂存，由审核员（无工具的 Claude）判断放行、拒绝或交给人（0.7.12 起，见 [agent-dispatch-and-review.zh.md](agent-dispatch-and-review.zh.md)）。其余写入没有审批流程，你在 Obsidian 里能看到全部内容，也能直接改或删。凭据扫描命中就拒写。每次写入都是一次 git 提交，写入者记在 `by` 字段。
 
 ## 6. Hermes 接入：完全取代内置记忆
 

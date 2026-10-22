@@ -10,7 +10,7 @@ While piloting, only sessions whose scope is listed in AGENT_SKILLS_SCOPES use t
 library; every other session falls through to the original Hermes handlers.
 
 Configuration (profile .env):
-  AGENT_MEMORY_TOKEN       writer token (shared with the memory provider; required)
+  AGENT_TOKEN              this agent's token (shared with the memory provider; required; old name AGENT_MEMORY_TOKEN)
   AGENT_MEMORY_URL         default http://127.0.0.1:8787/mcp/memory
   AGENT_MEMORY_SELF_SCOPE  this agent's own scope, e.g. _agent-dorothy (always visible)
   AGENT_SKILLS_SCOPES      comma-separated pilot scopes, or "all"; unset/empty disables routing
@@ -68,7 +68,7 @@ class SkillLibrary:
         self.hermes_home = hermes_home
         self.originals = originals
         self.url = get_secret("AGENT_MEMORY_URL", "") or DEFAULT_URL
-        self.token = get_secret("AGENT_MEMORY_TOKEN", "") or ""
+        self.token = get_secret("AGENT_TOKEN", "") or get_secret("AGENT_MEMORY_TOKEN", "") or ""
         self.self_scope = get_secret("AGENT_MEMORY_SELF_SCOPE", "") or ""
         raw = (get_secret("AGENT_SKILLS_SCOPES", "") or "").strip()
         self.pilot: Optional[set] = None if raw == "all" else {item.strip() for item in raw.split(",") if item.strip()}

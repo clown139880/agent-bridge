@@ -27,7 +27,8 @@ import { BridgeRegistry } from "./bridge-registry.js";
 import { WebhookNotifier, type WebhookOptions } from "./webhook.js";
 import { AgentMemory, AgentSkills, type Writer } from "@agent-bridge/agent-memory";
 import { ConversationMcpServer } from "./memory-mcp.js";
-import { memoryEndpoint } from "./mcp/memory.js";
+import { memoryEndpoint, reviewContext, runMemoryTool, type AgentMemoryMcpOptions } from "./mcp/memory.js";
+import { claudeReviewer, MemoryReviews } from "./memory-review.js";
 import { mcpRoute } from "./mcp/route.js";
 import { bridgeEndpoint } from "./mcp/bridge.js";
 import { compareBridgeVersions } from "./bridge-version.js";
@@ -54,6 +55,7 @@ export class ControlPlane {
   private readonly webhook: WebhookNotifier;
   private readonly memory: ConversationMemoryStore;
   private readonly memoryMcp?: ConversationMcpServer;
+  private readonly memoryReviews?: MemoryReviews;
   private readonly agentMemory?: AgentMemory;
   private readonly approvalsById = new Map<string, PendingApproval>();
   private readonly resolvedApprovalIds = new Set<string>();
@@ -72,13 +74,14 @@ export class ControlPlane {
       host: string;
       port: number;
       bridgeToken?: string;
-      workerApiEnabled?: boolean;
-      workerApiToken?: string;
       controlApiReadToken?: string;
       controlApiWriteToken?: string;
-      conversationMemory?: { mcpReadToken?: string };
-      agentMemory?: { vault: string; root?: string; lockPath?: string; cacheDir?: string; writers: Array<Writer & { token: string }>;
+      /** AGENT_TOKENS: one per agent, for /mcp/memory, /mcp/bridge and /api/v1. */
+      agents?: Array<Writer & { token: string }>;
+      agentMemory?: { vault: string; root?: string; lockPath?: string; cacheDir?: string;
         skills?: { repo: string; lockPath?: string; archiveDir: string; push: boolean } };
+      /** Without a reviewer every held memory write waits for the human. */
+      memoryReview?: { reviewer?: { command: string; model: string; timeoutMs: number } };
       retention?: { actionsMs: number; attachmentsMs: number };
       sse?: { keepaliveMs: number; pollMs: number; maxBackpressure: number; actionTimeoutMs?: number };
       bridgeUpdate?: {
@@ -105,16 +108,25 @@ export class ControlPlane {
       catch (error) { log.error({ error }, "Skill library disabled: repository unavailable"); }
     }
     this.agentMemory = agentMemory;
-    const memoryEndpointOptions = options.conversationMemory?.mcpReadToken || agentMemory
-      ? [this.memory, options.conversationMemory?.mcpReadToken,
-        agentMemory && { store: agentMemory, skills: agentSkills, writers: options.agentMemory!.writers }] as const : undefined;
-    if (memoryEndpointOptions) this.memoryMcp = new ConversationMcpServer(...memoryEndpointOptions);
+    const agents = options.agents ?? [];
+    const memoryOptions: AgentMemoryMcpOptions | undefined = agents.length
+      ? { store: agentMemory, skills: agentSkills, writers: agents } : undefined;
+    if (memoryOptions && agentMemory) {
+      const reviewer = options.memoryReview?.reviewer;
+      memoryOptions.review = this.memoryReviews = new MemoryReviews(store.db, {
+        apply: (tool, args, writer) => runMemoryTool(this.memory, memoryOptions, tool, args, writer),
+        context: (tool, args) => reviewContext(memoryOptions, tool, args),
+        reviewer: reviewer && claudeReviewer(reviewer),
+        notify: (event) => this.webhook.notify(event),
+      });
+    }
+    if (memoryOptions) this.memoryMcp = new ConversationMcpServer(this.memory, memoryOptions);
     this.controlStore = new AgentControlStore(store.db, options.retention ?? {
       actionsMs: 86_400_000, attachmentsMs: 7 * 86_400_000,
     });
     this.controlApi = new AgentControlApi(store, this.controlStore, this.registry, {
-      workerToken: options.workerApiToken, readToken: options.controlApiReadToken,
-      writeToken: options.controlApiWriteToken, bridgeToken: options.bridgeToken,
+      readToken: options.controlApiReadToken, writeToken: options.controlApiWriteToken, bridgeToken: options.bridgeToken,
+      agents, memoryReviews: this.memoryReviews,
       sseKeepaliveMs: options.sse?.keepaliveMs ?? 15_000,
       ssePollMs: options.sse?.pollMs ?? 2_000, sseMaxBackpressure: options.sse?.maxBackpressure ?? 3,
       actionTimeoutMs: options.sse?.actionTimeoutMs ?? 30_000,
@@ -133,12 +145,12 @@ export class ControlPlane {
           sessionId, input, delivery: "auto", resume: this.resumeContext(sessionId) });
       },
     });
-    const apiEnabled = Boolean(options.workerApiEnabled || options.controlApiReadToken || options.controlApiWriteToken);
+    const apiEnabled = Boolean(options.controlApiReadToken || options.controlApiWriteToken || agents.length);
     const app = createHttpApp({
       health: () => ({ ok: true, bridges: this.bridges.size, legacyMcpCalls: this.memoryMcp?.legacyCalls ?? 0 }),
       memoryBootstrap: (c) => this.handleMemoryBootstrap(c),
       mcp: {
-        ...(memoryEndpointOptions ? { memory: mcpRoute(memoryEndpoint(...memoryEndpointOptions)) } : {}),
+        ...(memoryOptions ? { memory: mcpRoute(memoryEndpoint(this.memory, memoryOptions)) } : {}),
         ...(apiEnabled ? { bridge: mcpRoute(bridgeEndpoint(this.controlApi, () => this.loopbackBase())) } : {}),
       },
       legacyMcp: this.memoryMcp && ((request, response) => this.memoryMcp!.handle(request, response)),
@@ -160,6 +172,7 @@ export class ControlPlane {
     await new Promise<void>((resolve) => this.http.listen(this.options.port, this.options.host, resolve));
     setInterval(() => this.store.markStaleMachinesOffline(Date.now() - 45_000), 15_000).unref();
     this.controlStore.cleanup();
+    this.memoryReviews?.resume();
     this.cleanupTimer = setInterval(() => this.controlStore.cleanup(), 60 * 60_000);
     this.cleanupTimer.unref();
     log.info({ host: this.options.host, port: this.options.port }, "Control plane listening");

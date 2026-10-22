@@ -80,7 +80,7 @@
 | `skill_move` | 在作用域之间移动（例如提到 `_global`） | 写 |
 | `skill_rm` | 删除技能目录里的某个附属文件（不能删 `SKILL.md`） | 写 |
 
-- **鉴权**：沿用 `AGENT_MEMORY_TOKENS`。写入者身份取自 token；`agent` 角色可写任何作用域，`project` 角色只写项目作用域。
+- **鉴权**：沿用 agent token（`AGENT_TOKENS`，旧名 `AGENT_MEMORY_TOKENS`）。写入者身份取自 token；`agent` 角色可写任何作用域，`project` 角色直接写项目作用域，改下划线开头作用域的技能先经审核（[agent-dispatch-and-review.zh.md](agent-dispatch-and-review.zh.md)）。
 - **写入流程**：`flock` → 校验（frontmatter、单 `SKILL.md`、路径不越界）→ 凭据扫描（允许清单之外的命中就拒写）→ 写文件 → `git commit -- <技能路径>`（作者 `agent-skills (<写入者>)`）→ 异步 `git push`。
 - **配置**：`AGENT_SKILLS_REPO`（未设置则整个模块关闭）、`AGENT_SKILLS_LOCK`。
 

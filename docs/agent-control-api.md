@@ -32,8 +32,9 @@ DSH 原生 Session。API 中的 `taskId`、`conversationId` 只是关联标识�
   展示。
 
 当前工作树通过 `CONTROL_API_READ_TOKEN` 和 `CONTROL_API_WRITE_TOKEN` 提供 read/write 两档 scope：read token
-只能调用 GET（含 SSE），write token 同时拥有读写权限。`WORKER_API_ENABLED=true` 时
-`WORKER_API_TOKEN` 也是一枚读写 token（Hermes `/ab` 命令使用）。生产应给 DSH Host 使用独立 Control token。
+只能调用 GET（含 SSE），write token 同时拥有读写权限，这两枚是人的 token。每个 agent 用 `AGENT_TOKENS` 里自己的
+token 读写，它发起的 action 记为 `agent:<名字>`（0.7.12 删除了 `WORKER_API_TOKEN`）。`/memory-reviews` 列出暂存待审的记忆写入，
+`POST /memory-reviews/{id}/decision`（`{"choice":"allow"|"deny"}`）只接受人的 token。生产应给 DSH Host 使用独立 Control token。
 DSH Host 插件保存 Control token 并代理请求/事件；浏览器 Client 不得读取 token，也不得直连 Control Plane。
 
 以上 Host/Client 限制针对 DSH 插件。0.6.100 起，独立 Control Center 网页（`/control/`）不再要求输入

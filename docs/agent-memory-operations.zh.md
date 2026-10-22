@@ -12,14 +12,11 @@
 
 记忆工具挂在 `/mcp/memory`（官方 MCP SDK，无状态 Streamable HTTP）上，按 token 分权。客户端配置 URL `http://<control-plane>:8787/mcp/memory`、请求头 `Authorization: Bearer <token>` 和 `Accept: application/json, text/event-stream`，server 名用 `memory`，工具显示为 `mcp__memory__<工具>`。`tools/list` 只列出该 token 可用的工具。旧的 `/mcp` 端点保留到 0.8，沿用旧名 `memory_*` / `conversation_*`（也接受新名），每次调用计入 `/health` 的 `legacyMcpCalls`。
 
-| token | 工具 |
-| --- | --- |
-| `CONVERSATION_MCP_READ_TOKEN` | `history_search/history_review/history_read`，以及 `scope/bootstrap/load/search/get/scopes` |
-| `AGENT_MEMORY_TOKENS` 中的任一项 | 上述全部工具，加上 `write/retract`。写入者身份取自 token，不取自参数 |
+每个 agent 用 `AGENT_TOKENS`（旧名 `AGENT_MEMORY_TOKENS`）里自己的那枚 token，能用 `history_*`、`scope/bootstrap/load/search/get/scopes`、`write/retract` 和 `review`。写入者身份取自 token，不取自参数。0.7.12 起没有单独的只读 token（`CONVERSATION_MCP_READ_TOKEN` 已删除）。
 
 `search` 先按空格分词做关键词匹配（命中词数越多越靠前）；一个都没命中时，退回整句召回：消息里出现主题名或别名得 3 分，每个共有的两字片段得 0.5 分（最多 3 分）。`mode: "recall"` 直接用整句召回，Hermes 插件的每轮召回走这个模式，只在 `scope.md` 写了 `prefetch: true` 的作用域开启。
 
-`agent` 角色（Hermes、Dorothy）可以写 `_global`；`project` 角色（仓库里的 Codex/Claude/pi）只能写项目作用域，不能写下划线开头的作用域。没绑定的房间或仓库，可以由写入者用 `scope create=true` 建一个临时作用域（`status: provisional`）。
+`agent` 角色（Hermes、Dorothy）可以直接写 `_global`；`project` 角色（仓库里的 Codex/Claude/pi）直接写项目作用域，写下划线开头的作用域时先暂存、交给审核员，见 [agent-dispatch-and-review.zh.md](agent-dispatch-and-review.zh.md)。没绑定的房间或仓库，可以由写入者用 `scope create=true` 建一个临时作用域（`status: provisional`）。
 
 ## 作用域分工（0.6.98）
 
@@ -55,13 +52,10 @@ curl -s -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
 
 共享技能库（设计见 [agent-skills-design.zh.md](agent-skills-design.zh.md)）挂在同一个 `/mcp/memory` 上，配置 `AGENT_SKILLS_REPO` 后启用：
 
-| token | 工具 |
-| --- | --- |
-| 记忆读者（`CONVERSATION_MCP_READ_TOKEN`） | `skills`、`skill_search`、`skill` |
-| `AGENT_MEMORY_TOKENS` 中的写入者 | 上述加 `skill_write`、`skill_patch`、`skill_rm`、`skill_archive`、`skill_move` |
+每个 agent token 都能用 `skills`、`skill_search`、`skill`、`skill_write`、`skill_patch`、`skill_rm`、`skill_archive`、`skill_move`。
 
 - 技能目录是 `scopes/<scope>/<category>/<skill>/SKILL.md`；一个技能目录里只能有一个 `SKILL.md`。
 - 每次写入是一次只含该技能目录的提交，作者为 `agent-skills (<写入者>)`，在 `AGENT_SKILLS_LOCK` 下进行，之后后台 `git push`（失败不影响写入，下一次推送会带上）。
-- `project` 写入者不能写下划线开头的作用域（`_global`、`_agent-*`）。
+- `project` 写入者改下划线开头作用域（`_global`、`_agent-*`）里的技能时先经审核，见 [agent-dispatch-and-review.zh.md](agent-dispatch-and-review.zh.md)。
 - 归档会把技能目录移到 `AGENT_SKILLS_ARCHIVE_DIR`，Git 历史保留原内容。
 - 凭据扫描与记忆相同，命中就拒写。

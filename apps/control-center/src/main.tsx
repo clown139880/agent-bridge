@@ -116,6 +116,41 @@ function InputCard({ control, state, pending, disabled }: { control: ControlStat
   </form>;
 }
 
+interface MemoryReview { id: string; writer: string; tool: string; args: Record<string, unknown>; summary: string;
+  status: string; reason: string | null; createdAt: number }
+/** Memory/skill writes the reviewer handed to the human (docs/agent-dispatch-and-review.zh.md). */
+function MemoryReviewPanel({ writable }: { writable: boolean }) {
+  const [reviews, setReviews] = useState<MemoryReview[]>([]), [busy, setBusy] = useState(""), [error, setError] = useState("");
+  const client = useRef<ControlClient>();
+  const load = async () => {
+    try { setReviews((await client.current!.request<{ data: MemoryReview[] }>("/memory-reviews?status=waiting_human")).data); setError(""); }
+    catch (e) { setError(explain(e)); }
+  };
+  useEffect(() => {
+    client.current = new ControlClient("", () => {}, "/control/api/v1"); void load();
+    const timer = setInterval(() => { if (document.visibilityState === "visible") void load(); }, 60_000);
+    return () => { clearInterval(timer); client.current?.dispose(); };
+  }, []);
+  const decide = async (id: string, choice: "allow" | "deny") => {
+    setBusy(id);
+    try { await client.current!.request(`/memory-reviews/${segment(id)}/decision`, { body: { choice } }); await load(); }
+    catch (e) { setError(explain(e)); } finally { setBusy(""); }
+  };
+  if (!reviews.length && !error) return null;
+  return <aside className="pending-panel"><strong>待你确认的记忆写入</strong>
+    {error && <p className="error">{error}</p>}
+    {reviews.map(r => <div key={r.id} className="pending-item">
+      <div className="pending-kind">{r.writer} · {time(r.createdAt)}</div>
+      <pre className="pending-summary">{r.summary}</pre>
+      {r.reason && <p className="hint">审核：{r.reason}</p>}
+      <details><summary>完整内容</summary><pre className="pending-summary">{JSON.stringify(r.args, null, 2)}</pre></details>
+      {writable && <div className="row-actions">
+        <button type="button" className="primary" disabled={busy === r.id} onClick={() => void decide(r.id, "allow")}>允许写入</button>
+        <button type="button" className="danger" disabled={busy === r.id} onClick={() => void decide(r.id, "deny")}>拒绝</button></div>}
+    </div>)}
+  </aside>;
+}
+
 function App() {
   const [path, setPath] = useState(location.pathname);
   const [control, setControl] = useState<ControlState>();
@@ -219,6 +254,7 @@ function ActionView({ control, state }: { control: ControlState; state: ViewStat
 
 function Sessions({ control, state }: { control: ControlState; state: ViewState }) {
   return <section>
+    <MemoryReviewPanel writable={state.writable} />
     <div className="page-heading"><div><div className="eyebrow">YOUR CONVERSATIONS</div><h1>最近会话</h1></div>
       {state.writable && <Link className="button primary" to="/control/new">＋ 新对话</Link>}</div>
     <form className="filters" onSubmit={e => { e.preventDefault(); void control.refresh(); }}>

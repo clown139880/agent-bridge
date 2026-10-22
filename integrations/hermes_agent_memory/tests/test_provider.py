@@ -61,7 +61,7 @@ class FakeMcp:
 def mcp(monkeypatch):
     fake = FakeMcp()
     monkeypatch.setenv("AGENT_MEMORY_URL", fake.url)
-    monkeypatch.setenv("AGENT_MEMORY_TOKEN", "writer-token")
+    monkeypatch.setenv("AGENT_TOKEN", "writer-token")
     monkeypatch.setenv("AGENT_MEMORY_SELF_SCOPE", "_agent-dorothy")
     yield fake
     fake.server.shutdown()

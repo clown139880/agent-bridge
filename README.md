@@ -80,12 +80,10 @@ Control Plane 主要变量：
 | `DATABASE_PATH` | SQLite 路径，默认 `./data/control-plane.sqlite` |
 | `CONTROL_HOST` / `CONTROL_PORT` | HTTP/WebSocket 监听地址（Hono 唯一入口，默认 8787） |
 | `BRIDGE_TOKEN` | Bridge 注册密钥，跨机器部署时必须使用长随机值 |
-| `WORKER_API_ENABLED` | 默认 `false`；设为 `true` 才接受 `WORKER_API_TOKEN` |
-| `WORKER_API_TOKEN` | Hermes `/ab` 使用的读写 bearer token，启用时必填 |
-| `CONTROL_API_READ_TOKEN` / `CONTROL_API_WRITE_TOKEN` | Agent Control Host 的只读/读写 token；浏览器不得持有 |
-| `CONVERSATION_MCP_READ_TOKEN` | `/mcp/memory` 的独立只读 bearer token（`history_*` 工具）；不得复用 Bridge 或 Control API 写密钥。配置了 agent 记忆时也可调用只读的记忆与技能工具 |
+| `CONTROL_API_READ_TOKEN` / `CONTROL_API_WRITE_TOKEN` | 人的只读/读写 token（Control Center、DSH）；浏览器不得持有。只有它能裁决交给人的记忆审核 |
+| `AGENT_TOKENS` | 每个 agent 一枚：`名字:token[:agent|project]`，逗号分隔（旧名 `AGENT_MEMORY_TOKENS` 仍可用）。同一枚 token 用于 `/mcp/memory`、`/mcp/bridge` 和 `/api/v1`，以 `agent:<名字>` 记在它发起的 action 上。`project`（默认）写 `_` 开头的作用域或共享技能时先经审核，见 [`docs/agent-dispatch-and-review.zh.md`](docs/agent-dispatch-and-review.zh.md) |
+| `MEMORY_REVIEW` / `MEMORY_REVIEW_MODEL` / `MEMORY_REVIEW_COMMAND` / `MEMORY_REVIEW_TIMEOUT_MS` | 记忆审核员：默认用本机 `claude`（无工具）、模型 `sonnet`、超时 180 秒；`MEMORY_REVIEW=off` 时一律交给人 |
 | `AGENT_MEMORY_VAULT` | 跨 agent 记忆所在的 Git 笔记库（如 `/root/deathnote`）；不设则关闭记忆。见 [`docs/agent-memory-operations.zh.md`](docs/agent-memory-operations.zh.md) |
-| `AGENT_MEMORY_TOKENS` | `名字:token[:agent|project]`，逗号分隔；每个客户端一枚，持有者可以写记忆。`project`（默认）不能写 `_global` |
 | `AGENT_MEMORY_ROOT` / `AGENT_MEMORY_LOCK` / `AGENT_MEMORY_CACHE_DIR` | 笔记库内的记忆目录（默认 `agent-memory`）、与笔记库自动提交共用的 flock 文件、bootstrap 缓存目录（默认数据库旁的 `memory-cache`） |
 | `AGENT_SKILLS_REPO` | 共享技能库的 Git checkout（如 `/root/agent-skills`）；需要先启用 agent 记忆，不设则关闭。见 [`docs/agent-skills-design.zh.md`](docs/agent-skills-design.zh.md) |
 | `AGENT_SKILLS_LOCK` / `AGENT_SKILLS_ARCHIVE_DIR` / `AGENT_SKILLS_PUSH` | 技能库提交用的 flock 文件、归档目录（默认数据库旁的 `skills-archive`）、每次提交后是否后台推送（默认是，设 `false` 关闭） |
@@ -219,14 +217,16 @@ Control Plane 在同一个 8787 端口上提供两个 MCP 端点（官方 MCP SD
 
 | 端点 | server 名 | 工具 |
 | --- | --- | --- |
-| `http://<control-plane>:8787/mcp/memory` | `memory` | 对话档案 `history_search/history_review/history_read`；记忆 `bootstrap/search/get/write/retract/load/scopes/scope`；技能 `skills/skill_search/skill/skill_write/skill_patch/skill_rm/skill_archive/skill_move` |
-| `http://<control-plane>:8787/mcp/bridge` | `bridge` | `workers/sessions/session/pending/wait`，写 token 另有 `create/turn/approve/answer/interrupt` |
+| `http://<control-plane>:8787/mcp/memory` | `memory` | 对话档案 `history_search/history_review/history_read`；记忆 `bootstrap/search/get/write/retract/load/scopes/scope`；技能 `skills/skill_search/skill/skill_write/skill_patch/skill_rm/skill_archive/skill_move`；审核结果 `review` |
+| `http://<control-plane>:8787/mcp/bridge` | `bridge` | `workers/sessions/session/pending/wait/create/turn/approve/answer/interrupt`（只读 token 只有前五个） |
 
 客户端看到的全名是 `mcp__memory__search`、`mcp__bridge__wait` 这样的形式。
 
-`/mcp/bridge` 是 Agent Control API 的一层薄封装，供 Hermes 等 agent 驱动 session。它接受
-Control API token：只读 token 可用 `workers/sessions/session/pending/wait`，`CONTROL_API_WRITE_TOKEN` 另可用
-`create/turn/approve/answer/interrupt`；Bridge 注册 token 会被拒绝。典型流程：`workers` 看有哪些机器与最近目录，`create`
+两个端点都用 agent 自己的 token（`AGENT_TOKENS`），每个 agent 一枚，记忆和调度共用。
+
+`/mcp/bridge` 是 Agent Control API 的一层薄封装，供任何 agent（Hermes、Bridge 下的 Claude/Codex）跨项目、跨机器调度别的
+session，发起的 action 记为 `agent:<名字>`。agent token 可用全部工具；人的只读 token 只有 `workers/sessions/session/pending/wait`；
+Bridge 注册 token 会被拒绝。Claude 下 `mcp__bridge__*` 照常弹审批，经人允许才调度。典型流程：`workers` 看有哪些机器与最近目录，`create`
 新建 session（workspace 可用最近目录名），`turn` 发送新 turn（或 steer 正在运行的 turn），`wait` 等待结束，`pending` 查看待处理请求，
 `approve`（allow/deny/allow-session）与 `answer` 处理审批和问题。
 
@@ -236,8 +236,8 @@ Control API token：只读 token 可用 `workers/sessions/session/pending/wait`�
 没有命令行客户端（`abctl` 已删除）。旧的手写 `/mcp` 端点保留到 0.8，沿用旧工具名（也接受新名），
 每次调用都会记日志并计入 `/health` 的 `legacyMcpCalls`。
 
-`WORKER_API_TOKEN`（`WORKER_API_ENABLED=true`）仍是一枚读写 token，Hermes 的 `/ab` 命令用它列出 session；
-旧的 `/api/v1/runs` Worker API 与 Hermes Kanban 插件已移除，`GET /api/v1/runs` 只保留历史记录查询。
+Hermes 的 `/ab` 命令也用它自己的 agent token 列出 session（0.7.12 删除了 `WORKER_API_TOKEN` 和
+`CONVERSATION_MCP_READ_TOKEN`）。旧的 `/api/v1/runs` Worker API 与 Hermes Kanban 插件已移除，`GET /api/v1/runs` 只保留历史记录查询。
 
 ## 本地启动
 

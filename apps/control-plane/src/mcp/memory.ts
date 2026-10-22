@@ -1,14 +1,21 @@
-import type { AgentMemory, AgentSkills, Writer } from "@agent-bridge/agent-memory";
+import { MemoryError, type AgentMemory, type AgentSkills, type Writer } from "@agent-bridge/agent-memory";
 import type { ConversationMemoryStore } from "@agent-bridge/database";
+import type { MemoryReviews } from "../memory-review.js";
 import { bearerMatches, type McpEndpoint, type McpTool } from "./route.js";
 
 export interface AgentMemoryMcpOptions {
-  store: AgentMemory;
+  /** Cross-agent memory; without it the agents' tokens only search conversation history. */
+  store?: AgentMemory;
   /** Shared skill library (docs/agent-skills-design.zh.md); its tools appear only when configured. */
   skills?: AgentSkills;
-  /** One token per client; the token decides who the writer is, never a tool argument. */
+  /** AGENT_TOKENS: one token per agent; the token decides who the writer is, never a tool argument. */
   writers: Array<Writer & { token: string }>;
+  /** Holds writes a project agent may not make alone for review instead of refusing them. */
+  review?: MemoryReviews;
 }
+
+/** Tools whose refusal for a project writer becomes a review. */
+const REVIEWED = new Set(["write", "retract", "skill_write", "skill_patch", "skill_rm", "skill_archive", "skill_move"]);
 
 export interface MemoryPrincipal { conversation: boolean; memory: boolean; writer?: Writer }
 
@@ -22,6 +29,66 @@ const object = (properties: Record<string, unknown>, required: string[] = []) =>
 
 /** Every memory, history and skill tool, under its 0.7 name and its pre-0.7 legacy name. */
 export function memoryTools(history: ConversationMemoryStore, agentMemory?: AgentMemoryMcpOptions): Array<McpTool<MemoryPrincipal>> {
+  const tools = baseTools(history, agentMemory);
+  const review = agentMemory?.review;
+  if (!review) return tools;
+  return [...tools.map((tool) => REVIEWED.has(tool.name) ? { ...tool, run: async (args: Record<string, unknown>, principal: MemoryPrincipal) => {
+    try { return await tool.run(args, principal); }
+    catch (error) {
+      if (!(error instanceof MemoryError && error.code === "forbidden") || !principal.writer) throw error;
+      return review.submit(principal.writer, tool.name, args);
+    }
+  } } : tool), {
+    name: "review", allowed: (principal: MemoryPrincipal) => principal.memory,
+    description: "Outcome of a write that was held for review (review id from the write's reply): reviewing, waiting_human, applied, denied or failed, with the reason.",
+    inputSchema: object({ review_id: { type: "string" } }, ["review_id"]),
+    run: (args: Record<string, unknown>) => {
+      const found = review.get(required(args, "review_id"));
+      if (!found) throw new Error("review_not_found");
+      const { args: _args, ...rest } = found;
+      return rest;
+    },
+  }];
+}
+
+/** Runs one memory/skill tool as the given writer (an allowed review). */
+export async function runMemoryTool(history: ConversationMemoryStore, agentMemory: AgentMemoryMcpOptions,
+  name: string, args: Record<string, unknown>, writer: Writer): Promise<unknown> {
+  const tool = baseTools(history, agentMemory).find((item) => item.name === name);
+  if (!tool) throw new Error("unknown_tool");
+  return tool.run(args, { conversation: true, memory: true, writer });
+}
+
+/** What a held write would replace or join, for the reviewer. */
+export function reviewContext(agentMemory: AgentMemoryMcpOptions, tool: string, args: Record<string, unknown>): string {
+  const store = agentMemory.store, skills = agentMemory.skills;
+  const text = (key: string) => typeof args[key] === "string" ? args[key] as string : undefined;
+  const parts: string[] = [];
+  const scope = text("scope") ?? text("to");
+  if (store && scope) {
+    try {
+      const info = store.scope(scope);
+      parts.push(`Target scope ${scope} (${info.title}):\n${info.description || "(no description)"}`);
+      parts.push(`Its current core memory:\n${store.bootstrap(scope, 6000) || "(empty)"}`);
+    } catch (error) { parts.push(`Target scope ${scope}: ${error instanceof Error ? error.message : String(error)}`); }
+  }
+  if (store && scope && text("topic") && text("kind")) {
+    const current = store.get(scope, text("topic")!, text("kind")!);
+    parts.push(current.length ? `Current ${text("topic")}/${text("kind")}: ${current[0]!.value}\n${current[0]!.body}` : "No current fact in this slot.");
+  }
+  if (skills && text("name") && tool !== "skill_write") {
+    try {
+      const view = skills.view(text("name")!, "all", text("file"));
+      parts.push(`Current skill file (${view.scope}/${view.name}/${text("file") ?? "SKILL.md"}):\n${view.content}`);
+    } catch (error) { parts.push(`Skill ${text("name")}: ${error instanceof Error ? error.message : String(error)}`); }
+  } else if (skills && text("name")) {
+    try { parts.push(`The skill exists already:\n${skills.view(text("name")!, "all", text("file")).content}`); }
+    catch { parts.push("New skill or file."); }
+  }
+  return parts.join("\n\n");
+}
+
+function baseTools(history: ConversationMemoryStore, agentMemory?: AgentMemoryMcpOptions): Array<McpTool<MemoryPrincipal>> {
   const store = agentMemory?.store, skills = agentMemory?.skills;
   const conversation = (principal: MemoryPrincipal) => principal.conversation;
   const memoryRead = (principal: MemoryPrincipal) => principal.memory && !!store;
@@ -222,19 +289,17 @@ export function memoryTools(history: ConversationMemoryStore, agentMemory?: Agen
   ];
 }
 
-/** The conversation read token reads history and memory; each writer token also writes, as that writer. */
-export function memoryAuthenticator(readToken: string | undefined, agentMemory?: AgentMemoryMcpOptions) {
+/** Each agent token reads history and memory and writes as that agent. */
+export function memoryAuthenticator(agentMemory: AgentMemoryMcpOptions) {
   return (header: string | undefined): MemoryPrincipal | undefined => {
-    if (bearerMatches(header, readToken)) return { conversation: true, memory: !!agentMemory };
-    const writer = agentMemory?.writers.find((item) => bearerMatches(header, item.token));
-    return writer ? { conversation: true, memory: true, writer: { name: writer.name, role: writer.role } } : undefined;
+    const writer = agentMemory.writers.find((item) => bearerMatches(header, item.token));
+    return writer ? { conversation: true, memory: !!agentMemory.store, writer: { name: writer.name, role: writer.role } } : undefined;
   };
 }
 
-export function memoryEndpoint(history: ConversationMemoryStore, readToken: string | undefined,
-  agentMemory?: AgentMemoryMcpOptions): McpEndpoint<MemoryPrincipal> {
+export function memoryEndpoint(history: ConversationMemoryStore, agentMemory: AgentMemoryMcpOptions): McpEndpoint<MemoryPrincipal> {
   return { name: "agent-bridge-memory", version: "0.7.0", instructions: MEMORY_INSTRUCTIONS,
-    authenticate: memoryAuthenticator(readToken, agentMemory), tools: memoryTools(history, agentMemory) };
+    authenticate: memoryAuthenticator(agentMemory), tools: memoryTools(history, agentMemory) };
 }
 
 function required(args: Record<string, unknown>, key: string): string {

@@ -336,6 +336,23 @@ export function migrateDatabase(db: DatabaseSync): void {
       db.exec("COMMIT");
     } catch (error) { try { db.exec("ROLLBACK"); } catch {} throw error; }
   }
+
+  // Memory/skill writes a project agent may not make alone wait here for the reviewer or the human.
+  if (!db.prepare("SELECT 1 FROM schema_migrations WHERE version=11").get()) {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      db.exec(`
+        CREATE TABLE memory_reviews (
+          id TEXT PRIMARY KEY, writer TEXT NOT NULL, tool TEXT NOT NULL, args_json TEXT NOT NULL, summary TEXT NOT NULL,
+          status TEXT NOT NULL, decided_by TEXT, reason TEXT, result_json TEXT, error TEXT,
+          created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX memory_reviews_status_idx ON memory_reviews(status, created_at);
+      `);
+      db.prepare("INSERT INTO schema_migrations(version,applied_at) VALUES (11,?)").run(Date.now());
+      db.exec("COMMIT");
+    } catch (error) { try { db.exec("ROLLBACK"); } catch {} throw error; }
+  }
 }
 
 /**

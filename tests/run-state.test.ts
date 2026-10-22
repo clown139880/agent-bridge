@@ -16,11 +16,11 @@ type ControlInternals = {
   handleBridgeMessage(machineId: string, message: BridgeToControlMessage): Promise<void>;
 };
 
-test("the legacy worker-run routes are gone but the WORKER_API_TOKEN principal still reads the Control API", async () => {
+test("the legacy worker-run routes are gone but an agent token still reads the Control API", async () => {
   const databasePath = join(tmpdir(), `agent-bridge-worker-api-${randomUUID()}.sqlite`);
   const store = new Store(databasePath);
   const control = new ControlPlane(store, {
-    host: "127.0.0.1", port: 0, workerApiEnabled: true, workerApiToken: "test-secret",
+    host: "127.0.0.1", port: 0, agents: [{ name: "hermes", role: "agent", token: "test-secret" }],
   });
   const internals = control as unknown as ControlInternals;
   await control.start();
@@ -63,7 +63,7 @@ test("a run follows its session through heartbeats, approvals and agent events",
     capabilities: ["codex-cli", "codex-app-server"],
   });
   const control = new ControlPlane(store, {
-    host: "127.0.0.1", port: 0, workerApiEnabled: true, workerApiToken: "test-secret",
+    host: "127.0.0.1", port: 0, agents: [{ name: "hermes", role: "agent", token: "test-secret" }],
   });
   const internals = control as unknown as ControlInternals;
   internals.bridges.set("dev", {

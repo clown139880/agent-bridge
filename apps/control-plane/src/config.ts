@@ -14,13 +14,6 @@ const controlPlaneVersion = ((): string => {
   }
 })();
 
-function required(name: string): string {
-  const value = process.env[name];
-  if (!value) throw new Error(`Missing required environment variable: ${name}`);
-  return value;
-}
-
-const workerApiEnabled = process.env.WORKER_API_ENABLED === "true";
 const controlApiReadToken = process.env.CONTROL_API_READ_TOKEN;
 const controlApiWriteToken = process.env.CONTROL_API_WRITE_TOKEN;
 const databasePath = process.env.DATABASE_PATH ?? "./data/control-plane.sqlite";
@@ -56,14 +49,11 @@ export const config = {
   port: Number(process.env.CONTROL_PORT ?? "8787"),
   publicWsUrl: process.env.CONTROL_PUBLIC_WS_URL,
   bridgeToken: process.env.BRIDGE_TOKEN,
-  workerApiEnabled,
-  workerApiToken: workerApiEnabled ? required("WORKER_API_TOKEN") : undefined,
   controlApiReadToken,
   controlApiWriteToken,
-  conversationMemory: {
-    mcpReadToken: process.env.CONVERSATION_MCP_READ_TOKEN,
-  },
+  agents: agentTokens(),
   agentMemory: agentMemoryConfig(),
+  memoryReview: memoryReviewConfig(),
   retention: {
     actionsMs: duration("CONTROL_ACTION_RETENTION_MS", 86_400_000),
     attachmentsMs: duration("CONTROL_ATTACHMENT_RETENTION_MS", 7 * 86_400_000),
@@ -87,25 +77,47 @@ export const config = {
   } : undefined,
 };
 
+/**
+ * AGENT_TOKENS: one token per agent (Hermes, Dorothy, claude@hal, ...), comma-separated
+ * name:token[:agent|project]; repo-bound agents default to project. The same token reads and
+ * writes memory and drives sessions through /mcp/bridge and /api/v1 under the agent's name.
+ * AGENT_MEMORY_TOKENS is the pre-0.7.12 name.
+ */
+function agentTokens() {
+  const variable = process.env.AGENT_TOKENS !== undefined ? "AGENT_TOKENS" : "AGENT_MEMORY_TOKENS";
+  return (process.env[variable] ?? "").split(",").map((item) => item.trim()).filter(Boolean).map((item) => {
+    const [name, token, role = "project"] = item.split(":");
+    if (!name || !token || token.length < 16 || (role !== "agent" && role !== "project")) {
+      throw new Error(`${variable} entries must be name:token[:agent|project] with tokens of at least 16 characters`);
+    }
+    return { name, token, role: role as "agent" | "project" };
+  });
+}
+
 /** Cross-agent memory (docs/agent-memory-design.zh.md); disabled unless AGENT_MEMORY_VAULT is set. */
 function agentMemoryConfig() {
   const vault = process.env.AGENT_MEMORY_VAULT;
   if (!vault) return undefined;
-  // AGENT_MEMORY_TOKENS: comma-separated name:token[:agent|project]; repo-bound agents default to project.
-  const writers = (process.env.AGENT_MEMORY_TOKENS ?? "").split(",").map((item) => item.trim()).filter(Boolean).map((item) => {
-    const [name, token, role = "project"] = item.split(":");
-    if (!name || !token || token.length < 16 || (role !== "agent" && role !== "project")) {
-      throw new Error("AGENT_MEMORY_TOKENS entries must be name:token[:agent|project] with tokens of at least 16 characters");
-    }
-    return { name, token, role: role as "agent" | "project" };
-  });
   return {
     vault,
     root: process.env.AGENT_MEMORY_ROOT ?? "agent-memory",
     lockPath: process.env.AGENT_MEMORY_LOCK,
     cacheDir: process.env.AGENT_MEMORY_CACHE_DIR ?? join(dirname(databasePath), "memory-cache"),
-    writers,
     skills: agentSkillsConfig(),
+  };
+}
+
+/**
+ * Review of memory/skill writes a project agent may not make on its own (docs/agent-dispatch-and-review.zh.md).
+ * MEMORY_REVIEW=off sends every such write to the human instead of the reviewer model.
+ */
+function memoryReviewConfig() {
+  return {
+    reviewer: process.env.MEMORY_REVIEW === "off" ? undefined : {
+      command: process.env.MEMORY_REVIEW_COMMAND ?? "claude",
+      model: process.env.MEMORY_REVIEW_MODEL ?? "sonnet",
+      timeoutMs: duration("MEMORY_REVIEW_TIMEOUT_MS", 180_000),
+    },
   };
 }
 

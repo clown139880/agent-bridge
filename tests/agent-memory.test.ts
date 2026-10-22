@@ -175,13 +175,13 @@ test("each write is one commit touching only its scope; broken hand edits are sk
   assert.ok(existsSync(join(root, "scopes/travel/facts/visa/fact.md")));
 });
 
-test("MCP exposes memory reads to the conversation token and writes only to writer tokens", async () => {
+test("MCP gives every agent token reads and writes, and keeps project agents out of _-scopes", async () => {
   const { memory } = fixture();
   const { createServer } = await import("node:http");
   const { ConversationMcpServer } = await import("../apps/control-plane/src/memory-mcp.js");
   const { ConversationMemoryStore, Store } = await import("../packages/database/src/index.js");
   const store = new Store(join(mkdtempSync(join(tmpdir(), "agent-memory-db-")), "control.sqlite"));
-  const mcp = new ConversationMcpServer(new ConversationMemoryStore(store.db), "reader-token-0123456789", {
+  const mcp = new ConversationMcpServer(new ConversationMemoryStore(store.db), {
     store: memory, writers: [{ name: "hermes", role: "agent", token: "hermes-token-0123456789" },
       { name: "codex@wsl", role: "project", token: "codex-token-0123456789" }] });
   const server = createServer((request, response) => { void mcp.handle(request, response); });
@@ -199,13 +199,10 @@ test("MCP exposes memory reads to the conversation token and writes only to writ
   try {
     assert.equal((await rpc("wrong-token-0123456789", "tools/list")).status, 401);
     const names = async (token: string) => (await rpc(token, "tools/list")).body.result.tools.map((tool: { name: string }) => tool.name);
-    const readerTools = await names("reader-token-0123456789");
+    const readerTools = await names("codex-token-0123456789");
     assert.ok(readerTools.includes("conversation_search") && readerTools.includes("memory_bootstrap"));
-    assert.ok(!readerTools.includes("memory_write"));
     assert.ok((await names("hermes-token-0123456789")).includes("memory_write"));
 
-    assert.match((await call("reader-token-0123456789", "memory_write",
-      { scope: "travel", topic: "visa", kind: "fact", value: "v" })).error.message, /unknown_tool/);
     const written = await call("hermes-token-0123456789", "memory_write",
       { scope: "travel", topic: "visa", topic_display: "签证", kind: "fact", value: "免签" });
     assert.equal(written.result.structuredContent.path, "scopes/travel/facts/visa/fact.md");
@@ -213,19 +210,17 @@ test("MCP exposes memory reads to the conversation token and writes only to writ
     assert.match((await call("codex-token-0123456789", "memory_write",
       { scope: "_global", topic: "x", kind: "fact", value: "v" })).error.message, /forbidden/);
 
-    const resolved = await call("reader-token-0123456789", "memory_resolve_scope", { room_id: "!travel:example.org" });
+    const resolved = await call("codex-token-0123456789", "memory_resolve_scope", { room_id: "!travel:example.org" });
     assert.equal(resolved.result.structuredContent.scope, "travel");
-    assert.match((await call("reader-token-0123456789", "memory_resolve_scope", { room_id: "!x:example.org", create: true }))
-      .error.message, /unknown_tool/);
-    const boot = await call("reader-token-0123456789", "memory_bootstrap", { scope: "travel" });
+    const boot = await call("codex-token-0123456789", "memory_bootstrap", { scope: "travel" });
     assert.match(boot.result.structuredContent.text, /^- 免签$/m);
-    const hits = await call("reader-token-0123456789", "memory_search", { query: "免签" });
+    const hits = await call("codex-token-0123456789", "memory_search", { query: "免签" });
     assert.equal(hits.result.structuredContent.hits[0].scope, "travel");
-    const scopes = await call("reader-token-0123456789", "memory_scopes", {});
+    const scopes = await call("codex-token-0123456789", "memory_scopes", {});
     assert.equal(scopes.result.structuredContent.hidden, 1);
-    assert.equal((await call("reader-token-0123456789", "bootstrap", { scope: "travel" })).result.structuredContent.scope, "travel",
+    assert.equal((await call("codex-token-0123456789", "bootstrap", { scope: "travel" })).result.structuredContent.scope, "travel",
       "the legacy endpoint also accepts 0.7 names");
-    assert.equal(mcp.legacyCalls, 8);
+    assert.equal(mcp.legacyCalls, 7);
   } finally {
     server.close();
     store.db.close();
@@ -239,8 +234,9 @@ test("/mcp/memory serves the short tool names over the MCP SDK with the same tok
   const { memoryEndpoint } = await import("../apps/control-plane/src/mcp/memory.js");
   const { ConversationMemoryStore, Store } = await import("../packages/database/src/index.js");
   const store = new Store(join(mkdtempSync(join(tmpdir(), "agent-memory-db-")), "control.sqlite"));
-  const app = new Hono().all("/mcp/memory", mcpRoute(memoryEndpoint(new ConversationMemoryStore(store.db), "reader-token-0123456789", {
-    store: memory, writers: [{ name: "hermes", role: "agent", token: "hermes-token-0123456789" }] })));
+  const app = new Hono().all("/mcp/memory", mcpRoute(memoryEndpoint(new ConversationMemoryStore(store.db), {
+    store: memory, writers: [{ name: "hermes", role: "agent", token: "hermes-token-0123456789" },
+      { name: "codex@wsl", role: "project", token: "codex-token-0123456789" }] })));
   let id = 0;
   const rpc = async (token: string, method: string, params: unknown = {}) => {
     const response = await app.request("/mcp/memory", { method: "POST",
@@ -252,23 +248,23 @@ test("/mcp/memory serves the short tool names over the MCP SDK with the same tok
   };
   try {
     assert.equal((await rpc("wrong-token-0123456789", "tools/list")).status, 401);
-    const init = await rpc("reader-token-0123456789", "initialize", { protocolVersion: "2025-06-18", capabilities: {},
+    const init = await rpc("codex-token-0123456789", "initialize", { protocolVersion: "2025-06-18", capabilities: {},
       clientInfo: { name: "test", version: "0" } });
     assert.equal(init.body.result.serverInfo.name, "agent-bridge-memory");
     const names = async (token: string) => (await rpc(token, "tools/list")).body.result.tools.map((tool: { name: string }) => tool.name);
-    const readerTools = await names("reader-token-0123456789");
+    const readerTools = await names("codex-token-0123456789");
     assert.ok(readerTools.includes("history_search") && readerTools.includes("bootstrap") && readerTools.includes("scope"));
-    assert.ok(!readerTools.includes("write") && !readerTools.some((name: string) => name.startsWith("memory_")));
+    assert.ok(readerTools.includes("write") && !readerTools.some((name: string) => name.startsWith("memory_")));
     assert.ok((await names("hermes-token-0123456789")).includes("write"));
 
-    const denied = await rpc("reader-token-0123456789", "tools/call", { name: "write", arguments: { scope: "travel", topic: "visa", kind: "fact", value: "v" } });
-    assert.ok(denied.body.error || denied.body.result?.isError, "a reader cannot call a tool it was never given");
+    const denied = await rpc("codex-token-0123456789", "tools/call", { name: "write", arguments: { scope: "_global", topic: "visa", kind: "fact", value: "v" } });
+    assert.ok(denied.body.error || denied.body.result?.isError, "a project agent cannot write _global without review");
     const written = await rpc("hermes-token-0123456789", "tools/call", { name: "write",
       arguments: { scope: "travel", topic: "visa", topic_display: "签证", kind: "fact", value: "免签" } });
     assert.equal(written.body.result.structuredContent.path, "scopes/travel/facts/visa/fact.md");
-    const boot = await rpc("reader-token-0123456789", "tools/call", { name: "bootstrap", arguments: { scope: "travel" } });
+    const boot = await rpc("codex-token-0123456789", "tools/call", { name: "bootstrap", arguments: { scope: "travel" } });
     assert.match(boot.body.result.structuredContent.text, /^- 免签$/m);
-    const failed = await rpc("reader-token-0123456789", "tools/call", { name: "get", arguments: { scope: "travel", topic: "visa" } });
+    const failed = await rpc("codex-token-0123456789", "tools/call", { name: "get", arguments: { scope: "travel", topic: "visa" } });
     assert.ok(failed.body.error || failed.body.result?.isError, "schema validation rejects a missing kind");
   } finally {
     store.db.close();

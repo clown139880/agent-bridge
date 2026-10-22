@@ -16,7 +16,7 @@ Hermes MemoryProvider：用 Control Plane `/mcp/memory` 上的记忆工具（`bo
 ln -s /root/agent-bridge/integrations/hermes_agent_memory ~/.hermes/profiles/dorothy/plugins/agent-bridge-memory
 ```
 
-profile `.env`：`AGENT_MEMORY_TOKEN=<Control Plane AGENT_MEMORY_TOKENS 中该 profile 的 token>`，可选 `AGENT_MEMORY_URL`（默认 `http://127.0.0.1:8787/mcp/memory`，Bearer 即上面的 `AGENT_MEMORY_TOKEN`；旧的 `/mcp` 与旧工具名保留到 0.8）、`AGENT_MEMORY_SELF_SCOPE`、`AGENT_MEMORY_SHARED_SCOPE`。profile `config.yaml`：
+profile `.env`：`AGENT_TOKEN=<Control Plane AGENT_TOKENS 中该 profile 的 token>`（旧名 `AGENT_MEMORY_TOKEN` 仍可用；同一枚 token 也给 `config.yaml` 里的 `bridge` MCP 和 `/ab` 用），可选 `AGENT_MEMORY_URL`（默认 `http://127.0.0.1:8787/mcp/memory`，Bearer 即上面的 `AGENT_TOKEN`；旧的 `/mcp` 与旧工具名保留到 0.8）、`AGENT_MEMORY_SELF_SCOPE`、`AGENT_MEMORY_SHARED_SCOPE`。profile `config.yaml`：
 
 ```yaml
 memory:

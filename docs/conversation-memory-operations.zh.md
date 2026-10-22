@@ -4,7 +4,7 @@
 
 ## 接入
 
-Control Plane 在配置 `CONVERSATION_MCP_READ_TOKEN` 后开放远程 HTTP MCP：`http://<control-plane>:8787/mcp/memory`，请求头 `Authorization: Bearer <token>`，并需 `Accept: application/json, text/event-stream`。客户端里把 server 命名为 `memory`，工具即 `mcp__memory__history_search` 等。该 token 是独立只读身份，不得与 `BRIDGE_TOKEN`、`CONTROL_API_WRITE_TOKEN` 复用。客户端配置令牌时使用本机秘密或环境变量，不写入 prompt、技能或 Git。
+Control Plane 在配置 `AGENT_TOKENS` 后开放远程 HTTP MCP：`http://<control-plane>:8787/mcp/memory`，请求头 `Authorization: Bearer <该 agent 的 token>`，并需 `Accept: application/json, text/event-stream`。客户端里把 server 命名为 `memory`，工具即 `mcp__memory__history_search` 等。agent token 不得与 `BRIDGE_TOKEN`、`CONTROL_API_*` 复用（0.7.12 删除了独立只读的 `CONVERSATION_MCP_READ_TOKEN`）。客户端配置令牌时使用本机秘密或环境变量，不写入 prompt、技能或 Git。
 
 MCP 暴露三个对话工具（同一端点还有记忆与技能工具，见 [agent-memory-operations.zh.md](agent-memory-operations.zh.md)）：
 
