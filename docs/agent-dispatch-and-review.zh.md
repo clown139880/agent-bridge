@@ -26,6 +26,7 @@
 - 删除：`WORKER_API_ENABLED` / `WORKER_API_TOKEN`（只有 Hermes 的 `/ab` 在用）、`CONVERSATION_MCP_READ_TOKEN`（没人用了）。
 - agent token 在 `/api/v1` 上的身份是 `agent:<名字>`，记在它发起的每个 action 上（`actions.principal`），所以能查到哪个 session 是谁派的。
 - `agent` / `project` 角色只决定哪些记忆写入要审核，不再一刀切拒写。
+- Bridge 只读自己的 env 文件（`BRIDGE_ENV_FILE`，默认 `.env.bridge`）。0.7.13 之前它还会读工作目录下的 `.env`，HAL Bridge 跑在仓库目录里，于是把 Control Plane 的人类 token 和全部 agent token 传给了它启动的 Codex/Claude，HAL 上的 agent 可以冒充你或别的 agent。
 - 客户端：Hermes/Dorothy 的 `.env` 只留 `AGENT_TOKEN`（插件和 `/ab` 兼容旧名 `AGENT_MEMORY_TOKEN`），`config.yaml` 的 `bridge` 用 `${AGENT_TOKEN}`；各机器的 Claude（`~/.claude.json`）和 Codex（`~/.codex/config.toml`）在 `memory` 旁加一个 `bridge`，用同一枚 token。
 
 ## 3. 记忆和技能写入的审核

@@ -1,10 +1,11 @@
-import "dotenv/config";
 import { readFileSync } from "node:fs";
 import { hostname, platform } from "node:os";
 import { join } from "node:path";
 import { config as loadEnv } from "dotenv";
 import { splitAllowedRoots } from "./path-utils.js";
 
+// Only the Bridge's own env file. On HAL the Bridge runs in the checkout beside the Control Plane's
+// .env, whose human and agent tokens must never reach the agents it starts (0.7.13).
 loadEnv({ path: process.env.BRIDGE_ENV_FILE ?? ".env.bridge", override: true, quiet: true });
 
 const packageVersion = (JSON.parse(readFileSync(new URL("../../../package.json", import.meta.url), "utf8")) as { version: string }).version;
