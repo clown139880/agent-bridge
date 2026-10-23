@@ -17,7 +17,7 @@ test("mobile browser on non-secure HTTP: no-login entry, paging, history/SSE, se
   const directory = await mkdtemp(resolve(".runtime/tests/browser-"));
   const writes: { path: string; body: any; key?: string }[] = [], streams = new Set<import("node:http").ServerResponse>();
   const actions = new Map<string, Record<string, unknown>>();
-  let streamId = 0, turn = "turn-one", busy = true, writable = true;
+  let streamId = 0, turn = "turn-one", busy = true, writable = true, slowDetailMs = 0;
   const worker = { id: "claude@test", name: "Claude @ Test", status: "online", capabilities: ["session-actions", "turn-steer", "turn-interrupt"],
     workspaces: ["/work/repo"], recentWorkspaces: [{ name: "repo", path: "/work/repo" }] };
   const summary = (id = "s-active") => ({ sessionId: id, workerId: worker.id, machineId: "test", agent: "claude-code",
@@ -74,7 +74,7 @@ test("mobile browser on non-secure HTTP: no-login entry, paging, history/SSE, se
       const start = Math.max(0, end - 100);
       return send({ data: events.slice(start, end), hasMore: start > 0, nextCursor: start > 0 ? "before-30" : null });
     }
-    if (url.pathname.startsWith("/api/v1/sessions/")) return send(summary(url.pathname.split("/")[4]));
+    if (url.pathname.startsWith("/api/v1/sessions/")) { setTimeout(() => send(summary(url.pathname.split("/")[4])), slowDetailMs); return; }
     // Like the Control Plane: the client reconciles here when action.updated beats the POST response.
     if (url.pathname.startsWith("/api/v1/actions/")) return send(actions.get(url.pathname.split("/").at(-1)!) ?? { actionId: url.pathname.split("/").at(-1), status: "accepted", kind: "submit_turn", sessionId: "s-active" });
     return send({ data: [], hasMore: false, nextCursor: null });
@@ -149,6 +149,24 @@ test("mobile browser on non-secure HTTP: no-login entry, paging, history/SSE, se
   const newest = { eventId: "live-msg", cursor: "e:130", sessionId: "s-active", type: "message.completed", turnId: turn, timestamp: 4000, payload: { role: "assistant", text: "SSE 实时消息已到达" } };
   events.push(newest); emit("session.event.appended", newest); await wait("document.body.innerText.includes('SSE 实时消息已到达')");
   await js("document.querySelector('.transcript .load-more').click()"); await wait("document.body.innerText.includes('历史消息 0')");
+  // Switching back and forth (list and detail, background and foreground) keeps the page: no reload state, same place.
+  // Sampled before every painted frame: what the user would actually see.
+  const flashWatch = "window.__flash=false;window.__frames=0;requestAnimationFrame(function f(){window.__frames++;if(location.pathname.includes('/sessions/')&&(document.body.innerText.includes('正在读取会话')||!document.querySelector('.message')))window.__flash=true;if(window.__frames<120)requestAnimationFrame(f)});";
+  await js("window.scrollTo(0,400)"); await wait("Math.round(scrollY)===400");
+  await js("document.querySelector('.back').click()"); await wait("!!document.querySelector('a[href=\"/control/sessions/s-active\"]')");
+  slowDetailMs = 1500;
+  await js(`${flashWatch}document.querySelector('a[href="/control/sessions/s-active"]').click()`);
+  await wait("document.body.innerText.includes('历史消息 0') && document.body.innerText.includes('正在同步')");
+  await wait("!document.body.innerText.includes('正在同步')");
+  assert.equal(await js("window.__flash"), false, "a revisited detail must render from cache, not from an empty loading page");
+  assert.equal(await js("Math.round(scrollY)"), 400, "a revisited detail keeps its scroll position");
+  await js("Object.defineProperty(document,'visibilityState',{configurable:true,get:()=>window.__vis||'visible'});window.__vis='hidden';document.dispatchEvent(new Event('visibilitychange'))");
+  await wait("document.body.innerText.includes('后台已暂停')");
+  await js(`window.__vis='visible';${flashWatch}document.dispatchEvent(new Event('visibilitychange'))`);
+  await wait("document.body.innerText.includes('实时已连接')");
+  assert.equal(await js("window.__flash"), false, "returning to the foreground must not reload the page");
+  assert.equal(await js("Math.round(scrollY)"), 400);
+  slowDetailMs = 0;
   assert.equal(await js("document.documentElement.scrollWidth<=innerWidth"), true, "390px layout must not overflow horizontally");
   await fill("#message", " \n ", true);
   assert.equal(await js("document.querySelector('.composer button.primary').disabled"), true, "whitespace draft must stay disabled");
@@ -187,8 +205,11 @@ test("mobile browser on non-secure HTTP: no-login entry, paging, history/SSE, se
   assert.equal(await js("document.documentElement.scrollWidth<=innerWidth"), true);
   const screenshot = await command("Page.captureScreenshot", { format: "png" });
   await writeFile(resolve(directory, "mobile.png"), Buffer.from(screenshot.data, "base64"));
-  writable = false;
+  writable = false; slowDetailMs = 3000;
   await command("Page.reload");
+  // Recent conversations come back from IndexedDB before the slow detail GET answers.
+  await wait("!!document.querySelector('.message') && document.body.innerText.includes('正在同步')");
+  slowDetailMs = 0;
   await wait("!!document.querySelector('#message') && document.body.innerText.includes('只读模式')");
   assert.equal(await js("!!document.querySelector('#token')"), false, "reload connects without login");
   await fill("#message", "只读不能发送", true);

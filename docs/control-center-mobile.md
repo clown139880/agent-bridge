@@ -197,6 +197,10 @@ DSH Host/Client 凭据限制继续成立，本入口不读取 DSH Host 凭据。
 | `visibilitychange` 到 hidden、pagehide、路由离开且无订阅需求 | abort SSE 和未完成查询、取消重连定时器；不停止服务器上的 turn |
 | 回到前台 | 同一内存状态可从已应用 cursor 续接，并做一次详情/待结算 action 对账；状态已丢失则重新初始化 |
 
+**详情缓存（0.7.14 起）**：离开详情、页面隐藏和详情加载完成时，把该会话（session、已加载事件、待办、历史 cursor）记进内存（最近 8 个）。回到详情或回到前台时先立即显示缓存（`syncing`，不出现整页读取态，操作按钮在同步完成前不可用），再用 tail 增量合并（`mergeTail`）；缓存与新 tail 没有交集且还有更早内容时改用新 tail，不留空洞。滚动位置按页面保存在本标签页内存。最近 5 个会话（每个最多 150 条事件，超出部分改为“加载更早内容”）写入 IndexedDB `control-center/details`，刷新或 WebView 被回收后在 `/access` 成功后读出；3 天过期，401 时清空。选 IndexedDB 而不是 sessionStorage：后者在 Android 结束 App 进程后丢失、同步写、约 5 MB 字符串配额容易被工具输出撑满。
+
+**UCTW 原生桥**：`src/native/uctw.ts`。仅当 `window.uctw` 存在且 `version() >= 1` 时调用，异常静默忽略；普通浏览器无任何变化。新待审批/待回答 → `sound("approval")` + `haptic("warning")`；当前会话 `turn.completed` → `done`/`success`，`turn.failed` → `error`/`error`；发送、提交回答、审批按钮 → `haptic("tick")`。图片仍走 `<input type=file accept="image/*">`（不加 `capture`），类型由前端再校验。
+
 一个标签页至多一个流，路由组件共享连接管理器，禁止同时开列表流、详情流和 action 流。页面无需求、隐藏或离线时不设置周期 fetch；浏览器的 `online` / 可见性事件和用户重试触发恢复。闲置详情不自动发现别处发起的新 turn，界面显示最近刷新时间并提供刷新入口。
 
 ## 7. SSE 消费、恢复与背压

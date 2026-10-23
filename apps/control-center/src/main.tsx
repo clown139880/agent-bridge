@@ -2,9 +2,11 @@ import React, { useEffect, useLayoutEffect, useRef, useState, useSyncExternalSto
 import { createRoot } from "react-dom/client";
 import { ControlClient, explain } from "./api/client";
 import { BUILD_VERSION, newerBuild, runningEntry } from "./build";
+import { clearDetailStore, openDetailStore } from "./cache";
+import { haptic } from "./native/uctw";
 import { MessageText } from "./markdown";
 import { isLive, pendingId, segment, type Pending, type Session, type SessionEvent, type Snapshot } from "./api/types";
-import { ControlState, IMAGE_TYPES, type Route, type ViewState } from "./state";
+import { ControlState, type Route, type ViewState } from "./state";
 import "./styles.css";
 
 function navigate(path: string) {
@@ -57,7 +59,8 @@ function Attachments({ control, state, id, disabled }: { control: ControlState; 
     {rows.length > 0 && <ul className="attachment-list">{rows.map(u => <li key={u.localId} className={`attachment ${u.status}`}>
       <img src={u.preview} alt="" /><span>{u.status === "uploading" ? "上传中…" : u.status === "error" ? u.error : u.name}</span>
       <button type="button" className="quiet" aria-label={`移除 ${u.name}`} onClick={() => control.removeUpload(id, u.localId)}>×</button></li>)}</ul>}
-    <input ref={input} type="file" accept={IMAGE_TYPES.join(",")} multiple hidden onChange={e => {
+    {/* image/* lets a WebView offer camera and gallery; addFiles still enforces the accepted types. */}
+    <input ref={input} type="file" accept="image/*" multiple hidden onChange={e => {
       control.addFiles(id, [...(e.target.files ?? [])]); e.target.value = "";
     }} />
     <button type="button" className="quiet attach" disabled={disabled} onClick={() => input.current?.click()}>＋ 图片</button>
@@ -84,6 +87,7 @@ function ApprovalCard({ control, pending, disabled }: { control: ControlState; p
       className={choice === "allow" ? "primary" : choice === "deny" ? "danger" : ""}
       onClick={() => {
         if (choice === "allow-session" && !confirm("将在本会话后续所有调用中允许这个工具（不只是这一条命令）。确定？")) return;
+        haptic("tick");
         void control.submit(`/approvals/${segment(id)}/decision`, { choice });
       }}>{choiceLabels[choice] ?? choice}</button>)}</div>
     {choices.includes("allow-session") && <small className="hint">“本会话始终允许”放行整个工具的后续调用，不只当前这一条。</small>}
@@ -99,6 +103,7 @@ function InputCard({ control, state, pending, disabled }: { control: ControlStat
   const complete = questions.length > 0 && questions.every(q => value(q.id));
   return <form className="pending-item" onSubmit={e => {
     e.preventDefault(); if (!complete || disabled) return;
+    haptic("tick");
     void control.submit(`/user-input/${segment(pid)}/response`,
       { answers: Object.fromEntries(questions.map(q => [q.id, { answers: [value(q.id)] }])) });
   }}><div className="pending-kind">问题</div>
@@ -170,12 +175,12 @@ function App() {
     void (async () => {
       try {
         const access = await client.request<{ writable: boolean; version?: string }>("/access");
-        const snapshot = await client.request<Snapshot>("/snapshot?sessionLimit=50");
+        const [snapshot, store] = await Promise.all([client.request<Snapshot>("/snapshot?sessionLimit=50"), openDetailStore()]);
         if (cancelled) return;
         const instance = new ControlState("", access.writable, snapshot, () => {
-          active.current?.dispose(); active.current = undefined; setControl(undefined);
+          active.current?.dispose(); active.current = undefined; setControl(undefined); clearDetailStore();
           setError("连接已失效，请重新连接；外网访问请先完成 Cloudflare Access 验证。");
-        }, navigate, "/control/api/v1");
+        }, navigate, "/control/api/v1", store);
         active.current = instance; setServerVersion(access.version ?? "unknown"); setControl(instance);
         if (!/^\/control\/(sessions(?:\/[^/]+)?|new)\/?$/.test(location.pathname)) navigate("/control/sessions");
       } catch (e) { if (!cancelled) setError(explain(e)); }
@@ -198,7 +203,8 @@ function Center({ control, path, serverVersion }: { control: ControlState; path:
   const match = path.match(/^\/control\/sessions\/([^/]+)\/?$/);
   try { route = match ? { page: "detail", id: decodeURIComponent(match[1]) } : { page: path === "/control/new" ? "new" : "sessions" }; }
   catch { route = { page: "sessions" }; }
-  useEffect(() => { void control.open(route); }, [control, path]);
+  // Before paint: a cached detail replaces the previous page's state in the first visible frame.
+  useLayoutEffect(() => { void control.open(route); }, [control, path]);
   useEffect(() => {
     const visible = () => control.setVisible(document.visibilityState === "visible" && navigator.onLine);
     const hide = () => control.setVisible(false);
@@ -252,7 +258,25 @@ function ActionView({ control, state }: { control: ControlState; state: ViewStat
   </aside>;
 }
 
+/** Scroll positions by page for this tab, so switching back and forth does not lose the place. */
+const scrollMemory = new Map<string, { y: number; bottom: boolean }>();
+function useRememberScroll(key: string, onScroll?: (bottom: boolean) => void) {
+  const callback = useRef(onScroll); callback.current = onScroll;
+  // A layout effect: its cleanup still sees this page's DOM, before the next page's shorter content clamps the scroll.
+  useLayoutEffect(() => {
+    const save = () => {
+      const bottom = window.scrollY + window.innerHeight > document.documentElement.scrollHeight - 160;
+      scrollMemory.set(key, { y: window.scrollY, bottom }); return bottom;
+    };
+    const scroll = () => callback.current?.(save());
+    window.addEventListener("scroll", scroll, { passive: true });
+    return () => { window.removeEventListener("scroll", scroll); save(); };
+  }, [key]);
+}
+
 function Sessions({ control, state }: { control: ControlState; state: ViewState }) {
+  useRememberScroll("sessions");
+  useLayoutEffect(() => { const saved = scrollMemory.get("sessions"); if (saved) window.scrollTo({ top: saved.y }); }, []);
   return <section>
     <MemoryReviewPanel writable={state.writable} />
     <div className="page-heading"><div><div className="eyebrow">YOUR CONVERSATIONS</div><h1>最近会话</h1></div>
@@ -291,6 +315,7 @@ function NewSession({ control, state }: { control: ControlState; state: ViewStat
     <div className="page-heading"><div><div className="eyebrow">START SOMETHING</div><h1>新的对话</h1></div></div>
     <form className="panel new-form" onSubmit={e => {
       e.preventDefault(); if (!worker || !absolute || busy || !state.writable) return;
+      haptic("tick");
       void control.submit("/sessions", { workerId, workspace, ...modelBody(model),
         ...(input.trim() ? { input, ...attachmentBody(state, "new") } : {}) }, "new");
     }}>
@@ -334,23 +359,25 @@ function Detail({ control, state, id }: { control: ControlState; state: ViewStat
   const caps = session?.capabilities ?? worker?.capabilities ?? [];
   const online = worker?.status === "online" && session?.status !== "offline";
   const busy = isBusy(state);
-  const canOperate = state.writable && online && caps.includes("session-actions") && !state.loading && !busy;
+  const canOperate = state.writable && online && caps.includes("session-actions") && !state.loading && !state.syncing && !busy;
   const blocked = Boolean(session && (session.pendingApprovalCount || session.pendingUserInputCount || session.status.startsWith("waiting")));
   const running = isLive(session);
   const canInterrupt = Boolean(session && canOperate && session.activeTurnId && running && caps.includes("turn-interrupt"));
   const interrupt = () => void control.submit(`/sessions/${segment(id)}/interrupt`, { expectedTurnId: session!.activeTurnId });
   const draft = state.drafts[id] ?? "", [model, setModel] = useState<ModelChoice>({ model: "", effort: "" });
-  const [optionsOpen, setOptionsOpen] = useState(false), canResolve = state.writable && online && !busy;
+  const [optionsOpen, setOptionsOpen] = useState(false), canResolve = state.writable && online && !state.syncing && !busy;
   const bottom = useRef<HTMLDivElement>(null), transcript = useRef<HTMLDivElement>(null);
-  const follow = useRef(true), [unread, setUnread] = useState(0), previous = useRef<string[]>([]);
+  const restore = useRef(scrollMemory.get(id));
+  const follow = useRef(restore.current?.bottom ?? true), [unread, setUnread] = useState(0), previous = useRef<string[]>([]);
   const anchor = useRef<{ top: number; height: number }>();
   useEffect(() => { if (!state.moreLoading) anchor.current = undefined; }, [state.moreLoading]);
-  useEffect(() => {
-    const scroll = () => { follow.current = window.scrollY + window.innerHeight > document.documentElement.scrollHeight - 160; if (follow.current) setUnread(0); };
-    window.addEventListener("scroll", scroll, { passive: true }); return () => window.removeEventListener("scroll", scroll);
-  }, []);
+  useRememberScroll(id, bottom => { follow.current = bottom; if (bottom) setUnread(0); });
   useLayoutEffect(() => {
-    if (anchor.current) {
+    if (restore.current && state.events.length) {
+      // A revisited conversation reopens where it was left (or at its end, when it was followed).
+      if (restore.current.bottom) bottom.current?.scrollIntoView({ block: "end" }); else window.scrollTo({ top: restore.current.y });
+      restore.current = undefined;
+    } else if (anchor.current) {
       window.scrollTo({ top: anchor.current.top + (transcript.current?.scrollHeight ?? 0) - anchor.current.height });
       anchor.current = undefined;
     } else if (state.events.length) {
@@ -363,7 +390,7 @@ function Detail({ control, state, id }: { control: ControlState; state: ViewStat
   return <section className="detail-page"><Link className="back" to="/control/sessions">← 最近会话</Link>
     <div className="detail-heading"><div className="eyebrow">CONVERSATION</div><h1>{session ? title(session) : state.loading ? "正在读取会话…" : "会话详情"}</h1></div>
     {session && <>
-      <div className="detail-status"><div><Status status={session.status} /><small aria-live="polite">{state.connection}</small></div>
+      <div className="detail-status"><div><Status status={session.status} /><small aria-live="polite">{state.syncing ? "正在同步…" : state.connection}</small></div>
         <button className="interrupt" disabled={!canInterrupt} onClick={interrupt}>■ 打断</button></div>
       <details className="session-info"><summary>{session.agent} <span>·</span> {session.machineId} <span>·</span> {session.projectName}</summary>
         <p className="break-all">{session.workspace}</p><small className="break-all">Session · {id}</small>
@@ -382,13 +409,14 @@ function Detail({ control, state, id }: { control: ControlState; state: ViewStat
         {state.approvals.map(p => <ApprovalCard key={pendingId(p)} control={control} pending={p} disabled={!canResolve} />)}
         {state.inputs.map(p => <InputCard key={pendingId(p)} control={control} state={state} pending={p} disabled={!canResolve} />)}
         {!state.approvals.length && !state.inputs.length && <small>正在读取待办…</small>}
-        {!canResolve && <small>{!state.writable ? "只读模式，无法处理。" : !online ? "Worker 离线，暂不能处理。" : "正在提交…"}</small>}</aside>}
+        {!canResolve && <small>{!state.writable ? "只读模式，无法处理。" : !online ? "Worker 离线，暂不能处理。" : state.syncing ? "正在同步…" : "正在提交…"}</small>}</aside>}
       <div ref={bottom} className="transcript-end" />
     </div>
     {unread > 0 && <button className="new-content" onClick={() => { follow.current = true; setUnread(0); bottom.current?.scrollIntoView({ block: "end", behavior: "smooth" }); }}>↓ {unread} 条新内容</button>}
     {session && <form className="composer" onSubmit={e => {
       e.preventDefault(); if (!canOperate || !draft.trim() || blocked) return;
       if (uploading(state, id)) return;
+      haptic("tick");
       const body = session.activeTurnId ? { input: draft, delivery: "steer", expectedTurnId: session.activeTurnId, ...attachmentBody(state, id) }
         : { input: draft, delivery: "start_turn", ...modelBody(model), ...attachmentBody(state, id) };
       void control.submit(`/sessions/${segment(id)}/turns`, body, id);
