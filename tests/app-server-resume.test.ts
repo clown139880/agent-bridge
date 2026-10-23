@@ -229,8 +229,16 @@ test("Guardian reviews, other subagents and ephemeral threads are not discovered
     command: "codex", url: "ws://127.0.0.1:4500", allowedRoots: [process.cwd()],
     manageServer: false, reconnectMs: 3_000,
   }, (message) => emitted.push(message));
-  const internals = adapter as unknown as { handleNotification(method: string, params: Record<string, unknown>): Promise<void> };
+  const internals = adapter as unknown as {
+    handleNotification(method: string, params: Record<string, unknown>): Promise<void>;
+    request(method: string, params: Record<string, unknown>): Promise<unknown>;
+  };
   const thread = (id: string, extra: Record<string, unknown> = {}) => ({ id, cwd: process.cwd(), status: { type: "idle" }, ...extra });
+  const subscriptions: string[] = [];
+  internals.request = async (method, params) => {
+    if (method === "thread/resume") subscriptions.push(String(params.threadId));
+    return { thread: { ...thread(String(params.threadId)), turns: [] } };
+  };
   for (const t of [
     thread("guardian", { source: { subAgent: { other: "guardian" } }, threadSource: "guardian_review" }),
     thread("spawned", { parentThreadId: "parent", source: { subAgent: { thread_spawn: { depth: 1, parent_thread_id: "parent" } } } }),
@@ -238,6 +246,89 @@ test("Guardian reviews, other subagents and ephemeral threads are not discovered
     thread("conversation", { ephemeral: false, source: "vscode", threadSource: "user" }),
   ]) await internals.handleNotification("thread/started", { thread: t });
   assert.deepEqual([...new Set(emitted.flatMap(m => "sessionId" in m ? [m.sessionId] : []))], ["conversation"]);
+  assert.deepEqual(subscriptions, ["conversation"]);
+});
+
+test("concurrent subscriptions share one resume and ignore its thread/started echo", async () => {
+  const adapter = new CodexAppServerAdapter({ command: "codex", url: "ws://127.0.0.1:4500",
+    allowedRoots: [process.cwd()], manageServer: false, reconnectMs: 3_000 }, () => {});
+  const internals = adapter as unknown as {
+    ensureThreadSubscribed(id: string): Promise<unknown>;
+    handleNotification(method: string, params: Record<string, unknown>): Promise<void>;
+    request(method: string, params: Record<string, unknown>): Promise<unknown>;
+    subscribedThreads: Set<string>;
+  };
+  let resolve!: (value: unknown) => void, resumes = 0;
+  const thread = { id: "external", cwd: process.cwd(), status: { type: "idle" } };
+  internals.request = async (method) => {
+    assert.equal(method, "thread/resume");
+    resumes++;
+    return new Promise(r => { resolve = r; });
+  };
+  const first = internals.ensureThreadSubscribed(thread.id);
+  const second = internals.ensureThreadSubscribed(thread.id);
+  await internals.handleNotification("thread/started", { thread });
+  assert.equal(resumes, 1);
+  assert.equal(internals.subscribedThreads.has(thread.id), false);
+  resolve({ thread });
+  await Promise.all([first, second]);
+  assert.equal(internals.subscribedThreads.has(thread.id), true);
+});
+
+test("an external thread subscription failure retries on activity reconciliation", async () => {
+  const emitted: BridgeToControlMessage[] = [];
+  const adapter = new CodexAppServerAdapter({ command: "codex", url: "ws://127.0.0.1:4500",
+    allowedRoots: [process.cwd()], manageServer: false, reconnectMs: 3_000 }, m => emitted.push(m));
+  const internals = adapter as unknown as {
+    readyPromise: Promise<void>;
+    socket: { readyState: number; close(): void };
+    handleNotification(method: string, params: Record<string, unknown>): Promise<void>;
+    request(method: string, params: Record<string, unknown>): Promise<unknown>;
+    subscribedThreads: Set<string>;
+  };
+  internals.readyPromise = Promise.resolve();
+  internals.socket = { readyState: 1, close() {} };
+  const thread = { id: "external", cwd: process.cwd(), status: { type: "active" },
+    turns: [{ id: "running", status: "inProgress", startedAt: 100 }] };
+  let resumes = 0;
+  internals.request = async (method) => {
+    if (method === "thread/resume" && ++resumes === 1) throw new Error("temporary subscription failure");
+    return { thread };
+  };
+  await internals.handleNotification("thread/started", { thread });
+  assert.equal(internals.subscribedThreads.has(thread.id), false);
+  await adapter.reconcileActivity();
+  await adapter.reconcileActivity();
+  assert.equal(resumes, 2);
+  assert.equal(internals.subscribedThreads.has(thread.id), true);
+  const starts = emitted.filter(m => m.type === "session.event" && m.eventType === "turn.started");
+  assert.equal(starts.length, 1);
+  assert.equal(starts[0]?.type === "session.event" && starts[0].turnId, "running");
+  assert.equal(starts[0]?.timestamp, 100_000);
+});
+
+test("a stale active read cannot revive a turn that completed while reconciliation was pending", async () => {
+  const emitted: BridgeToControlMessage[] = [];
+  const adapter = new CodexAppServerAdapter({ command: "codex", url: "ws://127.0.0.1:4500",
+    allowedRoots: [process.cwd()], manageServer: false, reconnectMs: 3_000 }, m => emitted.push(m));
+  const internals = adapter as unknown as {
+    handleNotification(method: string, params: Record<string, unknown>): Promise<void>;
+    syncActiveTurns(ids: Iterable<string>): Promise<void>;
+    request(method: string, params: Record<string, unknown>): Promise<unknown>;
+    threadsById: Map<string, unknown>;
+    activeTurns: Map<string, string>;
+    activeThreads: Set<string>;
+  };
+  internals.threadsById.set("external", { id: "external", cwd: process.cwd() });
+  internals.request = async () => {
+    await internals.handleNotification("turn/started", { threadId: "external", turn: { id: "quick", status: "inProgress" } });
+    await internals.handleNotification("turn/completed", { threadId: "external", turn: { id: "quick", status: "completed", items: [] } });
+    return { thread: { id: "external", status: { type: "active" }, turns: [{ id: "quick", status: "inProgress" }] } };
+  };
+  await internals.syncActiveTurns(["external"]);
+  assert.equal(internals.activeTurns.has("external"), false);
+  assert.equal(internals.activeThreads.has("external"), false);
+  assert.deepEqual(emitted.flatMap(m => m.type === "session.event" ? [m.eventType] : []), ["turn.started", "turn.completed"]);
 });
 
 test("reconnect synchronizes active turns after completion notifications were lost", async () => {

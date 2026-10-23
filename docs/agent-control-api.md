@@ -883,6 +883,12 @@ UI mock 应至少模拟：worker 离线、空列表、100+ session 游标、acti
 `stream_changes` 供 SSE 投递当前状态。actions/idempotency keys 与附件分别保留 24 小时和 7 天，可由
 `CONTROL_ACTION_RETENTION_MS`、`CONTROL_ATTACHMENT_RETENTION_MS` 配置。
 
+0.7.16 起，连接同一个 App Server 的外部客户端（如 `codex --remote`）新建会话时，Bridge 在
+`thread/started` 发现通过目录和会话类型校验的线程后，显式调用 `thread/resume` 订阅执行事件。
+广播发现通知本身不代表当前连接已订阅。若订阅前已开始执行，Bridge 补报同一稳定 ID 的
+`turn.started`、用户消息和可确认的工具状态；活动读取中的未完成助手消息留待 `item/completed`。
+订阅失败在活动校准时重试，重复通知合并到同一次订阅，已完成 turn 不会被过时的读取重新标为 active。
+
 实现与理想上游能力之间有以下明确降级：
 
 1. Bridge 优先分页调用 `thread/list` 并为第一页补读最近 50 turns；App Server 不支持时回退

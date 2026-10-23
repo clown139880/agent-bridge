@@ -359,6 +359,86 @@ test("a session snapshot repairs a replay timestamp newer than the real thread a
   }
 });
 
+test("an external Codex session is active and streams tools before its turn completes", { timeout: 10_000 }, async () => {
+  const f = await fixture();
+  let ingestion = Promise.resolve();
+  const adapter = new CodexAppServerAdapter({ command: "codex", url: "ws://127.0.0.1:4500",
+    allowedRoots: [process.cwd()], manageServer: false, reconnectMs: 3_000 }, message => {
+    ingestion = ingestion.then(() => f.internals.handleBridgeMessage("dev", message));
+  });
+  const internals = adapter as unknown as {
+    handleNotification(method: string, params: Record<string, unknown>): Promise<void>;
+    syncActiveTurns(ids: Iterable<string>): Promise<void>;
+    request(method: string, params: Record<string, unknown>): Promise<unknown>;
+  };
+  const thread = { id: "external-codex", cwd: process.cwd(), status: { type: "idle" }, createdAt: 100, updatedAt: 100 };
+  const turn = { id: "external-turn", status: "inProgress", startedAt: 101, items: [
+    { id: "question", type: "userMessage", content: [{ type: "text", text: "Diagnose this machine" }] },
+    { id: "earlier-tool", type: "mcpToolCall", server: "diagnostics", tool: "read", status: "completed" },
+    { id: "already-running", type: "commandExecution", command: "vmstat", status: "inProgress" },
+    { id: "unfinished-answer", type: "agentMessage", text: "Partial" },
+  ] };
+  let subscribed = false, resumes = 0;
+  internals.request = async (method, params) => {
+    assert.equal(params.threadId, thread.id);
+    if (method === "thread/resume") {
+      resumes++;
+      // The remote client has already started its turn. Resume also emits a
+      // thread/started notification; that echo must not loop or reset state.
+      await internals.handleNotification("thread/started", { thread });
+      subscribed = true;
+      return { thread: { ...thread, status: { type: "active" }, turns: [turn] } };
+    }
+    assert.equal(method, "thread/read");
+    return { thread: { ...thread, status: { type: "active" }, turns: [turn] } };
+  };
+  const get = async (path: string) => {
+    await ingestion;
+    const response = await fetch(`${f.base}${path}`, { headers: f.headers });
+    assert.equal(response.status, 200);
+    return response.json() as Promise<any>;
+  };
+  const notify = async (method: string, params: Record<string, unknown>) => {
+    assert.equal(subscribed, true, "turn/item events require a real subscription");
+    await internals.handleNotification(method, { threadId: thread.id, ...params });
+  };
+  try {
+    await internals.handleNotification("thread/started", { thread });
+    assert.equal(resumes, 1);
+    const active = await get("/sessions?active=true");
+    assert.ok(active.data.some((s: any) => s.sessionId === thread.id && s.activeTurnId === turn.id));
+    const recovered = await get(`/sessions/${thread.id}/events?tail=true&limit=20`);
+    assert.ok(recovered.data.some((e: any) => e.type === "message.completed" && e.payload.role === "user"));
+    assert.ok(recovered.data.some((e: any) => e.type === "tool.completed" && e.itemId === "earlier-tool"));
+    assert.ok(recovered.data.some((e: any) => e.type === "tool.started" && e.itemId === "already-running"));
+    assert.equal(recovered.data.some((e: any) => e.type === "command.completed" && e.itemId === "already-running"), false);
+    assert.equal(recovered.data.some((e: any) => e.itemId === "unfinished-answer"), false);
+
+    await notify("item/started", { turnId: turn.id, item: { id: "shell", type: "commandExecution", command: "uptime" } });
+    await notify("item/completed", { turnId: turn.id, item: { id: "shell", type: "commandExecution", command: "uptime", status: "completed", exitCode: 0 } });
+    const events = await get(`/sessions/${thread.id}/events?tail=true&limit=20`);
+    assert.ok(events.data.some((e: any) => e.type === "tool.started"));
+    assert.ok(events.data.some((e: any) => e.type === "command.completed" && e.turnId === turn.id));
+    assert.equal(events.data.some((e: any) => e.type === "turn.completed"), false);
+
+    await internals.syncActiveTurns([thread.id]);
+    await internals.handleNotification("thread/started", { thread });
+    assert.equal(resumes, 1);
+    assert.equal((await get(`/sessions/${thread.id}`)).activeTurnId, turn.id);
+    await notify("turn/completed", { turn: { ...turn, status: "completed", items: [] } });
+    // A delayed read must not publish another turn.started after completion.
+    await internals.syncActiveTurns([thread.id]);
+    assert.equal((await get(`/sessions/${thread.id}`)).status, "idle");
+    const finalEvents = await get(`/sessions/${thread.id}/events?tail=true&limit=20`);
+    assert.equal(finalEvents.data.filter((e: any) => e.type === "turn.started").length, 1);
+    assert.equal(finalEvents.data.filter((e: any) => e.type === "turn.completed").length, 1);
+  } finally {
+    adapter.stop();
+    await ingestion;
+    await f.close();
+  }
+});
+
 test("thread/updated asynchronously refreshes the persisted session title", async () => {
   const f = await fixture();
   try {

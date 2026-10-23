@@ -136,6 +136,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
   private readonly turnModels = new Map<string, string>();
   private readonly pendingTurnModels = new Map<string, string>();
   private readonly subscribedThreads = new Set<string>();
+  private readonly threadSubscriptions = new Map<string, Promise<CodexThread>>();
   private readonly threadsById = new Map<string, CodexThread>();
   private readonly activeThreads = new Set<string>();
   private readonly reportedTurns = new Set<string>();
@@ -460,10 +461,18 @@ export class CodexAppServerAdapter implements AgentAdapter {
 
   async reconcileActivity(): Promise<void> {
     await this.ensureReady();
-    await this.syncActiveTurns(new Set([
+    const threadIds = new Set([
       ...this.activeThreads,
       ...this.activeTurns.keys(),
-    ]));
+    ]);
+    for (const threadId of threadIds) {
+      // A failed subscription to a thread opened by another client can be
+      // retried while it is active, without scanning every stored session.
+      if (!this.threadsById.has(threadId) || this.subscribedThreads.has(threadId)) continue;
+      try { await this.ensureThreadSubscribed(threadId); }
+      catch (error) { log.warn({ error, threadId }, "Unable to subscribe to active Codex thread"); }
+    }
+    await this.syncActiveTurns(threadIds);
   }
 
   isReady(): boolean {
@@ -694,12 +703,12 @@ export class CodexAppServerAdapter implements AgentAdapter {
         });
         const thread = result.thread;
 
-        let activeTurnId: string | undefined;
+        let activeTurn: CodexTurn | undefined;
         if (thread.status?.type === "active") {
           const turns = thread.turns ?? [];
           for (let index = turns.length - 1; index >= 0; index -= 1) {
             if (turns[index]?.status === "inProgress") {
-              activeTurnId = turns[index]?.id;
+              activeTurn = turns[index];
               break;
             }
           }
@@ -708,6 +717,10 @@ export class CodexAppServerAdapter implements AgentAdapter {
         // Notifications are already live while restoration runs. Only apply
         // the read if no newer turn notification changed the cached value.
         if (this.activeTurns.get(threadId) !== previousTurnId) continue;
+        // The turn may have started and finished while the read was pending,
+        // leaving the cached id undefined again. Never revive that stale read.
+        if (activeTurn && this.reportedTurns.has(activeTurn.id)) continue;
+        const activeTurnId = activeTurn?.id;
         if (!activeTurnId && previousTurnId) {
           // A terminal notification can be lost while the App Server socket
           // itself remains connected. Recover the terminal event before
@@ -715,7 +728,27 @@ export class CodexAppServerAdapter implements AgentAdapter {
           await this.syncLatestCompletedTurn(threadId, thread);
           if (this.activeTurns.get(threadId) !== previousTurnId) continue;
         }
-        if (activeTurnId) this.setActiveTurn(threadId, activeTurnId);
+        if (activeTurnId) {
+          this.setActiveTurn(threadId, activeTurnId);
+          if (activeTurnId !== previousTurnId && this.threadsById.has(threadId)) {
+            const model = activeTurn?.model ?? this.turnModels.get(activeTurnId) ?? thread.model;
+            if (model) this.turnModels.set(activeTurnId, model);
+            // Updating the adapter's cache alone leaves Control Plane idle.
+            // Reuse the live notification's id so later delivery is idempotent.
+            this.emitSessionEvent("turn.started", threadId, `app-server:${threadId}:${activeTurnId}:started`,
+              { status: "in_progress", ...(model ? { model } : {}) }, activeTurnId, undefined,
+              codexTimestamp(activeTurn?.startedAt) ?? Date.now());
+            for (const item of activeTurn?.items ?? []) {
+              if (item.type === "userMessage") this.emitHistoricalItem(threadId, activeTurnId, item,
+                codexTimestamp(activeTurn?.startedAt) ?? Date.now());
+              else if (item.status === "inProgress") this.handleStartedItem(threadId, item, activeTurnId);
+              else if (["completed", "failed", "declined"].includes(item.status ?? ""))
+                this.handleCompletedItem(threadId, item, activeTurnId);
+              // An agentMessage in an active read may still be partial. Leave
+              // it to item/completed instead of storing a premature reply.
+            }
+          }
+        }
         else this.activeTurns.delete(threadId);
         if (thread.status?.type === "active") this.activeThreads.add(threadId);
         else this.activeThreads.delete(threadId);
@@ -769,11 +802,28 @@ export class CodexAppServerAdapter implements AgentAdapter {
   private async ensureThreadSubscribed(threadId: string): Promise<CodexThread> {
     const known = this.threadsById.get(threadId);
     if (this.subscribedThreads.has(threadId) && known) return known;
-    const resumed = await this.request<{ thread: CodexThread }>("thread/resume", { threadId });
-    this.subscribedThreads.add(threadId);
-    if (resumed.thread.status?.type === "active") this.activeThreads.add(threadId);
-    await this.discoverThread(resumed.thread);
-    return resumed.thread;
+    const pending = this.threadSubscriptions.get(threadId);
+    if (pending) return pending;
+    const socket = this.socket;
+    // Install the in-flight entry before sending: a resume can immediately
+    // produce another thread/started notification on this connection.
+    const subscription = Promise.resolve().then(async () => {
+      if (socket !== this.socket) throw new Error("App Server changed while subscribing to thread");
+      const resumed = await this.request<{ thread: CodexThread }>("thread/resume", { threadId });
+      if (socket !== this.socket) throw new Error("App Server changed while subscribing to thread");
+      // Discovery was already published for a broadcast thread/started. Do
+      // not overwrite a live turn with the resume response's older metadata.
+      if (!this.threadsById.has(threadId)) await this.discoverThread(resumed.thread);
+      if (socket !== this.socket) throw new Error("App Server changed while subscribing to thread");
+      this.subscribedThreads.add(threadId);
+      if (resumed.thread.status?.type === "active") this.activeThreads.add(threadId);
+      return resumed.thread;
+    });
+    this.threadSubscriptions.set(threadId, subscription);
+    try { return await subscription; }
+    finally {
+      if (this.threadSubscriptions.get(threadId) === subscription) this.threadSubscriptions.delete(threadId);
+    }
   }
 
   private async handleMessage(raw: string): Promise<void> {
@@ -860,11 +910,24 @@ export class CodexAppServerAdapter implements AgentAdapter {
   private async handleNotification(method: string, params: Record<string, unknown>): Promise<void> {
     if (method === "thread/started") {
       const thread = params.thread as CodexThread | undefined;
+      // thread/started is broadcast to other clients too. It is not proof
+      // that this connection receives turn/item notifications. A resume can
+      // itself emit thread/started, so do not subscribe recursively.
+      if (thread && (this.threadSubscriptions.has(thread.id)
+        || this.subscribedThreads.has(thread.id) && this.threadsById.has(thread.id))) return;
       // Its session event would create a row in Control Plane, so only follow threads discovery accepted.
       if (thread && await this.discoverThread(thread, this.pendingStartPrompts.get(thread.cwd))) {
-        this.subscribedThreads.add(thread.id);
+        if (thread.status?.type === "active") this.activeThreads.add(thread.id);
         this.emitSessionEvent("session.discovered",thread.id,`app-server:${thread.id}:started`,
           {...(thread.model?{model:thread.model}:{})});
+        try {
+          await this.ensureThreadSubscribed(thread.id);
+          // The external client can start its turn before our subscription
+          // is installed. Recover that start instead of waiting for its end.
+          await this.syncActiveTurns([thread.id]);
+        } catch (error) {
+          log.warn({ error, threadId: thread.id }, "Unable to follow new Codex thread");
+        }
       }
       return;
     }
@@ -1170,6 +1233,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
     this.pendingUserInput.clear();
     this.clearPendingApprovals();
     this.subscribedThreads.clear();
+    this.threadSubscriptions.clear();
     this.activeThreads.clear();
     this.readyPromise = undefined;
     if (!this.rotating) this.scheduleReconnect();
