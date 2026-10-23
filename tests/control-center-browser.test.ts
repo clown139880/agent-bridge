@@ -167,6 +167,14 @@ test("mobile browser on non-secure HTTP: no-login entry, paging, history/SSE, se
   assert.equal(await js("window.__flash"), false, "returning to the foreground must not reload the page");
   assert.equal(await js("Math.round(scrollY)"), 400);
   slowDetailMs = 0;
+  // UCTW v2 share into the open, sendable conversation: filled in, not sent.
+  const shareInto = (share: unknown) => js(`(()=>{let p=${JSON.stringify(JSON.stringify(share))};window.uctw={version:()=>2,info:()=>'{}',haptic:k=>(window.__haptics=(window.__haptics||[]).concat(k)),sound:()=>{},takeShare:()=>{const v=p;p='';return v}};window.dispatchEvent(new Event('uctw:share'))})()`);
+  const writesBefore = writes.length;
+  await shareInto({ text: "分享来的链接 https://example.com", attachments: [{ id: "shared-1", filename: "shot.png", mimeType: "image/png", size: 3 }] });
+  await wait("document.querySelector('#message').value.includes('分享来的链接') && document.body.innerText.includes('shot.png')");
+  assert.equal(await js("!!document.querySelector('.share-sheet')"), false, "a sendable open conversation takes the share directly");
+  assert.deepEqual(await js("window.__haptics"), ["tick"]); assert.equal(writes.length, writesBefore, "never sent automatically");
+  await js("document.querySelector('.attachment button').click()"); await fill("#message", "", true);
   assert.equal(await js("document.documentElement.scrollWidth<=innerWidth"), true, "390px layout must not overflow horizontally");
   await fill("#message", " \n ", true);
   assert.equal(await js("document.querySelector('.composer button.primary').disabled"), true, "whitespace draft must stay disabled");
@@ -180,6 +188,13 @@ test("mobile browser on non-secure HTTP: no-login entry, paging, history/SSE, se
   await wait("document.querySelector('.composer button.primary').textContent.includes('发送') && !document.querySelector('.composer button.primary').disabled");
   await tap(".composer button.primary"); await wait("!document.querySelector('#message').value");
   assert.equal(writes[2].body.delivery, "start_turn"); assert.equal(writes[2].body.expectedTurnId, undefined);
+  await js("document.querySelector('.back').click()"); await wait("!!document.querySelector('a[href=\"/control/new\"]')");
+  // Elsewhere a share asks for its conversation; "new" fills the new-session form.
+  await shareInto({ text: "列表页收到的分享", attachments: [] });
+  await wait("!!document.querySelector('.share-sheet') && document.querySelector('.share-sheet').innerText.includes('移动端验收会话')");
+  await js("document.querySelector('.share-targets button.primary').click()");
+  await wait("location.pathname==='/control/new' && document.querySelector('#first-message').value==='列表页收到的分享' && !document.querySelector('.share-sheet')");
+  await fill("#first-message", "", true);
   await js("document.querySelector('.back').click()"); await wait("!!document.querySelector('a[href=\"/control/new\"]')");
   await js("document.querySelector('a[href=\"/control/new\"]').click()"); await wait("!!document.querySelector('#new-worker')");
   assert.equal(await js("document.querySelector('.new-form button.primary').disabled"), true, "new session needs worker and workspace");

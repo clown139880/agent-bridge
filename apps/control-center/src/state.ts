@@ -1,6 +1,6 @@
 import { ApiError, ControlClient, explain } from "./api/client";
 import { consumeStream, delay, StreamLimitError } from "./api/stream";
-import { nativeNotify } from "./native/uctw";
+import { nativeNotify, type Share } from "./native/uctw";
 import { isLive, pendingId, segment, type Action, type AttachmentRef, type Envelope, type ModelInfo, type Page, type Pending,
   type Session, type SessionEvent, type Snapshot, type Worker } from "./api/types";
 
@@ -23,6 +23,8 @@ export interface ViewState {
   uploads: Record<string, Upload[]>; models: Record<string, ModelCatalog>;
   /** Partly answered questions by pending id, then question id; survives detail reloads. */
   answers: Record<string, Record<string, AnswerDraft>>;
+  /** A share from another app waiting for the user to pick its conversation. */
+  share?: Share;
 }
 export interface AnswerDraft { choice: string; other?: string }
 /** A detail page as last shown, so returning to it never starts from an empty page. */
@@ -50,6 +52,12 @@ export function mergeTail(existing: SessionEvent[], tail: SessionEvent[]) {
   });
   return result;
 }
+/** Whether a message to this session could be sent from here (pending requests only delay it). */
+export const canCompose = (state: ViewState, session?: Session) => {
+  const worker = state.workers.find(w => w.id === session?.workerId);
+  return Boolean(state.writable && session && worker?.status === "online" && session.status !== "offline"
+    && (session.capabilities ?? worker.capabilities).includes("session-actions"));
+};
 const upsert = <T,>(rows: T[], item: T, id: (v: T) => string) => [...rows.filter(v => id(v) !== id(item)), item];
 
 // Unlike randomUUID(), getRandomValues() is available on ordinary HTTP origins too.
@@ -107,7 +115,7 @@ export class ControlState {
   }
   dispose() {
     this.disposed = true; this.scope.abort(); this.streamAbort?.abort(); this.api.dispose();
-    Object.values(this.state.uploads).flat().forEach(u => URL.revokeObjectURL(u.preview));
+    Object.values(this.state.uploads).flat().forEach(u => { if (u.preview) URL.revokeObjectURL(u.preview); });
     this.state = { ...this.state, sessions: [], workers: [], events: [], drafts: {}, uploads: {}, answers: {}, intent: undefined, session: undefined, approvals: [], inputs: [] };
     this.seen.clear(); this.listeners.clear(); this.details.clear();
   }
@@ -139,6 +147,27 @@ export class ControlState {
       set(result.error ? { status: "error", models: [], error: result.error } : { status: "ready", models: result.models ?? [] });
     } catch (e) { set({ status: "error", models: [], error: explain(e) }); }
   }
+  /** Into the open conversation when it can take a message, otherwise held for the picker. Never sent automatically. */
+  receiveShare(share: Share) {
+    if (!this.state.writable) { this.patch({ error: "只读模式，不能接收分享的内容。" }); return; }
+    const { route, session } = this.state;
+    if (route.page === "detail" && session?.sessionId === route.id && canCompose(this.state, session)) { this.applyShare(route.id!, share); return; }
+    const held = this.state.share;
+    this.patch({ share: held ? { text: [held.text, share.text].filter(t => t.trim()).join("\n\n"), attachments: [...held.attachments, ...share.attachments] } : share });
+  }
+  /** Appends the text to the draft and adds the uploaded images as ready attachments ("new" is the new-session form). */
+  applyShare(id: string, share = this.state.share) {
+    this.patch({ share: undefined });
+    if (!share || !this.state.writable) return;
+    if (share.text.trim()) {
+      const draft = (this.state.drafts[id] ?? "").trimEnd();
+      this.setDraft(id, draft ? `${draft}\n\n${share.text}` : share.text);
+    }
+    const room = Math.max(0, MAX_ATTACHMENTS - (this.state.uploads[id]?.length ?? 0)), kept = share.attachments.slice(0, room);
+    if (kept.length) this.setUploads(id, rows => [...rows, ...kept.map(ref => ({ localId: newIdempotencyKey(), name: ref.filename, preview: "", status: "ready" as const, ref }))]);
+    if (kept.length < share.attachments.length) this.patch({ error: `最多 ${MAX_ATTACHMENTS} 张图片，只保留了前 ${kept.length} 张分享的图片。` });
+  }
+  dismissShare() { this.patch({ share: undefined }); }
   private setUploads(id: string, change: (rows: Upload[]) => Upload[]) {
     this.patch({ uploads: { ...this.state.uploads, [id]: change(this.state.uploads[id] ?? []) } });
   }
@@ -158,7 +187,7 @@ export class ControlState {
   }
   removeUpload(id: string, localId: string) {
     const row = this.state.uploads[id]?.find(u => u.localId === localId);
-    if (row) URL.revokeObjectURL(row.preview);
+    if (row?.preview) URL.revokeObjectURL(row.preview);
     this.setUploads(id, rows => rows.filter(u => u.localId !== localId));
   }
   private clearUploads(id: string, sent: unknown) {

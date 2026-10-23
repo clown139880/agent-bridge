@@ -7,6 +7,7 @@ import { ControlClient, ApiError } from "../apps/control-center/src/api/client.j
 import { consumeStream, SseParser, StreamLimitError } from "../apps/control-center/src/api/stream.js";
 import { ControlState, mergeTail, type DetailCache, type DetailStore } from "../apps/control-center/src/state.js";
 import type { Envelope, Session, SessionEvent, Snapshot } from "../apps/control-center/src/api/types.js";
+import { takeShare } from "../apps/control-center/src/native/uctw.js";
 
 const event = (id: string, type = "session.event.appended", data: unknown = { eventId: id, cursor: `e:${id}`, sessionId: "s", type: "message.completed", payload: { text: id } }): Envelope =>
   ({ cursor: `c:${id}:0`, eventId: id, type, sessionId: "s", resource: { kind: "session", id: "s" }, data });
@@ -176,6 +177,39 @@ test("the UCTW bridge rings for new requests and finished turns, and its absence
   g.window = { uctw: { version: () => 1, sound: () => { throw new Error("gone"); }, haptic: () => {} } };
   f.emit(event("f", "session.event.appended", { eventId: "f", cursor: "e:f", sessionId: "s", type: "turn.failed", payload: {} }));
   await flush(); assert.equal(f.state.snapshot().events.at(-1)?.eventId, "f");
+});
+
+test("UCTW v2 shares: parsed defensively, filled into a sendable detail (never sent), otherwise held for the picker", async t => {
+  const g = globalThis as unknown as { window?: unknown };
+  t.after(() => { delete g.window; });
+  const ref = (id: string) => ({ id, filename: `${id}.png`, mimeType: "image/png", size: 3 });
+  let pending = "";
+  const bridge = (version: number) => ({ version: () => version, info: () => "{}", haptic: () => {}, sound: () => {},
+    takeShare: () => { const v = pending; pending = ""; return v; } });
+  g.window = { uctw: bridge(1) }; pending = JSON.stringify({ text: "hi", attachments: [] });
+  assert.equal(takeShare(), undefined, "v1 apps never hand out shares"); assert.ok(pending, "and the share stays with the app");
+  g.window = { uctw: bridge(2) };
+  assert.deepEqual(takeShare(), { text: "hi", attachments: [] }); assert.equal(takeShare(), undefined, "taken once");
+  pending = "{broken"; assert.equal(takeShare(), undefined);
+  pending = JSON.stringify({ text: "", attachments: [ref("a"), { id: 1 }, null] }); assert.deepEqual(takeShare(), { text: "", attachments: [ref("a")] });
+
+  const f = fixture(t);
+  await f.state.open({ page: "detail", id: "s" });
+  f.state.setDraft("s", "已有草稿");
+  f.state.receiveShare({ text: "https://example.com", attachments: Array.from({ length: 10 }, (_, i) => ref(`r${i}`)) });
+  let view = f.state.snapshot();
+  assert.equal(view.share, undefined); assert.equal(view.drafts.s, "已有草稿\n\nhttps://example.com");
+  assert.equal(view.uploads.s.length, 8); assert.ok(view.uploads.s.every(u => u.status === "ready" && u.ref));
+  assert.match(view.error, /只保留了前 8 张/);
+  assert.ok(!f.requests.some(r => r.init.method === "POST"), "a share is never sent automatically");
+
+  await f.state.open({ page: "sessions" });
+  f.state.receiveShare({ text: "第一段", attachments: [ref("x")] }); f.state.receiveShare({ text: "第二段", attachments: [] });
+  view = f.state.snapshot();
+  assert.deepEqual(view.share, { text: "第一段\n\n第二段", attachments: [ref("x")] }, "shares wait for the picker and accumulate");
+  f.state.applyShare("new");
+  view = f.state.snapshot();
+  assert.equal(view.share, undefined); assert.equal(view.drafts.new, "第一段\n\n第二段"); assert.deepEqual(view.uploads.new.map(u => u.ref?.id), ["x"]);
 });
 
 test("GET baseline never overwrites newer SSE status or loses pending fetched before a concurrent session update", async t => {

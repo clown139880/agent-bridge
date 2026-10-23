@@ -201,6 +201,8 @@ DSH Host/Client 凭据限制继续成立，本入口不读取 DSH Host 凭据。
 
 **UCTW 原生桥**：`src/native/uctw.ts`。仅当 `window.uctw` 存在且 `version() >= 1` 时调用，异常静默忽略；普通浏览器无任何变化。新待审批/待回答 → `sound("approval")` + `haptic("warning")`；当前会话 `turn.completed` → `done`/`success`，`turn.failed` → `error`/`error`；发送、提交回答、审批按钮 → `haptic("tick")`。图片仍走 `<input type=file accept="image/*">`（不加 `capture`），类型由前端再校验。
 
+**UCTW 分享（v2，0.7.15 起）**：`version() >= 2` 时页面监听 `window` 上的 `uctw:share` 事件，并在启动和回到可见时各调一次 `takeShare()`（取一次即清空）。JSON `{"text","attachments":[AttachmentRef]}` 中的图片已由原生端上传，作为 ready 附件加入，不重复上传，也没有预览图（浏览器入口不开放 `GET /attachments/:id`）。当前详情可发送时（可写、worker 在线、支持 `session-actions`）直接把文字追加到输入框；否则弹出选择面板（最近可发送的会话和“新对话”），面板打开期间收到的分享合并。只填写不发送；超过 8 张只保留前面的并提示；`haptic("tick")`。新对话表单的第一条消息因此改存在 `drafts.new`。
+
 一个标签页至多一个流，路由组件共享连接管理器，禁止同时开列表流、详情流和 action 流。页面无需求、隐藏或离线时不设置周期 fetch；浏览器的 `online` / 可见性事件和用户重试触发恢复。闲置详情不自动发现别处发起的新 turn，界面显示最近刷新时间并提供刷新入口。
 
 ## 7. SSE 消费、恢复与背压

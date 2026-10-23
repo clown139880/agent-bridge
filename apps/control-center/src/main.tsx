@@ -3,10 +3,10 @@ import { createRoot } from "react-dom/client";
 import { ControlClient, explain } from "./api/client";
 import { BUILD_VERSION, newerBuild, runningEntry } from "./build";
 import { clearDetailStore, openDetailStore } from "./cache";
-import { haptic } from "./native/uctw";
+import { haptic, SHARE_EVENT, takeShare } from "./native/uctw";
 import { MessageText } from "./markdown";
 import { isLive, pendingId, segment, type Pending, type Session, type SessionEvent, type Snapshot } from "./api/types";
-import { ControlState, type Route, type ViewState } from "./state";
+import { canCompose, ControlState, type Route, type ViewState } from "./state";
 import "./styles.css";
 
 function navigate(path: string) {
@@ -57,7 +57,7 @@ function Attachments({ control, state, id, disabled }: { control: ControlState; 
   const input = useRef<HTMLInputElement>(null), rows = state.uploads[id] ?? [];
   return <div className="attachments">
     {rows.length > 0 && <ul className="attachment-list">{rows.map(u => <li key={u.localId} className={`attachment ${u.status}`}>
-      <img src={u.preview} alt="" /><span>{u.status === "uploading" ? "上传中…" : u.status === "error" ? u.error : u.name}</span>
+      {u.preview ? <img src={u.preview} alt="" /> : <span className="attachment-thumb" aria-hidden="true">图</span>}<span>{u.status === "uploading" ? "上传中…" : u.status === "error" ? u.error : u.name}</span>
       <button type="button" className="quiet" aria-label={`移除 ${u.name}`} onClick={() => control.removeUpload(id, u.localId)}>×</button></li>)}</ul>}
     {/* image/* lets a WebView offer camera and gallery; addFiles still enforces the accepted types. */}
     <input ref={input} type="file" accept="image/*" multiple hidden onChange={e => {
@@ -216,6 +216,16 @@ function Center({ control, path, serverVersion }: { control: ControlState; path:
       window.removeEventListener("pageshow", visible); window.removeEventListener("online", visible); window.removeEventListener("offline", visible);
     };
   }, [control]);
+  // UCTW v2 shares: on the app's event, and on start or return in case the event fired before the page listened.
+  useEffect(() => {
+    const pull = () => {
+      if (document.visibilityState !== "visible") return;
+      const share = takeShare(); if (!share) return;
+      haptic("tick"); control.receiveShare(share);
+    };
+    window.addEventListener(SHARE_EVENT, pull); document.addEventListener("visibilitychange", pull); pull();
+    return () => { window.removeEventListener(SHARE_EVENT, pull); document.removeEventListener("visibilitychange", pull); };
+  }, [control]);
   const [stale, setStale] = useState(false);
   useEffect(() => {
     const running = runningEntry(); if (!running) return;
@@ -234,6 +244,7 @@ function Center({ control, path, serverVersion }: { control: ControlState; path:
         <div className="row-actions"><button className="primary" onClick={() => location.reload()}>立即刷新</button></div></aside>}
       {state.error && <div className="error" role="alert">{state.error}<button className="quiet" onClick={() => void control.refresh()}>刷新</button></div>}
       <ActionView control={control} state={state} />
+      {state.share && <SharePicker control={control} state={state} />}
       {route.page === "sessions" ? <Sessions control={control} state={state} />
         : route.page === "new" ? <NewSession control={control} state={state} />
           : <Detail key={route.id} control={control} state={state} id={route.id!} />}
@@ -241,6 +252,28 @@ function Center({ control, path, serverVersion }: { control: ControlState; path:
     <footer>AGENT BRIDGE <span>·</span> 页面 v{BUILD_VERSION} <span>·</span> 服务 v{serverVersion}
       {stale && <button className="quiet" onClick={() => location.reload()}>页面不是最新，刷新</button>}</footer>
   </div>;
+}
+
+/** Where a share from another app should go; it is only filled in, never sent. */
+function SharePicker({ control, state }: { control: ControlState; state: ViewState }) {
+  const share = state.share!, targets = state.sessions.filter(s => canCompose(state, s)).slice(0, 12);
+  const choose = (id: string) => {
+    haptic("tick"); control.applyShare(id, share);
+    navigate(id === "new" ? "/control/new" : `/control/sessions/${segment(id)}`);
+  };
+  return <aside className="share-sheet" role="dialog" aria-label="发送分享的内容">
+    <div className="share-head"><strong>分享到哪个对话？</strong>
+      <button type="button" className="quiet" onClick={() => control.dismissShare()}>取消</button></div>
+    {share.text.trim() && <p className="share-text">{share.text}</p>}
+    {share.attachments.length > 0 && <small className="hint">{share.attachments.length} 张图片</small>}
+    <p className="hint">内容会填进输入框，确认后再发送。</p>
+    <div className="share-targets">
+      <button type="button" className="primary" onClick={() => choose("new")}>＋ 新对话</button>
+      {targets.map(s => <button type="button" key={s.sessionId} onClick={() => choose(s.sessionId)}>
+        <span>{title(s)}</span><small>{s.agent} · {s.machineId} · {labels[s.status] ?? s.status}</small></button>)}
+      {!targets.length && <small className="hint">最近会话里没有可发送的，可以新建对话。</small>}
+    </div>
+  </aside>;
 }
 
 function ActionView({ control, state }: { control: ControlState; state: ViewState }) {
@@ -305,7 +338,7 @@ function Sessions({ control, state }: { control: ControlState; state: ViewState 
 
 function NewSession({ control, state }: { control: ControlState; state: ViewState }) {
   const [workerId, setWorkerId] = useState(""), [workspace, setWorkspace] = useState("");
-  const [input, setInput] = useState(""), [model, setModel] = useState<ModelChoice>({ model: "", effort: "" });
+  const input = state.drafts.new ?? "", [model, setModel] = useState<ModelChoice>({ model: "", effort: "" });
   const choices = state.workers.filter(w => w.status === "online" && w.capabilities.includes("session-actions"));
   const worker = choices.find(w => w.id === workerId);
   const spaces = worker?.recentWorkspaces?.length ? worker.recentWorkspaces : (worker?.workspaces ?? []).map(path => ({ name: path, path }));
@@ -327,7 +360,7 @@ function NewSession({ control, state }: { control: ControlState; state: ViewStat
       <datalist id="recent-spaces">{spaces.map(s => <option key={s.path} value={s.path}>{s.name}</option>)}</datalist>
       {worker && spaces.length > 0 && <div className="workspace-choices">{spaces.slice(0, 6).map(s => <button type="button" key={s.path} onClick={() => setWorkspace(s.path)}>{s.name}</button>)}</div>}
       {workspace && !absolute && <p className="hint">请使用目标机器上的绝对路径。</p>}
-      <label htmlFor="first-message">第一条消息 <span className="muted">（可选）</span></label><textarea id="first-message" rows={6} value={input} onChange={e => setInput(e.target.value)} onPaste={pasteImages(control, "new")} placeholder="想让 Agent 做什么？" />
+      <label htmlFor="first-message">第一条消息 <span className="muted">（可选）</span></label><textarea id="first-message" rows={6} value={input} onChange={e => control.setDraft("new", e.target.value)} onPaste={pasteImages(control, "new")} placeholder="想让 Agent 做什么？" />
       <Attachments control={control} state={state} id="new" disabled={!state.writable} />
       {(state.uploads.new?.length ?? 0) > 0 && !input.trim() && <p className="hint">图片需随第一条消息发送。</p>}
       <ModelPicker control={control} state={state} workerId={worker?.id} value={model} onChange={setModel} />
