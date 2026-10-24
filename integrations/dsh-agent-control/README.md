@@ -78,6 +78,19 @@ reference remapping, and creates `session.v3.jsonl[.zstd]` only when no V3
 artifact already exists. An unfamiliar event or seeded log is rejected without
 publishing a successor.
 
+### Preserving live commentary in Desktop
+
+Live Bridge replies use a separate native step for each message and tool card.
+DSH renders one assistant message per step, so sharing a step hides earlier
+commentary when a tool or the final answer arrives. Version 0.2.2 also translates
+the native loop's cached step number after imported output advances the log.
+The regression checks run the actual DSH Chat reducer while a turn runs, after
+it finishes or stops, and after replay. `scripts/verify-runtime.cjs` repeats the
+live/replay check against the installed Desktop runtime.
+
+Previously stored messages are retained; this change does not rewrite older
+Desktop logs that already contain several assistant messages in one step.
+
 ## Configuration
 
 ```yaml

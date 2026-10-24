@@ -108,9 +108,10 @@ export function openStep(events: readonly NativeEvent[]): OpenStep | undefined {
 /**
  * Balanced presentation transactions; never put remote tool calls in the local execution queue.
  * Without `into`, each item is its own closed turn: the log must be balanced (no
- * native turn running). With `into`, items join the running native loop's open
- * turn and step, so they show while the turn runs; DSH's invariants forbid
- * opening a turn inside another.
+ * native turn running). With `into`, each item closes its own step in the
+ * running turn and leaves a fresh step for the native loop's answer. DSH's
+ * renderer keeps only the latest assistant/message per step, even when their
+ * message IDs differ; sharing a step would erase earlier text and tool cards.
  */
 export function projectNativeEvents(rows: readonly JsonObject[], existing: readonly NativeEvent[], model = 'remote', toolResult: ToolResultShape = 'tool-role', into?: OpenStep): NativeEvent[] {
   const acknowledgements = existing.filter(e => e.type === ACK_EVENT)
@@ -129,6 +130,7 @@ export function projectNativeEvents(rows: readonly JsonObject[], existing: reado
   const addStep = (parent: string, line: string) => { const lines = steps.get(parent); if (lines) lines.push(line); else steps.set(parent, [line]) }
   for (const e of acknowledgements) if (str(e.data['parentItemId']) && str(e.data['step'])) addStep(str(e.data['parentItemId']), str(e.data['step']))
   let turn = existing.reduce((n, e) => Math.max(n, Number(e.data['turn']) || 0), 0)
+  let step = into?.step ?? 1
   const output: NativeEvent[] = []
   const add = (type: string, data: JsonObject, time: number, surface = false) => {
     output.push({ type, data, seq: existing.length + output.length, time, ...(surface ? { surfaceOp: 'append' as const } : {}) })
@@ -170,7 +172,7 @@ export function projectNativeEvents(rows: readonly JsonObject[], existing: reado
         add('turn/start', { turn }, time)
         add('step/start', { turn, step: 1 }, time)
       }
-      const at = into ?? { turn, step: 1 }
+      const at = into ? { turn: into.turn, step } : { turn, step: 1 }
       if (isMessage && payload['role'] === 'user') {
         const recovered = payload['recoveredFirstPrompt'] === true && existing.some(e => e.type === 'assistant/message')
         add('user/message', { id: 'bridge:' + id, role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: (recovered ? '【恢复的首条用户消息】\n' : '') + str(payload['text']) }] }, time, true)
@@ -193,8 +195,10 @@ export function projectNativeEvents(rows: readonly JsonObject[], existing: reado
           add('tool/result', { ...at, message: toolResultMessage('bridge:' + id + ':result', callId, output, isError, toolResult) }, time, true)
         }
       }
-      if (!into) {
-        add('step/end', { turn, step: 1 }, time)
+      add('step/end', at, time)
+      if (into) {
+        add('step/start', { turn: into.turn, step: ++step }, time)
+      } else {
         add('turn/end', { turn, reason: { kind: 'completed' } }, time)
       }
     }

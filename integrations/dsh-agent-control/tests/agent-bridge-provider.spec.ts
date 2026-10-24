@@ -18,6 +18,13 @@ import { constants, zstdCompressSync, zstdDecompressSync } from 'node:zlib'
 import { isStoredSessionCorruption, repairStoredToolResults, zstdFrames } from '../src/agent-bridge-provider/session-repair.js'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { createRequire } from 'node:module'
+
+const require = createRequire(import.meta.url)
+const { loadChatProjection } = require('../scripts/chat-projection.cjs') as {
+  loadChatProjection(bundle: string): (events: readonly NativeEvent[]) => { seq: number; blocks: { kind: string; text?: string }[] }[]
+}
+const projectChat = loadChatProjection(join(require.resolve('@deepseek-ai/dsh-client-ui-chat/package.json'), '../lib/client.js'))
 
 ;(KNOWN_SESSION_EVENT_TYPES as Set<string>).add(BINDING_EVENT)
 ;(KNOWN_SESSION_EVENT_TYPES as Set<string>).add(ACK_EVENT)
@@ -78,6 +85,30 @@ describe('native history projection', () => {
     expect(events.filter(event => event.type === 'turn/start').map(event => event.data.turn)).toEqual([1, 2, 3])
     expect(events.at(-2)?.data).toEqual({ turn: 3, step: 1 })
     expect((events.at(-1)?.data as { turn: number }).turn).toBe(3)
+  })
+  it('keeps native chunks and later loop steps after live imported steps', () => {
+    const session = Session.create(SessionId('step-identity'), projectNativeEvents([row('first')], []) as never)
+    guardImportedTurnNumbers(session as never)
+    projectNativeEvents([row('background')], sessionEvents(session as never)).forEach(event => appendSessionEvent(session as never, event))
+    // The cached loop still calls its next turn 2, although the imported log is at 2.
+    session.append('turn/start', { turn: 2 })
+    session.append('step/start', { turn: 2, step: 1 })
+    const rows = [row('plan', 'message.completed', { role: 'assistant', text: 'checking' }), row('tool', 'command.completed', { command: 'pwd' })]
+    projectNativeEvents(rows, sessionEvents(session as never), 'remote', 'tool-result-block', { turn: 3, step: 1 })
+      .forEach(event => appendSessionEvent(session as never, event))
+    session.append('assistant/chunk', { turn: 2, step: 1, chunk: { type: 'text-delta', index: 0, text: 'done' } } as never)
+    session.append('assistant/message', { turn: 2, step: 1, message: { id: 'final', role: 'assistant', source: { kind: 'model', provider: 'agent-bridge', model: 'remote' }, content: [{ type: 'text', text: 'done' }] }, stream: [] } as never, { surfaceOp: 'append' })
+    session.append('step/end', { turn: 2, step: 1 })
+    session.append('step/start', { turn: 2, step: 2 })
+    session.append('step/end', { turn: 2, step: 2 })
+    session.append('turn/end', { turn: 2, reason: { kind: 'completed' } })
+    const events = sessionEvents(session as never)
+    expectSessionInvariants(events)
+    expect(events.filter(event => event.type === 'step/start' && event.data['turn'] === 3).map(event => event.data['step'])).toEqual([1, 2, 3, 4])
+    expect(events.find(event => event.type === 'assistant/chunk')?.data).toMatchObject({ turn: 3, step: 3 })
+    expect(shown(events).slice(-3)).toEqual(['text:checking', 'tool:bridge:tool', 'text:done'])
+    const replay = Session.create(SessionId('replay'), JSON.parse(JSON.stringify(events)) as never)
+    expect(shown(sessionEvents(replay as never))).toEqual(shown(events))
   })
   it('does not reuse tool identities for repeated remote item IDs', () => {
     const events = projectNativeEvents(['one', 'two'].map(eventId => ({ ...row(eventId, 'command.completed', { command: 'pwd' }), itemId: 'same-item' })), [])
@@ -739,7 +770,10 @@ async function nativeTurn(agent: Agent, adapter: AgentBridgeLlmAdapter, options:
   const chunks: StreamChunk[] = []
   let error: unknown
   try {
-    for await (const chunk of adapter.stream({ sessionId: agent.id, provider: 'agent-bridge', model: 'remote', messages: [prompt], ...options } as GenerateOptions)) chunks.push(chunk)
+    for await (const chunk of adapter.stream({ sessionId: agent.id, provider: 'agent-bridge', model: 'remote', messages: [prompt], ...options } as GenerateOptions)) {
+      chunks.push(chunk)
+      session.append('assistant/chunk', { turn, step: 1, chunk } as never)
+    }
   } catch (caught) { error = caught }
   const text = chunks.flatMap(c => c.type === 'text-delta' ? [c.text] : []).join('')
   session.append('assistant/message', { turn, step: 1, message: { id: 'native-' + turn, role: 'assistant', source: { kind: 'model', provider: 'agent-bridge', model: 'remote' }, content: text ? [{ type: 'text', text }] : [] }, stream: [] }, { surfaceOp: 'append' })
@@ -747,13 +781,13 @@ async function nativeTurn(agent: Agent, adapter: AgentBridgeLlmAdapter, options:
   session.append('turn/end', { turn, reason: { kind: error ? 'error' : 'completed' } })
   return { chunks, error }
 }
-const shown = (events: readonly NativeEvent[]) => events.flatMap(e => {
-  if (e.type === 'tool/call') return ['tool:' + String(e.data['callId'])]
-  if (e.type !== 'assistant/message') return []
-  const text = (record(e.data['message'])['content'] as JsonObject[]).map(block => str(block['text'])).join('')
-  return text ? ['text:' + text] : []
-})
-const str = (value: unknown) => typeof value === 'string' ? value : ''
+const shown = (events: readonly NativeEvent[]) => [
+  ...projectChat(events).flatMap(message => {
+    const text = message.blocks.filter(block => block.kind === 'text').map(block => block.text).join('')
+    return text ? [{ seq: message.seq, text: 'text:' + text }] : []
+  }),
+  ...events.filter(event => event.type === 'tool/call').map(event => ({ seq: event.seq, text: 'tool:' + String(event.data['callId']) })),
+].sort((a, b) => a.seq - b.seq).map(item => item.text)
 const record = (value: unknown): JsonObject => value && typeof value === 'object' && !Array.isArray(value) ? value as JsonObject : {}
 
 describe('Bridge native turn', () => {
@@ -796,7 +830,7 @@ describe('Bridge native turn', () => {
     expectSessionInvariants(events)
     expect(shown(events)).toEqual(['text:foreign', 'tool:bridge:cmd'])
     expect(events.filter(e => e.type === 'tool/result')).toHaveLength(1)
-    expect(events.find(e => e.type === 'tool/call')?.data).toMatchObject({ step: 1, name: 'agent-bridge:command', arguments: JSON.stringify({ command: 'pwd' }) })
+    expect(events.find(e => e.type === 'tool/call')?.data).toMatchObject({ step: 2, name: 'agent-bridge:command', arguments: JSON.stringify({ command: 'pwd' }) })
     expect(events.find(e => e.type === 'tool/result')?.data['message']).toMatchObject({ role: 'user', source: { kind: 'tool', callId: 'bridge:cmd' }, content: [{ type: 'tool-result', toolCallId: 'bridge:cmd', content: [{ type: 'text', text: '/repo' }] }] })
     expect(events.some(e => e.type === ACK_EVENT && e.data['eventId'] === 'cmd')).toBe(true)
     expect(events.some(e => e.data['eventId'] === 'wrong')).toBe(false)

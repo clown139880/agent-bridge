@@ -5,6 +5,7 @@ const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 const assert = require('node:assert/strict');
 const os = require('node:os');
+const { loadChatProjection } = require('./chat-projection.cjs');
 const app = process.argv[2];
 if (!app) throw new Error('Pass the absolute TokensCowork resources/app.asar path');
 const base = path.join(app, 'node_modules');
@@ -21,13 +22,15 @@ const source = fs.readFileSync(bundle, 'utf8').replace(/from "(@deepseek-ai\/[^"
 fs.writeFileSync(target, source);
 (async () => {
   const { Session, SessionId, SESSION_FORMAT_VERSION } = await import(pathToFileURL(path.join(base, '@deepseek-ai/dsh-session/lib/index.js')));
+  const projectChat = loadChatProjection(path.join(base, '@deepseek-ai/dsh-client-ui-chat/lib/client.js'));
+  const visibleText = events => projectChat(events).flatMap(message => message.blocks.filter(block => block.kind === 'text').map(block => block.text));
   const plugin = await import(pathToFileURL(target));
   const rows = [
     { eventId: 'u', sessionId: 'r', turnId: 't', type: 'message.completed', timestamp: 1, payload: { role: 'user', text: 'hello' } },
     { eventId: 'a', sessionId: 'r', turnId: 't', type: 'message.completed', timestamp: 2, payload: { role: 'assistant', text: 'answer' } },
     { eventId: 'c', sessionId: 'r', turnId: 't', type: 'command.completed', timestamp: 3, payload: { command: 'pwd', output: '/repo', exitCode: 0 } },
   ];
-  const session = Session.create(SessionId('contract'), plugin.projectNativeEvents(rows, []));
+  const session = Session.create(SessionId('contract'), plugin.projectNativeEvents(rows, [], 'remote', 'tool-result-block'));
   const messages = session.deriveMessages();
   assert.equal(messages.length, 4);
   assert.equal(messages[0].content[0].text, 'hello');
@@ -104,8 +107,11 @@ fs.writeFileSync(target, source);
       console.log('PASS: remote directory source resolution -> Bridge creation -> selectable native session in the same workspace');
       stage = 'native provider turn';
       let submitted = false;
+      let replyPolls = 0;
       const receiptRows = [
         {eventId:'reply-user',sessionId:'r',turnId:'reply',type:'message.completed',timestamp:4,payload:{role:'user',text:'runtime probe'}},
+        {eventId:'reply-plan',sessionId:'r',turnId:'reply',type:'message.completed',timestamp:4,payload:{role:'assistant',text:'checking before tool'}},
+        {eventId:'reply-tool',sessionId:'r',turnId:'reply',type:'command.completed',timestamp:4,payload:{command:'fixture command',output:'fixture output',exitCode:0}},
         {eventId:'reply-assistant',sessionId:'r',turnId:'reply',type:'message.completed',timestamp:5,payload:{role:'assistant',text:'remote response'}},
         {eventId:'reply-end',sessionId:'r',turnId:'reply',type:'turn.completed',timestamp:6,payload:{status:'completed'}},
       ];
@@ -113,8 +119,11 @@ fs.writeFileSync(target, source);
       let submittedAttachments;
       bridge.call = async ({operation,args}) => {
         if (operation === 'upload') { uploadedImage = args; return {id:'fixture-image',filename:'probe.png',mimeType:'image/png',size:Buffer.from(args.content,'base64').length}; }
-        if (operation === 'session_events') return {data:submitted ? [...rows,...receiptRows] : rows,hasMore:false};
-        if (operation === 'session') return remote;
+        if (operation === 'session_events') {
+          if (submitted && replyPolls++ > 0) assert.ok(visibleText(resumed.session.snapshotEvents()).includes('checking before tool'), 'preamble remains visible after the tool while the remote turn is running');
+          return {data:submitted ? [...rows,...receiptRows.slice(0,replyPolls === 1 ? 3 : undefined)] : rows,hasMore:false};
+        }
+        if (operation === 'session') return submitted ? {...remote,status:'active',activeTurnId:'reply'} : remote;
         if (operation === 'submit_turn') { submitted = true; submittedAttachments = args.attachments; return {status:'succeeded',actionId:'fixture-action',turnId:'reply'}; }
         if (operation === 'approvals' || operation === 'user_input') return {data:[],hasMore:false};
         throw new Error('Unexpected Bridge operation: '+operation);
@@ -139,10 +148,14 @@ fs.writeFileSync(target, source);
       assert.ok(Buffer.from(uploadedImage.content,'base64').length > 0);
       assert.equal(submittedAttachments[0].id,'fixture-image');
       assert.ok(resumed.session.deriveMessages().some(message => message.content.some(block => block.text === 'remote response')));
-      adapter.commitAcks(resumed.id);
+      const completedEvents = resumed.session.snapshotEvents();
+      assert.ok(visibleText(completedEvents).includes('checking before tool'), 'native final reply does not replace the preamble');
+      assert.ok(visibleText(completedEvents).includes('remote response'));
+      const replayed = Session.create(SessionId('chat-replay'), JSON.parse(JSON.stringify(completedEvents)));
+      assert.deepEqual(visibleText(replayed.snapshotEvents()), visibleText(completedEvents), 'reloading the transcript preserves the same visible text');
       await target.syncHistory(resumed.id);
       assert.equal(resumed.session.deriveMessages().filter(message => message.content.some(block => block.text === 'remote response')).length,1);
-      console.log('PASS: installed native image storage -> Bridge upload -> turn attachment -> native response, followed by deduplicated reconciliation');
+      console.log('PASS: installed native image upload, live Chat preamble/tool/final rendering, replay and deduplicated reconciliation');
       stage = 'native deletion';
       bridge.call = async ({operation,args}) => {
         if (operation === 'delete_session') return {status:'succeeded',sessionId:args.sessionId};

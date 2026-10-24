@@ -84,25 +84,37 @@ export function sessionEvents(session: NativeSession): readonly NativeEvent[] {
   throw new Error('Unsupported DSH Session: snapshotEvents/events unavailable')
 }
 export function appendSessionEvent(session: NativeSession, event: Pick<NativeEvent, 'type' | 'data' | 'surfaceOp'>): void {
-  if (event.surfaceOp) session.append(event.type, event.data, { surfaceOp: event.surfaceOp })
-  else session.append(event.type, event.data)
+  // Projected events already name the log's coordinates. Only the native
+  // loop's direct appends need their cached turn/step numbers translated.
+  const append = guardedSessions.get(session) ?? session.append.bind(session)
+  append(event.type, event.data, ...(event.surfaceOp ? [{ surfaceOp: event.surfaceOp }] : []))
 }
 
-const guardedSessions = new WeakSet<NativeSession>()
-/** The native loop caches its turn counter at construction; background imports advance the log. */
+const guardedSessions = new WeakMap<NativeSession, NativeSession['append']>()
+/** Imports advance the log while the native loop retains its turn and step counters. */
 export function guardImportedTurnNumbers(session: NativeSession): void {
   if (guardedSessions.has(session)) return
-  guardedSessions.add(session)
   const append = session.append.bind(session)
   let maximum = sessionEvents(session).reduce((n, event) => Math.max(n, Number(event.data['turn']) || 0), 0)
   let sourceTurn = -1
   let logTurn = -1
+  let logStep = 0
+  const appendProjected: NativeSession['append'] = (type, data, options) => {
+    const result = append(type, data, options)
+    if (type === 'turn/start') { maximum = Number(data['turn']); logStep = 0 }
+    if (type === 'step/start') logStep = Number(data['step'])
+    return result
+  }
+  guardedSessions.set(session, appendProjected)
   session.append = (type, data, options) => {
     if (type === 'turn/start' && typeof data['turn'] === 'number') {
       sourceTurn = data['turn']
       logTurn = Math.max(maximum + 1, sourceTurn)
-      maximum = logTurn
     }
-    return append(type, data['turn'] === sourceTurn && logTurn !== sourceTurn ? { ...data, turn: logTurn } : data, options)
+    const mapped = data['turn'] === sourceTurn ? { ...data, turn: logTurn } : data
+    if (typeof mapped['step'] === 'number' && data['turn'] === sourceTurn) {
+      mapped['step'] = type === 'step/start' ? logStep + 1 : logStep
+    }
+    return appendProjected(type, mapped, options)
   }
 }
