@@ -105,9 +105,12 @@ export class ControlState {
   }
   snapshot = () => this.state;
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => this.listeners.delete(listener); };
-  private patch(value: Partial<ViewState>) {
+  private patch(value: Partial<ViewState>, synchronous = false) {
     if (this.disposed) return;
     this.state = { ...this.state, ...value };
+    // Controlled fields must update during the input event, before React restores
+    // their value. Streamed updates can still be coalesced into one notification.
+    if (synchronous) { this.listeners.forEach(f => f()); return; }
     if (!this.pendingNotifications) {
       this.pendingNotifications = true;
       queueMicrotask(() => { this.pendingNotifications = false; if (!this.disposed) this.listeners.forEach(f => f()); });
@@ -132,11 +135,11 @@ export class ControlState {
     while (this.details.size > MEMORY_DETAILS) this.details.delete(this.details.keys().next().value!);
     this.store?.save([...this.details.values()].slice(-STORED_DETAILS).map(trimmed));
   }
-  setDraft(id: string, text: string) { this.patch({ drafts: { ...this.state.drafts, [id]: text } }); }
+  setDraft(id: string, text: string) { this.patch({ drafts: { ...this.state.drafts, [id]: text } }, true); }
   setAnswer(pendingId: string, questionId: string, value: AnswerDraft) {
-    this.patch({ answers: { ...this.state.answers, [pendingId]: { ...this.state.answers[pendingId], [questionId]: value } } });
+    this.patch({ answers: { ...this.state.answers, [pendingId]: { ...this.state.answers[pendingId], [questionId]: value } } }, true);
   }
-  setFilters(query: string, workerFilter: string) { this.patch({ query, workerFilter }); }
+  setFilters(query: string, workerFilter: string) { this.patch({ query, workerFilter }, true); }
   /** One catalog request per worker per tab; a failed one may be retried. */
   async loadModels(workerId: string) {
     if (!workerId || this.state.models[workerId] && this.state.models[workerId].status !== "error") return;

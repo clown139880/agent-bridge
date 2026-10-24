@@ -9,9 +9,11 @@ import { WebSocket } from "ws";
 import { getRequestListener } from "../apps/control-plane/node_modules/@hono/node-server/dist/index.js";
 import { createControlWeb } from "../apps/control-plane/src/web/app.js";
 
+const browserDist = resolve(process.env.CONTROL_CENTER_TEST_DIST ?? "apps/control-center/dist");
+
 // Browser validation uses only fixture HTTP data and a repository-local Chromium profile.
 test("mobile browser on non-secure HTTP: no-login entry, paging, history/SSE, send, steer, interrupt, create, and server-only credentials", {
-  skip: !existsSync("/usr/bin/chromium") || !existsSync("apps/control-center/dist/index.html"), timeout: 60_000,
+  skip: !existsSync("/usr/bin/chromium") || !existsSync(resolve(browserDist, "index.html")), timeout: 60_000,
 }, async t => {
   await mkdir(resolve(".runtime/tests"), { recursive: true });
   const directory = await mkdtemp(resolve(".runtime/tests/browser-"));
@@ -31,7 +33,7 @@ test("mobile browser on non-secure HTTP: no-login entry, paging, history/SSE, se
     const cursor = `c:${++streamId}:0`, value = { cursor, eventId: `wire-${streamId}`, type, sessionId, resource: { kind: "session", id: sessionId ?? "global" }, data };
     streams.forEach(r => r.write(`id: ${cursor}\nevent: bridge.event\ndata: ${JSON.stringify(value)}\n\n`));
   };
-  const web = getRequestListener(createControlWeb().fetch, { overrideGlobalObjects: false });
+  const web = getRequestListener(createControlWeb(browserDist).fetch, { overrideGlobalObjects: false });
   const server = createServer((req, res) => {
     const url = new URL(req.url!, "http://test");
     if (!url.pathname.startsWith("/control/api/v1/")) { void web(req, res); return; }
@@ -119,6 +121,21 @@ test("mobile browser on non-secure HTTP: no-login entry, paging, history/SSE, se
     throw new Error(`UI condition timed out: ${expression}\n${await js("document.body.innerText")}\n${exceptions.join("\n")}`);
   };
   const fill = (selector: string, value: string, textarea = false) => js(`(()=>{const el=document.querySelector(${JSON.stringify(selector)});Object.getOwnPropertyDescriptor(${textarea ? "HTMLTextAreaElement" : "HTMLInputElement"}.prototype,'value').set.call(el,${JSON.stringify(value)});el.dispatchEvent(new Event('input',{bubbles:true}));})()`);
+  const pressEnter = async (modifiers = 0) => {
+    await command("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, modifiers, text: "\r" });
+    await command("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, modifiers });
+  };
+  const editMiddle = async (selector: string) => {
+    await fill(selector, "前面的文字后面的文字", true);
+    await js(`(()=>{const el=document.querySelector(${JSON.stringify(selector)});el.focus();el.setSelectionRange(5,5)})()`);
+    await command("Input.insertText", { text: "插入" });
+    assert.deepEqual(await js(`(()=>{const el=document.querySelector(${JSON.stringify(selector)});return [el.value,el.selectionStart,el.selectionEnd]})()`),
+      ["前面的文字插入后面的文字", 7, 7], "inserting in the middle must leave the caret beside the inserted text");
+    await js(`document.querySelector(${JSON.stringify(selector)}).setSelectionRange(5,7)`);
+    await command("Input.insertText", { text: "替换" });
+    assert.deepEqual(await js(`(()=>{const el=document.querySelector(${JSON.stringify(selector)});return [el.value,el.selectionStart,el.selectionEnd]})()`),
+      ["前面的文字替换后面的文字", 7, 7], "replacing selected text must preserve the caret");
+  };
   const tap = async (selector: string) => {
     // Let the scroll event land before measuring: until it does, the transcript still
     // follows new content and may scroll the target away between measure and touch.
@@ -175,10 +192,21 @@ test("mobile browser on non-secure HTTP: no-login entry, paging, history/SSE, se
   assert.equal(await js("!!document.querySelector('.share-sheet')"), false, "a sendable open conversation takes the share directly");
   assert.deepEqual(await js("window.__haptics"), ["tick"]); assert.equal(writes.length, writesBefore, "never sent automatically");
   await js("document.querySelector('.attachment button').click()"); await fill("#message", "", true);
+  await editMiddle("#message");
+  await fill("#message", "两行消息", true);
+  await js("document.querySelector('#message').focus()"); await pressEnter();
+  assert.equal(await js("document.querySelector('#message').value"), "两行消息\n", "Enter still inserts a newline");
+  assert.equal(writes.length, writesBefore);
+  await js("document.querySelector('#message').dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',ctrlKey:true,isComposing:true,bubbles:true,cancelable:true}))");
+  await js("document.querySelector('#message').dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',ctrlKey:true,keyCode:229,bubbles:true,cancelable:true}))");
+  await js("document.querySelector('#message').dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',ctrlKey:true,repeat:true,bubbles:true,cancelable:true}))");
+  assert.equal(writes.length, writesBefore, "IME confirmation and held keys must never send");
   assert.equal(await js("document.documentElement.scrollWidth<=innerWidth"), true, "390px layout must not overflow horizontally");
   await fill("#message", " \n ", true);
   assert.equal(await js("document.querySelector('.composer button.primary').disabled"), true, "whitespace draft must stay disabled");
-  await fill("#message", "补充一个要求", true); await tap(".composer button.primary");
+  await js("document.querySelector('#message').focus()"); await pressEnter(2);
+  assert.equal(writes.length, writesBefore, "the shortcut respects disabled submit buttons");
+  await fill("#message", "补充一个要求", true); await pressEnter(2);
   await wait("document.body.innerText.includes('操作已被接受')"); assert.equal(writes[0].body.expectedTurnId, "turn-one"); assert.equal(writes[0].body.delivery, "steer");
   await wait("!document.querySelector('.interrupt').disabled");
   await tap(".interrupt"); await wait("document.body.innerText.includes('本轮已打断')");
@@ -186,7 +214,7 @@ test("mobile browser on non-secure HTTP: no-login entry, paging, history/SSE, se
   await command("Emulation.setDeviceMetricsOverride", { width: 390, height: 500, deviceScaleFactor: 1, mobile: true });
   await fill("#message", "继续已空闲的会话", true);
   await wait("document.querySelector('.composer button.primary').textContent.includes('发送') && !document.querySelector('.composer button.primary').disabled");
-  await tap(".composer button.primary"); await wait("!document.querySelector('#message').value");
+  await js("document.querySelector('#message').focus()"); await pressEnter(4); await wait("!document.querySelector('#message').value");
   assert.equal(writes[2].body.delivery, "start_turn"); assert.equal(writes[2].body.expectedTurnId, undefined);
   await js("document.querySelector('.back').click()"); await wait("!!document.querySelector('a[href=\"/control/new\"]')");
   // Elsewhere a share asks for its conversation; "new" fills the new-session form.
@@ -199,8 +227,8 @@ test("mobile browser on non-secure HTTP: no-login entry, paging, history/SSE, se
   await js("document.querySelector('a[href=\"/control/new\"]').click()"); await wait("!!document.querySelector('#new-worker')");
   assert.equal(await js("document.querySelector('.new-form button.primary').disabled"), true, "new session needs worker and workspace");
   await js("(()=>{const e=document.querySelector('#new-worker');e.value='claude@test';e.dispatchEvent(new Event('change',{bubbles:true}));})()");
-  await fill("#workspace", "/work/repo"); await fill("#first-message", "创建验收", true);
-  await tap(".new-form button.primary"); await wait("location.pathname.endsWith('/created') && !!document.querySelector('.composer')");
+  await fill("#workspace", "/work/repo"); await editMiddle("#first-message"); await fill("#first-message", "创建验收", true);
+  await js("document.querySelector('#first-message').focus()"); await pressEnter(2); await wait("location.pathname.endsWith('/created') && !!document.querySelector('.composer')");
   assert.equal(writes[3].body.workerId, worker.id); assert.equal(writes[3].body.workspace, "/work/repo");
   await fill("#message", "新会话的追加指令", true);
   await wait("!document.querySelector('.composer button.primary').disabled");
@@ -215,6 +243,7 @@ test("mobile browser on non-secure HTTP: no-login entry, paging, history/SSE, se
   await wait("document.querySelector('.composer button.primary').disabled && document.body.innerText.includes('等待处理待办')");
   emit("session.updated", { ...summary("created"), status: "waiting_for_input", pendingUserInputCount: 1 }, "created");
   await wait("document.body.innerText.includes('等待回答') && document.querySelector('.composer button.primary').disabled");
+  await js("document.querySelector('#message').focus()"); await pressEnter(2);
   assert.equal(writes.length, 5, "pending interactions must not submit messages");
   assert.equal(await js("localStorage.length+sessionStorage.length"), 0); assert.equal(await js("document.cookie"), "");
   assert.equal(await js("document.documentElement.scrollWidth<=innerWidth"), true);
@@ -230,6 +259,7 @@ test("mobile browser on non-secure HTTP: no-login entry, paging, history/SSE, se
   await fill("#message", "只读不能发送", true);
   assert.equal(await js("document.querySelector('.composer button.primary').disabled"), true);
   assert.equal(await js("document.querySelector('.interrupt').disabled"), true);
+  await js("document.querySelector('#message').focus()"); await pressEnter(4);
   assert.equal(writes.length, 5, "read-only server configuration must not submit writes");
   assert.deepEqual(exceptions, []);
   console.log(`Mobile screenshot: ${directory}/mobile.png`);

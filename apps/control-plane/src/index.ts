@@ -20,6 +20,7 @@ const control = new ControlPlane(store, {
   sse: config.sse,
   bridgeUpdate: config.bridgeUpdate,
   webhook: config.webhook,
+  ntfy: config.ntfy,
 });
 
 await control.start();

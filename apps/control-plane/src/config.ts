@@ -75,6 +75,10 @@ export const config = {
     url: process.env.DOROTHY_WEBHOOK_URL,
     secret: process.env.DOROTHY_WEBHOOK_SECRET,
   } : undefined,
+  ntfy: process.env.NTFY_URL && process.env.NTFY_TOPIC ? {
+    url: process.env.NTFY_URL, topic: process.env.NTFY_TOPIC, token: process.env.NTFY_TOKEN,
+    controlCenterUrl: process.env.NTFY_CONTROL_CENTER_URL,
+  } : undefined,
 };
 
 /**

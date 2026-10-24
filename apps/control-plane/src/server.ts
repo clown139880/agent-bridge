@@ -21,10 +21,12 @@ import {
   type SessionDiscoveredMessage,
   type SessionActivityStatus,
   type SessionState,
+  type UserInputRequestMessage,
 } from "@agent-bridge/protocol";
 import { AgentControlApi } from "./api/router.js";
 import { BridgeRegistry } from "./bridge-registry.js";
 import { WebhookNotifier, type WebhookOptions } from "./webhook.js";
+import { NtfyNotifier, type NtfyOptions, type SessionNotificationKind } from "./ntfy.js";
 import { AgentMemory, AgentSkills, type Writer } from "@agent-bridge/agent-memory";
 import { ConversationMcpServer } from "./memory-mcp.js";
 import { memoryEndpoint, reviewContext, runMemoryTool, type AgentMemoryMcpOptions } from "./mcp/memory.js";
@@ -53,6 +55,7 @@ export class ControlPlane {
   private readonly controlStore: AgentControlStore;
   private readonly controlApi: AgentControlApi;
   private readonly webhook: WebhookNotifier;
+  private readonly ntfy: NtfyNotifier;
   private readonly memory: ConversationMemoryStore;
   private readonly memoryMcp?: ConversationMcpServer;
   private readonly memoryReviews?: MemoryReviews;
@@ -90,9 +93,11 @@ export class ControlPlane {
         publishedAt?: number;
       };
       webhook?: WebhookOptions;
+      ntfy?: NtfyOptions;
     },
   ) {
     this.webhook = new WebhookNotifier(options.webhook);
+    this.ntfy = new NtfyNotifier(options.ntfy);
     this.memory = new ConversationMemoryStore(store.db);
     let agentMemory: AgentMemory | undefined;
     if (options.agentMemory) {
@@ -331,7 +336,7 @@ export class ControlPlane {
       for (const session of message.sessions) this.memory.upsertSessionProject(session.sessionId, session.projectIdentity);
       for (const approval of message.approvals) await this.handleApprovalRequest(machineId,
         { type: "approval_request", ...approval });
-      for (const input of message.userInputs) this.controlStore.upsertUserInput(machineId, input);
+      for (const input of message.userInputs) this.handleUserInputRequest(machineId, input);
       if (message.complete) {
         // A restarted worker may no longer own an old live session. Its complete
         // inventory must clear that old turn, otherwise clients steer forever.
@@ -395,6 +400,10 @@ export class ControlPlane {
         const status = activityForStructuredEvent(message.eventType);
         if (status) this.controlStore.updateSessionActivity(message.sessionId, status.activity,
           status.active ? message.turnId : undefined, status.lastTurn);
+        if (message.eventType === "turn.completed" || message.eventType === "turn.failed") {
+          this.notifySession(message.eventType === "turn.completed" ? "completed" : "failed", message.sessionId,
+            message.payload.summary ?? message.payload.error);
+        }
       }
       return;
     }
@@ -403,7 +412,7 @@ export class ControlPlane {
       return;
     }
     if (message.type === "user_input_request") {
-      this.controlStore.upsertUserInput(machineId, message);
+      this.handleUserInputRequest(machineId, message);
       return;
     }
     if (message.type === "user_input_resolved") {
@@ -651,11 +660,29 @@ export class ControlPlane {
     // approval_request reaches us. Never persist a reasonless blocked state in
     // that case: there is no pending approval for the API caller to resolve.
     if (this.resolvedApprovalIds.delete(message.approvalId)) return;
+    const first = !this.controlStore.pending(message.approvalId);
     this.controlStore.upsertApproval(machineId, message);
+    if (first) this.notifySession("approval", message.sessionId, message.summary);
     this.store.updateSessionStatus(message.sessionId, "blocked");
     const workerRun = this.store.getWorkerRunBySession(message.sessionId);
     if (workerRun) this.store.updateWorkerRun(workerRun.id, "blocked");
     this.approvalsById.set(message.approvalId, { approvalId: message.approvalId, sessionId: message.sessionId });
+  }
+
+  private handleUserInputRequest(machineId: string, message: Omit<UserInputRequestMessage, "type">): void {
+    const first = !this.controlStore.pending(message.requestId);
+    this.controlStore.upsertUserInput(machineId, message);
+    if (first) this.notifySession("input", message.sessionId, message.questions.map(q => q.question).join("\n"));
+  }
+
+  private notifySession(kind: SessionNotificationKind, sessionId: string, detail?: unknown): void {
+    const session = this.store.getSession(sessionId);
+    if (!session) return;
+    const title = this.controlStore.session(sessionId)?.title;
+    const summary = typeof detail === "string" ? detail
+      : detail && typeof detail === "object" && "message" in detail ? String(detail.message) : undefined;
+    this.ntfy.notify({ kind, sessionId, title: typeof title === "string" && title ? title : session.projectName,
+      machineId: session.machineId, agent: session.agentType, summary });
   }
 
   private async handleSessionDiscovered(machineId: string, message: SessionDiscoveredMessage): Promise<void> {

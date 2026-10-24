@@ -75,6 +75,14 @@ const pasteImages = (control: ControlState, id: string) => (e: React.ClipboardEv
   const files = [...e.clipboardData.files].filter(f => f.type.startsWith("image/"));
   if (files.length) { e.preventDefault(); control.addFiles(id, files); }
 };
+const submitWithKeyboard = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+  if (e.key !== "Enter" || !(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey
+    || e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
+  e.preventDefault();
+  if (e.repeat) return;
+  const form = e.currentTarget.form, submit = form?.querySelector<HTMLButtonElement>('button[type="submit"]');
+  if (submit && !submit.disabled) form!.requestSubmit(submit);
+};
 
 // Never a real option label: the API rejects empty/control-only answers.
 const OTHER = "\0other";
@@ -360,12 +368,13 @@ function NewSession({ control, state }: { control: ControlState; state: ViewStat
       <datalist id="recent-spaces">{spaces.map(s => <option key={s.path} value={s.path}>{s.name}</option>)}</datalist>
       {worker && spaces.length > 0 && <div className="workspace-choices">{spaces.slice(0, 6).map(s => <button type="button" key={s.path} onClick={() => setWorkspace(s.path)}>{s.name}</button>)}</div>}
       {workspace && !absolute && <p className="hint">请使用目标机器上的绝对路径。</p>}
-      <label htmlFor="first-message">第一条消息 <span className="muted">（可选）</span></label><textarea id="first-message" rows={6} value={input} onChange={e => control.setDraft("new", e.target.value)} onPaste={pasteImages(control, "new")} placeholder="想让 Agent 做什么？" />
+      <label htmlFor="first-message">第一条消息 <span className="muted">（可选）</span></label><textarea id="first-message" rows={6} value={input} onChange={e => control.setDraft("new", e.target.value)} onPaste={pasteImages(control, "new")} onKeyDown={submitWithKeyboard} aria-keyshortcuts="Control+Enter Meta+Enter" placeholder="想让 Agent 做什么？" />
       <Attachments control={control} state={state} id="new" disabled={!state.writable} />
       {(state.uploads.new?.length ?? 0) > 0 && !input.trim() && <p className="hint">图片需随第一条消息发送。</p>}
       <ModelPicker control={control} state={state} workerId={worker?.id} value={model} onChange={setModel} />
       <p className="hint">未选择时沿用 Agent 默认模型和思考程度。路径由目标 Bridge 校验。</p>
-      <button className="primary" disabled={!state.writable || !worker || !absolute || busy}>{busy ? "正在创建…" : "创建对话 →"}</button>
+      <p className="hint">Enter 换行 · Ctrl / ⌘ + Enter 创建对话</p>
+      <button type="submit" className="primary" disabled={!state.writable || !worker || !absolute || busy}>{busy ? "正在创建…" : "创建对话 →"}</button>
     </form></section>;
 }
 
@@ -454,13 +463,13 @@ function Detail({ control, state, id }: { control: ControlState; state: ViewStat
         : { input: draft, delivery: "start_turn", ...modelBody(model), ...attachmentBody(state, id) };
       void control.submit(`/sessions/${segment(id)}/turns`, body, id);
     }}><label className="sr-only" htmlFor="message">发送消息</label>
-      <textarea id="message" rows={3} value={draft} onChange={e => control.setDraft(id, e.target.value)} onPaste={pasteImages(control, id)} placeholder={blocked ? "请先处理审批或问题" : running ? "追加指令…" : "继续这段对话…"} />
+      <textarea id="message" rows={3} value={draft} onChange={e => control.setDraft(id, e.target.value)} onPaste={pasteImages(control, id)} onKeyDown={submitWithKeyboard} aria-keyshortcuts="Control+Enter Meta+Enter" placeholder={blocked ? "请先处理审批或问题" : running ? "追加指令…" : "继续这段对话…"} />
       <Attachments control={control} state={state} id={id} disabled={!state.writable} />
       {!running && <details className="composer-options" onToggle={e => setOptionsOpen(e.currentTarget.open)}><summary>模型 {model.model ? state.models[session.workerId]?.models.find(m => m.model === model.model)?.displayName ?? model.model : "默认"} ·思考 {model.effort ? effortLabels[model.effort] ?? model.effort : "默认"}</summary>
         {optionsOpen && <ModelPicker control={control} state={state} workerId={session.workerId} value={model} onChange={setModel} />}</details>}
-      <div className="composer-actions"><small>{!state.writable ? "只读模式" : blocked ? "等待处理待办" : !online ? "Worker 离线" : uploading(state, id) ? "图片上传中…" : running && !session.activeTurnId ? "等待 turn 信息" : "Enter 换行"}</small>
+      <div className="composer-actions"><small>{!state.writable ? "只读模式" : blocked ? "等待处理待办" : !online ? "Worker 离线" : uploading(state, id) ? "图片上传中…" : running && !session.activeTurnId ? "等待 turn 信息" : "Enter 换行 · Ctrl / ⌘ + Enter 发送"}</small>
         <div className="row-actions">{running && <button type="button" className="danger" disabled={!canInterrupt} onClick={interrupt}>■ 中断</button>}
-        <button className="primary" disabled={!canOperate || !draft.trim() || blocked || uploading(state, id) || Boolean(running && (!session.activeTurnId || !caps.includes("turn-steer"))) || !["idle", "active"].includes(session.status)}>{running ? "追加指令 ↑" : "发送 ↑"}</button></div></div>
+        <button type="submit" className="primary" disabled={!canOperate || !draft.trim() || blocked || uploading(state, id) || Boolean(running && (!session.activeTurnId || !caps.includes("turn-steer"))) || !["idle", "active"].includes(session.status)}>{running ? "追加指令 ↑" : "发送 ↑"}</button></div></div>
     </form>}
   </section>;
 }
