@@ -6,6 +6,8 @@
 
 当前代码能力、DSH 接入方式和已知边界以 [`docs/current-state.md`](docs/current-state.md) 为准；较早的轮次记录和方案评估是历史材料。
 
+个人消息中心的 MQTT、多来源和多设备呈现方向见[设计稿](docs/personal-message-center.zh.md)；该文档是规划，不代表功能已上线。
+
 ## 任务完成定义
 
 涉及 Agent Bridge 代码或发布的任务，只有在改动已推送到远程，且已在 HAL 上执行
