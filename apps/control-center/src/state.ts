@@ -25,6 +25,7 @@ export interface ViewState {
   answers: Record<string, Record<string, AnswerDraft>>;
   /** A share from another app waiting for the user to pick its conversation. */
   share?: Share;
+  reads: Record<string, number>;
 }
 export interface AnswerDraft { choice: string; other?: string }
 /** A detail page as last shown, so returning to it never starts from an empty page. */
@@ -33,7 +34,20 @@ export interface DetailCache {
   before: string | null; historyMore: boolean; savedAt: number;
 }
 /** Optional persistence (IndexedDB in the browser) for the most recent details. */
-export interface DetailStore { entries: DetailCache[]; save(entries: DetailCache[]): void }
+export interface DetailStore {
+  entries: DetailCache[]; save(entries: DetailCache[]): void;
+  /** Agent replies already seen per session on this device (see `unreadCount`). */
+  reads?: Record<string, number>; saveReads?(reads: Record<string, number>): void;
+}
+const MAX_READS = 500;
+/**
+ * Agent replies a session gained since this device last showed it. A session never
+ * opened here has no baseline and shows none.
+ */
+export const unreadCount = (state: ViewState, s: Session) => {
+  const read = state.reads[s.sessionId];
+  return read === undefined || s.messageCount === undefined ? 0 : Math.max(0, s.messageCount - read);
+};
 const MEMORY_DETAILS = 8, STORED_DETAILS = 5, STORED_EVENTS = 150;
 const trimmed = (c: DetailCache): DetailCache => c.events.length <= STORED_EVENTS ? c
   : { ...c, events: c.events.slice(-STORED_EVENTS), before: c.events[c.events.length - STORED_EVENTS].cursor, historyMore: true };
@@ -104,13 +118,14 @@ export class ControlState {
     this.state = { route: { page: "sessions" }, sessions: byPrompt(snapshot.sessions), workers: snapshot.workers,
       events: [], approvals: [], inputs: [], loading: false, moreLoading: false,
       hasMore: snapshot.truncated.sessions, historyMore: false, error: "", syncing: false, connection: "按需更新",
-      updatedAt: Date.now(), query: "", workerFilter: "", writable, drafts: {}, uploads: {}, models: {}, answers: {} };
+      updatedAt: Date.now(), query: "", workerFilter: "", writable, drafts: {}, uploads: {}, models: {}, answers: {}, reads: store?.reads ?? {} };
   }
   snapshot = () => this.state;
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => this.listeners.delete(listener); };
   private patch(value: Partial<ViewState>, synchronous = false) {
     if (this.disposed) return;
     this.state = { ...this.state, ...value };
+    if (value.session) this.markRead();
     // Controlled fields must update during the input event, before React restores
     // their value. Streamed updates can still be coalesced into one notification.
     if (synchronous) { this.listeners.forEach(f => f()); return; }
@@ -137,6 +152,19 @@ export class ControlState {
     this.details.set(session.sessionId, { session, events, approvals, inputs, before: this.before, historyMore, savedAt: Date.now() });
     while (this.details.size > MEMORY_DETAILS) this.details.delete(this.details.keys().next().value!);
     this.store?.save([...this.details.values()].slice(-STORED_DETAILS).map(trimmed));
+  }
+  /** The open conversation, while on screen, counts as read up to its current replies. */
+  private markRead() {
+    const { route, session, reads } = this.state;
+    if (!this.visible || route.page !== "detail" || !session || session.sessionId !== route.id || session.messageCount === undefined
+      || reads[session.sessionId] === session.messageCount) return;
+    const next = { ...reads };
+    delete next[session.sessionId]; // most recent last, so trimming drops the longest unseen
+    next[session.sessionId] = session.messageCount;
+    const keys = Object.keys(next);
+    for (const key of keys.slice(0, Math.max(0, keys.length - MAX_READS))) delete next[key];
+    this.state = { ...this.state, reads: next };
+    this.store?.saveReads?.(next);
   }
   setDraft(id: string, text: string) { this.patch({ drafts: { ...this.state.drafts, [id]: text } }, true); }
   setAnswer(pendingId: string, questionId: string, value: AnswerDraft) {
@@ -440,7 +468,7 @@ export class ControlState {
     this.visible = visible;
     // Hidden: drop in-flight reads and the stream (resumed with Last-Event-ID), keep the page as it is.
     if (!visible) { this.remember(); this.scope.abort(); this.syncStream(); }
-    else void this.open(this.state.route, false);
+    else { this.markRead(); void this.open(this.state.route, false); }
   }
   async submit(path: string, body: Record<string, unknown>, draftId?: string) {
     const old = this.state.intent;

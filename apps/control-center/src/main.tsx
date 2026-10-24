@@ -8,7 +8,7 @@ import { MessageText } from "./markdown";
 import { AgentIcon, machineStyle, Origin } from "./identity";
 import { TOOL_TYPES, transcriptRows } from "./transcript";
 import { isLive, pendingId, segment, type Pending, type Session, type SessionEvent, type Snapshot } from "./api/types";
-import { canCompose, ControlState, type Route, type ViewState } from "./state";
+import { canCompose, ControlState, unreadCount, type Route, type ViewState } from "./state";
 import "./styles.css";
 
 function navigate(path: string) {
@@ -336,13 +336,15 @@ function Sessions({ control, state }: { control: ControlState; state: ViewState 
     </form>
     <div className="list-meta"><span>{state.loading ? "正在读取…" : `${state.sessions.length} 个会话`}</span>
       <button className="quiet" disabled={state.loading} onClick={() => void control.refresh()}>↻ 刷新</button></div>
-    <div className="session-list">{state.sessions.map(s => <Link key={s.sessionId} to={`/control/sessions/${segment(s.sessionId)}`} className="session-row">
+    <div className="session-list">{state.sessions.map(s => { const unread = unreadCount(state, s); return <Link key={s.sessionId} to={`/control/sessions/${segment(s.sessionId)}`} className="session-row">
       <span className="machine-stripe" style={machineStyle(s.machineId)} aria-hidden="true" />
-      <div className="session-row-top"><Status status={s.status} /><time title="最后一条消息">{time(promptTime(s))}</time></div>
+      <div className="session-row-top"><Status status={s.status} /><span className="row-end">
+        {unread > 0 && <span className="unread-badge" aria-label={`${unread} 条未读回复`}>{unread > 99 ? "99+" : unread}</span>}
+        <time title="最后一条消息">{time(promptTime(s))}</time></span></div>
       <h2>{title(s)}</h2><p><Origin agent={s.agent} workerId={s.workerId} machineId={s.machineId}>{s.projectName}</Origin></p>
       {(s.pendingApprovalCount > 0 || s.pendingUserInputCount > 0) && <small className="pending-count">{s.pendingApprovalCount} 项审批 · {s.pendingUserInputCount} 项待答</small>}
       <span className="row-arrow" aria-hidden="true">↗</span>
-    </Link>)}</div>
+    </Link>; })}</div>
     {state.loading && !state.sessions.length && <Skeleton rows={4} kind="session" />}
     {!state.loading && !state.sessions.length && <div className="empty">还没有匹配的会话。<p>换个关键词，或发起一段新对话。</p></div>}
     {state.hasMore && <button className="load-more" disabled={state.moreLoading || state.loading} onClick={() => void control.loadList(true)}>{state.moreLoading ? "加载中…" : "加载更多会话"}</button>}

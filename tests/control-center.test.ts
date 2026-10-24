@@ -410,3 +410,28 @@ test("agent and machine identity: brand marks and a stable machine hue outside t
   assert.match(html, /class="machine-chip" style="--machine-hue:hsl\(/);
   assert.match(html, />repo</);
 });
+
+test("unread badges count Agent replies since this device last showed the session, and none for never-opened ones", async t => {
+  const saved: Array<Record<string, number>> = [];
+  const store: DetailStore = { entries: [], save() {}, reads: { s: 3 }, saveReads: r => saved.push(r) };
+  const listed = { ...session, messageCount: 5 }, other = { ...session, sessionId: "never", messageCount: 9 };
+  t.mock.method(globalThis, "fetch", async (path: string) => {
+    if (path === "/api/v1/sessions/s") return json({ ...listed, messageCount: 6 });
+    if (path.includes("/snapshot")) return json({ ...snapshot, sessions: [listed, other] });
+    if (path.startsWith("/api/v1/workers")) return json({ workers: snapshot.workers });
+    return json({ data: [], hasMore: false, nextCursor: null });
+  });
+  const state = new ControlState("test-token", true, { ...snapshot, sessions: [listed, other] }, () => {}, () => {}, "/api/v1", store);
+  t.after(() => state.dispose());
+  const { unreadCount } = await import("../apps/control-center/src/state.js");
+  assert.equal(unreadCount(state.snapshot(), listed), 2);
+  assert.equal(unreadCount(state.snapshot(), other), 0);
+  await state.open({ page: "detail", id: "s" });
+  assert.equal(state.snapshot().reads.s, 6);
+  assert.deepEqual(saved.at(-1), { s: 6 });
+  assert.equal(unreadCount(state.snapshot(), { ...listed, messageCount: 6 }), 0);
+  // Hidden, new replies stay unread.
+  state.setVisible(false);
+  (state as unknown as { patch(v: object): void }).patch({ session: { ...listed, messageCount: 8 } });
+  assert.equal(state.snapshot().reads.s, 6);
+});

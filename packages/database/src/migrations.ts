@@ -371,6 +371,23 @@ export function migrateDatabase(db: DatabaseSync): void {
       db.exec("COMMIT");
     } catch (error) { try { db.exec("ROLLBACK"); } catch {} throw error; }
   }
+
+  // How many Agent replies a session holds: clients compare it with what they last read to show unread badges.
+  if (!db.prepare("SELECT 1 FROM schema_migrations WHERE version=13").get()) {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      addColumn(db, "sessions", "message_count", "INTEGER NOT NULL DEFAULT 0");
+      db.exec(`
+        UPDATE sessions SET message_count = (
+          SELECT COUNT(*) FROM events
+          WHERE events.session_id = sessions.id AND events.type = 'message.completed' AND typeof(events.body) = 'text'
+            AND json_valid(events.body) AND json_extract(events.body, '$.role') = 'assistant'
+        );
+      `);
+      db.prepare("INSERT INTO schema_migrations(version,applied_at) VALUES (13,?)").run(Date.now());
+      db.exec("COMMIT");
+    } catch (error) { try { db.exec("ROLLBACK"); } catch {} throw error; }
+  }
 }
 
 /**

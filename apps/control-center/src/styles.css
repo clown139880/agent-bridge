@@ -44,6 +44,8 @@
 .session-row p span, .session-info span { margin: 0 .2rem; opacity: .6; }
 .session-row-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .session-row time { font-size: .69rem; color: var(--muted); }
+.row-end { display: inline-flex; align-items: center; gap: 8px; }
+.unread-badge { min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: #d93a2b; color: #fff; font-size: .66rem; font-weight: 700; line-height: 18px; text-align: center; font-variant-numeric: tabular-nums; }
 .row-arrow { position: absolute; right: 0; top: 55px; color: var(--muted); }
 .status { display: inline-flex; align-items: center; gap: 7px; font-size: .74rem; color: var(--muted); }
 .dot { width: 7px; height: 7px; background: currentColor; border-radius: 50%; }

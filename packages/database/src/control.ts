@@ -377,6 +377,10 @@ export class AgentControlStore {
       if (isReply && this.db.prepare(`UPDATE sessions SET last_response_at=?,updated_at=?
         WHERE id=? AND (last_response_at IS NULL OR last_response_at<?)`)
         .run(message.timestamp, message.timestamp, message.sessionId, message.timestamp).changes) markChanged(this.db, "session", message.sessionId);
+      if (message.eventType === "message.completed" && payload.role === "assistant") {
+        this.db.prepare("UPDATE sessions SET message_count=message_count+1 WHERE id=?").run(message.sessionId);
+        markChanged(this.db, "session", message.sessionId);
+      }
       if (message.eventType === "message.completed" && payload.role === "user" && this.db.prepare(`UPDATE sessions SET last_prompt_at=?
         WHERE id=? AND (last_prompt_at IS NULL OR last_prompt_at<?)`)
         .run(message.timestamp, message.sessionId, message.timestamp).changes) markChanged(this.db, "session", message.sessionId);
@@ -798,7 +802,7 @@ export class AgentControlStore {
       pendingApprovalCount:count("approval"),pendingUserInputCount:count("user_input"),latestRun:run,
       createdAt:Number(row.created_at),updatedAt:Number(row.updated_at??row.created_at),
       lastResponseAt:row.last_response_at==null?null:Number(row.last_response_at),
-      lastPromptAt:row.last_prompt_at==null?null:Number(row.last_prompt_at),source:String(row.source??"app-server"),
+      lastPromptAt:row.last_prompt_at==null?null:Number(row.last_prompt_at),messageCount:Number(row.message_count??0),source:String(row.source??"app-server"),
       historyCompleteness:String(row.history_completeness??"loaded-only")};
     if(detail){const runs=this.db.prepare("SELECT * FROM worker_runs WHERE session_id=? ORDER BY created_at DESC,id DESC LIMIT 20")
       .all(String(row.id)) as Record<string,unknown>[];

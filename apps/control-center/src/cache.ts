@@ -4,7 +4,7 @@
 // Read only after /access succeeded, and wiped when the server rejects the login.
 import type { DetailCache, DetailStore } from "./state";
 
-const DB = "control-center", STORE = "details", KEY = "recent", MAX_AGE = 3 * 24 * 3600_000;
+const DB = "control-center", STORE = "details", KEY = "recent", READS = "reads", MAX_AGE = 3 * 24 * 3600_000;
 
 function database(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -27,19 +27,27 @@ async function transact<T>(mode: IDBTransactionMode, run: (store: IDBObjectStore
 
 /** Never blocks startup for long: a slow or unavailable IndexedDB means an empty cache. */
 export async function openDetailStore(timeoutMs = 400): Promise<DetailStore> {
-  let entries: DetailCache[] = [];
+  let entries: DetailCache[] = [], reads: Record<string, number> = {};
+  const timeout = new Promise<undefined>(r => setTimeout(r, timeoutMs));
   try {
-    const stored = await Promise.race([transact<DetailCache[] | undefined>("readonly", s => s.get(KEY)),
-      new Promise<undefined>(r => setTimeout(r, timeoutMs))]);
+    const [stored, read] = await Promise.race([Promise.all([transact<DetailCache[] | undefined>("readonly", s => s.get(KEY)),
+      transact<Record<string, number> | undefined>("readonly", s => s.get(READS))]), timeout.then(() => [undefined, undefined] as const)]);
     entries = Array.isArray(stored) ? stored.filter(e => e?.session?.sessionId && Date.now() - e.savedAt < MAX_AGE) : [];
+    if (read && typeof read === "object") reads = Object.fromEntries(Object.entries(read).filter(([, n]) => typeof n === "number"));
   } catch { /* private mode or blocked storage */ }
-  let queued: DetailCache[] | undefined, writing = false;
+  // Last write wins per key; writes never overlap.
+  const queued = new Map<string, unknown>();
+  let writing = false;
   const flush = async () => {
     writing = true;
-    while (queued) { const value = queued; queued = undefined; await transact("readwrite", s => s.put(value, KEY)).catch(() => {}); }
+    while (queued.size) {
+      const [key, value] = queued.entries().next().value!; queued.delete(key);
+      await transact("readwrite", s => s.put(value, key)).catch(() => {});
+    }
     writing = false;
   };
-  return { entries, save(value) { queued = value; if (!writing) void flush(); } };
+  const put = (key: string, value: unknown) => { queued.set(key, value); if (!writing) void flush(); };
+  return { entries, reads, save: value => put(KEY, value), saveReads: value => put(READS, value) };
 }
 
-export function clearDetailStore() { void transact("readwrite", s => s.delete(KEY)).catch(() => {}); }
+export function clearDetailStore() { void transact("readwrite", s => s.clear()).catch(() => {}); }

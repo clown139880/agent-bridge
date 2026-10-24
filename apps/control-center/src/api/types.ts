@@ -6,6 +6,8 @@ export interface Session {
   sessionId: string; workerId: string; machineId: string; agent: string;
   title: string | null; promptSummary: string | null; projectName: string; workspace: string;
   status: string; activeTurnId: string | null; updatedAt: number; createdAt: number; lastPromptAt?: number | null;
+  /** Agent replies so far; unread badges compare it with what this device last saw. */
+  messageCount?: number;
   pendingApprovalCount: number; pendingUserInputCount: number;
   capabilities?: string[]; historyCompleteness?: string; source?: string;
   error?: { error: { message: string } } | null;
