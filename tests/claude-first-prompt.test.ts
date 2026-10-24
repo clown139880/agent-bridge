@@ -3,7 +3,7 @@ import test from 'node:test';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ClaudeCodeAdapter, readSessionMeta, readTranscriptMessages } from '../apps/bridge/src/claude/claude-adapter.js';
+import { ClaudeCodeAdapter, readSessionMeta, readTranscriptMessages, readTranscriptTitle } from '../apps/bridge/src/claude/claude-adapter.js';
 import type { BridgeToControlMessage } from '../packages/protocol/src/index.js';
 
 test('Claude turn ids survive adapter restarts and message events inherit their active turn', () => {
@@ -297,4 +297,28 @@ test('Claude text blocks with identical text in different messages keep distinct
   const ids = events.flatMap(event => event.type === 'session.event' && event.eventType === 'message.completed' ? [event.eventId] : []);
   assert.equal(ids.length, 2);
   assert.notEqual(ids[0], ids[1]);
+});
+
+test('Claude\'s own session name wins: a /rename title, else the latest ai-title, also past a long tail', () => {
+  const root = mkdtempSync(join(tmpdir(), 'claude-title-'));
+  try {
+    const file = join(root, 'native-id.jsonl');
+    const rows = (extra: object[]) => [
+      {type:'user',cwd:root,timestamp:'2026-09-01T00:00:01Z',message:{content:'a very long first prompt'}},
+      {type:'ai-title',aiTitle:'Early title',sessionId:'native-id'},
+      ...extra,
+    ].map(row => JSON.stringify(row)).join('\n');
+    writeFileSync(file, rows([{type:'ai-title',aiTitle:'Current title',sessionId:'native-id'}]));
+    assert.equal(readSessionMeta(file)?.title, 'Current title');
+    assert.equal(readTranscriptTitle(file), 'Current title');
+    writeFileSync(file, rows([{type:'custom-title',customTitle:'Renamed',sessionId:'native-id'},{type:'ai-title',aiTitle:'Later',sessionId:'native-id'}]));
+    assert.equal(readTranscriptTitle(file), 'Renamed');
+    // The title only appears before a tail longer than the read window.
+    const filler = {type:'assistant',message:{content:'x'.repeat(1000)}};
+    writeFileSync(file, rows(Array.from({ length: 400 }, () => filler)));
+    assert.equal(readTranscriptTitle(file), 'Early title');
+    assert.equal(readTranscriptTitle(join(root, 'missing.jsonl')), undefined);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

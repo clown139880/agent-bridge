@@ -80,7 +80,7 @@ export interface SessionListQuery {
   dayStart?: number;
   segment?: "recent" | "history" | "all";
   q?: string;
-  sort: "updatedAt" | "createdAt";
+  sort: "updatedAt" | "createdAt" | "lastPromptAt";
   order: "asc" | "desc";
   limit: number;
   cursor?: string;
@@ -377,6 +377,9 @@ export class AgentControlStore {
       if (isReply && this.db.prepare(`UPDATE sessions SET last_response_at=?,updated_at=?
         WHERE id=? AND (last_response_at IS NULL OR last_response_at<?)`)
         .run(message.timestamp, message.timestamp, message.sessionId, message.timestamp).changes) markChanged(this.db, "session", message.sessionId);
+      if (message.eventType === "message.completed" && payload.role === "user" && this.db.prepare(`UPDATE sessions SET last_prompt_at=?
+        WHERE id=? AND (last_prompt_at IS NULL OR last_prompt_at<?)`)
+        .run(message.timestamp, message.sessionId, message.timestamp).changes) markChanged(this.db, "session", message.sessionId);
       // Tool progress is activity too: without this the updatedAfter background sync
       // cannot see a turn's tool calls until its next reply.
       const isToolProgress = TOOL_PROGRESS_TYPES.has(message.eventType);
@@ -575,7 +578,9 @@ export class AgentControlStore {
 
   listSessions(input: SessionListQuery): { data: Record<string, unknown>[]; nextCursor: string | null; hasMore: boolean } {
     const filter = { ...input, cursor: undefined, limit: undefined };
-    const scope = scopeFor("sessions", filter), column = input.sort === "createdAt" ? "created_at" : "updated_at";
+    // A session without a prompt yet sorts by its creation.
+    const scope = scopeFor("sessions", filter), column = input.sort === "createdAt" ? "created_at"
+      : input.sort === "lastPromptAt" ? "COALESCE(last_prompt_at,created_at)" : "updated_at";
     const direction = input.order === "asc" ? "ASC" : "DESC";
     const comparator = input.order === "asc" ? ">" : "<";
     const where: string[] = [], params: any[] = [];
@@ -606,7 +611,8 @@ export class AgentControlStore {
     const rows=this.db.prepare(sql).all(...params,input.limit+1) as Record<string,unknown>[];
     const hasMore=rows.length>input.limit; if(hasMore) rows.pop();
     const data=rows.map(row=>this.mapSession(row,false)); const lastRow=rows.at(-1);
-    return { data,hasMore,nextCursor:hasMore&&lastRow?encodeCursor(scope,[Number(lastRow[column]),String(lastRow.id)]):null };
+    const sortValue=(row:Record<string,unknown>)=>Number(input.sort==="lastPromptAt"?row.last_prompt_at??row.created_at:row[column]);
+    return { data,hasMore,nextCursor:hasMore&&lastRow?encodeCursor(scope,[sortValue(lastRow),String(lastRow.id)]):null };
   }
 
   /** Page presentation groups, never individual sessions, so a page boundary cannot split a group. */
@@ -791,7 +797,8 @@ export class AgentControlStore {
       activeTurnId:row.active_turn_id?String(row.active_turn_id):null,lastTurnStatus:row.last_turn_status?String(row.last_turn_status):null,
       pendingApprovalCount:count("approval"),pendingUserInputCount:count("user_input"),latestRun:run,
       createdAt:Number(row.created_at),updatedAt:Number(row.updated_at??row.created_at),
-      lastResponseAt:row.last_response_at==null?null:Number(row.last_response_at),source:String(row.source??"app-server"),
+      lastResponseAt:row.last_response_at==null?null:Number(row.last_response_at),
+      lastPromptAt:row.last_prompt_at==null?null:Number(row.last_prompt_at),source:String(row.source??"app-server"),
       historyCompleteness:String(row.history_completeness??"loaded-only")};
     if(detail){const runs=this.db.prepare("SELECT * FROM worker_runs WHERE session_id=? ORDER BY created_at DESC,id DESC LIMIT 20")
       .all(String(row.id)) as Record<string,unknown>[];

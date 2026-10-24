@@ -41,7 +41,7 @@
 | 业务 / MCP 语义 | 已有 HTTP | 移动端用法 |
 | --- | --- | --- |
 | `workers` | `GET /workers` | 机器、agent、在线状态、能力、最近 workspace |
-| `sessions` | `GET /sessions?sort=updatedAt&order=desc&limit=50` | 搜索、过滤、游标分页；不是历史 `/runs` |
+| `sessions` | `GET /sessions?sort=lastPromptAt&order=desc&limit=50` | 搜索、过滤、游标分页；按用户最后一条消息排序（没有消息时按创建时间），Agent 输出和工具调用不改变顺序；不是历史 `/runs` |
 | 首屏一致性 | `GET /snapshot?sessionLimit=50` | 同一读事务的 workers / sessions / pending / `streamCursor` |
 | `session` | `GET /sessions/:id`，`GET /sessions/:id/events`，两个 pending 列表 | 组合详情、消息和待办；HTTP 返回完整资源，MCP 返回精简组合结果 |
 | `wait` | `GET /stream?cursor=…`，必要时加 `sessionId=…` | 前端消费事件和状态，不增加 `/wait` 轮询接口 |

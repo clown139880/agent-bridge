@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import { homedir } from "node:os";
 import pino from "pino";
@@ -836,6 +836,8 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     this.appendLog(session, "Turn started");
     this.emit({ type: "agent.started", sessionId: session.sessionId, timestamp: Date.now(), summary: "New turn started" });
     this.emitSessionEvent(session, "turn.started", `claude:${session.sessionId}:${turnId}:started`, { status: "in_progress" });
+    // A first turn can end before Claude has named the session.
+    this.refreshTitle(session);
     return turnId;
   }
 
@@ -858,6 +860,22 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       this.emit({ type: "agent.completed", sessionId: session.sessionId, timestamp: Date.now(), summary });
       this.emitSessionEvent(session, "turn.completed", `${eventId}:structured`, { status, summary }, turnId);
     }
+    this.refreshTitle(session);
+  }
+
+  /** Announce the session again when Claude has (re)named it in its transcript. A name is cosmetic: never fails a turn. */
+  private refreshTitle(session: ClaudeSession): void {
+    let title: string | undefined;
+    try {
+      const path = session.discovered && session.nativeSessionId && this.options.claudeHome ? this.transcriptPath(session.nativeSessionId) : undefined;
+      title = path ? readTranscriptTitle(path) : undefined;
+    } catch (error) {
+      log.debug({ error, sessionId: session.sessionId }, "could not read the Claude session title");
+    }
+    if (!title || title === session.title) return;
+    session.title = title;
+    session.discovered = false;
+    this.emitDiscovered(session);
   }
 
   // ---- input / actions ---------------------------------------------------
@@ -1283,6 +1301,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
           agentType: "claude-code",
           projectPath,
           projectName: basename(projectPath),
+          title: meta.title,
           promptSummary: summarizePrompt(meta.firstUserText),
           status: "waiting",
           createdAt: meta.createdAt ?? Date.now(),
@@ -1436,6 +1455,7 @@ interface SessionMeta {
   createdAt?: number;
   firstUserText?: string;
   firstUserAt?: number;
+  title?: string;
 }
 
 export interface TranscriptMessage { uuid: string; role: "user" | "assistant"; text: string; timestamp: number }
@@ -1524,5 +1544,44 @@ export function readSessionMeta(path: string): SessionMeta | undefined {
     }
     if (meta.cwd && meta.firstUserText) break;
   }
+  meta.title = transcriptTitle(head);
   return meta;
+}
+
+const TITLE_TAIL_BYTES = 256 * 1024;
+
+/**
+ * The name Claude Code gives a session: a `/rename` title, else its latest generated
+ * `ai-title`. Claude repeats the entry through the transcript, so the tail usually
+ * holds the current one.
+ */
+export function readTranscriptTitle(path: string): string | undefined {
+  try {
+    const size = statSync(path).size;
+    if (size > TITLE_TAIL_BYTES) {
+      const buffer = Buffer.alloc(TITLE_TAIL_BYTES), fd = openSync(path, "r");
+      try { readSync(fd, buffer, 0, TITLE_TAIL_BYTES, size - TITLE_TAIL_BYTES); } finally { closeSync(fd); }
+      const title = transcriptTitle(buffer.toString("utf8"));
+      if (title) return title;
+    }
+    return transcriptTitle(readFileSync(path, "utf8"));
+  } catch {
+    return undefined;
+  }
+}
+
+function transcriptTitle(text: string): string | undefined {
+  let custom: string | undefined, generated: string | undefined;
+  for (const line of text.split("\n")) {
+    if (!line.includes('"custom-title"') && !line.includes('"ai-title"')) continue;
+    let row: Record<string, unknown>;
+    try {
+      row = JSON.parse(line) as Record<string, unknown>;
+    } catch {
+      continue; // the tail's first line may be cut
+    }
+    if (row.type === "custom-title" && typeof row.customTitle === "string" && row.customTitle.trim()) custom = row.customTitle.trim();
+    if (row.type === "ai-title" && typeof row.aiTitle === "string" && row.aiTitle.trim()) generated = row.aiTitle.trim();
+  }
+  return custom ?? generated;
 }

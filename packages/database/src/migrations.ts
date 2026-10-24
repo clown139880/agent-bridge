@@ -353,6 +353,24 @@ export function migrateDatabase(db: DatabaseSync): void {
       db.exec("COMMIT");
     } catch (error) { try { db.exec("ROLLBACK"); } catch {} throw error; }
   }
+
+  // The time of a session's latest user prompt: a list order that agent output and tool progress never move.
+  if (!db.prepare("SELECT 1 FROM schema_migrations WHERE version=12").get()) {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      addColumn(db, "sessions", "last_prompt_at", "INTEGER");
+      // Message bodies are never compressed (only bulky command/file output is).
+      db.exec(`
+        UPDATE sessions SET last_prompt_at = (
+          SELECT MAX(events.created_at) FROM events
+          WHERE events.session_id = sessions.id AND events.type = 'message.completed' AND typeof(events.body) = 'text'
+            AND json_valid(events.body) AND json_extract(events.body, '$.role') = 'user'
+        );
+      `);
+      db.prepare("INSERT INTO schema_migrations(version,applied_at) VALUES (12,?)").run(Date.now());
+      db.exec("COMMIT");
+    } catch (error) { try { db.exec("ROLLBACK"); } catch {} throw error; }
+  }
 }
 
 /**

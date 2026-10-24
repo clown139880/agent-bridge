@@ -939,6 +939,14 @@ export class CodexAppServerAdapter implements AgentAdapter {
       }
       return;
     }
+    // Codex names a thread after it starts; announce the name instead of the first prompt.
+    if (method === "thread/name/updated") {
+      const known = typeof params.threadId === "string" ? this.threadsById.get(params.threadId) : undefined;
+      if (known && typeof params.threadName === "string" && params.threadName.trim()) {
+        await this.discoverThread({ ...known, name: params.threadName.trim() });
+      }
+      return;
+    }
     const threadId = typeof params.threadId === "string" ? params.threadId : undefined;
     if (!threadId) return;
     if (method === "thread/deleted") {

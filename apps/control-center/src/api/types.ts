@@ -5,13 +5,13 @@ export interface Worker {
 export interface Session {
   sessionId: string; workerId: string; machineId: string; agent: string;
   title: string | null; promptSummary: string | null; projectName: string; workspace: string;
-  status: string; activeTurnId: string | null; updatedAt: number; createdAt: number;
+  status: string; activeTurnId: string | null; updatedAt: number; createdAt: number; lastPromptAt?: number | null;
   pendingApprovalCount: number; pendingUserInputCount: number;
   capabilities?: string[]; historyCompleteness?: string; source?: string;
   error?: { error: { message: string } } | null;
 }
 export interface SessionEvent {
-  eventId: string; cursor: string; sessionId: string; type: string; turnId: string | null;
+  eventId: string; cursor: string; sessionId: string; type: string; turnId: string | null; itemId?: string | null;
   timestamp: number; payload: Record<string, unknown>;
 }
 export interface Question {

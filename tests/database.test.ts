@@ -188,7 +188,7 @@ test("a 0.4.2 database upgrades transactionally to the Agent Control schema", ()
   `);legacy.close();
   const store=new Store(path);
   const version=store.db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get() as {version:number};
-  assert.equal(version.version,11);
+  assert.equal(version.version,12);
   const tables=(store.db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{name:string}>).map(row=>row.name);
   for(const table of ["pending_requests","actions","idempotency_keys","stream_changes","event_search","deleted_sessions","attachments",
     "deleted_workers","conversation_collection_gaps"])
@@ -199,15 +199,15 @@ test("a 0.4.2 database upgrades transactionally to the Agent Control schema", ()
   assert.equal(session.activity_status,"idle");assert.equal(session.source,"app-server");
   assert.equal(session.last_response_at,null);assert.equal(session.updated_at,1);
   // Reopening proves the versioned migration is idempotent.
-  store.db.close();const reopened=new Store(path);assert.equal((reopened.db.prepare("SELECT COUNT(*) AS n FROM schema_migrations").get() as any).n,12);
+  store.db.close();const reopened=new Store(path);assert.equal((reopened.db.prepare("SELECT COUNT(*) AS n FROM schema_migrations").get() as any).n,13);
   reopened.db.close();rmSync(path,{force:true});
 });
 
 test("version 8 folds every retained copy into one event row per upstream event", () => {
   const path=join(tmpdir(),`agent-bridge-v8-${randomUUID()}.sqlite`);
-  // Build a version-7 database: mark 8 (and 10, which reads the v8 schema) applied, fill v7 tables, then unmark 8 and reopen.
+  // Build a version-7 database: mark 8 (and 10 and 12, which read the v8 schema) applied, fill v7 tables, then unmark 8 and reopen.
   const seed=new DatabaseSync(path);
-  seed.exec("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL); INSERT INTO schema_migrations VALUES (8,0),(10,0)");
+  seed.exec("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL); INSERT INTO schema_migrations VALUES (8,0),(10,0),(12,0)");
   seed.close();
   const v7=new Store(path);
   v7.upsertMachine({id:"dev",name:"dev",platform:"linux",hostname:"dev",capabilities:[]});
@@ -276,6 +276,34 @@ test("tool progress touches a session's updated_at without counting as a reply",
   control.appendSessionEvent({ type: "session.event", eventType: "message.completed", eventId: "prompt", sessionId: "thread-1",
     turnId: "turn-2", timestamp: 9, payload: { role: "user", text: "review" } });
   assert.deepEqual({ ...row() }, { updated_at: 9, last_response_at: 9 });
+  store.db.close();
+  rmSync(path, { force: true });
+});
+
+test("sessions sort by their latest user prompt, which agent output never moves", () => {
+  const path = join(tmpdir(), `agent-bridge-${randomUUID()}.sqlite`);
+  const store = new Store(path);
+  store.upsertMachine({ id: "dev", name: "dev", platform: "linux", hostname: "dev", capabilities: [] });
+  for (const [id, createdAt] of [["a", 1], ["b", 2], ["c", 3]] as const) store.createSession({
+    id, machineId: "dev", agentType: "claude-code", projectName: "project", projectPath: "/tmp/project",
+    matrixRoomId: "", matrixThreadId: null, nativeSessionId: id, status: "waiting", createdAt, updatedAt: createdAt,
+  });
+  const control = new AgentControlStore(store.db, { actionsMs: 1_000, attachmentsMs: 1_000 });
+  const append = (sessionId: string, eventId: string, timestamp: number, payload: Record<string, unknown>, eventType = "message.completed") =>
+    control.appendSessionEvent({ type: "session.event", eventType: eventType as "message.completed", eventId, sessionId, turnId: "t", timestamp, payload });
+  append("a", "a-prompt", 10, { role: "user", text: "first" });
+  append("b", "b-prompt", 20, { role: "user", text: "second" });
+  // Later replies and tool calls in "a" do not lift it above "b".
+  append("a", "a-reply", 30, { role: "assistant", text: "answer" });
+  append("a", "a-cmd", 40, { command: "ls", status: "completed" }, "command.completed");
+  // A replayed older prompt never moves the time back.
+  append("b", "b-old", 5, { role: "user", text: "older" });
+  const order = (sort: "updatedAt" | "lastPromptAt", cursor?: string) => control.listSessions({ sort, order: "desc", limit: 2, cursor });
+  assert.deepEqual(order("updatedAt").data.map(s => s.sessionId), ["a", "b"]);
+  const first = order("lastPromptAt");
+  assert.deepEqual(first.data.map(s => [s.sessionId, s.lastPromptAt]), [["b", 20], ["a", 10]]);
+  // A session without a prompt sorts by its creation, and pages continue in the same order.
+  assert.deepEqual(order("lastPromptAt", first.nextCursor!).data.map(s => s.sessionId), ["c"]);
   store.db.close();
   rmSync(path, { force: true });
 });

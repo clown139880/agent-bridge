@@ -369,3 +369,44 @@ test("agent markdown renders GFM and CJK emphasis but keeps raw HTML as text", a
   const plain = renderToStaticMarkup(createElement(MessageText, { markdown: false, text: "**as typed**" }));
   assert.match(plain, /\*\*as typed\*\*/);
 });
+
+test("the list asks for prompt order and shows the snapshot in it until the first page arrives", async t => {
+  const older = { ...session, sessionId: "older", createdAt: 1, lastPromptAt: 50, updatedAt: 900 };
+  const newer = { ...session, sessionId: "newer", createdAt: 2, lastPromptAt: 80, updatedAt: 100 };
+  const unprompted = { ...session, sessionId: "unprompted", createdAt: 60, lastPromptAt: null, updatedAt: 60 };
+  const state = new ControlState("test-token", true, { ...snapshot, sessions: [older, unprompted, newer] }, () => {}, () => {}, "/api/v1");
+  t.after(() => state.dispose());
+  assert.deepEqual(state.snapshot().sessions.map(s => s.sessionId), ["newer", "unprompted", "older"]);
+  const requests: string[] = [];
+  t.mock.method(globalThis, "fetch", async (path: string) => {
+    requests.push(path);
+    return path.startsWith("/api/v1/workers") ? json({ workers: snapshot.workers }) : json({ data: [], hasMore: false, nextCursor: null });
+  });
+  await state.loadList(false);
+  assert.match(requests.find(p => p.startsWith("/api/v1/sessions?"))!, /sort=lastPromptAt&order=desc/);
+});
+
+test("a tool call is one transcript row, at its start, showing its latest event", async () => {
+  const { transcriptRows } = await import("../apps/control-center/src/transcript.js");
+  const e = (eventId: string, type: string, itemId?: string): SessionEvent => ({ eventId, cursor: `e:${eventId}`, sessionId: "s", type, turnId: "t", itemId, timestamp: 1, payload: {} });
+  const rows = transcriptRows([e("prompt", "message.completed"), e("start", "tool.started", "call"), e("reply", "message.completed"),
+    e("done", "command.completed", "call"), e("loose", "tool.completed")]);
+  assert.deepEqual(rows.map(r => [r.key, r.event.eventId]), [["prompt", "prompt"], ["start", "done"], ["reply", "reply"], ["loose", "loose"]]);
+});
+
+test("agent and machine identity: brand marks and a stable machine hue outside the green band", async () => {
+  const { createElement, renderToStaticMarkup } = await import("../apps/control-center/test/render.js");
+  const { agentKind, machineHue, Origin } = await import("../apps/control-center/src/identity.js");
+  assert.equal(agentKind("claude-code"), "claude");
+  assert.equal(agentKind("codex-cli"), "codex");
+  assert.equal(agentKind(undefined, "pi@hal"), "pi");
+  assert.equal(machineHue("hal"), machineHue("hal"));
+  for (const id of ["hal", "dev-wsl", "macbook", "a", "b", "c"]) {
+    const hue = Number(machineHue(id).match(/^hsl\((\d+)/)![1]);
+    assert.ok(hue < 80 || hue >= 170, `${id} → ${hue}`);
+  }
+  const html = renderToStaticMarkup(createElement(Origin, { agent: "codex-cli", machineId: "hal" }, "repo"));
+  assert.match(html, /aria-label="Codex"/);
+  assert.match(html, /class="machine-chip" style="--machine-hue:hsl\(/);
+  assert.match(html, />repo</);
+});

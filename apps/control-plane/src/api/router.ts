@@ -205,7 +205,7 @@ export class AgentControlApi {
     const workerId=url.searchParams.get("workerId")??undefined,machineId=url.searchParams.get("machineId")??undefined;
     const parsedWorker=workerId?parseWorkerId(workerId):undefined;
     if(workerId&&(!parsedWorker||!agentTypeForWorkerPrefix(parsedWorker.prefix)||Boolean(machineId&&parsedWorker.machineId!==machineId)))throw new ApiProblem(400,"invalid_worker_id","workerId and machineId must agree");
-    const sort=url.searchParams.get("sort")??"updatedAt";if(!["updatedAt","createdAt"].includes(sort))throw new ApiProblem(400,"invalid_parameter","invalid sort");
+    const sort=url.searchParams.get("sort")??"updatedAt";if(!["updatedAt","createdAt","lastPromptAt"].includes(sort))throw new ApiProblem(400,"invalid_parameter","invalid sort");
     const order=url.searchParams.get("order")??"desc";if(!["asc","desc"].includes(order))throw new ApiProblem(400,"invalid_parameter","invalid order");
     const active=url.searchParams.get("active");if(active!==null&&!['true','false'].includes(active))throw new ApiProblem(400,"invalid_parameter","active must be boolean");
     const statuses=url.searchParams.getAll("status"),validStatuses=new Set(["creating","active","waiting_for_approval","waiting_for_input","idle","offline","error","unknown"]);
@@ -219,7 +219,7 @@ export class AgentControlApi {
       conversationId:url.searchParams.get("conversationId")??undefined,active:active===null?undefined:active==="true",
       updatedAfter:updatedAfter!==null?Number(updatedAfter):undefined,
       dayStart:dayStart!==null?Number(dayStart):undefined,segment:segment as "recent"|"history"|"all",
-      q:url.searchParams.get("q")??undefined,sort:sort as "updatedAt"|"createdAt",order:order as "asc"|"desc",
+      q:url.searchParams.get("q")??undefined,sort:sort as "updatedAt"|"createdAt"|"lastPromptAt",order:order as "asc"|"desc",
       limit:integer(url.searchParams.get("limit"),"limit",50,1,200),cursor:url.searchParams.get("cursor")??undefined});
       this.ok(response,{...page,streamCursor:this.store.streamCursor()});}catch(error){this.cursorError(error);}
   }

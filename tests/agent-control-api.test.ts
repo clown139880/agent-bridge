@@ -465,6 +465,31 @@ test("thread/updated asynchronously refreshes the persisted session title", asyn
   }
 });
 
+test("thread/name/updated replaces the first-prompt title with Codex's name", async () => {
+  const f = await fixture();
+  try {
+    const pending: Promise<void>[] = [];
+    const adapter = new CodexAppServerAdapter({ command: "codex", url: "ws://127.0.0.1:4500",
+      allowedRoots: [process.cwd()], manageServer: false, reconnectMs: 3_000 }, (message) => {
+      pending.push(f.internals.handleBridgeMessage("dev", message));
+    });
+    const internals = adapter as unknown as {
+      handleNotification(method: string, params: Record<string, unknown>): Promise<void>;
+      threadsById: Map<string, { id: string; cwd: string; name?: string | null; preview?: string }>;
+    };
+    internals.threadsById.set("thread-1", { id: "thread-1", cwd: process.cwd(), name: null, preview: "a long first prompt" });
+
+    await internals.handleNotification("thread/name/updated", { threadId: "thread-1", threadName: "Short name" });
+    await internals.handleNotification("thread/name/updated", { threadId: "thread-1", threadName: null });
+    await Promise.all(pending);
+
+    assert.equal(f.internals.controlStore.session("thread-1")?.title, "Short name");
+    assert.equal(internals.threadsById.get("thread-1")?.name, "Short name");
+  } finally {
+    await f.close();
+  }
+});
+
 test("deleting an idle session clears retained data and prevents inventory resurrection", async () => {
   const f = await fixture();
   try {

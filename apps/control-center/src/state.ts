@@ -58,6 +58,9 @@ export const canCompose = (state: ViewState, session?: Session) => {
   return Boolean(state.writable && session && worker?.status === "online" && session.status !== "offline"
     && (session.capabilities ?? worker.capabilities).includes("session-actions"));
 };
+/** The snapshot lists by activity; show it in the list's prompt order until the first page replaces it. */
+const byPrompt = (sessions: Session[]) => [...sessions].sort((a, b) =>
+  (b.lastPromptAt ?? b.createdAt) - (a.lastPromptAt ?? a.createdAt) || (a.sessionId < b.sessionId ? 1 : -1));
 const upsert = <T,>(rows: T[], item: T, id: (v: T) => string) => [...rows.filter(v => id(v) !== id(item)), item];
 
 // Unlike randomUUID(), getRandomValues() is available on ordinary HTTP origins too.
@@ -98,7 +101,7 @@ export class ControlState {
     this.api = new ControlClient(token, unauthorized, base);
     for (const entry of store?.entries ?? []) this.details.set(entry.session.sessionId, entry);
     this.cursor = snapshot.streamCursor;
-    this.state = { route: { page: "sessions" }, sessions: snapshot.sessions, workers: snapshot.workers,
+    this.state = { route: { page: "sessions" }, sessions: byPrompt(snapshot.sessions), workers: snapshot.workers,
       events: [], approvals: [], inputs: [], loading: false, moreLoading: false,
       hasMore: snapshot.truncated.sessions, historyMore: false, error: "", syncing: false, connection: "按需更新",
       updatedAt: Date.now(), query: "", workerFilter: "", writable, drafts: {}, uploads: {}, models: {}, answers: {} };
@@ -238,7 +241,7 @@ export class ControlState {
             this.cursor = snap.streamCursor; this.seen.clear();
             this.approvalUpdates.clear(); this.inputUpdates.clear();
             // Keep what is on screen; the detail GETs below merge the changes it missed.
-            this.patch({ workers: snap.workers, sessions: snap.sessions });
+            this.patch({ workers: snap.workers, sessions: byPrompt(snap.sessions) });
             if (this.state.route.page === "detail") await this.loadDetail(this.state.route.id!, this.generation, false);
           } catch (e) { if (!signal.aborted) this.patch({ error: explain(e) }); }
         } else if (error instanceof ApiError && [401, 403].includes(error.status)) {
@@ -413,7 +416,8 @@ export class ControlState {
     const signal = this.scope.signal;
     try {
       const { query, workerFilter } = this.state;
-      const params = new URLSearchParams({ sort: "updatedAt", order: "desc", limit: "50" });
+      // A prompt moves a session up; agent output and tool calls never reorder the list.
+      const params = new URLSearchParams({ sort: "lastPromptAt", order: "desc", limit: "50" });
       if (query) params.set("q", query);
       if (workerFilter) params.set("workerId", workerFilter);
       if (more && this.listCursor) params.set("cursor", this.listCursor);

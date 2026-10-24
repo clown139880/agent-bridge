@@ -1,10 +1,12 @@
-import React, { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { createRoot } from "react-dom/client";
 import { ControlClient, explain } from "./api/client";
 import { BUILD_VERSION, newerBuild, runningEntry } from "./build";
 import { clearDetailStore, openDetailStore } from "./cache";
 import { haptic, SHARE_EVENT, takeShare } from "./native/uctw";
 import { MessageText } from "./markdown";
+import { AgentIcon, machineStyle, Origin } from "./identity";
+import { TOOL_TYPES, transcriptRows } from "./transcript";
 import { isLive, pendingId, segment, type Pending, type Session, type SessionEvent, type Snapshot } from "./api/types";
 import { canCompose, ControlState, type Route, type ViewState } from "./state";
 import "./styles.css";
@@ -20,6 +22,8 @@ function Link({ to, children, className }: { to: string; children: React.ReactNo
 const labels: Record<string, string> = { active: "正在运行", creating: "启动中", idle: "已空闲",
   waiting_for_approval: "等待审批", waiting_for_input: "等待回答", offline: "已离线", error: "异常", unknown: "未知" };
 const title = (s: Session) => s.title || s.promptSummary || s.projectName || "未命名会话";
+/** The list's order: the latest prompt, else creation (the server sorts the same way). */
+const promptTime = (s: Session) => s.lastPromptAt ?? s.createdAt;
 const time = (value: number) => new Date(value).toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
 function Status({ status }: { status: string }) {
   return <span className={`status ${["active", "creating"].includes(status) ? "live" : status.startsWith("waiting") ? "waiting" : ""}`}>
@@ -246,6 +250,7 @@ function Center({ control, path, serverVersion }: { control: ControlState; path:
     <header className="topbar"><Link to="/control/sessions" className="brand"><span className="brand-mark">ab</span><span>控制中心</span></Link>
       <div className="top-actions"><span className="scope">{state.writable ? "操作模式" : "只读模式"}</span></div>
     </header>
+    {(state.loading || state.syncing) && <div className="loading-bar" role="progressbar" aria-label="正在加载" />}
     <main>
       {stale && <aside className="action-banner" role="status"><strong>控制中心已更新</strong>
         <p>这个页面还是旧版本，刷新后才能使用新功能（如处理审批）。</p>
@@ -278,7 +283,7 @@ function SharePicker({ control, state }: { control: ControlState; state: ViewSta
     <div className="share-targets">
       <button type="button" className="primary" onClick={() => choose("new")}>＋ 新对话</button>
       {targets.map(s => <button type="button" key={s.sessionId} onClick={() => choose(s.sessionId)}>
-        <span>{title(s)}</span><small>{s.agent} · {s.machineId} · {labels[s.status] ?? s.status}</small></button>)}
+        <span>{title(s)}</span><small><Origin agent={s.agent} workerId={s.workerId} machineId={s.machineId}>{labels[s.status] ?? s.status}</Origin></small></button>)}
       {!targets.length && <small className="hint">最近会话里没有可发送的，可以新建对话。</small>}
     </div>
   </aside>;
@@ -333,11 +338,13 @@ function Sessions({ control, state }: { control: ControlState; state: ViewState 
     <div className="list-meta"><span>{state.loading ? "正在读取…" : `${state.sessions.length} 个会话`}</span>
       <button className="quiet" disabled={state.loading} onClick={() => void control.refresh()}>↻ 刷新</button></div>
     <div className="session-list">{state.sessions.map(s => <Link key={s.sessionId} to={`/control/sessions/${segment(s.sessionId)}`} className="session-row">
-      <div className="session-row-top"><Status status={s.status} /><time>{time(s.updatedAt)}</time></div>
-      <h2>{title(s)}</h2><p>{s.agent} <span>·</span> {s.machineId} <span>·</span> {s.projectName}</p>
+      <span className="machine-stripe" style={machineStyle(s.machineId)} aria-hidden="true" />
+      <div className="session-row-top"><Status status={s.status} /><time title="最后一条消息">{time(promptTime(s))}</time></div>
+      <h2>{title(s)}</h2><p><Origin agent={s.agent} workerId={s.workerId} machineId={s.machineId}>{s.projectName}</Origin></p>
       {(s.pendingApprovalCount > 0 || s.pendingUserInputCount > 0) && <small className="pending-count">{s.pendingApprovalCount} 项审批 · {s.pendingUserInputCount} 项待答</small>}
       <span className="row-arrow" aria-hidden="true">↗</span>
     </Link>)}</div>
+    {state.loading && !state.sessions.length && <Skeleton rows={4} kind="session" />}
     {!state.loading && !state.sessions.length && <div className="empty">还没有匹配的会话。<p>换个关键词，或发起一段新对话。</p></div>}
     {state.hasMore && <button className="load-more" disabled={state.moreLoading || state.loading} onClick={() => void control.loadList(true)}>{state.moreLoading ? "加载中…" : "加载更多会话"}</button>}
     <p className="hint refresh-note">按需刷新 · {time(state.updatedAt)} 更新</p>
@@ -362,6 +369,7 @@ function NewSession({ control, state }: { control: ControlState; state: ViewStat
     }}>
       <label htmlFor="new-worker">由谁来执行</label><select id="new-worker" value={workerId} required onChange={e => { setWorkerId(e.target.value); setWorkspace(""); setModel({ model: "", effort: "" }); }}>
         <option value="">选择在线 Worker</option>{choices.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}</select>
+      {worker && <small><Origin workerId={worker.id} machineId={worker.id.slice(worker.id.indexOf("@") + 1)}>{worker.name}</Origin></small>}
       {!choices.length && <p className="hint">没有在线且支持会话操作的 Worker，请刷新后重试。</p>}
       <label htmlFor="workspace">工作目录</label><input id="workspace" list="recent-spaces" value={workspace} required
         onChange={e => setWorkspace(e.target.value)} placeholder="选择最近目录，或输入目标机器绝对路径" autoCapitalize="none" spellCheck={false} />
@@ -378,21 +386,37 @@ function NewSession({ control, state }: { control: ControlState; state: ViewStat
     </form></section>;
 }
 
-function EventView({ event }: { event: SessionEvent }) {
+const RUNNING_TOOL = new Set(["tool.started", "task.started", "task.progress"]);
+/** One line per tool call: its first line, shown in place of the call's earlier events. */
+function ToolLine({ event }: { event: SessionEvent }) {
   const [open, setOpen] = useState(false);
+  const p = event.payload;
+  const text = String(typeof p.command === "string" ? `$ ${p.command}` : p.summary ?? p.description ?? p.name ?? event.type).trim().split("\n")[0] || event.type;
+  const running = RUNNING_TOOL.has(event.type);
+  const failed = ["failed", "declined", "error"].includes(String(p.status)) || typeof p.exitCode === "number" && p.exitCode !== 0;
+  const kind = typeof p.command === "string" ? "command" : event.type.startsWith("file_change") ? "file" : event.type.startsWith("task") ? "task" : "tool";
+  return <details className={`tool ${running ? "running" : ""} ${failed ? "failed" : ""}`} onToggle={e => setOpen(e.currentTarget.open)}>
+    <summary><span className="tool-mark" aria-hidden="true">{{ command: "$", file: "✎", task: "◇", tool: "›" }[kind]}</span>
+      <span className="tool-text">{text.replace(/^\$ /, "")}</span>{failed && <span className="tool-flag">失败</span>}</summary>
+    {open && <pre>{JSON.stringify(p, null, 2)}</pre>}</details>;
+}
+
+function EventView({ event }: { event: SessionEvent }) {
   const p = event.payload;
   if (event.type === "message.completed") return <article className={`message ${p.role === "user" ? "user" : "assistant"}`}>
     <div className="message-label">{p.role === "user" ? "你" : p.role === "assistant" ? "AGENT" : "SYSTEM"}<time>{time(event.timestamp)}</time></div>
     {typeof p.text === "string" ? <MessageText text={p.text} markdown={p.role !== "user"} /> : <div className="message-text">（无文本消息）</div>}
   </article>;
-  if (["tool.started", "tool.completed", "command.completed", "file_change.completed", "task.started", "task.progress", "task.completed"].includes(event.type)) {
-    const summary = String(p.command ?? p.summary ?? p.description ?? p.name ?? event.type);
-    return <details className="tool" onToggle={e => setOpen(e.currentTarget.open)}><summary>{summary.slice(0, 180)}</summary>{open && <pre>{JSON.stringify(p, null, 2)}</pre>}</details>;
-  }
+  if (TOOL_TYPES.has(event.type)) return <ToolLine event={event} />;
   if (event.type === "progress") return <p className="progress-note">{String(p.summary ?? "正在思考…")}</p>;
   const label: Record<string, string> = { "turn.started": "开始执行", "turn.completed": "本轮完成", "turn.failed": "本轮失败", "turn.interrupted": "本轮已打断",
     "approval.requested": "请求审批", "approval.resolved": "审批已处理", "user_input.requested": "等待回答", "user_input.resolved": "问题已回答", error: "执行异常" };
   return label[event.type] ? <div className="event-note"><span>{label[event.type]}</span>{Boolean(p.error || p.summary && event.type !== "turn.completed") && <p>{String(p.error ?? p.summary)}</p>}</div> : null;
+}
+
+function Skeleton({ rows, kind }: { rows: number; kind: "session" | "message" }) {
+  return <div className="skeleton" role="status" aria-label="正在加载">{Array.from({ length: rows }, (_, i) =>
+    <div key={i} className={`skeleton-${kind} ${kind === "message" && i % 2 === 0 ? "user" : ""}`}><span /><span /><span /></div>)}</div>;
 }
 
 function Detail({ control, state, id }: { control: ControlState; state: ViewState; id: string }) {
@@ -412,6 +436,7 @@ function Detail({ control, state, id }: { control: ControlState; state: ViewStat
   const restore = useRef(scrollMemory.get(id));
   const follow = useRef(restore.current?.bottom ?? true), [unread, setUnread] = useState(0), previous = useRef<string[]>([]);
   const anchor = useRef<{ top: number; height: number }>();
+  const rows = useMemo(() => transcriptRows(state.events), [state.events]);
   useEffect(() => { if (!state.moreLoading) anchor.current = undefined; }, [state.moreLoading]);
   useRememberScroll(id, bottom => { follow.current = bottom; if (bottom) setUnread(0); });
   useLayoutEffect(() => {
@@ -434,7 +459,7 @@ function Detail({ control, state, id }: { control: ControlState; state: ViewStat
     {session && <>
       <div className="detail-status"><div><Status status={session.status} /><small aria-live="polite">{state.syncing ? "正在同步…" : state.connection}</small></div>
         <button className="interrupt" disabled={!canInterrupt} onClick={interrupt}>■ 打断</button></div>
-      <details className="session-info"><summary>{session.agent} <span>·</span> {session.machineId} <span>·</span> {session.projectName}</summary>
+      <details className="session-info" style={machineStyle(session.machineId)}><summary><Origin agent={session.agent} workerId={session.workerId} machineId={session.machineId}>{session.projectName}</Origin></summary>
         <p className="break-all">{session.workspace}</p><small className="break-all">Session · {id}</small>
         <p className="hint">历史覆盖：{session.historyCompleteness ?? "未知"} · {session.source ?? "未知来源"}</p></details>
       <div className="detail-tools"><small>完整消息与事件实时更新</small><button className="quiet" disabled={state.loading} onClick={() => void control.refresh()}>↻ 刷新</button></div>
@@ -444,8 +469,11 @@ function Detail({ control, state, id }: { control: ControlState; state: ViewStat
       {state.historyMore && <button className="load-more" disabled={state.moreLoading} onClick={() => {
         anchor.current = { top: window.scrollY, height: transcript.current?.scrollHeight ?? 0 }; void control.moreHistory();
       }}>{state.moreLoading ? "读取中…" : "↑ 加载更早内容"}</button>}
-      {state.events.map(e => <EventView key={e.eventId} event={e} />)}
+      {state.loading && !state.events.length && <Skeleton rows={3} kind="message" />}
+      {rows.map(r => <EventView key={r.key} event={r.event} />)}
       {!state.loading && !state.events.length && <div className="empty">还没有已记录的内容。</div>}
+      {state.syncing ? <p className="sync-note" role="status"><span className="spinner" aria-hidden="true" />正在加载最新消息…</p>
+        : session?.status === "active" && <p className="sync-note working" role="status"><AgentIcon agent={session.agent} workerId={session.workerId} size={14} />正在工作<span className="dots" aria-hidden="true"><i /><i /><i /></span></p>}
       {/* At the end of the transcript, beside the composer the page follows, not above the history. */}
       {session && (state.approvals.length > 0 || state.inputs.length > 0 || blocked) && <aside className="pending-panel"><strong>等待你处理</strong>
         {state.approvals.map(p => <ApprovalCard key={pendingId(p)} control={control} pending={p} disabled={!canResolve} />)}
