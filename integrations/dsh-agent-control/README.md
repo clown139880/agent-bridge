@@ -170,6 +170,10 @@ or silently claim integration success.
 
 ## Architecture notes
 
+For old commentary hidden by shared steps, see the
+[read-only recovery dry run](docs/commentary-recovery.md). It validates candidates
+with the installed Session and Chat code; it does not rewrite Desktop logs.
+
 The [Bridge conversation provider](docs/bridge-conversation-provider.md) is the
 current design. The earlier session-hub evaluation and UI-shadow implementation
 are historical. Bridge remains authoritative for remote sessions; DSH stores a
