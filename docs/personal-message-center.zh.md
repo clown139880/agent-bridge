@@ -2,7 +2,7 @@
 
 状态：2026-10-24 讨论稿。记录方向和扩展约束，各阶段是否上线以对应的实现和验收记录为准。
 
-第一阶段已进入实现，协议与运行验收另见 [MQTT 业务消息 v1](message-events-v1.zh.md)。本稿描述的完整消息中心、额外来源与多媒体呈现仍为规划。
+第一阶段服务端已在 0.7.20 上线，App 0.1.39 已发布；协议、运行验收和待补的手机实机确认另见 [MQTT 业务消息 v1](message-events-v1.zh.md)。本稿描述的完整消息中心、额外来源与多媒体呈现仍为规划。
 
 ## 目标
 
@@ -15,7 +15,7 @@ MQTT 继续作为共同入口，来源无需依赖 App 后端。消息中心补�
 ## 已有能力与新增范围
 
 - pocket-hub 已运行：接收 `pw/in/<source>/msg` 和 `state/<key>`，负责手表侧校验、去重、限流、中文渲染与显示仲裁。旧 AgentAdapter 通过 SSE 唤醒状态刷新，并产出 `pw/data/agent`。
-- uctw-gateway 已有 HMAC 的 `/hooks/notify`、手机设备登记、RFC 8291 加密和 ntfy UnifiedPush 投递；App 已支持解密与打开对应 Agent 会话。持久通知历史、业务去重、撤回和可靠重试需要补充。
+- uctw-gateway 已有 HMAC 的 `/hooks/notify`、手机设备登记、RFC 8291 加密和 ntfy UnifiedPush 投递；App 已支持解密与打开对应 Agent 会话。第一阶段补齐了 `/hooks/events`、持久发件箱、业务去重、撤回和重试；长期消息历史与 App 信息流仍待后续建设。
 - Bridge 0.7.17 的标准 ntfy JSON 发布器是未启用的预备实现，不是 App 的加密推送链路。
 - Silas Grey、Polymaker、Dorothy 和 HA 是本次纳入设计的业务来源；本稿不宣称已检查或接入它们的全部当前实现。Rokid 的通知接收与下述呈现能力也是规划项。
 
@@ -61,7 +61,7 @@ flowchart TD
 
 ### 主题与兼容
 
-- 通用主题可采用 `uctw/messages/<source>/events` 和 `uctw/messages/<source>/state/<short-key>`；名称为候选，实施时确定。
+- 通用主题已确定为 `uctw/messages/<source>/events` 和 `uctw/messages/<source>/state/<short-key>`，第一阶段来源为 `agent-bridge`；短 key 与载荷约束见 v1 契约。
 - 一次性事件不 retain；状态主题保留最新状态，包括必要的 resolved 墓碑。墓碑到期后显式清理，不能无限积累。
 - 手机、手表、眼镜使用独立订阅身份，各自收到所需消息。不同设备不放入同一个共享订阅消费组。
 - MQTT 账号与 topic ACL 限制来源和读取范围，来源身份以授权 topic 为准，不信任 payload 任意自报。
@@ -115,7 +115,7 @@ flowchart TD
 
 - 来源在 broker 不可达时持久化待发事件或使用已有可靠重试，重试保持 eventId。
 - QoS 1 允许重复，也不代表业务已写盘。消费者在本地持久接收后确认；各通道独立去重与重试。需核对 broker 持久化、持久会话、队列上限和过期策略。
-- App 网关目前 HTTP socket 激活、空闲退出，无法直接由未订阅的 MQTT 消息唤醒。倾向由轻量常驻订阅进程转交本机网关，网关写盘后再确认；网关继续负责手机发件箱和重试恢复。
+- App 网关继续 HTTP socket 激活、空闲退出。现由轻量常驻的 `uctw-relay` 订阅 MQTT 并转交本机网关，网关写盘后再确认 MQTT；网关负责手机发件箱和重试恢复。
 - 统一使用绝对 expiresAt。网关、App、pocket-hub 校验过期，投递重试和 MQTT 延迟不能重置整个有效期；保留状态也需清理过期内容。
 - 按 key 记录持久 revision 和 resolved 墓碑，终端也处理乱序，防止旧的 active 消息复活已解决待办。
 - 事件/幂等与墓碑初始保留期建议 7 天，并覆盖最大有效期与重试窗口；用户可见消息历史、图表资源和审计日志分别制定保留策略，不能一并七天删除。
