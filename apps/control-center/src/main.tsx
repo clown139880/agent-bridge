@@ -90,7 +90,7 @@ const submitWithKeyboard = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
 
 // Never a real option label: the API rejects empty/control-only answers.
 const OTHER = "\0other";
-const choiceLabels: Record<string, string> = { allow: "允许", deny: "拒绝", "allow-session": "本会话始终允许" };
+const choiceLabels: Record<string, string> = { allow: "允许", deny: "拒绝", "allow-session": "本会话始终允许", "allow-always": "永久允许" };
 function ApprovalCard({ control, pending, disabled }: { control: ControlState; pending: Pending; disabled: boolean }) {
   const id = pendingId(pending), choices = pending.choices?.length ? pending.choices : ["allow", "deny"];
   return <div className="pending-item"><div className="pending-kind">审批{pending.kind ? ` · ${pending.kind}` : ""}</div>
@@ -98,11 +98,10 @@ function ApprovalCard({ control, pending, disabled }: { control: ControlState; p
     <div className="row-actions">{choices.map(choice => <button key={choice} type="button" disabled={disabled}
       className={choice === "allow" ? "primary" : choice === "deny" ? "danger" : ""}
       onClick={() => {
-        if (choice === "allow-session" && !confirm("将在本会话后续所有调用中允许这个工具（不只是这一条命令）。确定？")) return;
         haptic("tick");
         void control.submit(`/approvals/${segment(id)}/decision`, { choice });
       }}>{choiceLabels[choice] ?? choice}</button>)}</div>
-    {choices.includes("allow-session") && <small className="hint">“本会话始终允许”放行整个工具的后续调用，不只当前这一条。</small>}
+    {choices.includes("allow-session") && <small className="hint">“本会话始终允许”放行这个工具在本会话的后续调用；{choices.includes("allow-always") ? "“永久允许”对这台机器之后的所有会话都放行（写入 Claude 的 settings.json）。" : "不只当前这一条。"}</small>}
   </div>;
 }
 

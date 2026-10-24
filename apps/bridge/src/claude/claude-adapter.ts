@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, statSync } from "node:fs";
+import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { homedir } from "node:os";
 import pino from "pino";
@@ -40,6 +40,8 @@ const FILE_CHANGE_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]
 /** Non-mutating built-in tools cleared without a prompt when CLAUDE_AUTO_APPROVE=readonly.
  *  Deliberately excludes Bash (can mutate) and Task (spawns an arbitrary subagent). */
 const READONLY_TOOLS = new Set(["Read", "Grep", "Glob", "LS", "NotebookRead", "WebSearch", "WebFetch", "TodoWrite"]);
+/** Tools that run commands or change files: one tap must never allow them forever. */
+const NEVER_ALWAYS = new Set(["Bash", "Monitor", ...FILE_CHANGE_TOOLS]);
 const LOG_LIMIT = 2_000;
 /** A success result with no summary this soon after its turn started is the stray empty
  *  result a revived Claude emits before working on the prompt; it must not close the turn. */
@@ -161,6 +163,8 @@ export class ClaudeCodeAdapter implements AgentAdapter {
    * session (or restarting the bridge) forgets them.
    */
   private readonly allowedTools = new Map<string, Set<string>>();
+  /** "allow-always" grants: every session at once, and Claude's settings.json for the next processes. */
+  private readonly alwaysAllowedTools = new Set<string>();
   private ready = false;
   private modelCatalog: CodexModelInfo[] | undefined;
 
@@ -1102,7 +1106,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     if (toolName === "AskUserQuestion") {
       return this.handleAskUserQuestion(session, toolInput);
     }
-    if (session.sessionAllowedTools.has(toolName) || this.isAutoApproved(toolName)) {
+    if (session.sessionAllowedTools.has(toolName) || this.alwaysAllowedTools.has(toolName) || this.isAutoApproved(toolName)) {
       return Promise.resolve({ behavior: "allow", updatedInput: toolInput });
     }
     const approvalId = randomUUID();
@@ -1128,11 +1132,11 @@ export class ClaudeCodeAdapter implements AgentAdapter {
         approvalId,
         kind,
         summary,
-        choices: ["allow", "deny", "allow-session"],
+        choices: approvalChoices(toolName),
         turnId: session.activeTurnId,
         requestedAt,
       });
-      this.emitSessionEvent(session, "approval.requested", `approval:${approvalId}:requested`, { approvalId, kind, summary, choices: ["allow", "deny", "allow-session"] }, session.activeTurnId);
+      this.emitSessionEvent(session, "approval.requested", `approval:${approvalId}:requested`, { approvalId, kind, summary, choices: approvalChoices(toolName) }, session.activeTurnId);
       const onAbort = () => {
         if (pending.answered) return;
         pending.answered = true;
@@ -1153,11 +1157,27 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       approval.resolve({ behavior: "deny", message: "denied by operator" });
     } else {
       if (choice === "allow-session") session.sessionAllowedTools.add(approval.toolName);
+      if (choice === "allow-always" && !NEVER_ALWAYS.has(approval.toolName)) this.allowAlways(approval.toolName);
       approval.resolve({ behavior: "allow", updatedInput: approval.input });
     }
     this.appendLog(session, `Approval answered: ${choice}`);
     this.emit({ type: "approval_resolved", sessionId, approvalId, resolvedAt: Date.now() });
     this.emitSessionEvent(session, "approval.resolved", `approval:${approvalId}:resolved`, { approvalId, choice }, approval.turnId);
+  }
+
+  /**
+   * Allow a tool from now on: in this bridge at once, and as a rule in Claude's own
+   * settings.json so the next Claude processes (and the CLI) never ask. Remove the
+   * rule from `permissions.allow` there to take it back.
+   */
+  private allowAlways(toolName: string): void {
+    this.alwaysAllowedTools.add(toolName);
+    if (!this.options.claudeHome) return;
+    try {
+      addClaudeAllowRule(join(this.options.claudeHome, "settings.json"), toolName);
+    } catch (error) {
+      log.warn({ error, toolName }, "could not persist the always-allow rule; it holds until the bridge restarts");
+    }
   }
 
   // ---- structured user input (AskUserQuestion) ---------------------------
@@ -1235,7 +1255,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     const approvals = [...this.sessions.values()].flatMap((s) =>
       [...s.pendingApprovals.values()]
         .filter((a) => !a.answered)
-        .map((a) => ({ approvalId: a.approvalId, sessionId: s.sessionId, turnId: a.turnId, kind: a.kind, summary: approvalSummaryForTool(a.toolName, a.input), choices: ["allow", "deny", "allow-session"], requestedAt: a.requestedAt })),
+        .map((a) => ({ approvalId: a.approvalId, sessionId: s.sessionId, turnId: a.turnId, kind: a.kind, summary: approvalSummaryForTool(a.toolName, a.input), choices: approvalChoices(a.toolName), requestedAt: a.requestedAt })),
     );
     const userInputs = [...this.sessions.values()]
       .filter((s) => s.pendingUserInput)
@@ -1358,7 +1378,30 @@ function approvalKindForTool(toolName: string): ApprovalKind {
 function approvalSummaryForTool(toolName: string, input: Record<string, unknown>): string {
   if (toolName === "Bash") return `$ ${String(input.command ?? "")}`.trim();
   if (FILE_CHANGE_TOOLS.has(toolName)) return `${toolName} ${String(input.file_path ?? input.notebook_path ?? "")}`.trim();
-  return `${toolName} requested`;
+  // What it would read or call, so the decision is not blind.
+  const args = Object.keys(input).length ? JSON.stringify(input) : "";
+  return args ? `${toolName} ${truncate(args, 400)}` : `${toolName} requested`;
+}
+
+function approvalChoices(toolName: string): ApprovalChoice[] {
+  return NEVER_ALWAYS.has(toolName) ? ["allow", "deny", "allow-session"] : ["allow", "deny", "allow-session", "allow-always"];
+}
+
+/** Add a bare tool-name rule to Claude's `permissions.allow`, keeping everything else in the file. */
+export function addClaudeAllowRule(path: string, toolName: string): void {
+  let settings: Record<string, unknown> = {};
+  if (existsSync(path)) {
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown; // a file we cannot read is never overwritten
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("settings.json is not an object");
+    settings = parsed as Record<string, unknown>;
+  }
+  const permissions = record(settings.permissions);
+  const allow = Array.isArray(permissions.allow) ? permissions.allow : [];
+  if (allow.includes(toolName)) return;
+  settings.permissions = { ...permissions, allow: [...allow, toolName] };
+  const temporary = `${path}.${process.pid}.tmp`;
+  writeFileSync(temporary, `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 });
+  renameSync(temporary, path);
 }
 
 function record(value: unknown): Record<string, unknown> {

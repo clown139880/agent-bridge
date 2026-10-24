@@ -1,7 +1,7 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Store, AgentControlStore, PendingRow, ActionRow } from "@agent-bridge/database";
-import { parseWorkerId, workerId as buildWorkerId, type AgentType, type ActionKind, type ControlToBridgeMessage } from "@agent-bridge/protocol";
+import { parseWorkerId, workerId as buildWorkerId, type AgentType, type ActionKind, type ApprovalChoice, type ControlToBridgeMessage } from "@agent-bridge/protocol";
 import { BridgeRegistry } from "../bridge-registry.js";
 import type { MemoryReviewRoutes } from "../memory-review.js";
 import { AgentControlSse, SseCursorError } from "./sse.js";
@@ -434,7 +434,7 @@ export class AgentControlApi {
         throw new ApiProblem(409,"approval_already_resolved","approval resolution is already in progress");
       }
       if(!created.existing)this.dispatch(created.action,{type:"action.resolve_approval",actionId:created.action.actionId,
-        sessionId:pending.sessionId,approvalId:id,choice:choice as "allow"|"deny"|"allow-session"});
+        sessionId:pending.sessionId,approvalId:id,choice:choice as ApprovalChoice});
       this.ok(response,actionJson(this.store.action(created.action.actionId)!),202);return;
     }
     const questions=Array.isArray(pending.request.questions)?pending.request.questions as Array<Record<string,unknown>>:[];

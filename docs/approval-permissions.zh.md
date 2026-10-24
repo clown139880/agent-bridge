@@ -43,8 +43,11 @@ claude 进程还会读取所在机器的 `~/.claude/settings.json`（Bridge 没�
   - `all`：全部放行。
 - `CLAUDE_AUTO_APPROVE_TOOLS`：额外按**工具名**整体放行，例如 `["Bash"]` 会放行所有 Bash 命令。
 - **Bash、Edit/Write/MultiEdit/NotebookEdit、所有 MCP 工具**在 `readonly` 模式下一律弹审批，不看命令内容。
-- 例外（2026-10-15，clown 决定）：中央记忆 MCP 服务（0.7 起是 `/mcp/memory`，客户端配置名 `memory`）的全部工具（`history_*`、记忆和技能工具，含写入）由原生规则 `mcp__memory` 放行，不再弹审批。写入都是 Git 提交，可撤回或归档。还没把配置名从 `conversation-memory` 改过来的机器继续靠 `mcp__conversation-memory`，两条规则在 0.8 去掉旧 `/mcp` 前并存。`/mcp/bridge`（`mcp__bridge__*`）不在例外里，照常弹审批：0.7.12 起所有 agent 都配有 `bridge`，可以跨项目、跨机器调度别的 session，每次调度都要经人允许；派出去的 session 的审批可以由派发它的 agent 回答（clown 2026-10-22 决定）。HAL 写在 `/root/.claude/settings.json` 的 `permissions.allow`（新会话即生效，不必重启 Bridge）；其他机器加在各自的 `~/.claude/settings.json`，或用第 6 节的 env 规则档。
-- 审批选项是 `allow` / `deny` / `allow-session`。`allow-session` 把**工具名**加入 `session.sessionAllowedTools`：点一次之后，本会话里**所有** Bash 都不会再问，不区分具体命令。
+- 例外（2026-10-15，clown 决定）：中央记忆 MCP 服务（0.7 起是 `/mcp/memory`，客户端配置名 `memory`）的全部工具（`history_*`、记忆和技能工具，含写入）由原生规则 `mcp__memory` 放行，不再弹审批。写入都是 Git 提交，可撤回或归档。还没把配置名从 `conversation-memory` 改过来的机器继续靠 `mcp__conversation-memory`，两条规则在 0.8 去掉旧 `/mcp` 前并存。`/mcp/bridge` 的写操作（`create` / `turn` / `approve` / `answer` / `interrupt`）不在例外里，照常弹审批（只读的 `sessions` / `session` / `pending` / `workers` / `wait` 在 HAL 上已放行，见下文）：0.7.12 起所有 agent 都配有 `bridge`，可以跨项目、跨机器调度别的 session，每次调度都要经人允许；派出去的 session 的审批可以由派发它的 agent 回答（clown 2026-10-22 决定）。HAL 写在 `/root/.claude/settings.json` 的 `permissions.allow`（新会话即生效，不必重启 Bridge）；其他机器加在各自的 `~/.claude/settings.json`，或用第 6 节的 env 规则档。
+- 审批选项是 `allow` / `deny` / `allow-session` / `allow-always`。`allow-session` 把**工具名**加入 `session.sessionAllowedTools`：点一次之后，本会话里**所有** Bash 都不会再问，不区分具体命令。Control Center 点它不再弹确认框（clown 2026-10-24）。
+- `allow-always`（0.7.19 起，“永久允许”，只有 Claude 会话提供）：这台 Bridge 上的所有会话立刻放行这个工具名，并把同名规则追加进那台机器 `~/.claude/settings.json` 的 `permissions.allow`，之后启动的 claude 进程由原生规则放行。撤回就从那里删掉规则（Bridge 内存里的放行到重启为止）。会执行命令或改文件的工具（Bash、Monitor、Edit/Write/MultiEdit/NotebookEdit）不提供这个选项。`/mcp/bridge` 的 `approve` 不接受它：agent 不能替人做永久授权。
+- 非 Bash、非文件编辑的工具，审批摘要会带上调用参数（截到 400 字），不再只显示 “X requested”。
+- HAL 的 `/root/.claude/settings.json` 另外放行了只读工具 `Read`、`Grep`、`Glob`、`WebFetch`、`WebSearch` 和 `/mcp/bridge` 的只读工具 `mcp__bridge__sessions` / `session` / `pending` / `workers` / `wait`（clown 2026-10-24：读和回顾不需要逐个授权）。`create`、`turn`、`approve`、`answer`、`interrupt` 仍要审批。
 - Codex app-server 的审批（`apps/bridge/src/app-server.ts`）由 Codex 自己的 approval policy 决定什么时候请求，Bridge 只负责转发。
 
 ## 3. Control Plane 与人工

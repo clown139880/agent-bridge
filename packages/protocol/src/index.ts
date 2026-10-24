@@ -203,7 +203,8 @@ export interface ModelCatalogResponseMessage {
 }
 
 export type ApprovalKind = "command" | "file-change" | "permissions";
-export type ApprovalChoice = "allow" | "deny" | "allow-session";
+/** "allow-always" (Claude only, never for command or edit tools) keeps allowing the tool in every later session. */
+export type ApprovalChoice = "allow" | "deny" | "allow-session" | "allow-always";
 
 export interface ApprovalRequestMessage {
   type: "approval_request";
