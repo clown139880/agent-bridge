@@ -21,6 +21,7 @@ const control = new ControlPlane(store, {
   bridgeUpdate: config.bridgeUpdate,
   webhook: config.webhook,
   ntfy: config.ntfy,
+  messages: config.messages,
 });
 
 await control.start();

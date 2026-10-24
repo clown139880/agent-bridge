@@ -79,6 +79,11 @@ export const config = {
     url: process.env.NTFY_URL, topic: process.env.NTFY_TOPIC, token: process.env.NTFY_TOKEN,
     controlCenterUrl: process.env.NTFY_CONTROL_CENTER_URL,
   } : undefined,
+  messages: process.env.MESSAGE_MQTT_URL ? {
+    url: process.env.MESSAGE_MQTT_URL,
+    username: process.env.MESSAGE_MQTT_USER,
+    password: process.env.MESSAGE_MQTT_PASSWORD,
+  } : undefined,
 };
 
 /**

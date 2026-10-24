@@ -2,6 +2,8 @@
 
 状态：本页记录 0.7.17 的预备直发实现，尚未启用。后续方向见[个人消息中心设计](personal-message-center.zh.md)：业务来源发布到 MQTT，App 后端与 pocket-hub 等分别消费。
 
+MQTT 第一阶段的实际契约与配置见 [MQTT 业务消息 v1](message-events-v1.zh.md)。不要使用下面的标准 JSON 发布器替代 App 的加密链路。
+
 UCTW App 现有链路由自有后端按设备密钥加密，再经 ntfy UnifiedPush 投递，不是订阅本页发布器的标准 JSON topic。以下配置是预备实现的代码说明，不是 App 的接入步骤。
 
 该预备实现采用全推送：新收到的 `turn.completed`、`turn.failed`、待审批和待回答各提醒一次，不检查 DSH、网页或手机是否在线、是否正在查看会话。普通消息片段、工具调用、进度和主动打断不单独推送。该范围也作为后续消息中心第一阶段的 Agent 提醒策略。

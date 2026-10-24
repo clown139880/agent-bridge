@@ -27,6 +27,7 @@ import { AgentControlApi } from "./api/router.js";
 import { BridgeRegistry } from "./bridge-registry.js";
 import { WebhookNotifier, type WebhookOptions } from "./webhook.js";
 import { NtfyNotifier, type NtfyOptions, type SessionNotificationKind } from "./ntfy.js";
+import { AgentMessagePublisher, type MessageMqttOptions } from "./message-publisher.js";
 import { AgentMemory, AgentSkills, type Writer } from "@agent-bridge/agent-memory";
 import { ConversationMcpServer } from "./memory-mcp.js";
 import { memoryEndpoint, reviewContext, runMemoryTool, type AgentMemoryMcpOptions } from "./mcp/memory.js";
@@ -56,6 +57,7 @@ export class ControlPlane {
   private readonly controlApi: AgentControlApi;
   private readonly webhook: WebhookNotifier;
   private readonly ntfy: NtfyNotifier;
+  private readonly messages?: AgentMessagePublisher;
   private readonly memory: ConversationMemoryStore;
   private readonly memoryMcp?: ConversationMcpServer;
   private readonly memoryReviews?: MemoryReviews;
@@ -94,6 +96,7 @@ export class ControlPlane {
       };
       webhook?: WebhookOptions;
       ntfy?: NtfyOptions;
+      messages?: MessageMqttOptions;
     },
   ) {
     this.webhook = new WebhookNotifier(options.webhook);
@@ -129,6 +132,7 @@ export class ControlPlane {
     this.controlStore = new AgentControlStore(store.db, options.retention ?? {
       actionsMs: 86_400_000, attachmentsMs: 7 * 86_400_000,
     });
+    if (options.messages) this.messages = new AgentMessagePublisher(store, this.controlStore, options.messages);
     this.controlApi = new AgentControlApi(store, this.controlStore, this.registry, {
       readToken: options.controlApiReadToken, writeToken: options.controlApiWriteToken, bridgeToken: options.bridgeToken,
       agents, memoryReviews: this.memoryReviews,
@@ -152,7 +156,8 @@ export class ControlPlane {
     });
     const apiEnabled = Boolean(options.controlApiReadToken || options.controlApiWriteToken || agents.length);
     const app = createHttpApp({
-      health: () => ({ ok: true, bridges: this.bridges.size, legacyMcpCalls: this.memoryMcp?.legacyCalls ?? 0 }),
+      health: () => ({ ok: true, bridges: this.bridges.size, legacyMcpCalls: this.memoryMcp?.legacyCalls ?? 0,
+        messages: this.messages ? { enabled: true, ...this.messages.status() } : { enabled: false } }),
       memoryBootstrap: (c) => this.handleMemoryBootstrap(c),
       mcp: {
         ...(memoryOptions ? { memory: mcpRoute(memoryEndpoint(this.memory, memoryOptions)) } : {}),
@@ -175,6 +180,7 @@ export class ControlPlane {
     // without changing the timestamp of the session's last real activity.
     this.controlStore.resetTransientSessionActivity();
     await new Promise<void>((resolve) => this.http.listen(this.options.port, this.options.host, resolve));
+    this.messages?.start();
     setInterval(() => this.store.markStaleMachinesOffline(Date.now() - 45_000), 15_000).unref();
     this.controlStore.cleanup();
     this.memoryReviews?.resume();
@@ -194,6 +200,7 @@ export class ControlPlane {
 
   async stop(): Promise<void> {
     clearInterval(this.cleanupTimer);
+    await this.messages?.stop();
     for (const bridge of this.bridges.values()) bridge.socket.close(1001, "server shutdown");
     await new Promise<void>((resolve) => this.http.close(() => resolve()));
   }
