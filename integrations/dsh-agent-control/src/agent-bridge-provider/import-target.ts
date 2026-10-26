@@ -1,3 +1,4 @@
+import { isBridgeRecord, bridgeRecordType, appendBridgeRecord } from './records.js'
 import { createHash, randomUUID } from 'node:crypto'
 import { mkdir, realpath, readFile, writeFile, readdir } from 'node:fs/promises'
 import { homedir, hostname as osHostname } from 'node:os'
@@ -113,7 +114,7 @@ export class AgentBridgeImportTarget {
     const cached = this.bindings.get(nativeId)
     if (cached) return cached
     const agent = this.host.agents.get(nativeId)
-    const event = agent && [...sessionEvents(nativeSession(agent))].reverse().find(e => e.type === BINDING_EVENT)
+    const event = agent && [...sessionEvents(nativeSession(agent))].reverse().find(e => isBridgeRecord(e.type, BINDING_EVENT))
     if (event && event.data['origin'] === new URL(this.origin).origin) {
       this.bindings.set(nativeId, event.data)
       return event.data
@@ -366,7 +367,7 @@ export class AgentBridgeImportTarget {
       executionLocations: Array.isArray(sibling?.['executionLocations']) ? sibling['executionLocations'] : [{ workerId, machineId: str(source['machineId']), workspace }],
       ...(str(sibling?.['projectIdentity']) ? { projectIdentity: str(sibling?.['projectIdentity']) } : {}) }
     const seed: NativeEvent[] = [
-      { type: BINDING_EVENT, data: binding, seq: 0, time },
+      { type: bridgeRecordType(BINDING_EVENT), ignorable: true, data: binding, seq: 0, time },
       { type: 'session/title', data: { title: '新会话', messageSeqs: [], source: { kind: 'user' } }, seq: 1, time },
     ]
     const setup = async (ctx: Context) => { await this.host.agentPresets?.mount(ctx, PROVIDER) }
@@ -406,7 +407,7 @@ export class AgentBridgeImportTarget {
       const bound: JsonObject = { ...binding, sessionId: remoteId }
       this.bindings.set(nativeId, bound)
       const agent = this.host.agents.get(nativeId)
-      if (agent) nativeSession(agent).append(BINDING_EVENT, bound)
+      if (agent) appendBridgeRecord(nativeSession(agent), BINDING_EVENT, bound)
       return receipt
     } finally { this.drafting.delete(nativeId) }
   }
@@ -419,9 +420,9 @@ export class AgentBridgeImportTarget {
     const agent = this.host.agents.get(nativeId)
     if (!agent) throw new Error('Native Bridge agent disappeared')
     const session = nativeSession(agent)
-    const seen = new Set(sessionEvents(session).filter(e => e.type === ACK_EVENT).map(e => e.data['eventId']))
+    const seen = new Set(sessionEvents(session).filter(e => isBridgeRecord(e.type, ACK_EVENT)).map(e => e.data['eventId']))
     for (const row of rows) if (!seen.has(row['eventId'])) {
-      session.append(ACK_EVENT, { eventId: str(row['eventId']), turnId: str(row['turnId']), ...(str(row['localMessageId']) ? { localMessageId: str(row['localMessageId']) } : {}) })
+      appendBridgeRecord(session, ACK_EVENT, { eventId: str(row['eventId']), turnId: str(row['turnId']), ...(str(row['localMessageId']) ? { localMessageId: str(row['localMessageId']) } : {}) })
       seen.add(row['eventId'])
     }
   }
@@ -675,7 +676,7 @@ export class AgentBridgeImportTarget {
       else {
         const history = await readHistory(this.bridge, remoteId, undefined, this.abort.signal)
         const time = Number(row['createdAt'] ?? row['updatedAt']) || Date.now()
-        const seed: NativeEvent[] = [{ type: BINDING_EVENT, data: binding, seq: 0, time }]
+        const seed: NativeEvent[] = [{ type: bridgeRecordType(BINDING_EVENT), ignorable: true, data: binding, seq: 0, time }]
         seed.push(...projectNativeEvents(history.rows, seed, model, toolResultShape(this.host)))
         // Empty retained histories still have a real, selectable presentation Session.
         if (!seed.some(e => e.type === 'turn/start')) seed.push(
@@ -691,10 +692,10 @@ export class AgentBridgeImportTarget {
     guardImportedTurnNumbers(nativeSession(agent))
     await this.syncHistory(id, agent)
     const session = nativeSession(agent)
-    const previousBinding = [...sessionEvents(session)].reverse().find(event => event.type === BINDING_EVENT)
+    const previousBinding = [...sessionEvents(session)].reverse().find(event => isBridgeRecord(event.type, BINDING_EVENT))
     // Placement and status move on every sibling change and turn; the in-memory binding carries
     // them and each sync refreshes them, so only a durable change is appended to the Session log.
-    if (!previousBinding || JSON.stringify(durableBinding(previousBinding.data)) !== JSON.stringify(durableBinding(binding))) session.append(BINDING_EVENT, binding)
+    if (!previousBinding || JSON.stringify(durableBinding(previousBinding.data)) !== JSON.stringify(durableBinding(binding))) appendBridgeRecord(session, BINDING_EVENT, binding)
     const title = promptTitle(row, sessionEvents(session))
     const previous = [...sessionEvents(session)].reverse().find(e => e.type === 'session/title')
     const previousBindingTitle = previousBinding ? promptTitle(previousBinding.data, sessionEvents(session)) : ''

@@ -59,6 +59,33 @@ The checked-in bundle defaults target Hal. Override the row in the profile's
 `cordis.patch.yml` for another installation. A patch replaces the complete
 config, so restate the full `bridge` object.
 
+### Session V4 plugin records and retained V3 history
+
+Plugin 0.2.4 uses the V4 `appendPluginRecord` API and recognizes both legacy
+`agent-bridge/*` and migrated `plugin:agent-bridge/*` metadata. New seeds mark
+Bridge records `ignorable`. Older runtimes retain their legacy append behavior.
+
+V4's fixed V3 migration vocabulary does not use the live event registry. V3
+files written without `ignorable` therefore require a one-time envelope repair.
+Stop Desktop and all writers, then run (substitute the active Desktop's dependencies):
+
+```powershell
+node scripts/repair-v3-plugin-records.cjs --runtime C:/path/to/desktop/node_modules
+node scripts/repair-v3-plugin-records.cjs --runtime C:/path/to/desktop/node_modules --apply
+node scripts/verify-v4-records.cjs C:/path/to/desktop/node_modules
+```
+
+The repair only adds `ignorable: true` to the two Bridge record types in V3
+files without an existing V4 successor. It preserves every payload, sequence,
+timestamp and reference. Each candidate must pass the installed V4 catalog's
+strict migration validation before replacement; unrelated structural failures
+are reported and left unchanged. Desktop still owns actual V4 migration and
+child discovery. Original compressed bytes are backed up under
+`~/.dsh/backups/bridge-v3-records`, verified by SHA256, and replaced atomically
+only if the source hash is unchanged. Windows apply refuses a running Desktop.
+To roll back, stop writers and restore the matching backup; retain any later
+activity and V4 successor before rollback, since Desktop prefers newer formats.
+
 ### Upgrading retained Bridge history to Session V3
 
 DSH Session V3 deliberately refuses unclassified V2 events. Agent Bridge V2

@@ -1,9 +1,10 @@
+import { isBridgeRecord, appendBridgeRecord } from './records.js'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { Context } from '@deepseek-ai/cordis'
 import type { JsonObject, JsonValue } from '../types.js'
 
 /** DSH 0.1.2-rc.1 / 0.1.3-alpha.1 session and persistence seam. */
-export interface NativeEvent { type: string; data: JsonObject; seq: number; time: number; surfaceOp?: 'append' }
+export interface NativeEvent { type: string; data: JsonObject; seq: number; time: number; surfaceOp?: 'append'; ignorable?: true }
 export interface NativeSession {
   id: string
   header: { id: string; cwd?: string; createdAt: number; agentPreset?: string }
@@ -86,6 +87,7 @@ export function sessionEvents(session: NativeSession): readonly NativeEvent[] {
 export function appendSessionEvent(session: NativeSession, event: Pick<NativeEvent, 'type' | 'data' | 'surfaceOp'>): void {
   // Projected events already name the log's coordinates. Only the native
   // loop's direct appends need their cached turn/step numbers translated.
+  if (isBridgeRecord(event.type)) { appendBridgeRecord(session, event.type, event.data); return }
   const append = guardedSessions.get(session) ?? session.append.bind(session)
   append(event.type, event.data, ...(event.surfaceOp ? [{ surfaceOp: event.surfaceOp }] : []))
 }

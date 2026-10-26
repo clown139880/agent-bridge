@@ -3,8 +3,8 @@ import type { JsonObject, JsonValue } from '../types.js'
 import { toolResultMessage, type NativeEvent, type ToolResultShape } from './dsh-compat.js'
 
 export const PROVIDER = 'agent-bridge'
-export const BINDING_EVENT = 'agent-bridge/binding'
-export const ACK_EVENT = 'agent-bridge/event'
+export { BINDING_EVENT, ACK_EVENT } from './records.js'
+import { ACK_EVENT, isBridgeRecord, bridgeRecordType } from './records.js'
 export const record = (value: unknown): JsonObject => value && typeof value === 'object' && !Array.isArray(value) ? value as JsonObject : {}
 export const str = (value: unknown, fallback = ''): string => typeof value === 'string' ? value : fallback
 export function textFromBlocks(blocks: readonly ContentBlock[]): string {
@@ -114,7 +114,7 @@ export function openStep(events: readonly NativeEvent[]): OpenStep | undefined {
  * message IDs differ; sharing a step would erase earlier text and tool cards.
  */
 export function projectNativeEvents(rows: readonly JsonObject[], existing: readonly NativeEvent[], model = 'remote', toolResult: ToolResultShape = 'tool-role', into?: OpenStep): NativeEvent[] {
-  const acknowledgements = existing.filter(e => e.type === ACK_EVENT)
+  const acknowledgements = existing.filter(e => isBridgeRecord(e.type, ACK_EVENT))
   const seen = new Set(acknowledgements.map(e => str(e.data['eventId'])))
   const seenItems = new Set([...seen].map(presentationItemKey).filter((key): key is string => !!key))
   const submittedUserTurns = new Set(acknowledgements.filter(e => /^action:[^:]+:user$/.test(str(e.data['eventId']))).map(e => str(e.data['turnId'])))
@@ -133,7 +133,7 @@ export function projectNativeEvents(rows: readonly JsonObject[], existing: reado
   let step = into?.step ?? 1
   const output: NativeEvent[] = []
   const add = (type: string, data: JsonObject, time: number, surface = false) => {
-    output.push({ type, data, seq: existing.length + output.length, time, ...(surface ? { surfaceOp: 'append' as const } : {}) })
+    output.push({ type: isBridgeRecord(type) ? bridgeRecordType(type) : type, ...(isBridgeRecord(type) ? { ignorable: true as const } : {}), data, seq: existing.length + output.length, time, ...(surface ? { surfaceOp: 'append' as const } : {}) })
   }
   // Backfilled transcript prompts carry their original timestamp.
   const ordered = existing.some(e => e.type === 'user/message' || e.type === 'assistant/message') ? rows : [...rows].sort((a, b) => Number(a['timestamp']) - Number(b['timestamp']))
