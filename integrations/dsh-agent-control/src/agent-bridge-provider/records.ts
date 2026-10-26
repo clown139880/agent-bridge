@@ -6,6 +6,7 @@ import type { JsonObject } from '../types.js'
 const appendRecord = (sessionApi as unknown as {
   appendPluginRecord?: (session: unknown, type: string, data: JsonObject) => unknown
 }).appendPluginRecord
+export const requiresSystemHead = Number(sessionApi.SESSION_FORMAT_VERSION) >= 4
 export const BINDING_EVENT = 'agent-bridge/binding'
 export const ACK_EVENT = 'agent-bridge/event'
 export const isBridgeRecord = (type: string, expected?: string): boolean =>

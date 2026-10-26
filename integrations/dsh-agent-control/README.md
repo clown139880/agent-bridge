@@ -96,6 +96,22 @@ validation, backup and stopped-writer requirements apply.
 
 ### Upgrading retained Bridge history to Session V3
 
+For the remaining pre-V4 structural defects, 0.2.7 provides
+`repair-v3-plugin-records.cjs --runtime <Desktop/node_modules> --repair-structure`
+(preview first, then add `--apply` with all writers stopped). It adds an empty
+protected system head before imported messages, repairs unambiguous stale final
+steps, normalizes physical turn numbering, and closes a missing turn/end only
+when the prior step is already closed and the next source turn is consecutive.
+Unknown events/references, forks and ambiguous overlaps are refused.
+
+This mode publishes a **V4 successor without modifying V3**, using the installed
+native codec and strict migration/current-format validation. Originals, source
+hashes, changes and the V3-to-repaired sequence map are retained under
+`~/.dsh/backups/bridge-v3-records` in `repair-report.json`. Original message
+payloads are checked for exact equality before native V4 conversion. An existing
+V4 successor is never overwritten. The Bridge writer now seeds the empty system
+head on V4 so a later native turn can append its system prompt safely.
+
 DSH Session V3 deliberately refuses unclassified V2 events. Agent Bridge V2
 logs contain audited `agent-bridge/binding` and `agent-bridge/event` records, so
 run the compatibility migration once after upgrading DSH and before reopening

@@ -3,6 +3,30 @@ import { expect, it } from 'vitest'
 import { isBridgeRecord, BINDING_EVENT, ACK_EVENT } from '../src/agent-bridge-provider/records.js'
 const { repair } = createRequire(import.meta.url)('../scripts/repair-v3-plugin-records.cjs') as { repair(rows: Record<string, unknown>[]): Record<string, unknown>[] }
 const { repairStaleFinalStep } = createRequire(import.meta.url)('../scripts/repair-v3-plugin-records.cjs') as { repairStaleFinalStep(rows: Record<string, unknown>[]): Record<string, unknown>[] }
+const { plan } = createRequire(import.meta.url)('../scripts/repair-v3-structure.cjs') as { plan(rows: any[]): { rows: any[]; mapping: number[]; changes: any[] } }
+
+it('adds a protected empty head, remaps title references and preserves every original message', () => {
+  const rows = [
+    { type: 'session', version: 3, id: 'agent-bridge-structural', isSeeded: false },
+    { type: BINDING_EVENT, seq: 0, time: 1, data: {} },
+    { type: 'turn/start', seq: 1, time: 1, data: { turn: 1 } },
+    { type: 'step/start', seq: 2, time: 1, data: { turn: 1, step: 1 } },
+    { type: 'user/message', seq: 3, time: 1, surfaceOp: 'append', data: { id: 'u', content: [{ type: 'text', text: 'original' }] } },
+    { type: 'step/end', seq: 4, time: 1, data: { turn: 1, step: 1 } },
+    { type: 'turn/start', seq: 5, time: 2, data: { turn: 2 } },
+    { type: 'turn/end', seq: 6, time: 2, data: { turn: 2 } },
+    { type: 'session/title', seq: 7, time: 2, data: { messageSeqs: [3] } },
+  ]
+  const original = structuredClone(rows), output = plan(rows)
+  expect(rows).toEqual(original)
+  expect(output.rows[4]).toMatchObject({ type: 'system/message', data: { message: { content: [] } } })
+  expect(output.rows[output.mapping[3]! + 1].data).toEqual(rows[4]!.data)
+  expect(output.rows.at(-1).data.messageSeqs).toEqual([output.mapping[3]])
+  expect(output.changes.some(change => change.kind === 'interrupted-turn-end')).toBe(true)
+  expect(plan(output.rows).rows).toEqual(output.rows)
+  expect(() => plan([{ ...rows[0], isSeeded: true }, ...rows.slice(1)])).toThrow('Fork')
+  expect(() => plan([...rows, { type: 'new/event', seq: 8, data: {} }])).toThrow('Unaudited')
+})
 
 it('repairs only a stale final answer/closure pair and preserves identities and references', () => {
   const event = (type: string, data: object, seq: number) => ({ type, data, seq, time: 100 + seq })

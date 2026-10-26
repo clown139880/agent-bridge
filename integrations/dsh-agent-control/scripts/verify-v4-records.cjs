@@ -38,6 +38,8 @@ async function run(runtime) {
     const events = plugin.projectNativeEvents([remote('new')], restored.events, 'remote', 'tool-role');
     assert.ok(events.some(event => event.type === 'plugin:agent-bridge/event' && event.ignorable === true));
     const session = Session.create(SessionId('v4-projection'), [...restored.events, ...events]);
+    assert.equal(session.deriveMessages()[0].role, 'system');
+    assert.deepEqual(session.deriveMessages()[0].content, []);
     assert.equal(session.deriveMessages().at(-1).content[0].text, 'answer');
     // Exercise the actual target's incremental record writer and binding reader.
     const agent = { id: session.id, session, status: 'idle' };
@@ -47,6 +49,10 @@ async function run(runtime) {
     importTarget.acknowledge(session.id, [{ eventId: 'incremental', turnId: 'turn' }]);
     assert.equal(session.snapshotEvents().filter(event => event.data.eventId === 'incremental').length, 1);
     assert.equal(session.snapshotEvents().at(-1).ignorable, true);
+    const catalog = createSessionFormatCatalogWithChildren([]);
+    const native = catalog.createRestore(catalog.encodeCurrentHeader({ ...session.header, delegationDepth: 0 }, 0), { recovery: 'strict', validation: 'current' });
+    session.snapshotEvents().forEach(event => native.decodeRow(catalog.encodeCurrentEvent(event)));
+    native.finish();
     console.log('PASS: actual V4 migration, retained metadata, replay, binding lookup, incremental plugin records and deduplication');
   } finally { fs.unlinkSync(target); }
 }

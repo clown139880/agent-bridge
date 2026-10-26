@@ -38,11 +38,14 @@ function repairStaleFinalStep(rows) {
     else if (event.type === 'step/start') { step = data.step; empty = true; }
     else if (event.type === 'step/end') { closed.add(data.step); step = undefined; }
     else if (event.type === 'turn/end') { turn = undefined; step = undefined; }
-    else if (event.type === 'assistant/message' && data.step !== step) {
+    else if (['assistant/message', 'assistant/attempt'].includes(event.type) && data.step !== step) {
       const end = output[i + 1], finish = output[i + 2];
+      const safeAnswer = event.type === 'assistant/message'
+        ? data.message?.source?.provider === 'agent-bridge' && data.message?.source?.kind === 'model'
+          && Array.isArray(data.message.content) && data.message.content.every(block => block.type === 'text')
+        : Array.isArray(data.stream) && data.stream.length === 0;
       if (!empty || !Number.isSafeInteger(step) || data.turn !== turn || !closed.has(data.step)
-        || data.step >= step || data.message?.source?.provider !== 'agent-bridge'
-        || data.message?.source?.kind !== 'model' || data.message?.content?.some(block => block.type !== 'text')
+        || data.step >= step || !safeAnswer
         || end?.type !== 'step/end' || end.data.turn !== turn || end.data.step !== data.step
         || finish?.type !== 'turn/end' || finish.data.turn !== turn) throw new Error('Ambiguous stale assistant step; refusing repair');
       output[i] = { ...event, data: { ...data, step } };
@@ -73,25 +76,36 @@ async function run(args = process.argv.slice(2)) {
     if (['session.v4.jsonl', 'session.v4.jsonl.zstd'].some(name => fs.existsSync(path.join(path.dirname(file), name)))) continue;
     const original = fs.readFileSync(file);
     try {
-      const output = repair(rows, args.includes('--repair-stale-step'));
+      const structure = args.includes('--repair-structure') ? require('./repair-v3-structure.cjs').plan(rows) : undefined;
+      let output = structure?.rows ?? repair(rows, args.includes('--repair-stale-step'));
       // This operation changes no coordinates or payloads. The native reader
       // still owns generation migration and child catalog discovery.
-      const restore = createSessionFormatCatalogWithChildren([]).createRestore(output[0], { recovery: 'strict', validation: 'current' });
+      const catalog = createSessionFormatCatalogWithChildren([]);
+      const restore = catalog.createRestore(output[0], { recovery: 'strict', validation: 'current' });
       for (const event of output.slice(1)) restore.decodeRow(event);
       const restored = restore.finish();
       const entry = { file, id: rows[0].id, sha256: hash(original), events: output.length - 1, targetVersion: restored.header.version, status: 'validated' };
+      const target = structure ? file.replace('session.v3.jsonl', 'session.v4.jsonl') : file;
+      if (structure) {
+        output = [catalog.encodeCurrentHeader(restored.header, restored.inheritedEventCount), ...restored.events.map(event => catalog.encodeCurrentEvent(event))];
+        const verify = catalog.createRestore(output[0], { recovery: 'strict', validation: 'current' });
+        output.slice(1).forEach(event => verify.decodeRow(event));
+        assert.deepEqual(verify.finish(), restored);
+        entry.target = target; entry.mapping = structure.mapping; entry.changes = structure.changes;
+      }
       if (args.includes('--apply')) {
         const backup = path.join(backupRoot, relative);
         fs.mkdirSync(path.dirname(backup), { recursive: true });
         fs.writeFileSync(backup, original, { flag: 'wx' });
         assert.equal(hash(fs.readFileSync(backup)), entry.sha256);
-        const temp = file + '.migrating';
+        const temp = target + '.migrating';
         try {
           fs.writeFileSync(temp, encodeRows(output, file.endsWith('.zstd')), { flag: 'wx' });
           // Decode through the same compressed reader before publication.
           assert.deepEqual(decodeFile(temp), output);
           assert.equal(hash(fs.readFileSync(file)), entry.sha256, 'Source changed during repair');
-          fs.renameSync(temp, file);
+          if (structure) { fs.linkSync(temp, target); fs.unlinkSync(temp); }
+          else fs.renameSync(temp, file);
         } catch (error) {
           if (fs.existsSync(temp)) fs.unlinkSync(temp);
           throw error;
@@ -102,6 +116,7 @@ async function run(args = process.argv.slice(2)) {
       report.push(entry);
     } catch (error) { report.push({ file, status: 'refused', reason: String(error) }); }
   }
+  if (args.includes('--apply') && fs.existsSync(backupRoot)) fs.writeFileSync(path.join(backupRoot, 'repair-report.json'), JSON.stringify(report, null, 2));
   console.log(JSON.stringify(report, null, 2));
   return report;
 }

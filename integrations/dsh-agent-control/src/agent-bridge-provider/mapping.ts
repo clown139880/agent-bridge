@@ -4,7 +4,7 @@ import { toolResultMessage, type NativeEvent, type ToolResultShape } from './dsh
 
 export const PROVIDER = 'agent-bridge'
 export { BINDING_EVENT, ACK_EVENT } from './records.js'
-import { ACK_EVENT, isBridgeRecord, bridgeRecordType } from './records.js'
+import { ACK_EVENT, isBridgeRecord, bridgeRecordType, requiresSystemHead } from './records.js'
 export const record = (value: unknown): JsonObject => value && typeof value === 'object' && !Array.isArray(value) ? value as JsonObject : {}
 export const str = (value: unknown, fallback = ''): string => typeof value === 'string' ? value : fallback
 export function textFromBlocks(blocks: readonly ContentBlock[]): string {
@@ -132,7 +132,13 @@ export function projectNativeEvents(rows: readonly JsonObject[], existing: reado
   let turn = existing.reduce((n, e) => Math.max(n, Number(e.data['turn']) || 0), 0)
   let step = into?.step ?? 1
   const output: NativeEvent[] = []
+  let needsHead = requiresSystemHead && !existing.some(event => ['user/message', 'assistant/message', 'tool/result', 'system/message'].includes(event.type))
   const add = (type: string, data: JsonObject, time: number, surface = false) => {
+    if (needsHead && surface) {
+      needsHead = false
+      add('system/message', { turn: into?.turn ?? turn, step: into ? step : 1,
+        message: { id: 'bridge:system-head', role: 'system', source: { kind: 'system-prompt' }, content: [] } }, time, true)
+    }
     output.push({ type: isBridgeRecord(type) ? bridgeRecordType(type) : type, ...(isBridgeRecord(type) ? { ignorable: true as const } : {}), data, seq: existing.length + output.length, time, ...(surface ? { surfaceOp: 'append' as const } : {}) })
   }
   // Backfilled transcript prompts carry their original timestamp.
