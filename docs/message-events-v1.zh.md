@@ -1,6 +1,6 @@
 # MQTT 业务消息 v1
 
-状态：第一阶段实现契约。总体方向见[个人消息中心设计](personal-message-center.zh.md)。本页区分代码能力和运行验收，上线状态以文末记录为准。
+状态：第一阶段实现契约。总体方向见[多来源、多设备消息设计](personal-message-center.zh.md)：来源各自发布，设备或其适配器独立订阅。本页区分代码能力和运行验收，上线状态以文末记录为准。
 
 ## 消息与主题
 
@@ -125,6 +125,8 @@ MESSAGE_MQTT_PASSWORD=<publisher password>
 
 **App 发布与实机状态：**0.1.39 / `8226d9b` 已发布，versionCode 为 39，[下载页](https://files.uniclown.com/sd/89EY9O5r/apk/uctw/index.html)及 App 内更新可用。APK SHA-256 为 `474ba578d641b3739c77c2bea75931b3477798ab4f65971e607c5ec59ccda7f6`，发布元数据与内网完整下载哈希一致；公网完整文件未独立下载核哈希。
 
-验收时已有一台设备登记了旧版能力，尚无 `events-v1` 登记，未确认手机安装并打开新版。待补：完成/待办的实际展示、点击目标会话、处理后撤回、同 key 更新不重复响、App 进程重启去重与通知到期清除。旧客户端的 resolved 会按兼容策略跳过。
+首次上线验收时已有一台设备登记了旧版能力。随后用户确认更新 App，网关已收到该设备的 `events-v1` 能力登记；发送了两条明确标注的点击/撤回测试，一分钟后发送 resolved，并清除了测试 retained 状态。两条测试及撤回均获网关持久接受、ntfy HTTP 200。
 
-本次仅上线 Agent → MQTT → App 网关 → 加密 ntfy 的第一阶段。长期消息历史、App 信息流、pocket-hub/T-Watch、Rokid、ETH 异动、Polymaker、Dorothy 新闻和 HA 业务来源仍按总体设计分阶段接入；它们的现有通知输出未修改。
+用户已确认手机实际收到通知，并可点击返回对应会话。自动撤回的实机效果尚未单独确认；传输接受不作为撤回已发生的证据。同 key 更新不重复响、App 进程重启去重与通知到期清除也留待实机补验。旧客户端的 resolved 继续按兼容策略跳过。
+
+本次仅上线 Agent → MQTT → App 网关 → 加密 ntfy 的第一阶段。后续由 pocket-hub/T-Watch、Rokid 等通道自行消费，由 ETH 异动、Polymaker、Dorothy 新闻和 HA 等来源各自发布；它们的现有通知输出未修改。当前规划不增加统一历史服务器或集中业务管理服务，短期投递记录继续服务重试、去重和排错。
