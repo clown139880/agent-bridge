@@ -5,9 +5,15 @@ const { repair, repairStaleFinalStep } = require('./repair-v3-plugin-records.cjs
 const known = new Set(['agent-bridge/binding', 'agent-bridge/event', 'turn/start', 'turn/end', 'step/start', 'step/end', 'user/message', 'assistant/message', 'assistant/attempt', 'tool/call', 'tool/result', 'system/message', 'session/title', 'session/end-seed', 'permission/preset', 'sandbox/mode', 'approval/policy', 'model/selection', 'agent/inbox/spliced', 'request/header', 'request/context']);
 const surface = new Set(['user/message', 'assistant/message', 'tool/result', 'system/message']);
 
-function plan(rows) {
+function plan(rows, v4 = false) {
   if (rows[0].isSeeded !== false || rows[0].parentSession) throw new Error('Fork lineage requires separate migration');
-  let input = repairStaleFinalStep(repair(rows));
+  let input;
+  if (v4) {
+    if (rows[0].type !== 'session' || rows[0].version !== 4 || !rows[0].id?.startsWith('agent-bridge-')) throw new Error('Expected Bridge V4');
+    if (!rows.some(e => e.type === 'plugin:agent-bridge/binding' && e.ignorable === true)) throw new Error('Missing V4 binding');
+    rows.slice(1).forEach((e, seq) => { if (e.seq !== seq) throw new Error('Non-dense event sequence'); });
+    input = rows;
+  } else input = repairStaleFinalStep(repair(rows));
   const events = [], mapping = [], changes = [];
   for (let i = 1; i < input.length; i++) if (input[i].data.step !== rows[i].data.step) {
     changes.push({ seq: rows[i].seq, field: 'step', from: rows[i].data.step, to: input[i].data.step });
@@ -18,7 +24,7 @@ function plan(rows) {
     return mapping[value];
   };
   for (const original of input.slice(1)) {
-    if (!known.has(original.type)) throw new Error('Unaudited event type: ' + original.type);
+    if (!known.has(original.type) && !(v4 && ['plugin:agent-bridge/binding', 'plugin:agent-bridge/event'].includes(original.type) && original.ignorable === true)) throw new Error('Unaudited event type: ' + original.type);
     const event = structuredClone(original);
     // Payloads are opaque except the documented title references and lifecycle
     // coordinates. Refuse future embedded seq references rather than guess.
@@ -52,7 +58,7 @@ function plan(rows) {
         if (turn === undefined || step === undefined) throw new Error('First surface has no open step');
         const id = 'bridge-system-head-' + createHash('sha256').update(rows[0].id).digest('hex');
         if (input.some(row => row.data?.message?.id === id || row.data?.id === id)) throw new Error('System head identity collision');
-        events.push({ type: 'system/message', seq: events.length, time: event.time, surfaceOp: 'append', data: { turn, step, message: { id, role: 'system', source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-system-prompt' }, content: [] } } });
+        events.push({ type: 'system/message', seq: events.length, time: event.time, surfaceOp: 'append', data: { turn, step, message: { id, role: 'system', source: v4 ? { kind: 'system-prompt' } : { kind: 'plugin', plugin: '@deepseek-ai/dsh-system-prompt' }, content: [] } } });
         changes.push({ beforeSeq: event.seq, kind: 'empty-system-head' });
         head = true;
       }
@@ -75,6 +81,7 @@ function plan(rows) {
     if (event.data.message) assert.deepEqual(next.data.message, event.data.message);
     if (event.type === 'user/message') assert.deepEqual(next.data, event.data);
   }
+  if (v4 && changes.some(change => change.kind !== 'empty-system-head')) throw new Error('V4 head repair cannot alter lifecycle coordinates');
   return { rows: [input[0], ...events], mapping, changes };
 }
 module.exports = { plan };

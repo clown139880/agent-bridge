@@ -96,6 +96,14 @@ validation, backup and stopped-writer requirements apply.
 
 ### Upgrading retained Bridge history to Session V3
 
+Version 0.2.8 also provides `--repair-v4-head` for V4 histories created before
+the protected system head fix. It scans histories whose first surface is not a
+system message, adds an empty head and remaps references, refusing lifecycle
+changes. Preview before `--apply`; stop Desktop writers before applying. This
+mode backs up and atomically replaces the V4 file after native strict validation,
+preserving every original message payload. The backup includes the source hash
+and sequence mapping, in the same backup directory described below.
+
 For the remaining pre-V4 structural defects, 0.2.7 provides
 `repair-v3-plugin-records.cjs --runtime <Desktop/node_modules> --repair-structure`
 (preview first, then add `--apply` with all writers stopped). It adds an empty

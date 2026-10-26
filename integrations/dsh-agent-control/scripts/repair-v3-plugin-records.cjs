@@ -67,16 +67,23 @@ async function run(args = process.argv.slice(2)) {
   const { createSessionFormatCatalogWithChildren } = await import(pathToFileURL(path.join(runtime, '@deepseek-ai/dsh-session-format-catalog/lib/index.js')));
   const root = path.resolve(args.includes('--sessions') ? value('--sessions') : path.join(os.homedir(), '.dsh/sessions'));
   const backupRoot = path.join(os.homedir(), '.dsh/backups/bridge-v3-records', new Date().toISOString().replace(/[:.]/g, '-'));
-  const files = fs.readdirSync(root, { recursive: true }).filter(file => /session\.v3\.jsonl(?:\.zstd)?$/.test(file));
+  const v4 = args.includes('--repair-v4-head');
+  const files = fs.readdirSync(root, { recursive: true }).filter(file => (v4 ? /session\.v4\.jsonl(?:\.zstd)?$/ : /session\.v3\.jsonl(?:\.zstd)?$/).test(file));
   const report = [];
   for (const relative of files) {
     const file = path.join(root, relative);
     const rows = decodeFile(file);
-    if (!rows[0]?.id?.startsWith('agent-bridge-') || !rows.some(event => types.has(event.type) && event.ignorable !== true)) continue;
-    if (['session.v4.jsonl', 'session.v4.jsonl.zstd'].some(name => fs.existsSync(path.join(path.dirname(file), name)))) continue;
+    if (!rows[0]?.id?.startsWith('agent-bridge-')) continue;
+    if (v4) {
+      const first = rows.find(event => event.surfaceOp === 'append');
+      if (!first || first.type === 'system/message') continue;
+    } else {
+      if (!rows.some(event => types.has(event.type) && event.ignorable !== true)) continue;
+      if (['session.v4.jsonl', 'session.v4.jsonl.zstd'].some(name => fs.existsSync(path.join(path.dirname(file), name)))) continue;
+    }
     const original = fs.readFileSync(file);
     try {
-      const structure = args.includes('--repair-structure') ? require('./repair-v3-structure.cjs').plan(rows) : undefined;
+      const structure = args.includes('--repair-structure') || v4 ? require('./repair-v3-structure.cjs').plan(rows, v4) : undefined;
       let output = structure?.rows ?? repair(rows, args.includes('--repair-stale-step'));
       // This operation changes no coordinates or payloads. The native reader
       // still owns generation migration and child catalog discovery.
@@ -104,7 +111,7 @@ async function run(args = process.argv.slice(2)) {
           // Decode through the same compressed reader before publication.
           assert.deepEqual(decodeFile(temp), output);
           assert.equal(hash(fs.readFileSync(file)), entry.sha256, 'Source changed during repair');
-          if (structure) { fs.linkSync(temp, target); fs.unlinkSync(temp); }
+          if (structure && !v4) { fs.linkSync(temp, target); fs.unlinkSync(temp); }
           else fs.renameSync(temp, file);
         } catch (error) {
           if (fs.existsSync(temp)) fs.unlinkSync(temp);
