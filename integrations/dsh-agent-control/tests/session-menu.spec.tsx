@@ -8,6 +8,29 @@ import { expect, it, vi } from 'vitest'
 import { extendSessionMenu, installSessionMenu } from '../src/client/session-menu.js'
 import { DeleteNativeSession, NativeCatalog } from '../src/client/native-catalog.js'
 
+it.skipIf(!process.env['DSH_CURRENT_RUNTIME_ROOT'])('decorates the current Desktop row while retaining its native menu slots', async () => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
+  const source = readFileSync(process.env['DSH_CURRENT_RUNTIME_ROOT'] + '/@deepseek-ai/dsh-client-ui-workspace/lib/client.js', 'utf8')
+    .replace('return module.exports;', 'module.exports.TestRow = SessionNodeItem; return module.exports;')
+  let exports: any
+  const primitives = new Proxy({ relativeTime: () => ({ unit: 'now', value: 0 }), HoverCard: ({ anchor }: any) => anchor, Menu: ({ anchor }: any) => anchor }, { get: (target, key) => Reflect.get(target, key) ?? (() => null) })
+  const require = (id: string) => id === 'react' ? React : id === 'react/jsx-runtime' ? jsx : id.endsWith('primitives') ? primitives : id.endsWith('cordis') ? { Service: class {} } : {}
+  new Function('window', source)({ __ModuleLoader__: { load: ({ factory }: any) => { exports = factory(require) } } })
+  const renderSlot = vi.fn(() => null), open = vi.fn()
+  const Browser = extendSessionMenu(() => createElement(exports.TestRow, {
+    node: { id: 'current-row', title: 'Current Desktop', status: 'idle', descendants: [], pendingInteractions: [], createdAt: 1, updatedAt: 1, runningSubagentCount: 0 },
+    currentId: '', now: 2, onOpen: open, onRenameRequest: vi.fn(), renderSlot, t: (key: string) => key,
+  }), undefined, { session: id => <i data-agent={id} />, workspace: () => undefined })
+  const div = document.createElement('div'); document.body.append(div); const root = createRoot(div)
+  try {
+    await act(async () => root.render(<Browser />))
+    expect(div.querySelector('[data-agent="current-row"]')?.closest('[role=treeitem]')).not.toBeNull()
+    await act(async () => div.querySelector<HTMLElement>('[role=treeitem]')!.click())
+    expect(open).toHaveBeenCalledWith('current-row')
+    expect(renderSlot.mock.calls.length).toBeGreaterThan(0)
+  } finally { await act(async () => root.unmount()); div.remove() }
+})
+
 it('extends the actual DSH menu and targets an unselected local session', async () => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
   const relative = 'node_modules/@deepseek-ai/dsh-client-ui-workspace/lib/client.js'

@@ -1,10 +1,26 @@
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { readFileSync } from 'node:fs'
-import { describe, expect, it } from 'vitest'
-import { FooterAction, WorkspaceController, inject } from '../src/client/index.js'
+import { describe, expect, it, vi } from 'vitest'
+import { FooterAction, WorkspaceController, inject, apply, ControlPanelIcon } from '../src/client/index.js'
 
 describe('client components', () => {
+  it('registers a native control panel after Automations on the current shell', () => {
+    const register = vi.fn((_options: { name: string; inject?: () => unknown }, _component: unknown) => () => {})
+    const ctx = {
+      connection: {}, remote: { session: {} },
+      get: () => undefined,
+      effect: () => {},
+      slots: { spec: (name: string) => name === 'main' ? { kind: 'keyed' } : undefined,
+        inject: (_name: string, callback: () => void) => callback(), register },
+    }
+    apply(ctx as never)
+    expect(register).toHaveBeenCalledWith(expect.objectContaining({ name: 'sidebar.panellist', id: 'agent-control', order: 20, label: 'Agent 控制台' }), ControlPanelIcon)
+    const page = register.mock.calls.find(([options]) => (options as { name?: string }).name === 'main')
+    expect(page).toBeDefined()
+    expect((page![0] as { inject(): { page: boolean } }).inject().page).toBe(true)
+    expect(register.mock.calls.some(([options]) => (options as { name?: string }).name === 'sidebar.footer.action')).toBe(false)
+  })
   it('waits for native session services without replacing their UI', () => {
     expect(inject).toEqual(expect.arrayContaining(['sessions', 'workspaces']))
   })

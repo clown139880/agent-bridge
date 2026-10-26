@@ -205,6 +205,15 @@ or silently claim integration success.
 
 ## Architecture notes
 
+Desktop 0.7.6 / DSH 0.2.1-rc.2 requires a compatible peer range before it will
+activate either plugin face. Release 0.2.6 declares that tested generation and
+the browser bundle's explicit external modules. The native sidebar now places
+**Agent 控制台** after Automations and opens its `main` panel; older shells keep
+the footer overlay. Workspace, workspace-tree and flat grouping remain owned
+by DSH, with Bridge catalog projection supplying merged repository membership
+and activity timestamps. Installing files alone is not activation: check the
+Desktop plugin manager and Host registration after upgrading.
+
 For old commentary hidden by shared steps, see the
 [read-only recovery dry run](docs/commentary-recovery.md). It validates candidates
 with the installed Session and Chat code; it does not rewrite Desktop logs.
