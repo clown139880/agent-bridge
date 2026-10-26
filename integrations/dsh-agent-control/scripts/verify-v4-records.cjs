@@ -38,8 +38,9 @@ async function run(runtime) {
     const events = plugin.projectNativeEvents([remote('new')], restored.events, 'remote', 'tool-role');
     assert.ok(events.some(event => event.type === 'plugin:agent-bridge/event' && event.ignorable === true));
     const session = Session.create(SessionId('v4-projection'), [...restored.events, ...events]);
-    assert.equal(session.deriveMessages()[0].role, 'system');
-    assert.deepEqual(session.deriveMessages()[0].content, []);
+    const firstSurface = session.snapshotEvents().find(event => event.surfaceOp === 'append');
+    assert.equal(firstSurface.type, 'system/message');
+    assert.deepEqual(firstSurface.data.message.content, []);
     assert.equal(session.deriveMessages().at(-1).content[0].text, 'answer');
     // Exercise the actual target's incremental record writer and binding reader.
     const agent = { id: session.id, session, status: 'idle' };
