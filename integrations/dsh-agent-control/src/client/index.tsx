@@ -145,9 +145,10 @@ function Metric({ label, value, tone }: { label: string; value: number; tone?: s
   return <div className={`${css.metric} ${tone ? css[`tone_${tone}`] : ''}`}><span>{label}</span><strong>{value}</strong></div>
 }
 
-function WorkspaceOverlay({ controller }: Injected) {
-  const open = useController(controller)
-  const ref = useDialog(open, controller.close)
+function WorkspaceOverlay({ controller, page = false }: Injected & { page?: boolean }) {
+  const overlayOpen = useController(controller)
+  const open = page || overlayOpen
+  const ref = useDialog(!page && open, controller.close)
   const [data, setData] = useState<RecordValue>()
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
@@ -165,11 +166,15 @@ function WorkspaceOverlay({ controller }: Injected) {
   useEffect(() => { if (open) void refresh(); return () => { requestEpoch.current++ } }, [open, refresh])
   const content = useMemo(() => data ? <Overview data={data} openSession={controller.openSession} refresh={refresh} /> : null, [data, refresh, controller])
   if (!open) return null
-  return <div ref={ref} tabIndex={-1} className={css.workspace} role="dialog" aria-modal="true" aria-label="Agent Control workspace" aria-busy={loading}>
-    <header className={css.topbar}><div className={css.title}><span className={css.logo}>AC</span><div><strong>Agent Control</strong><small>机器与对话</small></div></div><div className={css.topActions}><button type="button" aria-label="Refresh Agent Control" onClick={() => void refresh()} disabled={loading}>{loading ? '刷新中…' : '↻ 刷新'}</button><button type="button" onClick={controller.close}>关闭</button></div></header>
+  return <div ref={ref} tabIndex={-1} className={`${css.workspace} ${page ? css.workspacePanel : ''}`} role={page ? 'region' : 'dialog'} aria-modal={page ? undefined : true} aria-label="Agent Control workspace" aria-busy={loading}>
+    <header className={css.topbar}><div className={css.title}><span className={css.logo}>AC</span><div><strong>Agent 控制台</strong><small>机器与对话</small></div></div><div className={css.topActions}><button type="button" aria-label="Refresh Agent Control" onClick={() => void refresh()} disabled={loading}>{loading ? '刷新中…' : '↻ 刷新'}</button>{!page && <button type="button" onClick={controller.close}>关闭</button>}</div></header>
     {controller.error && <div className={css.error} role="alert">{controller.error}</div>}
     {error ? <ErrorBanner error={error} retry={() => void refresh()} /> : !data ? <div role="status" className={css.loading}>正在加载…</div> : content}
   </div>
+}
+
+export function ControlPanelIcon({ size = 16 }: { size?: number }) {
+  return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true"><rect x="3" y="4" width="18" height="13" rx="2" /><path d="M8 21h8M12 17v4M7 9l3 2-3 2M13 13h4" /></svg>
 }
 
 export const inject = ['slots', 'connection', 'layout', 'remote', 'remote.session', 'sessions', 'workspaces', 'uiWorkspace', 'modelDirectories']
@@ -225,6 +230,15 @@ export function apply(ctx: ClientContext): void {
     const disposers = [remote.$on('llm/adapters-updated', refresh), remote.$on('settings/document-updated', refresh), remote.$on('credentials/reference-updated', refresh)]
     return () => { for (const dispose of disposers) dispose(); controller.sessions.dispose() }
   })
-  ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({ name: 'sidebar.footer.action', id: 'agent-control', order: 20, inject: (): Injected => ({ controller }) }, FooterAction))
+  // Use the shell's native navigation row, immediately after Automations.
+  const panelSlots = ctx.slots as unknown as {
+    spec(name: string): unknown
+    inject(name: string, callback: () => () => void): void
+    register(options: { name: string; id?: string; key?: string; order?: number; label?: string; inject?: () => unknown }, component: unknown): () => void
+  }
+  if (panelSlots.spec('main')) {
+    panelSlots.inject('sidebar.panellist', () => panelSlots.register({ name: 'sidebar.panellist', id: 'agent-control', order: 20, label: 'Agent 控制台' }, ControlPanelIcon))
+    panelSlots.inject('main', () => panelSlots.register({ name: 'main', key: 'agent-control', inject: () => ({ controller, page: true }) }, WorkspaceOverlay))
+  } else ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({ name: 'sidebar.footer.action', id: 'agent-control', order: 20, inject: (): Injected => ({ controller }) }, FooterAction))
   ctx.slots.inject('shell.overlay', () => ctx.slots.register({ name: 'shell.overlay', id: 'agent-control', order: 10, inject: (): Injected => ({ controller }) }, WorkspaceOverlay))
 }

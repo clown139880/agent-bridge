@@ -44,7 +44,7 @@ export function extendSessionMenu(Component: ComponentType<any>, useWorkspaces?:
       if (!wrapped) {
         wrapped = (input: Props) => {
           const row = input['node']
-          const owner = row && typeof row.id === 'string' && typeof input['onArchive'] === 'function' ? { id: row.id as string, title: String(row.title ?? '') } : undefined
+          const owner = row && typeof row.id === 'string' && (typeof input['onArchive'] === 'function' || typeof input['onRenameRequest'] === 'function') ? { id: row.id as string, title: String(row.title ?? '') } : undefined
           const group = input['group']
           const relabel = !owner && decor && group && typeof group.workspaceId === 'string' && typeof group.label === 'string' && typeof input['onToggle'] === 'function'
             ? decor.workspace(group.workspaceId, group.label) : undefined
