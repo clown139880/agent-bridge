@@ -86,6 +86,14 @@ only if the source hash is unchanged. Windows apply refuses a running Desktop.
 To roll back, stop writers and restore the matching backup; retain any later
 activity and V4 successor before rollback, since Desktop prefers newer formats.
 
+For old live turns whose final Bridge answer and immediately following step/end
+retain a previously closed step number, 0.2.5 adds `--repair-stale-step`.
+Use `--sessions <affected-session-directory>` to preview that session first.
+It corrects only that pair to the empty currently open step, requires an immediate
+matching turn/end and a text-only Bridge model answer, and refuses ambiguous
+cases. All other fields and event coordinates remain unchanged; the same native
+validation, backup and stopped-writer requirements apply.
+
 ### Upgrading retained Bridge history to Session V3
 
 DSH Session V3 deliberately refuses unclassified V2 events. Agent Bridge V2
