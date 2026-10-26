@@ -153,7 +153,10 @@ function WorkspaceOverlay({ controller, page = false }: Injected & { page?: bool
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
   const requestEpoch = useRef(0)
+  const refreshing = useRef(false)
   const refresh = useCallback(async () => {
+    if (refreshing.current) return
+    refreshing.current = true
     const epoch = ++requestEpoch.current
     setLoading(true)
     try {
@@ -161,9 +164,14 @@ function WorkspaceOverlay({ controller, page = false }: Injected & { page?: bool
       if (epoch !== requestEpoch.current) return
       setData(result); setError('')
     } catch (cause) { if (epoch === requestEpoch.current) setError(cause instanceof Error ? cause.message : 'Agent Control unavailable') }
-    finally { if (epoch === requestEpoch.current) setLoading(false) }
+    finally { refreshing.current = false; if (epoch === requestEpoch.current) setLoading(false) }
   }, [])
-  useEffect(() => { if (open) void refresh(); return () => { requestEpoch.current++ } }, [open, refresh])
+  useEffect(() => {
+    if (!open) return
+    void refresh()
+    const timer = setInterval(() => { void refresh() }, 5000)
+    return () => { clearInterval(timer); requestEpoch.current++ }
+  }, [open, refresh])
   const content = useMemo(() => data ? <Overview data={data} openSession={controller.openSession} refresh={refresh} /> : null, [data, refresh, controller])
   if (!open) return null
   return <div ref={ref} tabIndex={-1} className={`${css.workspace} ${page ? css.workspacePanel : ''}`} role={page ? 'region' : 'dialog'} aria-modal={page ? undefined : true} aria-label="Agent Control workspace" aria-busy={loading}>

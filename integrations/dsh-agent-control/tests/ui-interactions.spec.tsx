@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
-import { act } from 'react'
+import { act, createElement, type ComponentType } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { SessionCreationController, SessionSourcePicker } from '../src/client/session-creation.js'
-import { Overview } from '../src/client/index.js'
+import { Overview, apply } from '../src/client/index.js'
 
 let container: HTMLDivElement, root: Root
 beforeEach(() => {
@@ -15,6 +15,30 @@ afterEach(async () => { await act(async () => root.unmount()); container.remove(
 const click = async (element: Element) => act(async () => { (element as HTMLElement).click() })
 
 describe('management UI interactions', () => {
+  it('clears a recovered synchronization error while the native control panel stays open', async () => {
+    vi.useFakeTimers()
+    try {
+      let failure = 'system/message requires a protected first surface head'
+      const call = vi.fn(async () => ({ ok: true, value: { sessionProvider: { registered: true, error: failure }, bridge: {} } }))
+      let panel!: ComponentType<Record<string, unknown>>, props!: Record<string, unknown>
+      apply({ connection: { rpc: { call } }, remote: { session: {} }, get: () => undefined, effect: () => {},
+        slots: { spec: () => ({ kind: 'keyed' }), inject: (_name: string, callback: () => void) => callback(),
+          register: (options: { name: string; inject?: () => Record<string, unknown> }, component: ComponentType<Record<string, unknown>>) => {
+            if (options.name === 'main') { panel = component; props = options.inject!() }
+            return () => {}
+          } },
+      } as never)
+      await act(async () => root.render(createElement(panel, props)))
+      expect(container.textContent).toContain(failure)
+      failure = ''
+      await act(async () => { await vi.advanceTimersByTimeAsync(5000) })
+      expect(container.textContent).not.toContain('部分对话同步失败')
+      expect(call).toHaveBeenCalledTimes(2)
+      await act(async () => root.render(null))
+      await vi.advanceTimersByTimeAsync(10000)
+      expect(call).toHaveBeenCalledTimes(2)
+    } finally { vi.useRealTimers() }
+  })
   it('requires an explicit create action, rejects offline choices, and cancels with Escape', async () => {
     const sources = [
       {id:'codex', name:'Codex @ wsl', machineId:'wsl', workspace:'/repo', available:true},
