@@ -273,3 +273,12 @@ component and recognizes the native rename/fork/archive menu by its item IDs.
 It preserves the original slot identity, store, locale, callbacks, and directory
 picker. Unloading restores the original component. Tests exercise the published
 DSH row implementation; changes to that upstream contract need revalidation.
+
+### 远端轮次展示（0.2.13）
+
+历史首次导入按远端 `turnId` 分组，每条正文或工具结果仍占独立 step。
+后台增量同步保留当前展示轮次，收到明确结束事件、不同远端轮次或本地新回合时关闭。
+外部客户端可能在继续产出工具结果时报告 `idle`，因此该状态不能单独作为结束依据。
+缺少结束事件时不伪造完成；下一轮会关闭前一轮。无 `turnId` 的记录仍独立展示。
+DSH 原生恢复流程会将重启时未结束的轮次标记为中断；重启后的追加形成新片段。
+离线整理工具应同步映射 Bridge 元数据的 `presentationTurn`，不能把 ACK 的文本 `step` 摘要当作原生步骤编号。

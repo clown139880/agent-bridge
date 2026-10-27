@@ -113,7 +113,7 @@ export function openStep(events: readonly NativeEvent[]): OpenStep | undefined {
  * renderer keeps only the latest assistant/message per step, even when their
  * message IDs differ; sharing a step would erase earlier text and tool cards.
  */
-export function projectNativeEvents(rows: readonly JsonObject[], existing: readonly NativeEvent[], model = 'remote', toolResult: ToolResultShape = 'tool-role', into?: OpenStep, activeRemoteTurnId?: string): NativeEvent[] {
+export function projectNativeEvents(rows: readonly JsonObject[], existing: readonly NativeEvent[], model = 'remote', toolResult: ToolResultShape = 'tool-role', into?: OpenStep, activeRemoteTurnId?: string, retainPassiveTurn = false): NativeEvent[] {
   const acknowledgements = existing.filter(e => isBridgeRecord(e.type, ACK_EVENT))
   const seen = new Set(acknowledgements.map(e => str(e.data['eventId'])))
   const seenItems = new Set([...seen].map(presentationItemKey).filter((key): key is string => !!key))
@@ -223,7 +223,11 @@ export function projectNativeEvents(rows: readonly JsonObject[], existing: reado
     }
     add(ACK_EVENT, { eventId: id, turnId: str(row['turnId']) }, time)
   }
-  if (passive && passive.remote !== activeRemoteTurnId) closePassive(Number(ordered.at(-1)?.['timestamp']) || Date.now())
+  // Observed external clients can report idle while continuing to append to
+  // the same remote turn. During incremental sync only an actual terminal
+  // event, a different remote turn or native takeover closes presentation.
+  // A seed remains balanced unless the summary explicitly identifies it live.
+  if (passive && !retainPassiveTurn && passive.remote !== activeRemoteTurnId) closePassive(Number(ordered.at(-1)?.['timestamp']) || Date.now())
   return output
 }
 

@@ -785,7 +785,7 @@ export class AgentBridgeImportTarget {
     // A native prompt may have started while the HTTP read was pending.
     if (this.isBusy(id)) return
     const session = nativeSession(agent)
-    for (const event of projectNativeEvents(history.rows, sessionEvents(session), str(binding['model'], 'remote'), toolResultShape(this.host), undefined, ['active', 'waiting_for_approval', 'waiting_for_input'].includes(str(binding['status'])) ? str(binding['activeTurnId']) || undefined : undefined)) appendSessionEvent(session, event)
+    for (const event of projectNativeEvents(history.rows, sessionEvents(session), str(binding['model'], 'remote'), toolResultShape(this.host), undefined, undefined, true)) appendSessionEvent(session, event)
     if (history.cursor) this.cursors.set(id, history.cursor)
     await this.host.sessions.flush(agent.session)
   }

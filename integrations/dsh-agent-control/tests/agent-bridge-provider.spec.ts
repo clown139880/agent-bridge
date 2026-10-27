@@ -73,6 +73,16 @@ async function fixture(rows = [row('u', 'message.completed', { role: 'user', tex
 }
 
 describe('native history projection', () => {
+  it('does not split incremental observations when the remote summary incorrectly reports idle', () => {
+    const first = projectNativeEvents([row('idle-poll1')], [], 'remote', 'tool-role', undefined, undefined, true)
+    expect(first.some(e => e.type === 'turn/end')).toBe(false)
+    expect(projectNativeEvents([], first, 'remote', 'tool-role', undefined, undefined, true)).toEqual([])
+    const second = projectNativeEvents([row('idle-poll2')], first, 'remote', 'tool-role', undefined, undefined, true)
+    expect(second.find(e => e.type === 'step/start')?.data).toEqual({ turn: 1, step: 2 })
+    expect(second.some(e => e.type === 'turn/start' || e.type === 'turn/end')).toBe(false)
+    const end = projectNativeEvents([row('idle-end', 'turn.completed', {})], [...first, ...second], 'remote', 'tool-role', undefined, undefined, true)
+    expect(end.filter(e => e.type === 'turn/end')).toHaveLength(1)
+  })
   it('continues a passive remote turn across polls and closes it on completion', () => {
     const remote = String(row('poll1')['turnId'])
     const events = projectNativeEvents([row('poll1')], [], 'remote', 'tool-role', undefined, remote)
