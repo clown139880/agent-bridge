@@ -147,6 +147,30 @@ describe('BridgeModelDirectory', () => {
 })
 
 describe('effort levels', () => {
+  it('provides the current native selector pending state and successful RPC result', async () => {
+    let finish!: (value: { ok: boolean }) => void
+    const directory = new BridgeModelDirectory(nativeId, catalog(claudeEntry), models().source,
+      () => new Promise(resolve => { finish = resolve }))
+    expect(directory.store.getSnapshot().pending).toBeNull()
+    await directory.load()
+    expect(directory.store.getSnapshot().pending).toBeNull()
+    const selection = { provider: groupIdOf('claude-opus-5'), model: 'claude-opus-5', reasoningEffort: 'max' }
+    const operation = directory.select(selection)
+    expect(directory.store.getSnapshot().pending).toEqual(selection)
+    finish({ ok: true })
+    await expect(operation).resolves.toEqual({ ok: true, value: undefined })
+    expect(directory.store.getSnapshot().pending).toBeNull()
+    expect(directory.store.getSnapshot().current).toEqual(selection)
+  })
+
+  it('clears pending and returns the Host error without discarding the model menu', async () => {
+    const error = { code: 'session/writer-held', message: 'busy' }
+    const directory = new BridgeModelDirectory(nativeId, catalog(claudeEntry), models().source, async () => ({ ok: false, error }))
+    await directory.load()
+    await expect(directory.select({ provider: groupIdOf('claude-opus-5'), model: 'claude-opus-5' })).resolves.toEqual({ ok: false, error })
+    expect(directory.store.getSnapshot().pending).toBeNull()
+    expect(directory.store.getSnapshot().groups.length).toBeGreaterThan(0)
+  })
   const ids = (state: Awaited<ReturnType<BridgeModelDirectory['load']>>) =>
     state.groups.map(group => group.models.map(model => model.reasoning?.efforts.map(effort => effort.id) ?? []))
 

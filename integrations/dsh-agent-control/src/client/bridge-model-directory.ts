@@ -2,6 +2,7 @@ import type { NativeCatalog, NativeEntry } from './native-catalog.js'
 
 type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue }
 type ModelSelection = { provider: string; model: string; reasoningEffort?: string }
+type SelectionResult = { ok: true; value: undefined } | { ok: false; error: { code: string; message: string } }
 type SelectModel = (request: { sessionId: string; provider: string; model: string; reasoningEffort?: string }) => Promise<{
   ok: boolean
   error?: { code?: string; message?: string }
@@ -15,6 +16,7 @@ type DirectoryModel = {
   reasoning?: { defaultEffort?: string; efforts: Array<{ id: string; name: string }> }
 }
 type DirectoryState = {
+  pending: ModelSelection | null
   current: ModelSelection | null
   routable: boolean | null
   groups: Array<{ id: string; name: string; models: DirectoryModel[] }>
@@ -23,7 +25,7 @@ type DirectoryState = {
   error: string | null
 }
 type SnapshotStore<T> = { getSnapshot(): T; subscribe(listener: () => void): () => void }
-type Directory = { store: SnapshotStore<DirectoryState>; load(): Promise<DirectoryState>; select(selection: ModelSelection): Promise<void>; dispose(): void }
+type Directory = { store: SnapshotStore<DirectoryState>; load(): Promise<DirectoryState>; select(selection: ModelSelection): Promise<SelectionResult>; dispose(): void }
 type Resolver = { directoryFor(sessionId: string): Directory }
 
 export const BRIDGE_PROVIDER = 'agent-bridge'
@@ -238,11 +240,11 @@ export class NativeModels {
 function sameState(left: DirectoryState, right: DirectoryState): boolean {
   if (left === right) return true
   if (left.status !== right.status || left.error !== right.error || left.routable !== right.routable) return false
-  return JSON.stringify([left.current, left.groups, left.failures]) === JSON.stringify([right.current, right.groups, right.failures])
+  return JSON.stringify([left.current, left.pending, left.groups, left.failures]) === JSON.stringify([right.current, right.pending, right.groups, right.failures])
 }
 
 export class BridgeModelDirectory implements Directory {
-  private state: DirectoryState = { current: null, routable: true, groups: [], failures: [], status: 'idle', error: null }
+  private state: DirectoryState = { current: null, pending: null, routable: true, groups: [], failures: [], status: 'idle', error: null }
   private readonly listeners = new Set<() => void>()
   private inflight: Promise<DirectoryState> | undefined
   private selected = false
@@ -308,11 +310,13 @@ export class BridgeModelDirectory implements Directory {
       const picked = this.selected ? this.state.current?.reasoningEffort : storedEffort(this.nativeId)
       const reasoningEffort = efforts.some(effort => effort.id === picked) ? picked : undefined
       const current = { provider: groupIdOf(currentModel), model: currentModel, ...(reasoningEffort ? { reasoningEffort } : {}) }
-      this.set({ current, routable: true, groups: groupModels(models), failures: [], status: 'ready', error: null })
+      this.set({ current, pending: this.state.pending, routable: true, groups: groupModels(models), failures: [], status: 'ready', error: null })
       // Adopt the recent model through the Host, exactly as a click would, so the
       // shown model is the sent one; if that fails the menu stays on Remote auto.
-      if (recent) await this.select({ provider: groupIdOf(recent), model: recent }, false)
-        .catch(() => this.set({ ...this.state, current, status: 'ready', error: null }))
+      if (recent) {
+        const result = await this.select({ provider: groupIdOf(recent), model: recent }, false)
+        if (!result.ok) this.set({ ...this.state, current, status: 'ready', error: null })
+      }
       return this.state
     } catch (error) {
       this.set({ ...this.state, status: 'error', error: errorText(error) })
@@ -320,22 +324,27 @@ export class BridgeModelDirectory implements Directory {
     }
   }
 
-  async select(selection: ModelSelection, remember = true): Promise<void> {
+  async select(selection: ModelSelection, remember = true): Promise<SelectionResult> {
     if (!isBridgeGroup(selection.provider)) throw new Error('Bridge 会话只能选择当前 worker 提供的模型。')
     if (!this.state.groups.some(group => group.models.some(model => model.id === selection.model))) throw new Error('所选模型不在当前 Bridge worker 的模型列表中。')
-    this.set({ ...this.state, status: 'selecting', error: null })
+    this.set({ ...this.state, pending: selection, status: 'selecting', error: null })
     try {
       // The Host knows one Bridge provider; the family group id is menu-only.
       const result = await this.selectModel({ sessionId: this.nativeId, provider: BRIDGE_PROVIDER, model: selection.model,
         ...(selection.reasoningEffort ? { reasoningEffort: selection.reasoningEffort } : {}) })
-      if (!result.ok) throw new Error(`${result.error?.code ?? 'select_failed'}: ${result.error?.message ?? '模型选择失败'}`)
+      if (!result.ok) {
+        const error = { code: result.error?.code ?? 'select_failed', message: result.error?.message ?? '模型选择失败' }
+        this.set({ ...this.state, pending: null, status: 'error', error: `${error.code}: ${error.message}` })
+        return { ok: false, error }
+      }
       this.selected = true
       if (remember) rememberModel(this.catalog.entry(this.nativeId), selection.model)
       rememberEffort(this.nativeId, selection.reasoningEffort)
-      this.set({ ...this.state, current: { ...selection, provider: groupIdOf(selection.model) }, status: 'ready', error: null })
+      this.set({ ...this.state, pending: null, current: { ...selection, provider: groupIdOf(selection.model) }, status: 'ready', error: null })
+      return { ok: true, value: undefined }
     } catch (error) {
-      this.set({ ...this.state, status: 'error', error: errorText(error) })
-      throw error
+      this.set({ ...this.state, pending: null, status: 'error', error: errorText(error) })
+      return { ok: false, error: { code: 'select_failed', message: errorText(error) } }
     }
   }
 
