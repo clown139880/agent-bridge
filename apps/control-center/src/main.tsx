@@ -502,7 +502,9 @@ function Detail({ control, state, id }: { control: ControlState; state: ViewStat
       e.preventDefault(); if (!canOperate || !draft.trim() || blocked) return;
       if (uploading(state, id)) return;
       haptic("tick");
+      // Running without a known turn id (some agents report "running" alone): the server decides steer or new turn.
       const body = session.activeTurnId ? { input: draft, delivery: "steer", expectedTurnId: session.activeTurnId, ...attachmentBody(state, id) }
+        : running ? { input: draft, delivery: "auto", ...attachmentBody(state, id) }
         : { input: draft, delivery: "start_turn", ...modelBody(model), ...attachmentBody(state, id) };
       void control.submit(`/sessions/${segment(id)}/turns`, body, id);
     }}><label className="sr-only" htmlFor="message">发送消息</label>
@@ -510,9 +512,9 @@ function Detail({ control, state, id }: { control: ControlState; state: ViewStat
       <Attachments control={control} state={state} id={id} disabled={!state.writable} />
       {!running && <details className="composer-options" onToggle={e => setOptionsOpen(e.currentTarget.open)}><summary>模型 {model.model ? state.models[session.workerId]?.models.find(m => m.model === model.model)?.displayName ?? model.model : "默认"} ·思考 {model.effort ? effortLabels[model.effort] ?? model.effort : "默认"}</summary>
         {optionsOpen && <ModelPicker control={control} state={state} workerId={session.workerId} value={model} onChange={setModel} />}</details>}
-      <div className="composer-actions"><small>{!state.writable ? "只读模式" : blocked ? "等待处理待办" : !online ? "Worker 离线" : uploading(state, id) ? "图片上传中…" : running && !session.activeTurnId ? "等待 turn 信息" : "Enter 换行 · Ctrl / ⌘ + Enter 发送"}</small>
+      <div className="composer-actions"><small>{!state.writable ? "只读模式" : blocked ? "等待处理待办" : !online ? "Worker 离线" : uploading(state, id) ? "图片上传中…" : "Enter 换行 · Ctrl / ⌘ + Enter 发送"}</small>
         <div className="row-actions">{running && <button type="button" className="danger" disabled={!canInterrupt} onClick={interrupt}>■ 中断</button>}
-        <button type="submit" className="primary" disabled={!canOperate || !draft.trim() || blocked || uploading(state, id) || Boolean(running && (!session.activeTurnId || !caps.includes("turn-steer"))) || !["idle", "active"].includes(session.status)}>{running ? "追加指令 ↑" : "发送 ↑"}</button></div></div>
+        <button type="submit" className="primary" disabled={!canOperate || !draft.trim() || blocked || uploading(state, id) || Boolean(running && session.activeTurnId && !caps.includes("turn-steer")) || !["idle", "active"].includes(session.status)}>{running ? "追加指令 ↑" : "发送 ↑"}</button></div></div>
     </form>}
   </section>;
 }

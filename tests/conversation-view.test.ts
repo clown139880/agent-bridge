@@ -119,3 +119,16 @@ test("an oversized turn arrives as a window with a cursor to its older items", (
   assert.equal(control.eventById("s", "c0")?.eventId, "c0");
   done();
 });
+
+test("an inventory reporting a running session without its turn keeps the turn the events named", () => {
+  const { store, control, append, done } = setup();
+  append("s", "turn.started", {}, "t1");
+  control.updateSessionActivity("s", "active", "t1");
+  const state = { sessionId: "s", nativeSessionId: "s", agentType: "claude-code" as const, projectPath: "/tmp/p", projectName: "p",
+    source: "app-server" as const, historyCompleteness: "loaded-only" as const, createdAt: 1, updatedAt: 2 };
+  control.upsertSession("dev", { ...state, activityStatus: "active" });
+  assert.equal(control.session("s")!.activeTurnId, "t1");
+  control.upsertSession("dev", { ...state, activityStatus: "idle" });
+  assert.equal(control.session("s")!.activeTurnId, null);
+  void store; done();
+});
