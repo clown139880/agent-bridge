@@ -73,6 +73,37 @@ async function fixture(rows = [row('u', 'message.completed', { role: 'user', tex
 }
 
 describe('native history projection', () => {
+  it('continues a passive remote turn across polls and closes it on completion', () => {
+    const remote = String(row('poll1')['turnId'])
+    const events = projectNativeEvents([row('poll1')], [], 'remote', 'tool-role', undefined, remote)
+    expect(events.filter(e => e.type === 'turn/end')).toHaveLength(0)
+    const next = projectNativeEvents([row('poll2')], JSON.parse(JSON.stringify(events)), 'remote', 'tool-role', undefined, remote)
+    expect(next.filter(e => e.type === 'turn/start')).toHaveLength(0)
+    expect(next.find(e => e.type === 'step/start')?.data).toEqual({ turn: 1, step: 2 })
+    const end = projectNativeEvents([row('end', 'turn.completed', {})], [...events, ...next], 'remote', 'tool-role', undefined, remote)
+    expect(end.filter(e => e.type === 'turn/end')).toHaveLength(1)
+    expect(projectNativeEvents([], [...events, ...next, ...end])).toEqual([])
+  })
+  it('closes passive turns on empty idle polls, a different turn, or missing remote identity', () => {
+    const remote = String(row('one')['turnId'])
+    const events = projectNativeEvents([row('one')], [], 'remote', 'tool-role', undefined, remote)
+    expect(projectNativeEvents([], events).map(e => e.type)).toEqual(['turn/end'])
+    const next = projectNativeEvents([{ ...row('two'), turnId: 'other' }], events, 'remote', 'tool-role', undefined, 'other')
+    expect(next[0]?.type).toBe('turn/end')
+    expect(next.find(e => e.type === 'turn/start')?.data['turn']).toBe(2)
+    const missing = projectNativeEvents([{ ...row('a'), turnId: '' }, { ...row('b'), turnId: '' }], [])
+    expect(missing.filter(e => e.type === 'turn/end')).toHaveLength(2)
+  })
+  it('closes passive presentation before native work and ignores stale reference coordinates', () => {
+    const remote = String(row('one')['turnId'])
+    const events = projectNativeEvents([row('one')], [], 'remote', 'tool-role', undefined, remote)
+    events.push({ type: 'workspace/changes', data: { turn: 303 }, seq: events.length, time: 3 })
+    const session = { events, id: 'fixture', header: { id: 'fixture', createdAt: 1 }, append(type: string, data: JsonObject) { events.push({ type, data, seq: events.length, time: 4 }) } }
+    guardImportedTurnNumbers(session)
+    session.append('turn/start', { turn: 304 })
+    session.append('step/start', { turn: 304, step: 1 })
+    expect(events.slice(-3).map(e => [e.type, e.data['turn']])).toEqual([['turn/end', 1], ['turn/start', 2], ['step/start', 2]])
+  })
   it('keeps imported and cached native loop turn numbers distinct', () => {
     const session = Session.create(SessionId('turn-identity'), projectNativeEvents([row('first')], []) as never)
     guardImportedTurnNumbers(session as never)

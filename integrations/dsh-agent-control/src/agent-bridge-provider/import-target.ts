@@ -677,7 +677,7 @@ export class AgentBridgeImportTarget {
         const history = await readHistory(this.bridge, remoteId, undefined, this.abort.signal)
         const time = Number(row['createdAt'] ?? row['updatedAt']) || Date.now()
         const seed: NativeEvent[] = [{ type: bridgeRecordType(BINDING_EVENT), ignorable: true, data: binding, seq: 0, time }]
-        seed.push(...projectNativeEvents(history.rows, seed, model, toolResultShape(this.host)))
+        seed.push(...projectNativeEvents(history.rows, seed, model, toolResultShape(this.host), undefined, ['active', 'waiting_for_approval', 'waiting_for_input'].includes(str(binding['status'])) ? str(binding['activeTurnId']) || undefined : undefined))
         // Empty retained histories still have a real, selectable presentation Session.
         if (!seed.some(e => e.type === 'turn/start')) seed.push(
           { type: 'turn/start', data: { turn: 1 }, seq: seed.length, time },
@@ -785,7 +785,7 @@ export class AgentBridgeImportTarget {
     // A native prompt may have started while the HTTP read was pending.
     if (this.isBusy(id)) return
     const session = nativeSession(agent)
-    for (const event of projectNativeEvents(history.rows, sessionEvents(session), str(binding['model'], 'remote'), toolResultShape(this.host))) appendSessionEvent(session, event)
+    for (const event of projectNativeEvents(history.rows, sessionEvents(session), str(binding['model'], 'remote'), toolResultShape(this.host), undefined, ['active', 'waiting_for_approval', 'waiting_for_input'].includes(str(binding['status'])) ? str(binding['activeTurnId']) || undefined : undefined)) appendSessionEvent(session, event)
     if (history.cursor) this.cursors.set(id, history.cursor)
     await this.host.sessions.flush(agent.session)
   }

@@ -93,11 +93,22 @@ export function appendSessionEvent(session: NativeSession, event: Pick<NativeEve
 }
 
 const guardedSessions = new WeakMap<NativeSession, NativeSession['append']>()
+/** A passive remote turn owns no local execution queue; its steps are always closed. */
+export function openPresentationTurn(events: readonly NativeEvent[]): { turn: number; remote: string; step: number } | undefined {
+  let turn: number | undefined, remote = '', step = 0
+  for (const event of events) {
+    if (event.type === 'turn/start') { turn = Number(event.data['turn']); remote = ''; step = 0 }
+    if (event.type === 'step/start') step = Number(event.data['step'])
+    if (event.type === 'turn/end') { turn = undefined; remote = '' }
+    if (turn !== undefined && isBridgeRecord(event.type) && event.data['presentationTurn'] === turn) remote = String(event.data['turnId'] ?? '')
+  }
+  return turn !== undefined && remote ? { turn, remote, step } : undefined
+}
 /** Imports advance the log while the native loop retains its turn and step counters. */
 export function guardImportedTurnNumbers(session: NativeSession): void {
   if (guardedSessions.has(session)) return
   const append = session.append.bind(session)
-  let maximum = sessionEvents(session).reduce((n, event) => Math.max(n, Number(event.data['turn']) || 0), 0)
+  let maximum = sessionEvents(session).reduce((n, event) => event.type === 'turn/start' ? Math.max(n, Number(event.data['turn']) || 0) : n, 0)
   let sourceTurn = -1
   let logTurn = -1
   let logStep = 0
@@ -110,8 +121,10 @@ export function guardImportedTurnNumbers(session: NativeSession): void {
   guardedSessions.set(session, appendProjected)
   session.append = (type, data, options) => {
     if (type === 'turn/start' && typeof data['turn'] === 'number') {
+      const passive = openPresentationTurn(sessionEvents(session))
+      if (passive) appendProjected('turn/end', { turn: passive.turn, reason: { kind: 'interrupted' } })
       sourceTurn = data['turn']
-      logTurn = Math.max(maximum + 1, sourceTurn)
+      logTurn = maximum + 1
     }
     const mapped = data['turn'] === sourceTurn ? { ...data, turn: logTurn } : data
     if (typeof mapped['step'] === 'number' && data['turn'] === sourceTurn) {

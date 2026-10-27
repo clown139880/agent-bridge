@@ -15,7 +15,7 @@ async function run(runtime) {
   fs.writeFileSync(target, source);
   try {
     const plugin = await import(pathToFileURL(target));
-    const { Session, SessionId } = await import(installed('dsh-session'));
+    const { Session, SessionId, appendPluginRecord } = await import(installed('dsh-session'));
     const { createSessionFormatCatalogWithChildren } = await import(installed('dsh-session-format-catalog'));
     const old = [
       { type: 'session', version: 3, id: 'agent-bridge-test', createdAt: 1, isSeeded: false, delegationDepth: 0 },
@@ -54,6 +54,25 @@ async function run(runtime) {
     const native = catalog.createRestore(catalog.encodeCurrentHeader({ ...session.header, delegationDepth: 0 }, 0), { recovery: 'strict', validation: 'current' });
     session.snapshotEvents().forEach(event => native.decodeRow(catalog.encodeCurrentEvent(event)));
     native.finish();
+    // A passive turn survives incremental polls with closed steps, including
+    // a seeded boundary, without losing any of its message surfaces.
+    const passive = plugin.projectNativeEvents([remote('poll-1')], [], 'remote', 'tool-role', undefined, 'turn');
+    const passiveSession = Session.create(SessionId('v4-passive'), passive);
+    const roundtrip = value => restore([
+      catalog.encodeCurrentHeader({ ...value.header, delegationDepth: 0 }, 0),
+      ...value.snapshotEvents().map(event => catalog.encodeCurrentEvent(event)),
+    ]);
+    roundtrip(passiveSession);
+    const poll2 = plugin.projectNativeEvents([remote('poll-2')], passiveSession.snapshotEvents(), 'remote', 'tool-role', undefined, 'turn');
+    assert.equal(poll2.filter(e => e.type === 'turn/start').length, 0);
+    assert.deepEqual(poll2.find(e => e.type === 'step/start').data, { turn: 1, step: 2 });
+    for (const event of poll2) { if (event.ignorable) appendPluginRecord(passiveSession, event.type, event.data); else passiveSession.append(event.type, event.data, event.surfaceOp ? { surfaceOp: event.surfaceOp } : undefined); }
+    roundtrip(passiveSession);
+    const close = plugin.projectNativeEvents([], passiveSession.snapshotEvents());
+    for (const event of close) passiveSession.append(event.type, event.data);
+    roundtrip(passiveSession);
+    assert.equal(passiveSession.deriveMessages().filter(m => m.role === 'assistant').length, 2);
+    console.log('PASS: actual V4 passive cross-poll turns, closed steps, strict restore and idle close');
     console.log('PASS: actual V4 migration, retained metadata, replay, binding lookup, incremental plugin records and deduplication');
   } finally { fs.unlinkSync(target); }
 }

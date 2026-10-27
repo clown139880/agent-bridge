@@ -1,6 +1,6 @@
 import type { ContentBlock, GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { JsonObject, JsonValue } from '../types.js'
-import { toolResultMessage, type NativeEvent, type ToolResultShape } from './dsh-compat.js'
+import { openPresentationTurn, toolResultMessage, type NativeEvent, type ToolResultShape } from './dsh-compat.js'
 
 export const PROVIDER = 'agent-bridge'
 export { BINDING_EVENT, ACK_EVENT } from './records.js'
@@ -107,13 +107,13 @@ export function openStep(events: readonly NativeEvent[]): OpenStep | undefined {
 
 /**
  * Balanced presentation transactions; never put remote tool calls in the local execution queue.
- * Without `into`, each item is its own closed turn: the log must be balanced (no
- * native turn running). With `into`, each item closes its own step in the
+ * Passive imports group by remote turn id, retaining an explicitly active
+ * remote turn across polling batches. With `into`, each item closes its own step in the
  * running turn and leaves a fresh step for the native loop's answer. DSH's
  * renderer keeps only the latest assistant/message per step, even when their
  * message IDs differ; sharing a step would erase earlier text and tool cards.
  */
-export function projectNativeEvents(rows: readonly JsonObject[], existing: readonly NativeEvent[], model = 'remote', toolResult: ToolResultShape = 'tool-role', into?: OpenStep): NativeEvent[] {
+export function projectNativeEvents(rows: readonly JsonObject[], existing: readonly NativeEvent[], model = 'remote', toolResult: ToolResultShape = 'tool-role', into?: OpenStep, activeRemoteTurnId?: string): NativeEvent[] {
   const acknowledgements = existing.filter(e => isBridgeRecord(e.type, ACK_EVENT))
   const seen = new Set(acknowledgements.map(e => str(e.data['eventId'])))
   const seenItems = new Set([...seen].map(presentationItemKey).filter((key): key is string => !!key))
@@ -129,17 +129,23 @@ export function projectNativeEvents(rows: readonly JsonObject[], existing: reado
   const steps = new Map<string, string[]>()
   const addStep = (parent: string, line: string) => { const lines = steps.get(parent); if (lines) lines.push(line); else steps.set(parent, [line]) }
   for (const e of acknowledgements) if (str(e.data['parentItemId']) && str(e.data['step'])) addStep(str(e.data['parentItemId']), str(e.data['step']))
-  let turn = existing.reduce((n, e) => Math.max(n, Number(e.data['turn']) || 0), 0)
+  let turn = existing.reduce((n, e) => e.type === 'turn/start' ? Math.max(n, Number(e.data['turn']) || 0) : n, 0)
+  let passive = into ? undefined : openPresentationTurn(existing)
   let step = into?.step ?? 1
   const output: NativeEvent[] = []
   let needsHead = requiresSystemHead && !existing.some(event => ['user/message', 'assistant/message', 'tool/result', 'system/message'].includes(event.type))
   const add = (type: string, data: JsonObject, time: number, surface = false) => {
     if (needsHead && surface) {
       needsHead = false
-      add('system/message', { turn: into?.turn ?? turn, step: into ? step : 1,
+      add('system/message', { turn: into?.turn ?? turn, step: into ? step : passive?.step ?? 1,
         message: { id: 'bridge:system-head', role: 'system', source: { kind: 'system-prompt' }, content: [] } }, time, true)
     }
     output.push({ type: isBridgeRecord(type) ? bridgeRecordType(type) : type, ...(isBridgeRecord(type) ? { ignorable: true as const } : {}), data, seq: existing.length + output.length, time, ...(surface ? { surfaceOp: 'append' as const } : {}) })
+  }
+  const closePassive = (time: number, kind = 'completed') => {
+    if (!passive) return
+    add('turn/end', { turn: passive.turn, reason: { kind } }, time)
+    passive = undefined
   }
   // Backfilled transcript prompts carry their original timestamp.
   const ordered = existing.some(e => e.type === 'user/message' || e.type === 'assistant/message') ? rows : [...rows].sort((a, b) => Number(a['timestamp']) - Number(b['timestamp']))
@@ -153,6 +159,10 @@ export function projectNativeEvents(rows: readonly JsonObject[], existing: reado
     const type = str(row['type'])
     if (type === 'message.completed' && payload['role'] === 'user' && submittedUserTurns.has(str(row['turnId']))) continue
     const time = typeof row['timestamp'] === 'number' ? row['timestamp'] : Date.now()
+    const remoteTurn = str(row['turnId'])
+    if (!into && passive?.remote === remoteTurn && ['turn.completed', 'turn.failed', 'turn.interrupted'].includes(type)) {
+      closePassive(time, type === 'turn.completed' ? 'completed' : 'interrupted')
+    }
     if (type === 'message.completed' && payload['role'] === 'user') {
       const local = localPrompts.find(e => !claimed.has(str(e.data['id'])) && echoesLocal(time, e.time)
         && sameUserText(str(payload['text']), messageText(e.data['content'])))
@@ -174,11 +184,16 @@ export function projectNativeEvents(rows: readonly JsonObject[], existing: reado
     }
     if (isMessage || isTool) {
       if (!into) {
-        turn++
-        add('turn/start', { turn }, time)
-        add('step/start', { turn, step: 1 }, time)
+        if (passive && (!remoteTurn || passive.remote !== remoteTurn)) closePassive(time)
+        if (!passive) {
+          turn++
+          add('turn/start', { turn }, time)
+          passive = { turn, remote: remoteTurn, step: 0 }
+          if (remoteTurn) add(ACK_EVENT, { eventId: `presentation:${turn}:${remoteTurn}`, presentationTurn: turn, turnId: remoteTurn }, time)
+        }
+        add('step/start', { turn, step: ++passive.step }, time)
       }
-      const at = into ? { turn: into.turn, step } : { turn, step: 1 }
+      const at = into ? { turn: into.turn, step } : { turn, step: passive!.step }
       if (isMessage && payload['role'] === 'user') {
         const recovered = payload['recoveredFirstPrompt'] === true && existing.some(e => e.type === 'assistant/message')
         add('user/message', { id: 'bridge:' + id, role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: (recovered ? '【恢复的首条用户消息】\n' : '') + str(payload['text']) }] }, time, true)
@@ -204,12 +219,11 @@ export function projectNativeEvents(rows: readonly JsonObject[], existing: reado
       add('step/end', at, time)
       if (into) {
         add('step/start', { turn: into.turn, step: ++step }, time)
-      } else {
-        add('turn/end', { turn, reason: { kind: 'completed' } }, time)
-      }
+      } else if (!remoteTurn) closePassive(time)
     }
     add(ACK_EVENT, { eventId: id, turnId: str(row['turnId']) }, time)
   }
+  if (passive && passive.remote !== activeRemoteTurnId) closePassive(Number(ordered.at(-1)?.['timestamp']) || Date.now())
   return output
 }
 
