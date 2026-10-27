@@ -1,4 +1,4 @@
-# Virtual read-only sessions (0.4.0)
+# Virtual read-only sessions (0.4.1)
 
 Bridge sessions use `bridge-remote-<sha256(origin + NUL + remoteId)>` identities.
 The existing importer continues in the background. The client catalog hides its
@@ -22,10 +22,13 @@ the Bridge `session_events` after cursor; idle does not close passive turns.
 The same cache/epoch is used on reconnect. Unused logs expire after ten minutes
 when another session is opened.
 
-Every thirty seconds a full history audit checks revisions, deletion, and order
-changes. An incompatible prefix terminates the follow with a visible error;
-switch away and reopen to obtain a new epoch. An old epoch cannot page or poll
-the replacement log. Host restart/cache expiry similarly requires reopening.
+History is read in full once per Host cache (pages of 500), never again on
+reopen or poll. Each poll first reads the session's `viewRevision` (Control
+Plane 0.7.25+) and reads events after the held cursor only when it changed.
+In-place revisions are found by revision accounting: from a baseline
+(revision, highest event id) read together through `view/changes`, revisions
+beyond the events read since are revisions of history already shown, and the
+follow ends with a visible error; switch away and reopen to obtain a new epoch.
 This first phase does not attempt to rewrite already delivered event sequence
 numbers. No token-by-token assistant stream or approval/question interaction is
 offered; completed messages/tools and pending-state activity remain viewable.

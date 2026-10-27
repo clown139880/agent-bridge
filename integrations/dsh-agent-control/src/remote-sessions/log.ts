@@ -4,7 +4,7 @@ import type { BridgeClient } from '../bridge-client.js'
 import type { JsonObject, JsonValue } from '../types.js'
 import type { NativeEvent } from '../agent-bridge-provider/dsh-compat.js'
 import { readHistory } from '../agent-bridge-provider/import-target.js'
-import { projectNativeEvents, str } from '../agent-bridge-provider/mapping.js'
+import { projectNativeEvents, record, str } from '../agent-bridge-provider/mapping.js'
 import { VIRTUAL_PREFIX } from './id.js'
 
 export function virtualSessionId(origin: string, remoteId: string): string {
@@ -31,9 +31,22 @@ export function projection(title: string, model: string, cursor: number): JsonOb
   return { asOfSeq: cursor, values: { title, modelSelection: { lastUsed: selection, next: selection }, sessionListMetadata: { blank: false, lastPromptAt: null } } }
 }
 interface Log {
-  remoteId: string; epoch: string; events: NativeEvent[]; rows: Map<string, string>; cursor?: string | undefined;
-  summary: JsonObject; checkedAt: number; touchedAt: number; invalid: boolean; pending?: Promise<void> | undefined
+  remoteId: string; epoch: string; events: NativeEvent[]; rows: Set<string>; cursor?: string | undefined;
+  summary: JsonObject; touchedAt: number; invalid: boolean; pending?: Promise<void> | undefined
+  /** Last session viewRevision seen; unchanged means nothing to read. */
+  revision: number
+  /**
+   * Revision accounting for in-place revisions: every stored event and every
+   * in-place revision moves the session's view revision by one. From a baseline
+   * (revision, highest event id) read together, revisions beyond the events read
+   * since then are in-place revisions of history already shown.
+   */
+  baseline?: { revision: number; high: number } | undefined
+  rowsAfterBaseline: number
 }
+const PAGE = 500
+const rowId = (row: JsonObject) => Number(/^e:(\d+)$/.exec(str(row['cursor']))?.[1] ?? 0)
+
 /** No Session, Agent, persistence, or filesystem service is used by this reader. */
 export class RemoteSessionLogs {
   private readonly logs = new Map<string, Log>()
@@ -48,7 +61,8 @@ export class RemoteSessionLogs {
     for (const [key, log] of this.logs) if (Date.now() - log.touchedAt > 600_000 && !log.pending) this.logs.delete(key)
     let log = this.logs.get(id)
     if (!log || log.invalid) {
-      log = { remoteId: str(summary['sessionId']), epoch: randomUUID(), events: [], rows: new Map(), summary, checkedAt: 0, touchedAt: Date.now(), invalid: false }
+      log = { remoteId: str(summary['sessionId']), epoch: randomUUID(), events: [], rows: new Set(), summary, touchedAt: Date.now(), invalid: false,
+        revision: -1, rowsAfterBaseline: 0 }
       this.logs.set(id, log)
     }
     log.summary = summary
@@ -78,22 +92,30 @@ export class RemoteSessionLogs {
     log.pending = this.read(log, signal).finally(() => { log.pending = undefined })
     return log.pending
   }
+  /** Cheap when nothing changed: one session read. Never re-reads history already held. */
   private async read(log: Log, signal?: AbortSignal): Promise<void> {
-    const full = Date.now() - log.checkedAt >= 30_000
-    const history = await readHistory(this.bridge, log.remoteId, full ? undefined : log.cursor, signal)
-    const known = new Set<string>()
-    for (const row of history.rows) {
-      const id = str(row['eventId']); known.add(id)
-      if (log.rows.has(id) && log.rows.get(id) !== JSON.stringify(row)) log.invalid = true
-    }
-    if (full && [...log.rows.keys()].some(id => !known.has(id))) log.invalid = true
-    if (full && [...log.rows.keys()].some((id, index) => str(history.rows[index]?.['eventId']) !== id)) log.invalid = true
-    if (log.invalid) throw new Error('Bridge 历史已原地修订，请切换后重新打开会话')
-    const fresh = history.rows.filter(row => !log.rows.has(str(row['eventId'])))
-    log.events.push(...projectRows(fresh, log.events, str(log.summary['model'], 'remote')))
-    for (const row of fresh) log.rows.set(str(row['eventId']), JSON.stringify(row))
-    log.cursor = history.cursor ?? log.cursor
-    if (full) log.checkedAt = Date.now()
+    const session = record(await this.bridge.call({ operation: 'session', args: { sessionId: log.remoteId } }, signal))
+    const revision = typeof session['viewRevision'] === 'number' ? session['viewRevision'] : undefined
     log.touchedAt = Date.now()
+    if (revision !== undefined && revision === log.revision) return
+    if (revision !== undefined && !log.baseline && !log.rows.size) log.baseline = await this.baseline(log.remoteId, revision, signal)
+    const history = await readHistory(this.bridge, log.remoteId, log.cursor, signal, PAGE)
+    const fresh = history.rows.filter(row => !log.rows.has(str(row['eventId'])))
+    if (log.baseline) log.rowsAfterBaseline += fresh.filter(row => rowId(row) > log.baseline!.high).length
+    if (revision !== undefined && log.baseline && revision - log.baseline.revision > log.rowsAfterBaseline) log.invalid = true
+    if (log.invalid) throw new Error('Bridge 历史已原地修订，请切换后重新打开会话')
+    log.events.push(...projectRows(fresh, log.events, str(log.summary['model'], 'remote')))
+    for (const row of fresh) log.rows.add(str(row['eventId']))
+    log.cursor = history.cursor ?? log.cursor
+    if (revision !== undefined) log.revision = revision
+  }
+  /** The revision and highest event id at one instant (Control Plane 0.7.25+); none from older servers. */
+  private async baseline(sessionId: string, since: number, signal?: AbortSignal): Promise<Log['baseline']> {
+    try {
+      const changes = record(await this.bridge.call({ operation: 'session_view_changes', args: { sessionId, since, rawAfter: 0 } }, signal))
+      const raw = record(changes['raw'])
+      return changes['hasMore'] === false && typeof changes['toRevision'] === 'number' && typeof raw['through'] === 'number'
+        ? { revision: changes['toRevision'], high: raw['through'] } : undefined
+    } catch { return undefined }
   }
 }

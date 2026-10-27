@@ -41,25 +41,35 @@ describe('virtual session log', () => {
     expect(historyPage([], -1)).toEqual({ records: [], hasMore: false })
     expect(() => historyPage(events, events.length)).toThrow('cursor')
   })
-  it('loads all pages, shares append-only history on reconnect, and refuses revised prefixes', async () => {
-    vi.useFakeTimers(); vi.setSystemTime(100_000)
-    let rows = [row('u'), row('a')]
-    const call = vi.fn(async ({ args }: { args?: JsonObject }): Promise<JsonValue> => {
+  it('loads history once, reads only on a new view revision, and refuses in-place revisions', async () => {
+    let rows = [row('u'), row('a')].map((r, i) => ({ ...r, cursor: `e:${i + 1}` }))
+    let revision = 2, reads = 0
+    const call = vi.fn(async ({ operation, args }: { operation: string; args?: JsonObject }): Promise<JsonValue> => {
+      if (operation === 'session') return { sessionId: 'r', viewRevision: revision }
+      if (operation === 'session_view_changes') return { hasMore: false, toRevision: revision, raw: { through: rows.length } }
+      reads++
+      expect(args?.['limit']).toBe(500)
       const offset = args?.['after'] ? Number(args['after']) : 0
-      return { data: rows.slice(offset, offset + 1), nextCursor: String(Math.min(offset + 1, rows.length)), hasMore: offset + 1 < rows.length }
+      return { data: rows.slice(offset), nextCursor: String(rows.length), hasMore: false }
     })
     const logs = new RemoteSessionLogs({ call }, origin), virtual = virtualSessionId(origin, 'r')
     const opened = await logs.open(virtual, [{ sessionId: 'r', title: 'Title', workspace: '/repo' }])
     const snapshot = opened['snapshot'] as JsonObject
     expect(snapshot['assistantStream']).toEqual({ revision: 0 })
     expect((snapshot['projections'] as JsonObject)['values']).toMatchObject({ title: 'Title', modelSelection: { next: { provider: 'agent-bridge' } } })
-    rows.push(row('b'))
+    expect(reads).toBe(1)
+    // Nothing changed: one session read, no history request.
+    expect((await logs.poll(virtual, String(opened['epoch']), Number(snapshot['cursor'])))['records']).toEqual([])
+    expect(reads).toBe(1)
+    rows.push({ ...row('b'), cursor: 'e:3' }); revision++
     const delta = await logs.poll(virtual, String(opened['epoch']), Number(snapshot['cursor']))
     expect((delta['records'] as unknown[]).length).toBeGreaterThan(0)
+    expect(call.mock.calls.filter(([c]) => c.operation === 'session_events').at(-1)![0].args).toMatchObject({ after: '2' })
+    // Reopening a held log reads only what is new: no full reload.
     const reopened = await logs.open(virtual, [{ sessionId: 'r' }])
-    expect(reopened['epoch']).toBe(opened['epoch'])
-    rows = [row('u', 'revision'), ...rows.slice(1)]
-    vi.setSystemTime(140_000)
+    expect(reopened['epoch']).toBe(opened['epoch']); expect(reads).toBe(2)
+    // An in-place revision moves the revision without a new event.
+    rows = [{ ...row('u', 'revision'), cursor: 'e:1' }, ...rows.slice(1)]; revision++
     await expect(logs.poll(virtual, String(opened['epoch']), Number(snapshot['cursor']))).rejects.toThrow('修订')
     const replacement = await logs.open(virtual, [{ sessionId: 'r' }])
     expect(replacement['epoch']).not.toBe(opened['epoch'])
