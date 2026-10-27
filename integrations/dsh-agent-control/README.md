@@ -274,6 +274,13 @@ It preserves the original slot identity, store, locale, callbacks, and directory
 picker. Unloading restores the original component. Tests exercise the published
 DSH row implementation; changes to that upstream contract need revalidation.
 
+### Bridge 对话视图（0.3.0，需 Control Plane 0.7.25）
+
+“Agent 控制台”面板点击最近对话时，在面板内直接渲染 Bridge 服务端视图（`@agent-bridge/transcript`，
+构建时从工作区源码打包），不创建原生 session，也不读原生历史。发送、中断、审批和提问走 Bridge 接口；
+会话 `session.updated` 的 `viewRevision` 前进时拉取变化，idle 不会停止跟随。
+“在原生会话中打开”保留旧的导入路径，原生侧栏同步暂不改变。
+
 ### 远端轮次展示（0.2.13）
 
 历史首次导入按远端 `turnId` 分组，每条正文或工具结果仍占独立 step。

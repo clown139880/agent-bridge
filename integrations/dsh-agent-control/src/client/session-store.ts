@@ -1,6 +1,7 @@
 import type { BridgeCall, BridgeStreamEvent, JsonObject, JsonValue } from '../types.js'
 import { BridgeStreamError } from './bridge-stream.js'
 import { asRecord, latestSessionModel, mergeRecords, readPage, requiredId, str } from './session-model.js'
+import { ConversationModel, type EntryView, type ViewChanges, type ViewPage } from '@agent-bridge/transcript'
 
 export type BridgeRpc = (operation: BridgeCall['operation'], args?: JsonObject) => Promise<JsonValue>
 export type BridgeStream = (cursor: string | undefined, signal: AbortSignal, onOpen?: () => void) => AsyncIterable<BridgeStreamEvent>
@@ -23,6 +24,11 @@ export interface SessionDetail {
   busy: boolean
   notice: string
   action?: JsonObject
+  /** The conversation as the Bridge view serves it (see @agent-bridge/transcript). */
+  entries: EntryView[]
+  viewLoaded: boolean
+  viewMore: boolean
+  viewError: string
 }
 export interface SessionState {
   workers?: JsonObject[]
@@ -41,7 +47,7 @@ export interface SessionState {
   realtimeError: string
   attachmentUrls: Record<string, string>
 }
-const emptyDetail = (): SessionDetail => ({ events: [], approvals: [], inputs: [], cursor: null, hasMore: false, loaded: false, loading: false, eventsLoading: false, error: '', eventsError: '', draft: '', draftAttachments: [], model: '', reasoningEffort: '', busy: false, notice: '' })
+const emptyDetail = (): SessionDetail => ({ events: [], approvals: [], inputs: [], cursor: null, hasMore: false, loaded: false, loading: false, eventsLoading: false, error: '', eventsError: '', draft: '', draftAttachments: [], model: '', reasoningEffort: '', busy: false, notice: '', entries: [], viewLoaded: false, viewMore: false, viewError: '' })
 const errorText = (error: unknown): string => error instanceof Error ? error.message : 'Bridge request failed.'
 
 /** One configured Bridge connection. Immutable UI snapshots; async writes always target their captured session. */
@@ -222,6 +228,8 @@ export class SessionStore {
       const session = { ...(current ?? {}), ...data }
       this.patch({ sessions: mergeRecords(this.state.sessions, [session], 'sessionId') })
       if (this.state.details[id]) this.patchDetail(id, { session: { ...(this.detail(id).session ?? {}), ...data } })
+      const model = this.views.get(id)
+      if (model && typeof data['viewRevision'] === 'number' && data['viewRevision'] > model.viewRevision) void this.pullView(id)
       return
     }
     if (message.type === 'session.event.appended') {
@@ -264,12 +272,83 @@ export class SessionStore {
     const detail = this.state.details[id]
     if (!detail?.loaded && !detail?.eventsLoading) void this.loadEvents(id, true)
     if (!detail?.loading) void this.refreshDetail(id)
+    // A wake-up may have been missed while disconnected; the view resumes from its own revision.
+    if (this.views.has(id)) void this.pullView(id)
   }
   select(id: string): void {
     this.patch({ selected: id })
     if (!this.state.details[id]) this.patchDetail(id, {})
     void this.refreshDetail(id)
     if (!this.detail(id).loaded) void this.loadEvents(id)
+    if (this.views.has(id)) void this.pullView(id); else void this.loadView(id)
+  }
+
+  private readonly views = new Map<string, ConversationModel>()
+  private readonly pulling = new Map<string, boolean>()
+  private showView(id: string): void {
+    const model = this.views.get(id)
+    this.patchDetail(id, { entries: model?.list() ?? [], viewLoaded: Boolean(model), viewMore: Boolean(model?.entriesBefore), viewError: '' })
+  }
+  /** The latest page of a conversation; earlier pages come from loadOlderView. */
+  async loadView(id: string): Promise<void> {
+    const generation = this.generation
+    try {
+      const page = asRecord(await this.rpc('session_view', { sessionId: id, limit: 20 })) as unknown as ViewPage
+      if (!this.valid(generation)) return
+      if (!Array.isArray(page.entries)) throw new Error('Agent Bridge returned an invalid conversation view. Update the Control Plane.')
+      this.views.set(id, ConversationModel.fromPage(page)); this.showView(id)
+    } catch (error) { if (this.valid(generation)) this.patchDetail(id, { viewError: errorText(error) }) }
+  }
+  /** Catch one conversation up to the server's view revision, one request at a time. */
+  async pullView(id: string): Promise<void> {
+    if (this.pulling.has(id)) { this.pulling.set(id, true); return }
+    const model = this.views.get(id), generation = this.generation
+    if (!model) return
+    this.pulling.set(id, false)
+    try {
+      for (;;) {
+        const changes = asRecord(await this.rpc('session_view_changes', { sessionId: id, since: model.viewRevision, rawAfter: model.rawHigh })) as unknown as ViewChanges
+        if (!this.valid(generation) || this.views.get(id) !== model) return
+        const result = model.applyChanges(changes)
+        if (result.kind === 'reset') { this.views.delete(id); await this.loadView(id); return }
+        this.showView(id)
+        if (!changes.hasMore && !this.pulling.get(id)) return
+        this.pulling.set(id, false)
+      }
+    } catch (error) {
+      if (!this.valid(generation)) return
+      if (/invalid_cursor|cursor/.test(errorText(error))) { this.views.delete(id); await this.loadView(id) }
+      else this.patchDetail(id, { viewError: errorText(error) })
+    } finally { this.pulling.delete(id) }
+  }
+  async loadOlderView(id: string): Promise<void> {
+    const model = this.views.get(id), before = model?.entriesBefore, generation = this.generation
+    if (!model || !before) return
+    try {
+      const page = asRecord(await this.rpc('session_view', { sessionId: id, limit: 20, before })) as unknown as ViewPage
+      if (!this.valid(generation) || this.views.get(id) !== model) return
+      if (model.applyOlder(page).kind === 'reset') { this.views.delete(id); await this.loadView(id); return }
+      this.showView(id)
+    } catch (error) {
+      if (!this.valid(generation)) return
+      // The order changed under the page cursor: start again from the latest page.
+      if (/expired/.test(errorText(error))) { this.views.delete(id); await this.loadView(id) }
+      else this.patchDetail(id, { viewError: errorText(error) })
+    }
+  }
+  /** The earlier items of a long turn. */
+  async loadEntryItems(id: string, key: string, before: number): Promise<void> {
+    const model = this.views.get(id), generation = this.generation
+    if (!model) return
+    try {
+      const page = asRecord(await this.rpc('session_view_entry', { sessionId: id, key, before }))
+      if (!this.valid(generation) || this.views.get(id) !== model) return
+      model.applyEntryItems(page['entry'] as unknown as EntryView); this.showView(id)
+    } catch (error) { if (this.valid(generation)) this.patchDetail(id, { viewError: errorText(error) }) }
+  }
+  /** A whole event, for an item the view trimmed. */
+  async fullEvent(id: string, eventId: string): Promise<JsonObject> {
+    return asRecord(await this.rpc('session_event', { sessionId: id, eventId }))
   }
   setDraft(id: string, draft: string): void { this.patchDetail(id, { draft }) }
   private attachmentPending = new Set<string>()

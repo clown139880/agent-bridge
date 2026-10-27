@@ -8,6 +8,8 @@ export interface Session {
   status: string; activeTurnId: string | null; updatedAt: number; createdAt: number; lastPromptAt?: number | null;
   /** Agent replies so far; unread badges compare it with what this device last saw. */
   messageCount?: number;
+  /** Moves with every change of the conversation view; above the held revision means fetch changes. */
+  viewRevision?: number;
   pendingApprovalCount: number; pendingUserInputCount: number;
   capabilities?: string[]; historyCompleteness?: string; source?: string;
   error?: { error: { message: string } } | null;

@@ -68,6 +68,10 @@ SSE 直接派发到现有 node:http handler，不经过 Hono Response 或 fetch 
 | 新增 | `DELETE` | `/sessions/{sessionId}` | 通过 owning Bridge adapter 删除/遗忘 session |
 | 新增 | `GET` | `/sessions/{sessionId}/runs` | session 关联的历史 Worker runs（只读） |
 | 新增 | `GET` | `/sessions/{sessionId}/events` | session 全量结构化事件/对话 |
+| 新增 | `GET` | `/sessions/{sessionId}/events/{eventId}` | 按 eventId 读取一条完整事件（0.7.25） |
+| 新增 | `GET` | `/sessions/{sessionId}/view` | 对话视图快照与旧页（0.7.25） |
+| 新增 | `GET` | `/sessions/{sessionId}/view/changes` | 某视图修订号之后的变化（0.7.25） |
+| 新增 | `GET` | `/sessions/{sessionId}/view/entries/{key}` | 超大轮次的更早条目（0.7.25） |
 | 新增 | `POST` | `/sessions/{sessionId}/turns` | 自动或显式 steer/start-new-turn |
 | 新增 | `POST` | `/sessions/{sessionId}/interrupt` | interrupt 当前 turn |
 | 新增 | `GET` | `/actions/{actionId}` | 查询异步写操作结果 |
@@ -568,6 +572,26 @@ action receipt 和 idempotency key 按正常保留期保留，因此删除成功
 `type` 过滤和 `limit` 上限与正向模式相同。`tail=true` 时使用 `before`，不使用 `after`。
 两种模式均附带 `streamCursor`，但历史事件分页 cursor 与 `/stream` 水位属于不同游标空间，禁止混用；
 不能用任意 REST 响应水位跳过尚未应用的 SSE 帧。
+
+#### 对话视图（0.7.25）
+
+服务端统一投影（`packages/transcript`，存储侧 `packages/database/src/view.ts`），网页与 DSH 插件都只渲染它。
+设计与约束见 `docs/unified-transcript-view-design.zh.md`。
+
+- `GET /sessions/{id}/view?limit=20&before=<v:…>`：最新若干视图条目（轮次 `t:<turnId>`、无 turnId 内容段
+  `o:<eventId>`、无 turnId 提示 `n:<eventId>`），按 anchor（首事件序号）升序；返回 `projectionVersion`、
+  `viewRevision`、`orderingEpoch`、`rawHigh`、`entries`、`entriesBefore` 和同一读事务内的 `streamCursor`。
+  `before` 绑定 `orderingEpoch`，次序改变后返回 `410 cursor_expired`。
+- `GET /sessions/{id}/view/changes?since=<viewRevision>&rawAfter=<rawHigh>`：`since` 之后变化的条目（整条替换）、
+  失去全部事件的 `removed`，按修订号分批，`hasMore=false` 时客户端即持有 `toRevision` 的视图；
+  `raw:{after,through,count}` 是 `rawAfter` 之后新增的原始事件数，供“↓ N 条新内容”使用。
+  `orderingEpoch` 与客户端不同时应重新读取快照。`since` 超过当前修订号返回 `400 invalid_cursor`。
+- `GET /sessions/{id}/view/entries/{key}?before=<seq>`：一条超大轮次在 `itemsBefore` 之前的条目。
+- `GET /sessions/{id}/events/{eventId}`：视图里标 `truncated` 的条目，按 eventId 读取完整内容。
+
+唤醒：每个事件写入或原地修订都会推进 session 的 `viewRevision` 并发出 `session.updated`；客户端看到
+大于自身的 `viewRevision` 就请求 changes。`c:` 游标只用于普通资源，不作为视图交付凭证。
+视图写入不改变 `messageCount`。
 
 这是 session 的跨 run 对话真相，必须包括 user/assistant 完整消息、turn 边界、工具摘要、approval 和 user
 input；不得只返回当前 `AgentEvent` 的生命周期摘要。系统不传输、不存储 token/文本 delta，只提供

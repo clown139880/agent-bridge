@@ -7,6 +7,7 @@ import {
 } from "@agent-bridge/protocol";
 import { decodeEventBody, encodeEventBody, EVENT_COLUMNS, eventWire, indexEvent, type EventRow } from "./events.js";
 import { markChanged, signalStream, type StreamKind } from "./stream.js";
+import { eventById, recordAppendedEvent, recordRevisedEvent, viewChanges, viewEntryItems, viewPage } from "./view.js";
 
 /** Settled tool and task work that counts as session activity. Starts and ticks do not, to keep the feed quiet. */
 const TOOL_PROGRESS_TYPES = new Set(["command.completed", "file_change.completed", "tool.completed", "task.started", "task.completed"]);
@@ -348,6 +349,7 @@ export class AgentControlStore {
       const turnId = message.turnId ?? conflict.storedTurnId;
       this.db.prepare("UPDATE events SET type=?,turn_id=?,body=? WHERE id=?")
         .run(message.eventType, turnId, encodeEventBody(message.eventType, payload), row.id);
+      recordRevisedEvent(this.db, message.sessionId, row.id, { eventId: message.eventId, type: message.eventType, turnId, payload });
       this.db.prepare("DELETE FROM event_search WHERE rowid=?").run(row.id);
       indexEvent(this.db, { id: row.id, session_id: message.sessionId, type: message.eventType, turn_id: turnId }, payload);
       markChanged(this.db, "session", message.sessionId);
@@ -370,6 +372,10 @@ export class AgentControlStore {
       if (!inserted.changes) return false;
       const id = Number(inserted.lastInsertRowid);
       indexEvent(this.db, { id, session_id: message.sessionId, type: message.eventType, turn_id: message.turnId ?? null }, payload);
+      recordAppendedEvent(this.db, message.sessionId, id, { eventId: message.eventId, type: message.eventType,
+        turnId: message.turnId ?? null, payload });
+      // Every event moves the session's view revision, which the session resource carries.
+      markChanged(this.db, "session", message.sessionId);
       // A prompt counts too: a long turn that only runs tools must not sink below
       // idle sessions until its first reply. Tool progress still never reorders.
       const isReply = (message.eventType === "message.completed" && (payload.role === "assistant" || payload.role === "user"))
@@ -699,6 +705,7 @@ export class AgentControlStore {
       // The contentless index is keyed by event id and has no trigger on `events`.
       this.db.prepare("DELETE FROM event_search WHERE rowid IN (SELECT id FROM events WHERE session_id=?)").run(id);
       this.db.prepare("DELETE FROM events WHERE session_id=?").run(id);
+      this.db.prepare("DELETE FROM view_dirty WHERE session_id=?").run(id);
       this.db.prepare("DELETE FROM worker_runs WHERE session_id=?").run(id);
       this.db.prepare("DELETE FROM sessions WHERE id=?").run(id);
       markChanged(this.db, "session", id);
@@ -723,7 +730,26 @@ export class AgentControlStore {
   }
 
   resetTransientSessionActivity(): void {
-    this.db.prepare("UPDATE sessions SET activity_status='offline' WHERE activity_status IN ('creating','active','waiting_for_approval','waiting_for_input')").run();
+    this.transaction(() => {
+      const rows = this.db.prepare(`UPDATE sessions SET activity_status='offline'
+        WHERE activity_status IN ('creating','active','waiting_for_approval','waiting_for_input') RETURNING id`).all() as Array<{ id: string }>;
+      for (const row of rows) markChanged(this.db, "session", row.id);
+    });
+  }
+
+  /** The conversation view (see view.ts), each read from one consistent state with the feed position. */
+  viewPage(sessionId: string, limit: number, before?: string) { return this.read(() => viewPage(this.db, sessionId, limit, before)); }
+  viewChanges(sessionId: string, since: number, rawAfter: number) { return this.read(() => viewChanges(this.db, sessionId, since, rawAfter)); }
+  viewEntryItems(sessionId: string, key: string, before: number) {
+    const page = this.read(() => ({ page: viewEntryItems(this.db, sessionId, key, before) }));
+    return page.page && { ...page.page, streamCursor: page.streamCursor };
+  }
+  eventById(sessionId: string, eventId: string) { return eventById(this.db, sessionId, eventId); }
+
+  private read<T>(fn: () => T): T & { streamCursor: string } {
+    this.db.exec("BEGIN");
+    try { const value = fn(); return { ...value, streamCursor: this.streamCursor() }; }
+    finally { this.db.exec("COMMIT"); }
   }
 
   sessionEventsTail(sessionId: string, before: string | undefined, limit: number, types: string[]):
@@ -802,7 +828,7 @@ export class AgentControlStore {
       pendingApprovalCount:count("approval"),pendingUserInputCount:count("user_input"),latestRun:run,
       createdAt:Number(row.created_at),updatedAt:Number(row.updated_at??row.created_at),
       lastResponseAt:row.last_response_at==null?null:Number(row.last_response_at),
-      lastPromptAt:row.last_prompt_at==null?null:Number(row.last_prompt_at),messageCount:Number(row.message_count??0),source:String(row.source??"app-server"),
+      lastPromptAt:row.last_prompt_at==null?null:Number(row.last_prompt_at),messageCount:Number(row.message_count??0),viewRevision:Number(row.view_revision??0),orderingEpoch:Number(row.ordering_epoch??0),source:String(row.source??"app-server"),
       historyCompleteness:String(row.history_completeness??"loaded-only")};
     if(detail){const runs=this.db.prepare("SELECT * FROM worker_runs WHERE session_id=? ORDER BY created_at DESC,id DESC LIMIT 20")
       .all(String(row.id)) as Record<string,unknown>[];

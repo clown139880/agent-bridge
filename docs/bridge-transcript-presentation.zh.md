@@ -1,5 +1,8 @@
 # Bridge 对话的轮次与过程展示
 
+0.7.25 起分组、工具合并和完成判断由服务端视图统一完成（`packages/transcript`，接口见
+`docs/agent-control-api.md`“对话视图”），Control Center 与 DSH 插件只渲染。以下展示规则仍适用。
+
 Control Center 按远端 `turnId` 组织对话，保留用户输入和最后一条助手回复，
 将中间消息和工具记录放入一个可展开的过程区。默认标准模式折叠已完成过程；
 简洁隐藏步骤编号，详细展开过程，完全展开同时展开工具载荷。

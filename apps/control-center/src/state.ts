@@ -1,6 +1,7 @@
 import { ApiError, ControlClient, explain } from "./api/client";
 import { consumeStream, delay, StreamLimitError } from "./api/stream";
 import { nativeNotify, type Share } from "./native/uctw";
+import { ConversationModel, type ConversationSnapshot, type EntryView, type ViewChanges, type ViewPage } from "@agent-bridge/transcript";
 import { isLive, pendingId, segment, type Action, type AttachmentRef, type Envelope, type ModelInfo, type Page, type Pending,
   type Session, type SessionEvent, type Snapshot, type Worker } from "./api/types";
 
@@ -16,7 +17,11 @@ export const IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"
 export const FILE_TYPES = ["application/pdf", "text/plain", "text/markdown", "text/csv", "application/json", "application/zip", "application/octet-stream",
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "application/vnd.openxmlformats-officedocument.presentationml.presentation"];
 export interface ViewState {
-  route: Route; sessions: Session[]; workers: Worker[]; session?: Session; events: SessionEvent[];
+  route: Route; sessions: Session[]; workers: Worker[]; session?: Session;
+  /** The open conversation as served by the view API (see @agent-bridge/transcript). */
+  entries: EntryView[];
+  /** New events recorded since the conversation opened: what "↓ N 条新内容" adds while scrolled up. */
+  rawAdded: number;
   approvals: Pending[]; inputs: Pending[]; loading: boolean; moreLoading: boolean; hasMore: boolean;
   historyMore: boolean; error: string;
   /** A cached detail is on screen while the GETs catch up; actions wait for the fresh baseline. */
@@ -32,8 +37,7 @@ export interface ViewState {
 export interface AnswerDraft { choice: string; other?: string }
 /** A detail page as last shown, so returning to it never starts from an empty page. */
 export interface DetailCache {
-  session: Session; events: SessionEvent[]; approvals: Pending[]; inputs: Pending[];
-  before: string | null; historyMore: boolean; savedAt: number;
+  session: Session; view: ConversationSnapshot; approvals: Pending[]; inputs: Pending[]; savedAt: number;
 }
 /** Optional persistence (IndexedDB in the browser) for the most recent details. */
 export interface DetailStore {
@@ -50,24 +54,10 @@ export const unreadCount = (state: ViewState, s: Session) => {
   const read = state.reads[s.sessionId];
   return read === undefined || s.messageCount === undefined ? 0 : Math.max(0, s.messageCount - read);
 };
-const MEMORY_DETAILS = 8, STORED_DETAILS = 5, STORED_EVENTS = 150;
-const trimmed = (c: DetailCache): DetailCache => c.events.length <= STORED_EVENTS ? c
-  : { ...c, events: c.events.slice(-STORED_EVENTS), before: c.events[c.events.length - STORED_EVENTS].cursor, historyMore: true };
-export const mergeEvents = (first: SessionEvent[], second: SessionEvent[]) => {
-  const seen = new Set<string>();
-  return [...first, ...second].filter(e => !seen.has(e.eventId) && Boolean(seen.add(e.eventId)));
-};
-// Merge a fresh tail without moving previously loaded older history below it.
-export function mergeTail(existing: SessionEvent[], tail: SessionEvent[]) {
-  const result = [...existing], known = new Set(existing.map(e => e.eventId));
-  tail.forEach((event, i) => {
-    if (known.has(event.eventId)) return;
-    const next = tail.slice(i + 1).find(e => known.has(e.eventId));
-    const index = next ? result.findIndex(e => e.eventId === next.eventId) : result.length;
-    result.splice(index, 0, event); known.add(event.eventId);
-  });
-  return result;
-}
+const MEMORY_DETAILS = 8, STORED_DETAILS = 5, STORED_ENTRIES = 30;
+/** A stored detail keeps its latest entries; the rest is paged in again from the view. */
+const trimmed = (c: DetailCache): DetailCache => c.view.entries.length <= STORED_ENTRIES ? c : { ...c, view: { ...c.view,
+  entries: c.view.entries.slice(-STORED_ENTRIES), entriesBefore: `v:${c.view.orderingEpoch}:${c.view.entries.at(-STORED_ENTRIES)!.anchor}` } };
 /** Whether a message to this session could be sent from here (pending requests only delay it). */
 export const canCompose = (state: ViewState, session?: Session) => {
   const worker = state.workers.find(w => w.id === session?.workerId);
@@ -94,7 +84,10 @@ export class ControlState {
   private cursor: string;
   private listCursor: string | null = null;
   private listQueryKey = "";
-  private before: string | null = null;
+  /** The open conversation; its revision is what the next changes request resumes from. */
+  private model?: ConversationModel;
+  private pulling = false;
+  private pullAgain = false;
   private generation = 0;
   private revision = 0;
   private deleted = false;
@@ -103,7 +96,6 @@ export class ControlState {
   private visible = true;
   private disposed = false;
   private bootstrap = false;
-  private finalizing = false;
   private projectionHold = false;
   private streamStopped = false;
   private seen = new Set<string>();
@@ -118,7 +110,7 @@ export class ControlState {
     for (const entry of store?.entries ?? []) this.details.set(entry.session.sessionId, entry);
     this.cursor = snapshot.streamCursor;
     this.state = { route: { page: "sessions" }, sessions: byPrompt(snapshot.sessions), workers: snapshot.workers,
-      events: [], approvals: [], inputs: [], loading: false, moreLoading: false,
+      entries: [], rawAdded: 0, approvals: [], inputs: [], loading: false, moreLoading: false,
       hasMore: snapshot.truncated.sessions, historyMore: false, error: "", syncing: false, connection: "按需更新",
       updatedAt: Date.now(), query: "", workerFilter: "", writable, drafts: {}, uploads: {}, models: {}, answers: {}, reads: store?.reads ?? {} };
   }
@@ -139,19 +131,20 @@ export class ControlState {
   dispose() {
     this.disposed = true; this.scope.abort(); this.streamAbort?.abort(); this.api.dispose();
     Object.values(this.state.uploads).flat().forEach(u => { if (u.preview) URL.revokeObjectURL(u.preview); });
-    this.state = { ...this.state, sessions: [], workers: [], events: [], drafts: {}, uploads: {}, answers: {}, intent: undefined, session: undefined, approvals: [], inputs: [] };
+    this.model = undefined;
+    this.state = { ...this.state, sessions: [], workers: [], entries: [], drafts: {}, uploads: {}, answers: {}, intent: undefined, session: undefined, approvals: [], inputs: [] };
     this.seen.clear(); this.listeners.clear(); this.details.clear();
   }
   private forget(id: string) {
     this.details.delete(id); this.store?.save([...this.details.values()].slice(-STORED_DETAILS).map(trimmed));
-    if (this.state.session?.sessionId === id) this.patch({ session: undefined, events: [], approvals: [], inputs: [], historyMore: false });
+    if (this.state.session?.sessionId === id) { this.model = undefined; this.patch({ session: undefined, entries: [], approvals: [], inputs: [], historyMore: false }); }
   }
   /** Keep the detail on screen (most recent last) and persist the newest few. */
   private remember() {
-    const { route, session, events, approvals, inputs, historyMore } = this.state;
-    if (this.disposed || route.page !== "detail" || !session || session.sessionId !== route.id || this.deleted) return;
+    const { route, session, approvals, inputs } = this.state;
+    if (this.disposed || route.page !== "detail" || !session || session.sessionId !== route.id || this.deleted || !this.model) return;
     this.details.delete(session.sessionId);
-    this.details.set(session.sessionId, { session, events, approvals, inputs, before: this.before, historyMore, savedAt: Date.now() });
+    this.details.set(session.sessionId, { session, view: this.model.snapshot(), approvals, inputs, savedAt: Date.now() });
     while (this.details.size > MEMORY_DETAILS) this.details.delete(this.details.keys().next().value!);
     this.store?.save([...this.details.values()].slice(-STORED_DETAILS).map(trimmed));
   }
@@ -233,8 +226,10 @@ export class ControlState {
   }
   private needsStream() {
     const i = this.state.intent;
-    return this.visible && !this.streamStopped && (this.bootstrap || this.finalizing || this.projectionHold && this.state.route.page === "detail" ||
-      this.state.route.page === "detail" && isLive(this.state.session) || Boolean(i && (i.submitting || i.uncertain || i.receipt?.status === "accepted")));
+    // A visible conversation stays subscribed whatever its status says: an external client
+    // can report idle and keep writing to the same turn.
+    return this.visible && !this.streamStopped && (this.bootstrap || this.state.route.page === "detail"
+      || Boolean(i && (i.submitting || i.uncertain || i.receipt?.status === "accepted")));
   }
   private syncStream() {
     if (this.disposed) return;
@@ -259,6 +254,8 @@ export class ControlState {
       try {
         const response = await this.api.stream(this.cursor, signal);
         openedAt = Date.now(); this.patch({ connection: "实时已连接" });
+        // A wake-up may have been missed while disconnected; the view resumes from its own revision.
+        void this.pull();
         await consumeStream(response, signal, e => {
           if (this.seen.has(e.eventId)) return;
           this.apply(e); this.cursor = e.cursor;
@@ -296,19 +293,17 @@ export class ControlState {
     if (e.type === "approval.upserted" || e.type === "user_input.upserted") this.notifyPending(e.data as Pending);
     if (e.type === "session.updated") {
       const s = e.data as Session;
-      if (selected) { this.revision++; this.patch({ session: { ...this.state.session, ...s } }); }
+      if (selected) {
+        this.revision++; this.patch({ session: { ...this.state.session, ...s } });
+        if (this.model && (s.viewRevision ?? 0) > this.model.viewRevision) void this.pull();
+      }
       // Do not accumulate unrelated transcript/resources from the global stream.
       if (this.state.sessions.some(v => v.sessionId === s.sessionId)) this.patch({ sessions: this.state.sessions.map(v => v.sessionId === s.sessionId ? { ...v, ...s } : v) });
     } else if (e.type === "session.deleted") {
       this.patch({ sessions: this.state.sessions.filter(s => s.sessionId !== e.sessionId) });
       if (selected) { this.deleted = true; this.projectionHold = false; this.revision++; this.patch({ session: undefined, error: "此会话已被删除" }); }
     } else if (e.type === "session.event.appended" && selected) {
-      let events = mergeEvents(this.state.events, [e.data as SessionEvent]);
-      if (events.length > 1000) {
-        events = events.slice(-1000); this.before = events[0].cursor;
-        this.patch({ historyMore: true });
-      }
-      this.patch({ events });
+      // The transcript follows session.updated (its view revision); raw events only ring.
       const type = (e.data as SessionEvent).type;
       if (type === "turn.completed" || type === "turn.failed") nativeNotify(type === "turn.completed" ? "done" : "error");
     } else if (e.type === "approval.upserted" && selected) {
@@ -327,9 +322,7 @@ export class ControlState {
       if (intent?.receipt?.actionId === action.actionId) this.receiveAction(action);
     }
     this.releaseProjection();
-    if (selected && !this.bootstrap && !isLive(this.state.session) && this.state.route.page === "detail"
-      && (e.type === "session.updated" || e.type === "session.event.appended")) void this.finalize();
-    else this.syncStream();
+    this.syncStream();
   }
   /** Each request rings once, and not for one already listed on the page. */
   private notifyPending(pending: Pending) {
@@ -338,12 +331,36 @@ export class ControlState {
       || [...this.state.approvals, ...this.state.inputs].some(p => pendingId(p) === id)) return;
     this.notified.add(id); nativeNotify("approval");
   }
-  private async finalize() {
-    if (this.finalizing || this.bootstrap || this.deleted || !this.streamAbort || isLive(this.state.session)) { this.syncStream(); return; }
-    this.finalizing = true;
-    try { await this.loadDetail(this.state.route.id!, this.generation, false); }
-    catch (e) { if (!this.scope.signal.aborted) this.patch({ error: explain(e) }); }
-    finally { this.finalizing = false; this.syncStream(); }
+  private showModel() {
+    this.patch({ entries: this.model?.list() ?? [], historyMore: Boolean(this.model?.entriesBefore) });
+  }
+  /** Catch the open conversation up to the server's view revision, one request at a time. */
+  private async pull() {
+    if (this.pulling) { this.pullAgain = true; return; }
+    const model = this.model, id = this.state.route.id, generation = this.generation, signal = this.scope.signal;
+    if (!model || this.state.route.page !== "detail" || !id || this.bootstrap) return;
+    this.pulling = true;
+    try {
+      do {
+        this.pullAgain = false;
+        const changes = await this.api.request<ViewChanges>(`/sessions/${segment(id)}/view/changes?since=${model.viewRevision}&rawAfter=${model.rawHigh}`, { signal });
+        if (generation !== this.generation || this.model !== model || this.deleted) return;
+        const result = model.applyChanges(changes);
+        if (result.kind === "reset") { await this.loadDetail(id, generation, true); return; }
+        if (result.kind === "applied") {
+          this.showModel();
+          if (result.newRawEvents) this.patch({ rawAdded: this.state.rawAdded + result.newRawEvents });
+        }
+        if (changes.hasMore) this.pullAgain = true;
+      } while (this.pullAgain && !signal.aborted);
+    } catch (e) {
+      if (signal.aborted || generation !== this.generation) return;
+      if (e instanceof ApiError && e.code === "invalid_cursor") await this.loadDetail(id, generation, true).catch(() => {});
+      else this.patch({ error: explain(e) });
+    } finally {
+      this.pulling = false;
+      if (this.pullAgain && !this.scope.signal.aborted) void this.pull();
+    }
   }
   async open(route: Route, freshStream = true) {
     // Leaving (or re-opening) a detail keeps it: the next visit shows it at once and only catches up.
@@ -353,9 +370,10 @@ export class ControlState {
     this.deleted = false; this.approvalUpdates.clear(); this.inputUpdates.clear();
     this.streamStopped = false; this.bootstrap = route.page === "detail";
     const cached = route.page === "detail" ? this.details.get(route.id!) : undefined;
-    this.before = cached?.before ?? null; this.listCursor = null;
-    this.patch({ route, loading: !cached, syncing: Boolean(cached), error: "", events: cached?.events ?? [], session: cached?.session,
-      approvals: cached?.approvals ?? [], inputs: cached?.inputs ?? [], historyMore: cached?.historyMore ?? false, moreLoading: false });
+    const model = ConversationModel.restore(cached?.view);
+    this.model = model; this.pullAgain = false; this.listCursor = null;
+    this.patch({ route, loading: !cached, syncing: Boolean(cached), error: "", entries: model?.list() ?? [], rawAdded: 0, session: cached?.session,
+      approvals: cached?.approvals ?? [], inputs: cached?.inputs ?? [], historyMore: Boolean(model?.entriesBefore), moreLoading: false });
     if (route.page !== "detail") this.syncStream();
     if (!this.visible) { this.bootstrap = false; this.patch({ loading: false, syncing: false }); this.syncStream(); return; }
     try {
@@ -380,9 +398,9 @@ export class ControlState {
     } finally {
       if (generation === this.generation) {
         this.bootstrap = false; this.patch({ loading: false, syncing: false });
-        // Read the final tail before closing a stream whose resource became idle during initialization.
-        if (route.page === "detail" && !isLive(this.state.session)) void this.finalize();
-        else this.syncStream();
+        this.syncStream();
+        // Changes that arrived while the detail loaded.
+        if (route.page === "detail") void this.pull();
       }
     }
   }
@@ -398,12 +416,16 @@ export class ControlState {
     } while (!signal.aborted);
     return items;
   }
+  /**
+   * The session, its pending requests and its conversation. A conversation already held
+   * (from this tab or the cache) catches up through changes; `reset` reloads its latest page.
+   */
   private async loadDetail(id: string, generation: number, reset: boolean) {
     const revision = this.revision, signal = this.scope.signal, path = `/sessions/${segment(id)}`;
-    const known = new Set(this.state.events.map(e => e.eventId));
-    const [session, history, approvals, inputs] = await Promise.all([
+    const fresh = reset || !this.model;
+    const [session, page, approvals, inputs] = await Promise.all([
       this.api.request<Session>(path, { signal }),
-      this.api.request<Page<SessionEvent>>(`${path}/events?tail=true&limit=100`, { signal }),
+      fresh ? this.api.request<ViewPage>(`${path}/view?limit=20`, { signal }) : Promise.resolve(undefined),
       this.allPending(`/approvals?sessionId=${segment(id)}&status=pending&limit=200`, signal),
       this.allPending(`/user-input?sessionId=${segment(id)}&status=pending&limit=200`, signal),
     ]);
@@ -413,30 +435,46 @@ export class ControlState {
       updates.forEach((p, id) => rows.set(id, p));
       return [...rows.values()].filter(p => p.status === "pending");
     };
-    // A cached transcript too old to meet the fresh tail restarts from the tail (plus SSE received meanwhile).
-    if (!reset && history.hasMore && !history.data.some(e => known.has(e.eventId))) {
-      reset = true; this.patch({ events: this.state.events.filter(e => !known.has(e.eventId)) });
-    }
+    if (page) this.model = ConversationModel.fromPage(page);
     // SSE received while GETs were pending wins for mutable resources.
     this.patch({ session: revision === this.revision ? session : { ...session, ...this.state.session, capabilities: session.capabilities },
       approvals: mergePending(approvals, this.approvalUpdates),
-      inputs: mergePending(inputs, this.inputUpdates),
-      events: reset ? mergeEvents(history.data, this.state.events) : mergeTail(this.state.events, history.data),
-      updatedAt: Date.now() });
-    if (reset) { this.before = history.nextCursor; this.patch({ historyMore: history.hasMore }); }
+      inputs: mergePending(inputs, this.inputUpdates), updatedAt: Date.now() });
+    this.showModel();
+    if (!page) void this.pull();
     this.releaseProjection();
   }
   async moreHistory() {
-    if (this.state.moreLoading || !this.before) return;
-    const generation = this.generation, id = this.state.route.id!, before = this.before;
+    const model = this.model, before = model?.entriesBefore;
+    if (this.state.moreLoading || !model || !before) return;
+    const generation = this.generation, id = this.state.route.id!;
     this.patch({ moreLoading: true, error: "" });
     try {
-      const page = await this.api.request<Page<SessionEvent>>(`/sessions/${segment(id)}/events?tail=true&limit=100&before=${segment(before)}`, { signal: this.scope.signal });
-      if (generation !== this.generation) return;
-      this.before = page.nextCursor;
-      this.patch({ events: mergeEvents(page.data, this.state.events), historyMore: page.hasMore });
-    } catch (e) { if (generation === this.generation && !this.scope.signal.aborted) this.patch({ error: explain(e) }); }
+      const page = await this.api.request<ViewPage>(`/sessions/${segment(id)}/view?limit=20&before=${segment(before)}`, { signal: this.scope.signal });
+      if (generation !== this.generation || this.model !== model) return;
+      if (model.applyOlder(page).kind === "reset") await this.loadDetail(id, generation, true);
+      else this.showModel();
+    } catch (e) {
+      if (generation !== this.generation || this.scope.signal.aborted) return;
+      // The order changed under the page cursor: start again from the latest page.
+      if (e instanceof ApiError && e.code === "cursor_expired") await this.loadDetail(id, generation, true).catch(() => {});
+      else this.patch({ error: explain(e) });
+    }
     finally { if (generation === this.generation) this.patch({ moreLoading: false }); }
+  }
+  /** The earlier items of a long turn. */
+  async moreItems(key: string, before: number) {
+    const model = this.model, id = this.state.route.id, generation = this.generation;
+    if (!model || !id) return;
+    try {
+      const page = await this.api.request<{ entry: EntryView }>(`/sessions/${segment(id)}/view/entries/${segment(key)}?before=${before}`, { signal: this.scope.signal });
+      if (generation !== this.generation || this.model !== model) return;
+      model.applyEntryItems(page.entry); this.showModel();
+    } catch (e) { if (generation === this.generation && !this.scope.signal.aborted) this.patch({ error: explain(e) }); }
+  }
+  /** A whole event, for an item the view trimmed. */
+  fullEvent(eventId: string) {
+    return this.api.request<SessionEvent>(`/sessions/${segment(this.state.route.id!)}/events/${segment(eventId)}`, { signal: this.scope.signal });
   }
   async loadList(more: boolean, generation = this.generation) {
     if (more && this.state.moreLoading) return;
@@ -538,8 +576,8 @@ export class ControlState {
     const receipt = this.state.intent?.receipt;
     if (!this.projectionHold || !receipt) return;
     if (receipt.sessionId === this.state.session?.sessionId && (
-      isLive(this.state.session) || ["offline", "error", "unknown"].includes(this.state.session.status) || this.state.events.some(e =>
-        ["turn.completed", "turn.failed", "turn.interrupted"].includes(e.type) && Boolean(receipt.turnId) && e.turnId === receipt.turnId)
+      isLive(this.state.session) || ["offline", "error", "unknown"].includes(this.state.session.status) || this.state.entries.some(e =>
+        e.closure.kind === "terminal" && Boolean(receipt.turnId) && e.turnId === receipt.turnId)
       || receipt.kind === "create_session" && !this.state.intent?.body.input)) this.projectionHold = false;
   }
   private async reconcileAction() {

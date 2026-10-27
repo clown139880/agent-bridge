@@ -1,44 +1,45 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { transcriptRows, transcriptTurns, turnPresentation } from '../apps/control-center/src/transcript.js';
-import type { SessionEvent } from '../apps/control-center/src/api/types.js';
-const event = (id: string, type: string, payload: Record<string, unknown> = {}, turnId: string | null = 'one', itemId?: string): SessionEvent =>
-  ({ eventId: id, cursor: id, sessionId: 'session', type, payload, turnId, itemId, timestamp: Number(id) * 1000 });
+import { projectEntry, type ViewItem, type WireEvent } from '../packages/transcript/src/index.js';
 
-test('one remote turn retains tools and commentary in order with one final reply', () => {
-  const rows = [event('1','turn.started'), event('2','message.completed',{role:'user',text:'hello'}),
-    event('3','message.completed',{role:'assistant',text:'checking'}), event('4','tool.started',{},'one','call'),
-    event('5','command.completed',{output:'result'},'one','call'), event('6','message.completed',{role:'assistant',text:'done'}), event('7','turn.completed')];
-  const [turn] = transcriptTurns(rows);
-  assert.equal(transcriptTurns(rows).length, 1); assert.equal(turn.status,'completed'); assert.equal(turn.durationMs,6000);
-  const view = turnPresentation(turn);
-  assert.deepEqual(view.prompts.map(r=>r.event.payload.text),['hello']);
-  assert.deepEqual(view.process.map(r=>r.event.eventId),['3','5']); assert.equal(view.final?.event.payload.text,'done');
-});
-test('reused tool ids from different turns never overwrite one another', () => {
-  const rows=transcriptRows([event('1','tool.started',{},'one','call'),event('2','tool.completed',{},'one','call'),event('3','tool.completed',{},'two','call')]);
-  assert.deepEqual(rows.map(r=>r.event.eventId),['2','3']);
-});
-test('partial pages never invent a start time or completed status', () => {
-  const [turn]=transcriptTurns([event('3','tool.completed'),event('4','message.completed',{role:'assistant',text:'answer'})]);
-  assert.equal(turn.partial,true);assert.equal(turn.status,'unknown');assert.equal(turn.durationMs,undefined);
-});
-test('steered prompts stay between their surrounding output rather than moving to the beginning', () => {
-  const turns=transcriptTurns([event('1','turn.started'),event('2','message.completed',{role:'user',text:'first'}),event('3','tool.completed'),event('4','message.completed',{role:'user',text:'steer'}),event('5','turn.interrupted')]);
-  assert.equal(turns.length,2);assert.equal(turns[1].status,'interrupted');
-  assert.deepEqual(turns.flatMap(t=>t.rows).map(r=>r.event.eventId),['1','2','3','4','5']);
-});
-test('commentary followed by work is not promoted to a final answer', () => {
-  const [turn]=transcriptTurns([event('1','message.completed',{role:'assistant',text:'working'}),event('2','tool.started')]);
-  assert.equal(turnPresentation(turn).final,undefined);
-});
+const event = (seq: number, type: string, payload: Record<string, unknown> = {}, turnId: string | null = 'one', itemId?: string) =>
+  ({ seq, eventId: String(seq), cursor: `e:${seq}`, sessionId: 'session', type, payload, turnId, itemId, timestamp: seq * 1000 }) as WireEvent & { seq: number };
+const entry = (events: Array<WireEvent & { seq: number }>, superseded = false) => projectEntry({ key: 't:one', events, superseded });
+
+async function render(view: ReturnType<typeof entry>, options: { mode?: 'standard' | 'verbose'; session?: Record<string, unknown> } = {}) {
+  const { createElement, renderToStaticMarkup } = await import('../apps/control-center/test/render.js');
+  const { TurnView } = await import('../apps/control-center/src/turn-view.js');
+  const paint = (item: ViewItem) => createElement('p', {}, String(item.event.payload.text ?? item.event.payload.output ?? item.event.type));
+  return renderToStaticMarkup(createElement(TurnView, { entry: view, mode: options.mode ?? 'standard', session: options.session as never, render: paint }));
+}
+
 test('settled work folds but prompts and answers remain visible; failed work stays open', async () => {
-  const {createElement,renderToStaticMarkup}=await import('../apps/control-center/test/render.js');
-  const {TurnView}=await import('../apps/control-center/src/turn-view.js');
-  const [turn]=transcriptTurns([event('1','turn.started'),event('2','message.completed',{role:'user',text:'prompt'}),event('3','tool.completed',{output:'private tool output'}),event('4','message.completed',{role:'assistant',text:'answer'}),event('5','turn.completed')]);
-  const render=(e:SessionEvent)=>createElement('p',{},String(e.payload.text??e.payload.output??e.type));
-  const html=renderToStaticMarkup(createElement(TurnView,{turn,mode:'standard',render}));
-  assert.match(html,/prompt/);assert.match(html,/answer/);assert.doesNotMatch(html,/private tool output/);assert.match(html,/aria-expanded="false"/);
-  const failed=renderToStaticMarkup(createElement(TurnView,{turn:{...turn,status:'failed'},mode:'standard',render}));
-  assert.match(failed,/private tool output/);assert.match(failed,/aria-expanded="true"/);
+  const view = entry([event(1, 'turn.started'), event(2, 'message.completed', { role: 'user', text: 'prompt' }),
+    event(3, 'tool.completed', { output: 'private tool output' }, 'one', 'x'), event(4, 'message.completed', { role: 'assistant', text: 'answer' }), event(5, 'turn.completed')]);
+  const html = await render(view);
+  assert.match(html, /prompt/); assert.match(html, /answer/); assert.doesNotMatch(html, /private tool output/); assert.match(html, /aria-expanded="false"/);
+  assert.match(html, /已完成/);
+  const failed = await render({ ...view, status: 'failed' });
+  assert.match(failed, /private tool output/); assert.match(failed, /aria-expanded="true"/);
+});
+
+test('a started turn is running only while the session says so', async () => {
+  const view = entry([event(1, 'turn.started'), event(2, 'message.completed', { role: 'user', text: 'q' }), event(3, 'tool.completed', {}, 'one', 'x')]);
+  assert.match(await render(view, { session: { activeTurnId: 'one', status: 'active' } }), /正在执行/);
+  const idle = await render(view, { session: { activeTurnId: null, status: 'idle' } });
+  assert.doesNotMatch(idle, /正在执行/); assert.match(idle, /执行记录/);
+});
+
+test('output after a terminal event is shown as continued activity', async () => {
+  const view = entry([event(1, 'turn.started'), event(2, 'turn.completed'), event(3, 'command.completed', { output: 'late' }, 'one', 'y')]);
+  assert.match(await render(view), /之后仍有活动/);
+});
+
+test('a steering prompt splits the turn in place, each part with its own answer', async () => {
+  const view = entry([event(1, 'message.completed', { role: 'user', text: 'first' }), event(2, 'tool.completed', {}, 'one', 'x'),
+    event(3, 'message.completed', { role: 'user', text: 'steer' }), event(4, 'message.completed', { role: 'assistant', text: 'done' }), event(5, 'turn.interrupted')]);
+  const html = await render(view);
+  assert.equal(html.match(/execution-turn/g)?.length, 2);
+  assert.ok(html.indexOf('first') < html.indexOf('steer') && html.indexOf('steer') < html.indexOf('done'));
+  assert.match(html, /已中断/);
 });

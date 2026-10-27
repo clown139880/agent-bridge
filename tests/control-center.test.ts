@@ -5,7 +5,8 @@ import test from "node:test";
 import { createControlWeb } from "../apps/control-plane/src/web/app.js";
 import { ControlClient, ApiError } from "../apps/control-center/src/api/client.js";
 import { consumeStream, SseParser, StreamLimitError } from "../apps/control-center/src/api/stream.js";
-import { ControlState, mergeTail, type DetailCache, type DetailStore } from "../apps/control-center/src/state.js";
+import { ControlState, type DetailCache, type DetailStore } from "../apps/control-center/src/state.js";
+import { projectEntry, type EntryView } from "../packages/transcript/src/index.js";
 import type { Envelope, Session, SessionEvent, Snapshot } from "../apps/control-center/src/api/types.js";
 import { takeShare } from "../apps/control-center/src/native/uctw.js";
 
@@ -19,6 +20,10 @@ const snapshot: Snapshot = { sessions: [session], workers: [{ id: "claude@test",
   approvals: [], userInput: [], streamCursor: "c:0:0", truncated: { sessions: false } };
 const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } });
 const flush = () => new Promise<void>(r => setTimeout(r, 15));
+/** A one-message turn as the view API serves it. */
+const viewEntry = (id: string, anchor: number, rev: number): EntryView => ({ ...projectEntry({ key: `t:${id}`, superseded: false,
+  events: [{ seq: anchor, eventId: id, cursor: `e:${anchor}`, sessionId: "s", type: "message.completed", turnId: id, timestamp: anchor, payload: { role: "assistant", text: id } }] }), rev });
+const emptyView = { projectionVersion: 1, viewRevision: 0, orderingEpoch: 0, rawHigh: 0, entries: [], entriesBefore: null, streamCursor: "c:0:0" };
 
 test("web routes constrain SPA fallback, traversal, caching, missing build and security headers", async () => {
   await mkdir(resolve(".runtime/tests"), { recursive: true });
@@ -91,6 +96,7 @@ test("stream decoder preserves split UTF-8 and refuses an oversized unapplied qu
 function fixture(t: test.TestContext, options: { live?: boolean; store?: DetailStore; history?: () => unknown; write?: (init: RequestInit) => Response | Promise<Response>; detail?: () => Promise<Response>; action?: () => Promise<Response> } = {}) {
   let wire: ReadableStreamDefaultController<Uint8Array> | undefined;
   let streamCalls = 0, cancels = 0, current = { ...session, ...(options.live ? { status: "active", activeTurnId: "t1" } : {}) };
+  const view = { rev: 1, raw: 1, epoch: 0, entries: [viewEntry("history", 1, 1)] };
   const requests: { path: string; init: RequestInit }[] = [];
   t.mock.method(globalThis, "fetch", async (path: string, init: RequestInit) => {
     requests.push({ path, init });
@@ -101,8 +107,14 @@ function fixture(t: test.TestContext, options: { live?: boolean; store?: DetailS
     if (init.method === "POST") return options.write ? options.write(init) : json({ actionId: "a", kind: "submit_turn", status: "succeeded", sessionId: "s", turnId: "new-turn" });
     if (path.includes("/snapshot")) return json({ ...snapshot, sessions: [current] });
     if (path === "/api/v1/sessions/s") return options.detail ? options.detail() : json(current);
-    if (path.includes("/events") && options.history) return json(options.history());
-    if (path.includes("/events")) return json({ data: [{ eventId: "history", cursor: "e:1", sessionId: "s", type: "message.completed", payload: { role: "assistant", text: "History" } }], nextCursor: null, hasMore: false });
+    if (path.includes("/view/changes")) {
+      const query = new URL(path, "http://x").searchParams, since = Number(query.get("since")), after = Number(query.get("rawAfter"));
+      return json({ projectionVersion: 1, fromRevision: since, toRevision: view.rev, hasMore: false, orderingEpoch: view.epoch,
+        entries: view.entries.filter(e => e.rev > since), removed: [], raw: { after, through: view.raw, count: view.raw - after }, streamCursor: "c:0:0" });
+    }
+    if (path.includes("/view") && options.history) return json(options.history());
+    if (path.includes("/view")) return json({ projectionVersion: 1, viewRevision: view.rev, orderingEpoch: view.epoch, rawHigh: view.raw,
+      entries: view.entries, entriesBefore: null, streamCursor: "c:0:0" });
     if (path.startsWith("/api/v1/sessions?")) return json({ data: [current], hasMore: false, nextCursor: null });
     if (path === "/api/v1/workers") return json({ workers: snapshot.workers });
     if (path.startsWith("/api/v1/actions/")) return options.action ? options.action() : json({ actionId: "a", kind: "submit_turn", status: "accepted", sessionId: "s" });
@@ -110,56 +122,66 @@ function fixture(t: test.TestContext, options: { live?: boolean; store?: DetailS
   });
   const state = new ControlState("test-token", true, snapshot, () => {}, () => {}, "/api/v1", options.store);
   t.after(() => state.dispose());
-  return { state, requests, setSession: (s: Partial<Session>) => { current = { ...current, ...s }; },
-    emit: (e: Envelope) => wire!.enqueue(new TextEncoder().encode(frame(e))),
+  const emit = (e: Envelope) => wire!.enqueue(new TextEncoder().encode(frame(e)));
+  return { state, requests, view, setSession: (s: Partial<Session>) => { current = { ...current, ...s }; }, emit,
+    /** The server records a new turn and announces the session's new view revision. */
+    write: (id: string, cursor = id) => {
+      view.rev++; view.raw++; view.entries.push(viewEntry(id, view.raw, view.rev));
+      emit(event(cursor, "session.updated", { ...current, viewRevision: view.rev }));
+    },
     stats: () => ({ streamCalls, cancels }) };
 }
 
-test("active detail merges SSE with history, keeps pending, and stops all streaming while hidden", async t => {
+test("active detail follows view revisions with changes, keeps pending, and stops all streaming while hidden", async t => {
   const f = fixture(t, { live: true });
   await f.state.open({ page: "detail", id: "s" });
-  f.emit(event("1")); f.emit(event("2", "approval.upserted", { id: "p", sessionId: "s", status: "pending", summary: "Approve" }));
-  await flush(); assert.equal(f.state.snapshot().events.length, 2); assert.equal(f.state.snapshot().approvals.length, 1);
-  f.emit(event("1")); await flush(); assert.equal(f.state.snapshot().events.length, 2);
+  f.write("1"); f.emit(event("2", "approval.upserted", { id: "p", sessionId: "s", status: "pending", summary: "Approve" }));
+  await flush(); assert.deepEqual(f.state.snapshot().entries.map(e => e.key), ["t:history", "t:1"]); assert.equal(f.state.snapshot().approvals.length, 1);
+  assert.equal(f.state.snapshot().rawAdded, 1);
+  f.emit(event("3", "session.updated", { ...session, status: "active", activeTurnId: "t1", viewRevision: f.view.rev })); await flush();
+  assert.equal(f.state.snapshot().entries.length, 2); assert.equal(f.state.snapshot().rawAdded, 1, "a repeated revision fetches nothing new");
   f.state.setVisible(false); await flush(); assert.equal(f.stats().cancels, 1);
   assert.equal(f.state.snapshot().connection, "后台已暂停");
   f.state.setVisible(true); await flush(); assert.equal(f.stats().streamCalls, 2);
   const streamRequests = f.requests.filter(v => v.path === "/api/v1/stream");
-  assert.equal(new Headers(streamRequests[1].init.headers).get("last-event-id"), "c:2:0");
+  assert.equal(new Headers(streamRequests[1].init.headers).get("last-event-id"), "c:3:0");
 });
 
 test("returning to a loaded detail (navigation or foreground) shows it at once and only catches up", async t => {
   const f = fixture(t, { live: true });
   await f.state.open({ page: "detail", id: "s" });
-  f.emit(event("1")); await flush();
-  assert.deepEqual(f.state.snapshot().events.map(e => e.eventId), ["history", "1"]);
+  f.write("1"); await flush();
+  assert.deepEqual(f.state.snapshot().entries.map(e => e.key), ["t:history", "t:1"]);
   await f.state.open({ page: "sessions" });
   const back = f.state.open({ page: "detail", id: "s" });
   // Synchronously after navigating back: cached content, no page-wide loading state.
   let view = f.state.snapshot();
   assert.equal(view.loading, false); assert.equal(view.syncing, true); assert.equal(view.session?.sessionId, "s");
-  assert.deepEqual(view.events.map(e => e.eventId), ["history", "1"]);
+  assert.deepEqual(view.entries.map(e => e.key), ["t:history", "t:1"]);
   await back; view = f.state.snapshot();
-  assert.equal(view.syncing, false); assert.deepEqual(view.events.map(e => e.eventId), ["history", "1"]);
+  assert.equal(view.syncing, false); assert.deepEqual(view.entries.map(e => e.key), ["t:history", "t:1"]);
+  assert.equal(f.requests.filter(r => /\/view\?/.test(r.path)).length, 1, "a held conversation catches up through changes");
   f.state.setVisible(false); f.state.setVisible(true);
   view = f.state.snapshot();
-  assert.equal(view.loading, false); assert.equal(view.syncing, true); assert.equal(view.events.length, 2);
-  await flush(); assert.equal(f.state.snapshot().syncing, false); assert.equal(f.state.snapshot().events.length, 2);
+  assert.equal(view.loading, false); assert.equal(view.syncing, true); assert.equal(view.entries.length, 2);
+  await flush(); assert.equal(f.state.snapshot().syncing, false); assert.equal(f.state.snapshot().entries.length, 2);
 });
 
-test("recent details persist through the store and a stale cache restarts from the fresh tail", async t => {
-  const ev = (id: string) => event(id).data as SessionEvent;
+test("recent details persist through the store and a cache from another ordering reloads the latest page", async t => {
   const saved: DetailCache[][] = [];
-  const cached: DetailCache = { session, events: [ev("a"), ev("b")], approvals: [], inputs: [], before: "e:a", historyMore: true, savedAt: Date.now() };
-  const f = fixture(t, { store: { entries: [cached], save: v => saved.push(v) },
-    history: () => ({ data: [ev("x"), ev("y")], nextCursor: "e:x", hasMore: true }) });
+  const cached: DetailCache = { session, approvals: [], inputs: [], savedAt: Date.now(), view: { projectionVersion: 1, viewRevision: 1,
+    orderingEpoch: 0, rawHigh: 1, entries: [viewEntry("a", 1, 1), viewEntry("b", 2, 1)], entriesBefore: "v:0:1" } };
+  const f = fixture(t, { store: { entries: [cached], save: v => saved.push(v) } });
+  f.view.epoch = 1; f.view.rev = 7; f.view.entries = [viewEntry("x", 5, 6), viewEntry("y", 6, 7)];
   const opening = f.state.open({ page: "detail", id: "s" });
-  assert.deepEqual(f.state.snapshot().events.map(e => e.eventId), ["a", "b"], "restored before any request answers");
-  assert.equal(f.state.snapshot().loading, false);
-  await opening;
-  assert.deepEqual(f.state.snapshot().events.map(e => e.eventId), ["x", "y"], "no overlap with a longer tail: no silent gap");
-  assert.deepEqual(saved.at(-1)!.map(c => c.events.map(e => e.eventId)), [["x", "y"]]);
-  assert.equal(saved.at(-1)![0].before, "e:x");
+  assert.deepEqual(f.state.snapshot().entries.map(e => e.key), ["t:a", "t:b"], "restored before any request answers");
+  assert.equal(f.state.snapshot().loading, false); assert.equal(f.state.snapshot().historyMore, true);
+  await opening; await flush();
+  assert.deepEqual(f.state.snapshot().entries.map(e => e.key), ["t:x", "t:y"], "a changed order never patches the cached entries");
+  assert.equal(f.state.snapshot().rawAdded, 0);
+  await f.state.open({ page: "sessions" });
+  assert.deepEqual(saved.at(-1)!.map(c => c.view.entries.map(e => e.key)), [["t:x", "t:y"]]);
+  assert.equal(saved.at(-1)![0].view.orderingEpoch, 1);
 });
 
 test("the UCTW bridge rings for new requests and finished turns, and its absence or failure is harmless", async t => {
@@ -176,7 +198,7 @@ test("the UCTW bridge rings for new requests and finished turns, and its absence
   assert.deepEqual(calls, ["sound:approval", "haptic:warning", "sound:done", "haptic:success"]);
   g.window = { uctw: { version: () => 1, sound: () => { throw new Error("gone"); }, haptic: () => {} } };
   f.emit(event("f", "session.event.appended", { eventId: "f", cursor: "e:f", sessionId: "s", type: "turn.failed", payload: {} }));
-  await flush(); assert.equal(f.state.snapshot().events.at(-1)?.eventId, "f");
+  await flush(); assert.equal(f.state.snapshot().error, "");
 });
 
 test("UCTW v2 shares: parsed defensively, filled into a sendable detail (never sent), otherwise held for the picker", async t => {
@@ -222,19 +244,22 @@ test("GET baseline never overwrites newer SSE status or loses pending fetched be
   assert.equal(f.state.snapshot().session?.status, "active"); assert.equal(f.state.snapshot().approvals.length, 1);
 });
 
-test("idle detail does not leave a permanent stream and a successful start retains observation until projection arrives", async t => {
+test("a visible idle detail stays subscribed: an external client may report idle and keep writing", async t => {
   const f = fixture(t);
   await f.state.open({ page: "detail", id: "s" }); await flush();
-  assert.equal(f.stats().cancels, 1);
+  assert.equal(f.stats().cancels, 0);
+  f.write("late"); await flush();
+  assert.deepEqual(f.state.snapshot().entries.map(e => e.key), ["t:history", "t:late"]);
   f.state.setDraft("s", "Hello");
   await f.state.submit("/sessions/s/turns", { input: "Hello", delivery: "start_turn" }, "s"); await flush();
   assert.equal(f.state.snapshot().intent?.receipt?.status, "succeeded");
-  assert.equal(f.stats().cancels, 1, "do not close on the old idle projection immediately after POST succeeds");
+  assert.equal(f.stats().cancels, 0);
   f.setSession({ status: "active", activeTurnId: "new-turn" });
   f.emit(event("2", "session.updated", { ...session, status: "active", activeTurnId: "new-turn" })); await flush();
   f.setSession({ status: "idle", activeTurnId: null });
   f.emit(event("3", "session.updated", session)); await flush();
-  assert.equal(f.stats().cancels, 2); assert.equal(f.state.snapshot().drafts.s, "");
+  assert.equal(f.stats().cancels, 0); assert.equal(f.state.snapshot().drafts.s, "");
+  f.state.setVisible(false); await flush(); assert.equal(f.stats().cancels, 1, "only leaving the page closes it");
 });
 
 test("a reconcile answer older than action.updated cannot undo the action's result", async t => {
@@ -314,11 +339,6 @@ test("read mode refuses writes without probing server permission", async t => {
   await state.submit("/sessions", { workerId: "claude@test", workspace: "/repo" }); assert.equal(calls, 0);
 });
 
-test("final tail fills a missing event between known anchors without moving loaded older history", () => {
-  const events = ["old", "a", "b", "c", "new"].map(id => event(id).data as import("../apps/control-center/src/api/types.js").SessionEvent);
-  assert.deepEqual(mergeTail([events[0], events[1], events[3]], [events[1], events[2], events[3], events[4]]).map(e => e.eventId), ["old", "a", "b", "c", "new"]);
-});
-
 test("unauthorized response invalidates authentication, forbidden remains a scope error", async t => {
   let logout = 0; const client = new ControlClient("read", () => logout++); t.after(() => client.dispose());
   t.mock.method(globalThis, "fetch", async () => json({ error: { code: "forbidden", message: "write required" } }, 403));
@@ -387,14 +407,6 @@ test("the list asks for prompt order and shows the snapshot in it until the firs
   assert.match(requests.find(p => p.startsWith("/api/v1/sessions?"))!, /sort=lastPromptAt&order=desc/);
 });
 
-test("a tool call is one transcript row, at its start, showing its latest event", async () => {
-  const { transcriptRows } = await import("../apps/control-center/src/transcript.js");
-  const e = (eventId: string, type: string, itemId?: string): SessionEvent => ({ eventId, cursor: `e:${eventId}`, sessionId: "s", type, turnId: "t", itemId, timestamp: 1, payload: {} });
-  const rows = transcriptRows([e("prompt", "message.completed"), e("start", "tool.started", "call"), e("reply", "message.completed"),
-    e("done", "command.completed", "call"), e("loose", "tool.completed")]);
-  assert.deepEqual(rows.map(r => [r.key, r.event.eventId]), [["prompt", "prompt"], ["start", "done"], ["reply", "reply"], ["loose", "loose"]]);
-});
-
 test("agent and machine identity: brand marks and a stable machine hue outside the green band", async () => {
   const { createElement, renderToStaticMarkup } = await import("../apps/control-center/test/render.js");
   const { agentKind, machineHue, Origin } = await import("../apps/control-center/src/identity.js");
@@ -420,6 +432,7 @@ test("unread badges count Agent replies since this device last showed the sessio
     if (path === "/api/v1/sessions/s") return json({ ...listed, messageCount: 6 });
     if (path.includes("/snapshot")) return json({ ...snapshot, sessions: [listed, other] });
     if (path.startsWith("/api/v1/workers")) return json({ workers: snapshot.workers });
+    if (path.includes("/view")) return json(emptyView);
     return json({ data: [], hasMore: false, nextCursor: null });
   });
   const state = new ControlState("test-token", true, { ...snapshot, sessions: [listed, other] }, () => {}, () => {}, "/api/v1", store);

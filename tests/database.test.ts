@@ -188,7 +188,7 @@ test("a 0.4.2 database upgrades transactionally to the Agent Control schema", ()
   `);legacy.close();
   const store=new Store(path);
   const version=store.db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get() as {version:number};
-  assert.equal(version.version,13);
+  assert.equal(version.version,14);
   const tables=(store.db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{name:string}>).map(row=>row.name);
   for(const table of ["pending_requests","actions","idempotency_keys","stream_changes","event_search","deleted_sessions","attachments",
     "deleted_workers","conversation_collection_gaps"])
@@ -199,15 +199,15 @@ test("a 0.4.2 database upgrades transactionally to the Agent Control schema", ()
   assert.equal(session.activity_status,"idle");assert.equal(session.source,"app-server");
   assert.equal(session.last_response_at,null);assert.equal(session.updated_at,1);
   // Reopening proves the versioned migration is idempotent.
-  store.db.close();const reopened=new Store(path);assert.equal((reopened.db.prepare("SELECT COUNT(*) AS n FROM schema_migrations").get() as any).n,14);
+  store.db.close();const reopened=new Store(path);assert.equal((reopened.db.prepare("SELECT COUNT(*) AS n FROM schema_migrations").get() as any).n,15);
   reopened.db.close();rmSync(path,{force:true});
 });
 
 test("version 8 folds every retained copy into one event row per upstream event", () => {
   const path=join(tmpdir(),`agent-bridge-v8-${randomUUID()}.sqlite`);
-  // Build a version-7 database: mark 8 (and 10, 12 and 13, which read the v8 schema) applied, fill v7 tables, then unmark 8 and reopen.
+  // Build a version-7 database: mark 8 (and 10, 12, 13 and 14, which read the v8 schema) applied, fill v7 tables, then unmark 8 and reopen.
   const seed=new DatabaseSync(path);
-  seed.exec("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL); INSERT INTO schema_migrations VALUES (8,0),(10,0),(12,0),(13,0)");
+  seed.exec("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL); INSERT INTO schema_migrations VALUES (8,0),(10,0),(12,0),(13,0),(14,0)");
   seed.close();
   const v7=new Store(path);
   v7.upsertMachine({id:"dev",name:"dev",platform:"linux",hostname:"dev",capabilities:[]});
@@ -231,7 +231,7 @@ test("version 8 folds every retained copy into one event row per upstream event"
   const cold=Number((v7.db.prepare("SELECT sequence FROM conversation_messages WHERE message_id='m2'").get() as {sequence:number}).sequence);
   v7.db.prepare("INSERT INTO conversation_messages_fts(rowid,content) VALUES (?,?)").run(cold,"cold prompt");
   v7.db.prepare("INSERT INTO stream_events(event_id,type,resource_kind,resource_id,payload,created_at) VALUES ('s','x','session','thread','{}',1)").run();
-  v7.db.prepare("DELETE FROM schema_migrations WHERE version=8").run();
+  v7.db.prepare("DELETE FROM schema_migrations WHERE version IN (8,14)").run();
   v7.db.close();
 
   const store=new Store(path);

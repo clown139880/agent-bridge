@@ -15,6 +15,7 @@ import { ActivityStore } from './activity.js'
 import { ActivityDock, ActivityTasksButton } from './activity-dock.js'
 
 import { SessionStore, type BridgeRpc } from './session-store.js'
+import { ConversationPanel } from './conversation-view.js'
 import { SessionCreationController, SessionSourcePicker, type CreationSessions, type CreationWorkspaces, type CreationNavigation } from './session-creation.js'
 import { NativeModels, installBridgeModelDirectories } from './bridge-model-directory.js'
 
@@ -152,6 +153,8 @@ function WorkspaceOverlay({ controller, page = false }: Injected & { page?: bool
   const [data, setData] = useState<RecordValue>()
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+  // A Bridge conversation read from the Bridge view in this panel, without a native session.
+  const [conversation, setConversation] = useState<string>()
   const requestEpoch = useRef(0)
   const refreshing = useRef(false)
   const refresh = useCallback(async () => {
@@ -172,12 +175,13 @@ function WorkspaceOverlay({ controller, page = false }: Injected & { page?: bool
     const timer = setInterval(() => { void refresh() }, 5000)
     return () => { clearInterval(timer); requestEpoch.current++ }
   }, [open, refresh])
-  const content = useMemo(() => data ? <Overview data={data} openSession={controller.openSession} refresh={refresh} /> : null, [data, refresh, controller])
+  const content = useMemo(() => data ? <Overview data={data} openSession={setConversation} refresh={refresh} /> : null, [data, refresh])
   if (!open) return null
   return <div ref={ref} tabIndex={-1} className={`${css.workspace} ${page ? css.workspacePanel : ''}`} role={page ? 'region' : 'dialog'} aria-modal={page ? undefined : true} aria-label="Agent Control workspace" aria-busy={loading}>
     <header className={css.topbar}><div className={css.title}><span className={css.logo}>AC</span><div><strong>Agent 控制台</strong><small>机器与对话</small></div></div><div className={css.topActions}><button type="button" aria-label="Refresh Agent Control" onClick={() => void refresh()} disabled={loading}>{loading ? '刷新中…' : '↻ 刷新'}</button>{!page && <button type="button" onClick={controller.close}>关闭</button>}</div></header>
     {controller.error && <div className={css.error} role="alert">{controller.error}</div>}
-    {error ? <ErrorBanner error={error} retry={() => void refresh()} /> : !data ? <div role="status" className={css.loading}>正在加载…</div> : content}
+    {conversation ? <ConversationPanel store={controller.sessions} sessionId={conversation} onClose={() => setConversation(undefined)} openNative={controller.openSession} />
+      : error ? <ErrorBanner error={error} retry={() => void refresh()} /> : !data ? <div role="status" className={css.loading}>正在加载…</div> : content}
   </div>
 }
 

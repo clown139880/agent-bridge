@@ -1,5 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 import { decodeEventBody, encodeEventBody, indexEvent } from "./events.js";
+import { backfillViewKeys } from "./view.js";
 
 function columns(db: DatabaseSync, table: string): Set<string> {
   return new Set((db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((row) => row.name));
@@ -385,6 +386,27 @@ export function migrateDatabase(db: DatabaseSync): void {
         );
       `);
       db.prepare("INSERT INTO schema_migrations(version,applied_at) VALUES (13,?)").run(Date.now());
+      db.exec("COMMIT");
+    } catch (error) { try { db.exec("ROLLBACK"); } catch {} throw error; }
+  }
+
+  // The conversation view (view.ts): each event's view entry, and per-session revisions clients resume from.
+  if (!db.prepare("SELECT 1 FROM schema_migrations WHERE version=14").get()) {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      addColumn(db, "events", "view_key", "TEXT");
+      addColumn(db, "sessions", "view_revision", "INTEGER NOT NULL DEFAULT 0");
+      addColumn(db, "sessions", "ordering_epoch", "INTEGER NOT NULL DEFAULT 0");
+      addColumn(db, "sessions", "last_entry_key", "TEXT");
+      db.exec(`
+        CREATE TABLE view_dirty (
+          session_id TEXT NOT NULL, view_key TEXT NOT NULL, rev INTEGER NOT NULL, PRIMARY KEY(session_id, view_key)
+        ) WITHOUT ROWID;
+        CREATE INDEX view_dirty_rev_idx ON view_dirty(session_id, rev);
+      `);
+      backfillViewKeys(db);
+      db.exec("CREATE INDEX events_view_idx ON events(session_id, view_key, id)");
+      db.prepare("INSERT INTO schema_migrations(version,applied_at) VALUES (14,?)").run(Date.now());
       db.exec("COMMIT");
     } catch (error) { try { db.exec("ROLLBACK"); } catch {} throw error; }
   }

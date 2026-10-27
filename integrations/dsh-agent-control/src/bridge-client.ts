@@ -61,6 +61,11 @@ export class BridgeClient {
         const id = this.segment(textArg(args, 'sessionId')!)
         return this.request('GET', `/sessions/${id}/events?${query(args, ['after', 'before', 'tail', 'limit', 'type'])}`, undefined, undefined, signal)
       }
+      // The conversation view (Control Plane 0.7.25+): snapshot pages, changes since a revision, an entry's older items, one whole event.
+      case 'session_view': return this.request('GET', `/sessions/${this.segment(textArg(args, 'sessionId')!)}/view?${query(args, ['limit', 'before'])}`, undefined, undefined, signal)
+      case 'session_view_changes': return this.request('GET', `/sessions/${this.segment(textArg(args, 'sessionId')!)}/view/changes?${query(args, ['since', 'rawAfter'])}`, undefined, undefined, signal)
+      case 'session_view_entry': return this.request('GET', `/sessions/${this.segment(textArg(args, 'sessionId')!)}/view/entries/${this.segment(textArg(args, 'key')!)}?${query(args, ['before'])}`, undefined, undefined, signal)
+      case 'session_event': return this.request('GET', `/sessions/${this.segment(textArg(args, 'sessionId')!)}/events/${this.segment(textArg(args, 'eventId')!)}`, undefined, undefined, signal)
       case 'create_session': return this.write('/sessions', this.pick(args, ['workerId', 'workspace', 'input', 'model', 'reasoningEffort', 'attachments']), signal)
       case 'submit_turn': {
         const id = this.segment(textArg(args, 'sessionId')!)

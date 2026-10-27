@@ -8,6 +8,7 @@ import test from "node:test";
 import { WebSocket } from "ws";
 import { getRequestListener } from "../apps/control-plane/node_modules/@hono/node-server/dist/index.js";
 import { createControlWeb } from "../apps/control-plane/src/web/app.js";
+import { projectEntry } from "../packages/transcript/src/index.js";
 
 const browserDist = resolve(process.env.CONTROL_CENTER_TEST_DIST ?? "apps/control-center/dist");
 
@@ -25,10 +26,20 @@ test("mobile browser on non-secure HTTP: no-login entry, paging, history/SSE, se
   const summary = (id = "s-active") => ({ sessionId: id, workerId: worker.id, machineId: "test", agent: "claude-code",
     title: id === "s-active" ? "移动端验收会话" : id === "created" ? "新建验收会话" : `历史会话 ${id}`, projectName: "repo", workspace: "/work/repo",
     status: busy ? "active" : "idle", activeTurnId: busy ? turn : null, pendingApprovalCount: 0, pendingUserInputCount: 0,
-    createdAt: 1000, updatedAt: 2000, capabilities: worker.capabilities, historyCompleteness: "full", source: "fixture" });
-  const sessions = Array.from({ length: 53 }, (_, i) => summary(i === 0 ? "s-active" : `s-${i}`));
-  const events: any[] = Array.from({ length: 130 }, (_, i) => ({ eventId: `msg-${i}`, cursor: `e:${i}`, sessionId: "s-active", type: "message.completed", turnId: "old-turn",
+    createdAt: 1000, updatedAt: 2000, capabilities: worker.capabilities, historyCompleteness: "full", source: "fixture",
+    viewRevision: id === "s-active" ? events.length : id === "created" ? 1 : 0 });
+  const events: any[] = Array.from({ length: 130 }, (_, i) => ({ eventId: `msg-${i}`, cursor: `e:${i + 1}`, sessionId: "s-active", type: "message.completed", turnId: `old-${i >> 1}`,
     timestamp: 2000 + i, payload: { role: i % 2 ? "assistant" : "user", text: i === 129 ? "历史尾页最后一条" : `历史消息 ${i}` } }));
+  // The conversation view of s-active, projected like the Control Plane does (each event's sequence is its revision).
+  const viewEntries = () => {
+    const turns = new Map<string, any[]>();
+    events.forEach((e, i) => { const rows = turns.get(e.turnId) ?? []; rows.push({ ...e, seq: i + 1 }); turns.set(e.turnId, rows); });
+    return [...turns].map(([id, rows]) => ({ ...projectEntry({ key: `t:${id}`, events: rows, superseded: false }), rev: rows.at(-1).seq }));
+  };
+  const created = [{ ...projectEntry({ key: "t:created-turn", superseded: false, events: [{ seq: 1, eventId: "created-msg", cursor: "e:1", sessionId: "created",
+    type: "message.completed", turnId: "created-turn", timestamp: 5000, payload: { role: "user", text: "创建验收" } }] }), rev: 1 }];
+  const record = (event: any) => { events.push({ ...event, cursor: `e:${events.length + 1}` }); emit("session.updated", summary(), "s-active"); };
+  const sessions = Array.from({ length: 53 }, (_, i) => summary(i === 0 ? "s-active" : `s-${i}`));
   const emit = (type: string, data: any, sessionId: string | null = "s-active") => {
     const cursor = `c:${++streamId}:0`, value = { cursor, eventId: `wire-${streamId}`, type, sessionId, resource: { kind: "session", id: sessionId ?? "global" }, data };
     streams.forEach(r => r.write(`id: ${cursor}\nevent: bridge.event\ndata: ${JSON.stringify(value)}\n\n`));
@@ -60,7 +71,7 @@ test("mobile browser on non-secure HTTP: no-login entry, paging, history/SSE, se
           emit("session.updated", summary(id), id);
           actions.set(actionId, { actionId, kind, status: "succeeded", sessionId: id, turnId: turn });
           emit("action.updated", actions.get(actionId), id);
-          if (kind === "interrupt_turn") emit("session.event.appended", { eventId: "interrupted", cursor: "e:999", type: "turn.interrupted", turnId: turn, sessionId: id, timestamp: 4000, payload: {} }, id);
+          if (kind === "interrupt_turn") record({ eventId: "interrupted", type: "turn.interrupted", turnId: turn, sessionId: id, timestamp: 4000, payload: {} });
         }, 80).unref();
       }); return;
     }
@@ -71,10 +82,20 @@ test("mobile browser on non-secure HTTP: no-login entry, paging, history/SSE, se
       const filtered = q ? sessions.filter(s => s.title.includes(q)) : sessions;
       return send({ data: filtered.slice(start, start + 50), hasMore: start === 0 && filtered.length > 50, nextCursor: start === 0 ? "page-two" : null });
     }
-    if (url.pathname.endsWith("/events")) {
-      const end = url.searchParams.has("before") ? 30 : events.length;
-      const start = Math.max(0, end - 100);
-      return send({ data: events.slice(start, end), hasMore: start > 0, nextCursor: start > 0 ? "before-30" : null });
+    const view = url.pathname.match(/^\/api\/v1\/sessions\/([^/]+)\/view(\/changes)?$/);
+    if (view) {
+      const all = view[1] === "s-active" ? viewEntries() : view[1] === "created" ? created : [];
+      if (view[2]) {
+        const since = Number(url.searchParams.get("since")), after = Number(url.searchParams.get("rawAfter"));
+        const through = view[1] === "s-active" ? events.length : view[1] === "created" ? 1 : 0;
+        return send({ projectionVersion: 1, fromRevision: since, toRevision: through, hasMore: false, orderingEpoch: 0,
+          entries: all.filter(e => e.rev > since), removed: [], raw: { after, through, count: through - after }, streamCursor: `c:${streamId}:0` });
+      }
+      const before = Number(url.searchParams.get("before")?.split(":")[2] ?? Infinity);
+      const older = all.filter(e => e.anchor < before), page = older.slice(-20);
+      const revision = view[1] === "s-active" ? events.length : view[1] === "created" ? 1 : 0;
+      return send({ projectionVersion: 1, viewRevision: revision, orderingEpoch: 0, rawHigh: revision,
+        entries: page, entriesBefore: older.length > page.length ? `v:0:${page[0].anchor}` : null, streamCursor: `c:${streamId}:0` });
     }
     if (url.pathname.startsWith("/api/v1/sessions/")) { setTimeout(() => send(summary(url.pathname.split("/")[4])), slowDetailMs); return; }
     // Like the Control Plane: the client reconciles here when action.updated beats the POST response.
@@ -163,9 +184,13 @@ test("mobile browser on non-secure HTTP: no-login entry, paging, history/SSE, se
   await js("document.querySelector('.load-more').click()"); await wait("document.querySelectorAll('.session-row').length===53");
   await fill("#search", "移动端"); await js("document.querySelector('.filters').requestSubmit()"); await wait("document.querySelectorAll('.session-row').length===1");
   await js("document.querySelector('.session-row').click()"); await wait("document.body.innerText.includes('历史尾页最后一条') && document.body.innerText.includes('实时已连接')");
-  const newest = { eventId: "live-msg", cursor: "e:130", sessionId: "s-active", type: "message.completed", turnId: turn, timestamp: 4000, payload: { role: "assistant", text: "SSE 实时消息已到达" } };
-  events.push(newest); emit("session.event.appended", newest); await wait("document.body.innerText.includes('SSE 实时消息已到达')");
-  await js("document.querySelector('.transcript .load-more').click()"); await wait("document.body.innerText.includes('历史消息 0')");
+  record({ eventId: "live-msg", sessionId: "s-active", type: "message.completed", turnId: turn, timestamp: 4000, payload: { role: "assistant", text: "SSE 实时消息已到达" } });
+  await wait("document.body.innerText.includes('SSE 实时消息已到达')");
+  for (let page = 0; page < 3; page++) {
+    await js("document.querySelector('.transcript > .load-more').click()");
+    await wait(`!document.querySelector('.transcript > .load-more') || document.querySelectorAll('.execution-turn').length >= ${40 + page * 20}`);
+  }
+  await wait("document.body.innerText.includes('历史消息 0') && !document.querySelector('.transcript > .load-more')");
   // Switching back and forth (list and detail, background and foreground) keeps the page: no reload state, same place.
   // Sampled before every painted frame: what the user would actually see.
   const flashWatch = "window.__flash=false;window.__frames=0;requestAnimationFrame(function f(){window.__frames++;if(location.pathname.includes('/sessions/')&&(document.body.innerText.includes('正在读取会话')||!document.querySelector('.message')))window.__flash=true;if(window.__frames<120)requestAnimationFrame(f)});";
@@ -209,7 +234,7 @@ test("mobile browser on non-secure HTTP: no-login entry, paging, history/SSE, se
   await fill("#message", "补充一个要求", true); await pressEnter(2);
   await wait("document.body.innerText.includes('操作已被接受')"); assert.equal(writes[0].body.expectedTurnId, "turn-one"); assert.equal(writes[0].body.delivery, "steer");
   await wait("!document.querySelector('.interrupt').disabled");
-  await tap(".interrupt"); await wait("document.body.innerText.includes('本轮已打断')");
+  await tap(".interrupt"); await wait("document.body.innerText.includes('已中断')");
   assert.equal(writes[1].body.expectedTurnId, "turn-one");
   await command("Emulation.setDeviceMetricsOverride", { width: 390, height: 500, deviceScaleFactor: 1, mobile: true });
   await fill("#message", "继续已空闲的会话", true);

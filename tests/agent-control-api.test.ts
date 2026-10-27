@@ -606,3 +606,33 @@ test("a phantom waiting session with no pending rows can be deleted", async () =
     assert.equal((await response.json() as any).kind, "delete_session");
   } finally { await f.close(); }
 });
+
+test("conversation view: snapshot, changes woken by session.updated, entry windows and whole events", async () => {
+  const f = await fixture();
+  try {
+    const get = async (path: string) => { const r = await fetch(`${f.base}${path}`, { headers: f.headers }); return { status: r.status, body: await r.json() as Record<string, any> }; };
+    const snap = await get("/sessions/thread-1/view");
+    assert.equal(snap.status, 200);
+    assert.deepEqual(snap.body.entries.map((e: any) => e.key), ["t:initial-turn"]);
+    assert.equal(snap.body.projectionVersion, 1); assert.match(snap.body.streamCursor, /^c:/);
+    const stream = new AbortController();
+    const response = await fetch(`${f.base}/stream?sessionId=thread-1`, { headers: { ...f.headers, "last-event-id": snap.body.streamCursor }, signal: stream.signal });
+    const reader = response.body!.getReader();
+    await f.internals.handleBridgeMessage("dev", { type: "session.event", eventId: "late", eventType: "command.completed",
+      sessionId: "thread-1", turnId: "initial-turn", itemId: "c", timestamp: 3000, payload: { command: "ls", output: "x".repeat(5000) } });
+    let text = "";
+    while (!/"viewRevision":(\d+)/.test(text) || Number(/"viewRevision":(\d+)/.exec(text)![1]) <= snap.body.viewRevision) text += new TextDecoder().decode((await reader.read()).value);
+    stream.abort();
+    const changes = await get(`/sessions/thread-1/view/changes?since=${snap.body.viewRevision}&rawAfter=${snap.body.rawHigh}`);
+    assert.equal(changes.body.raw.count, 1); assert.equal(changes.body.hasMore, false);
+    const item = changes.body.entries[0].items.at(-1);
+    assert.equal(item.truncated, true);
+    const whole = await get(`/sessions/thread-1/events/${encodeURIComponent(item.event.eventId)}`);
+    assert.equal(String(whole.body.payload.output).length, 5000);
+    assert.equal((await get(`/sessions/thread-1/view/entries/${encodeURIComponent("t:initial-turn")}?before=1`)).status, 200);
+    assert.equal((await get(`/sessions/thread-1/view/entries/${encodeURIComponent("t:none")}`)).status, 404);
+    assert.equal((await get(`/sessions/thread-1/view/changes?since=999999`)).body.error.code, "invalid_cursor");
+    assert.equal((await get(`/sessions/missing/view`)).status, 404);
+    assert.equal((await get(`/sessions/thread-1/view?before=v:9:1`)).status, 410);
+  } finally { await f.close(); }
+});

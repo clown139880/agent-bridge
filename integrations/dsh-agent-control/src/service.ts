@@ -8,6 +8,7 @@ export interface AgentControlConfig { bridge: BridgeConfig }
 
 const BRIDGE_OPERATIONS = new Set<BridgeCall['operation']>([
   'workers', 'delete_worker', 'models', 'snapshot', 'sessions', 'session', 'delete_session', 'session_events', 'create_session', 'submit_turn',
+  'session_view', 'session_view_changes', 'session_view_entry', 'session_event',
   'interrupt_turn', 'approvals', 'approval', 'resolve_approval', 'user_input', 'user_input_request',
   'respond_user_input', 'action', 'upload', 'download',
 ])

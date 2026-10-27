@@ -1,6 +1,6 @@
 # 统一对话视图接口：设计与核对结论
 
-日期：2026-10-27。状态：设计评审完成，尚未实施。后续用户已确认：DSH 保留侧栏轻量目录，正文改用 Bridge 独立实时视图，不再复制全量历史到原生 session。
+日期：2026-10-27。状态：0.7.25 实施（服务端视图、Control Center、DSH 插件 0.3.0 面板），见文末“实施记录”。后续用户已确认：DSH 保留侧栏轻量目录，正文改用 Bridge 独立实时视图，不再复制全量历史到原生 session。
 
 用户要求 claude@hal 设计，由 Codex 对照代码核对。设计会话：
 `claude-1e4fc611-8cd1-4c3b-9bad-4c7f940304b7`。
@@ -170,3 +170,21 @@ DSH 后续改动仅升插件版本，按 Windows 插件发布流程安装与校�
 10. 新视图运行期间不再向对应 Bridge 原生 session 追加正文；旧历史保留、旧链接可达、重复目录项可控；普通 DSH 原生对话不受影响。
 
 评审结论：架构方向通过；上述恢复、分页、计数和 DSH 边界是实施约束，不得省略后再声称两端完全统一。
+
+## 实施记录（0.7.25 / DSH 插件 0.3.0）
+
+实施时把增量协议收敛为“SSE 只唤醒、内容由客户端拉取”，上文约束均满足，具体取舍：
+
+- 视图键在写入时确定并存于 `events.view_key`（`t:` 轮次、`o:` 无 turnId 内容段、`n:` 无 turnId 提示；
+  其余无 turnId 元数据不进视图）。元数据不切断内容段，也不依附前后轮次，因此没有 notes 依赖。
+- 每次写入或原地修订推进 `sessions.view_revision`，并在 `view_dirty` 记下受影响条目（含被新轮次取代的上一轮）。
+  修订改变条目归属时推进 `ordering_epoch`。投影在读取时计算，不持久化派生视图。
+- 不新增 SSE 帧：`session.updated` 携带 `viewRevision`，客户端据此请求 `view/changes`；断线重连后无条件拉一次。
+  changes 以完整修订为界分批，`hasMore=false` 即与该修订的完整投影一致；不存在 invalidated 中间态，
+  超大条目以窗口加 `itemsBefore` 与按 eventId 直读覆盖。
+- `raw` 计数由服务端按客户端提交的 `rawAfter` 精确计算，一问一答，不需要区间对齐。
+- Control Center 可见详情页始终保持订阅，不再因 idle 关流；红点、`markRead`、“↓N”语义不变。
+- DSH 插件在“Agent 控制台”面板内直接渲染 Bridge 视图（不创建原生 session、不读原生历史），
+  发送、中断、审批与提问走 Bridge 接口。原生导入链路暂时保留：Desktop 宿主没有可供插件切换主面板
+  或向原生侧栏添加非原生条目的接口，侧栏点击直达插件视图需在 Windows Desktop 上验证扩展点后再切换，
+  届时停止对应 import/syncHistory。

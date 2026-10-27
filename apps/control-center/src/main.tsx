@@ -6,7 +6,7 @@ import { clearDetailStore, openDetailStore } from "./cache";
 import { haptic, SHARE_EVENT, takeShare } from "./native/uctw";
 import { MessageText } from "./markdown";
 import { AgentIcon, machineStyle, Origin } from "./identity";
-import { TOOL_TYPES, transcriptTurns } from "./transcript";
+import { TOOL_TYPES } from "@agent-bridge/transcript";
 import { TurnView, DETAIL_MODES, type DetailMode } from "./turn-view";
 import { isLive, pendingId, segment, type Pending, type Session, type SessionEvent, type Snapshot } from "./api/types";
 import { canCompose, ControlState, unreadCount, type Route, type ViewState } from "./state";
@@ -389,8 +389,9 @@ function NewSession({ control, state }: { control: ControlState; state: ViewStat
 
 const RUNNING_TOOL = new Set(["tool.started", "task.started", "task.progress"]);
 /** One line per tool call: its first line, shown in place of the call's earlier events. */
-function ToolLine({ event, expanded = false }: { event: SessionEvent; expanded?: boolean }) {
-  const [open, setOpen] = useState(false);
+function ToolLine({ event: shown, expanded = false, load }: { event: SessionEvent; expanded?: boolean; load?: () => Promise<SessionEvent> }) {
+  const [open, setOpen] = useState(false), [whole, setWhole] = useState<SessionEvent | "loading" | "error">();
+  const event = typeof whole === "object" ? whole : shown;
   const p = event.payload;
   const text = String(typeof p.command === "string" ? `$ ${p.command}` : p.summary ?? p.description ?? p.name ?? event.type).trim().split("\n")[0] || event.type;
   const running = RUNNING_TOOL.has(event.type);
@@ -399,16 +400,19 @@ function ToolLine({ event, expanded = false }: { event: SessionEvent; expanded?:
   return <details open={expanded || open} className={`tool ${running ? "running" : ""} ${failed ? "failed" : ""}`} onToggle={e => setOpen(e.currentTarget.open)}>
     <summary><span className="tool-mark" aria-hidden="true">{{ command: "$", file: "✎", task: "◇", tool: "›" }[kind]}</span>
       <span className="tool-text">{text.replace(/^\$ /, "")}</span>{failed && <span className="tool-flag">失败</span>}</summary>
-    {(expanded || open) && <pre>{JSON.stringify(p, null, 2)}</pre>}</details>;
+    {(expanded || open) && <>{load && typeof whole !== "object" && <button type="button" className="quiet" disabled={whole === "loading"}
+      onClick={() => { setWhole("loading"); load().then(setWhole, () => setWhole("error")); }}>
+      {whole === "loading" ? "读取中…" : whole === "error" ? "读取失败，重试" : "内容已截断 · 加载完整内容"}</button>}
+      <pre>{JSON.stringify(p, null, 2)}</pre></>}</details>;
 }
 
-function EventView({ event, expanded = false }: { event: SessionEvent; expanded?: boolean }) {
+function EventView({ event, expanded = false, load }: { event: SessionEvent; expanded?: boolean; load?: () => Promise<SessionEvent> }) {
   const p = event.payload;
   if (event.type === "message.completed") return <article className={`message ${p.role === "user" ? "user" : "assistant"}`}>
     <div className="message-label">{p.role === "user" ? "你" : p.role === "assistant" ? "AGENT" : "SYSTEM"}<time>{time(event.timestamp)}</time></div>
     {typeof p.text === "string" ? <MessageText text={p.text} markdown={p.role !== "user"} /> : <div className="message-text">（无文本消息）</div>}
   </article>;
-  if (TOOL_TYPES.has(event.type)) return <ToolLine event={event} expanded={expanded} />;
+  if (TOOL_TYPES.has(event.type)) return <ToolLine event={event} expanded={expanded} load={load} />;
   if (event.type === "progress") return <p className="progress-note">{String(p.summary ?? "正在思考…")}</p>;
   const label: Record<string, string> = { "turn.started": "开始执行", "turn.completed": "本轮完成", "turn.failed": "本轮失败", "turn.interrupted": "本轮已打断",
     "approval.requested": "请求审批", "approval.resolved": "审批已处理", "user_input.requested": "等待回答", "user_input.resolved": "问题已回答", error: "执行异常" };
@@ -435,9 +439,9 @@ function Detail({ control, state, id }: { control: ControlState; state: ViewStat
   const [optionsOpen, setOptionsOpen] = useState(false), canResolve = state.writable && online && !state.syncing && !busy;
   const bottom = useRef<HTMLDivElement>(null), transcript = useRef<HTMLDivElement>(null);
   const restore = useRef(scrollMemory.get(id));
-  const follow = useRef(restore.current?.bottom ?? true), [unread, setUnread] = useState(0), previous = useRef<string[]>([]);
+  const follow = useRef(restore.current?.bottom ?? true), [unread, setUnread] = useState(0), previous = useRef(state.rawAdded);
   const anchor = useRef<{ top: number; height: number }>();
-  const turns = useMemo(() => transcriptTurns(state.events), [state.events]);
+  const turns = state.entries;
   const [detailMode, setDetailMode] = useState<DetailMode>(() => {
     try { const saved = localStorage.getItem('bridge-transcript-mode'); return saved && saved in DETAIL_MODES ? saved as DetailMode : 'standard'; }
     catch { return 'standard'; }
@@ -445,20 +449,21 @@ function Detail({ control, state, id }: { control: ControlState; state: ViewStat
   useEffect(() => { if (!state.moreLoading) anchor.current = undefined; }, [state.moreLoading]);
   useRememberScroll(id, bottom => { follow.current = bottom; if (bottom) setUnread(0); });
   useLayoutEffect(() => {
-    if (restore.current && state.events.length) {
+    if (restore.current && turns.length) {
       // A revisited conversation reopens where it was left (or at its end, when it was followed).
       if (restore.current.bottom) bottom.current?.scrollIntoView({ block: "end" }); else window.scrollTo({ top: restore.current.y });
       restore.current = undefined;
     } else if (anchor.current) {
       window.scrollTo({ top: anchor.current.top + (transcript.current?.scrollHeight ?? 0) - anchor.current.height });
       anchor.current = undefined;
-    } else if (state.events.length) {
-      const known = new Set(previous.current), count = state.events.filter(e => !known.has(e.eventId)).length;
+    } else if (turns.length) {
+      // New events recorded while scrolled up; view revisions of what is already shown do not count.
+      const count = Math.max(0, state.rawAdded - previous.current);
       if (follow.current) bottom.current?.scrollIntoView({ block: "end" });
-      else if (previous.current.length) setUnread(v => v + count);
+      else setUnread(v => v + count);
     }
-    previous.current = state.events.map(e => e.eventId);
-  }, [state.events]);
+    previous.current = state.rawAdded;
+  }, [turns, state.rawAdded]);
   return <section className="detail-page"><Link className="back" to="/control/sessions">← 最近会话</Link>
     <div className="detail-heading"><div className="eyebrow">CONVERSATION</div><h1>{session ? title(session) : state.loading ? "正在读取会话…" : "会话详情"}</h1></div>
     {session && <>
@@ -476,9 +481,12 @@ function Detail({ control, state, id }: { control: ControlState; state: ViewStat
       {state.historyMore && <button className="load-more" disabled={state.moreLoading} onClick={() => {
         anchor.current = { top: window.scrollY, height: transcript.current?.scrollHeight ?? 0 }; void control.moreHistory();
       }}>{state.moreLoading ? "读取中…" : "↑ 加载更早内容"}</button>}
-      {state.loading && !state.events.length && <Skeleton rows={3} kind="message" />}
-      {turns.map(turn => <TurnView key={`${turn.key}:${detailMode}`} turn={turn} mode={detailMode} render={(event, expanded) => <EventView event={event} expanded={expanded} />} />)}
-      {!state.loading && !state.events.length && <div className="empty">还没有已记录的内容。</div>}
+      {state.loading && !turns.length && <Skeleton rows={3} kind="message" />}
+      {turns.map(entry => <TurnView key={`${entry.key}:${detailMode}`} entry={entry} session={session} mode={detailMode}
+        onMoreItems={(key, before) => void control.moreItems(key, before)}
+        render={(item, expanded) => <EventView event={item.event} expanded={expanded}
+          load={item.truncated ? () => control.fullEvent(item.event.eventId) : undefined} />} />)}
+      {!state.loading && !turns.length && <div className="empty">还没有已记录的内容。</div>}
       {state.syncing ? <p className="sync-note" role="status"><span className="spinner" aria-hidden="true" />正在加载最新消息…</p>
         : session?.status === "active" && <p className="sync-note working" role="status"><AgentIcon agent={session.agent} workerId={session.workerId} size={14} />正在工作<span className="dots" aria-hidden="true"><i /><i /><i /></span></p>}
       {/* At the end of the transcript, beside the composer the page follows, not above the history. */}

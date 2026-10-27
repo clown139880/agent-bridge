@@ -7,6 +7,7 @@ import { markChanged } from "./stream.js";
 export * from "./control.js";
 export * from "./events.js";
 export * from "./stream.js";
+export { VIEW_BUDGET, ViewError } from "./view.js";
 export * from "./memory.js";
 
 export interface MachineRecord {

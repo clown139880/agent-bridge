@@ -124,6 +124,8 @@ export class AgentControlApi {
       const action=url.pathname.match(/^\/api\/v1\/actions\/([^/]+)$/);
       if(request.method==="GET"&&action){const row=this.store.action(decodeURIComponent(action[1]!));
         if(!row)throw new ApiProblem(404,"action_not_found","action not found");this.ok(response,actionJson(row));return true;}
+      const view=url.pathname.match(/^\/api\/v1\/sessions\/([^/]+)\/(view|view\/changes|view\/entries\/[^/]+|events\/[^/]+)$/);
+      if(request.method==="GET"&&view){this.sessionView(url,response,decodeURIComponent(view[1]!),view[2]!);return true;}
       const session=url.pathname.match(/^\/api\/v1\/sessions\/([^/]+)(?:\/(runs|events|turns|interrupt))?$/);
       if(session){await this.sessionRoute(request,response,url,principal,decodeURIComponent(session[1]!),session[2]);return true;}
       const approval=url.pathname.match(/^\/api\/v1\/approvals\/([^/]+)(?:\/(decision))?$/);
@@ -458,6 +460,23 @@ export class AgentControlApi {
     this.ok(response,actionJson(this.store.action(created.action.actionId)!),202);
   }
 
+  /** The conversation view (packages/database/src/view.ts): snapshot pages, changes since a revision, older items, whole events. */
+  private sessionView(url:URL,response:ServerResponse,sessionId:string,path:string):void{
+    const max=Number.MAX_SAFE_INTEGER;
+    try{
+      if(path==="view"){this.ok(response,this.store.viewPage(sessionId,integer(url.searchParams.get("limit"),"limit",20,1,100),url.searchParams.get("before")??undefined));return;}
+      if(path==="view/changes"){this.ok(response,this.store.viewChanges(sessionId,integer(url.searchParams.get("since"),"since",0,0,max),
+        integer(url.searchParams.get("rawAfter"),"rawAfter",0,0,max)));return;}
+      if(path.startsWith("view/entries/")){
+        const page=this.store.viewEntryItems(sessionId,decodeURIComponent(path.slice(13)),integer(url.searchParams.get("before"),"before",max,1,max));
+        if(!page)throw new ApiProblem(404,"entry_not_found","view entry not found");this.ok(response,page);return;}
+      const event=this.store.eventById(sessionId,decodeURIComponent(path.slice(7)));
+      if(!event)throw new ApiProblem(404,"event_not_found","event not found");this.ok(response,event);
+    }catch(error){
+      if(error instanceof Error&&error.message==="session_not_found")throw new ApiProblem(404,"session_not_found","session not found");
+      this.cursorError(error);
+    }
+  }
   private cursorError(error:unknown):never {
     if(error instanceof Error&&error.message==="invalid_cursor")throw new ApiProblem(400,"invalid_cursor","invalid cursor");
     if(error instanceof Error&&error.message==="cursor_expired")throw new ApiProblem(410,"cursor_expired","cursor is outside the replay window");

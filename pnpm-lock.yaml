@@ -39,6 +39,9 @@ importers:
 
   apps/control-center:
     dependencies:
+      '@agent-bridge/transcript':
+        specifier: workspace:*
+        version: link:../../packages/transcript
       react:
         specifier: ^18.3.1
         version: 18.3.1
@@ -113,6 +116,9 @@ importers:
         specifier: ^2.9.0
         version: 2.9.0
     devDependencies:
+      '@agent-bridge/transcript':
+        specifier: workspace:*
+        version: link:../../packages/transcript
       '@deepseek-ai/cordis':
         specifier: 4.0.2
         version: 4.0.2(@deepseek-ai/cordis-plugin-include@1.0.7)(@deepseek-ai/cordis-plugin-loader@1.0.3)
@@ -215,8 +221,13 @@ importers:
       '@agent-bridge/protocol':
         specifier: workspace:*
         version: link:../protocol
+      '@agent-bridge/transcript':
+        specifier: workspace:*
+        version: link:../transcript
 
   packages/protocol: {}
+
+  packages/transcript: {}
 
 packages:
 

@@ -42,9 +42,14 @@ function mirrorBuild(): Promise<void> {
   return mirroring
 }
 
+// The shared conversation projection is bundled from its workspace source, so a
+// plugin build never depends on a prior `tsc -b` of the root packages.
+const alias = { '@agent-bridge/transcript': resolve(import.meta.dirname, '../../packages/transcript/src/index.ts') }
+
 const host: UserConfig = {
   name: packageId,
   entry: { index: 'src/index.ts' },
+  alias,
   outDir: 'lib',
   format: 'esm',
   platform: 'node',
@@ -59,6 +64,7 @@ const host: UserConfig = {
 const client: UserConfig = {
   name: `${packageId}/client`,
   entry: { client: 'src/client/index.tsx' },
+  alias,
   outDir: 'lib',
   format: 'cjs',
   platform: 'browser',
