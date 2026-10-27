@@ -53,13 +53,13 @@ export function activityAt(binding: JsonObject): number {
 export function nativeSessionId(origin: string, sessionId: string): string {
   return 'agent-bridge-' + hash(new URL(origin).origin + '\0' + sessionId)
 }
-export async function readHistory(bridge: Pick<BridgeClient, 'call'>, sessionId: string, after?: string, signal?: AbortSignal): Promise<{ rows: JsonObject[]; cursor?: string }> {
+export async function readHistory(bridge: Pick<BridgeClient, 'call'>, sessionId: string, after?: string, signal?: AbortSignal, limit = 200): Promise<{ rows: JsonObject[]; cursor?: string }> {
   const rows: JsonObject[] = []
   const cursors = new Set<string>()
   let cursor = after
   do {
     signal?.throwIfAborted()
-    const page = record(await bridge.call({ operation: 'session_events', args: { sessionId, limit: 200, ...(cursor ? { after: cursor } : {}) } }, signal))
+    const page = record(await bridge.call({ operation: 'session_events', args: { sessionId, limit, ...(cursor ? { after: cursor } : {}) } }, signal))
     if (!Array.isArray(page['data'])) throw new Error('Invalid Bridge history page')
     for (const value of page['data']) {
       const row = record(value)
