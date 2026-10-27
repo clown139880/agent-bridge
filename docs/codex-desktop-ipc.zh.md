@@ -14,6 +14,8 @@
 
 ## 断线与兼容性
 
+0.7.24 起，允许目录中的仓库所注册的 linked worktree 也可使用。Bridge 验证 `.git` 指针、主仓库的 `worktrees` 注册目录和反向 `gitdir` 指针；不会整体放行 `.codex/worktrees`。桌面会话切换到 worktree 后，以桌面快照中的实际路径校验和更新发现信息。
+
 已由本进程识别为桌面所有的会话，桌面断线后保持归属，不自动切换 writer。快照版本不兼容或缺少快照时拒绝发送。补丁序号不连续会重新订阅完整快照。写入后断线/超时报告 `desktop_outcome_unknown`，禁止自动重发；先查看会话，确认结果后再决定下一步。桌面会话删除暂需在 Codex Desktop 中操作。
 
 这是桌面的内部 IPC 协议，当前验证版本为 Windows Codex 26.1021.3705.0，快照版本 11。桌面升级后应验证兼容性；`CODEX_DESKTOP_IPC=false` 可关闭此路由，但旧 App Server 仍无法写入桌面持有的会话。

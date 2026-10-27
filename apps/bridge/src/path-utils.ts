@@ -1,5 +1,5 @@
-import { isAbsolute, relative, resolve, sep, win32 } from "node:path";
-import { existsSync, realpathSync } from "node:fs";
+import { dirname, isAbsolute, join, relative, resolve, sep, win32 } from "node:path";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
@@ -25,6 +25,27 @@ export function isPathWithinRoots(candidate: string, roots: string[], platform: 
     const separator = pathApi ? "\\" : sep;
     return relation === "" || (!relation.startsWith(`..${separator}`) && relation !== ".." && !(pathApi ? win32.isAbsolute(relation) : isAbsolute(relation)));
   });
+}
+
+/** Accept only registered linked worktrees whose owning repository is allowed.
+ * Both Git metadata directions must agree; an arbitrary .git pointer is insufficient.
+ */
+export function isWorkspaceWithinRoots(candidate: string, roots: string[]): boolean {
+  if (isPathWithinRoots(candidate, roots)) return true;
+  try {
+    const workspace = realpathSync.native(candidate);
+    const dotGit = join(workspace, ".git");
+    const pointer = readFileSync(dotGit, "utf8").trim().match(/^gitdir: (.+)$/);
+    if (!pointer) return false;
+    const metadata = realpathSync.native(resolve(workspace, pointer[1]));
+    const common = realpathSync.native(resolve(metadata, readFileSync(join(metadata, "commondir"), "utf8").trim()));
+    // A standard linked worktree is registered in <repo>/.git/worktrees/<id>.
+    if (relative(join(common, "worktrees"), dirname(metadata)) !== "") return false;
+    if (relative(realpathSync.native(join(dirname(common), ".git")), common) !== "") return false;
+    if (!isPathWithinRoots(dirname(common), roots)) return false;
+    const backPointer = realpathSync.native(resolve(metadata, readFileSync(join(metadata, "gitdir"), "utf8").trim()));
+    return relative(backPointer, realpathSync.native(dotGit)) === "";
+  } catch { return false; }
 }
 
 export async function deriveProjectIdentity(cwd: string): Promise<string | undefined> {

@@ -17,7 +17,7 @@ import type {
 } from "@agent-bridge/protocol";
 import { DEFAULT_EFFORT } from "@agent-bridge/protocol";
 import { CodexDesktopSessionScanner } from "./desktop-sessions.js";
-import { deriveProjectIdentity, isPathWithinRoots } from "./path-utils.js";
+import { deriveProjectIdentity, isWorkspaceWithinRoots } from "./path-utils.js";
 import type { AgentAdapter, ResumeTarget } from "./agent-adapter.js";
 import { materializeAttachment, type AttachmentFetcher } from "./attachments.js";
 import { CodexDesktop, desktopAppTool } from "./codex-desktop.js";
@@ -200,7 +200,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
     if (options.desktopIpc) this.desktop = new CodexDesktop({
       notify: (method, params) => this.handleNotification(method, params),
       request: message => this.handleServerRequest(message),
-      validatePath: cwd => isPathWithinRoots(cwd, options.allowedRoots),
+      validatePath: cwd => isWorkspaceWithinRoots(cwd, options.allowedRoots),
       onError: error => log.warn({ error }, "Desktop session synchronization failed"),
     });
     if (options.desktopHome) {
@@ -1439,7 +1439,7 @@ export async function resolveProjectPath(
 
   if (!isAbsolute(candidate) || !existsSync(candidate)) throw new Error(`Invalid project path: ${candidate}`);
   const path = realpathSync(candidate);
-  const allowed = isPathWithinRoots(path, allowedRoots);
+  const allowed = isWorkspaceWithinRoots(path, allowedRoots);
   if (!allowed) throw new Error(`Project path is outside BRIDGE_ALLOWED_ROOTS: ${path}`);
   return path;
 }
