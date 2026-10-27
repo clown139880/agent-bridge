@@ -6,7 +6,8 @@ import { clearDetailStore, openDetailStore } from "./cache";
 import { haptic, SHARE_EVENT, takeShare } from "./native/uctw";
 import { MessageText } from "./markdown";
 import { AgentIcon, machineStyle, Origin } from "./identity";
-import { TOOL_TYPES, transcriptRows } from "./transcript";
+import { TOOL_TYPES, transcriptTurns } from "./transcript";
+import { TurnView, DETAIL_MODES, type DetailMode } from "./turn-view";
 import { isLive, pendingId, segment, type Pending, type Session, type SessionEvent, type Snapshot } from "./api/types";
 import { canCompose, ControlState, unreadCount, type Route, type ViewState } from "./state";
 import "./styles.css";
@@ -388,26 +389,26 @@ function NewSession({ control, state }: { control: ControlState; state: ViewStat
 
 const RUNNING_TOOL = new Set(["tool.started", "task.started", "task.progress"]);
 /** One line per tool call: its first line, shown in place of the call's earlier events. */
-function ToolLine({ event }: { event: SessionEvent }) {
+function ToolLine({ event, expanded = false }: { event: SessionEvent; expanded?: boolean }) {
   const [open, setOpen] = useState(false);
   const p = event.payload;
   const text = String(typeof p.command === "string" ? `$ ${p.command}` : p.summary ?? p.description ?? p.name ?? event.type).trim().split("\n")[0] || event.type;
   const running = RUNNING_TOOL.has(event.type);
   const failed = ["failed", "declined", "error"].includes(String(p.status)) || typeof p.exitCode === "number" && p.exitCode !== 0;
   const kind = typeof p.command === "string" ? "command" : event.type.startsWith("file_change") ? "file" : event.type.startsWith("task") ? "task" : "tool";
-  return <details className={`tool ${running ? "running" : ""} ${failed ? "failed" : ""}`} onToggle={e => setOpen(e.currentTarget.open)}>
+  return <details open={expanded || open} className={`tool ${running ? "running" : ""} ${failed ? "failed" : ""}`} onToggle={e => setOpen(e.currentTarget.open)}>
     <summary><span className="tool-mark" aria-hidden="true">{{ command: "$", file: "✎", task: "◇", tool: "›" }[kind]}</span>
       <span className="tool-text">{text.replace(/^\$ /, "")}</span>{failed && <span className="tool-flag">失败</span>}</summary>
-    {open && <pre>{JSON.stringify(p, null, 2)}</pre>}</details>;
+    {(expanded || open) && <pre>{JSON.stringify(p, null, 2)}</pre>}</details>;
 }
 
-function EventView({ event }: { event: SessionEvent }) {
+function EventView({ event, expanded = false }: { event: SessionEvent; expanded?: boolean }) {
   const p = event.payload;
   if (event.type === "message.completed") return <article className={`message ${p.role === "user" ? "user" : "assistant"}`}>
     <div className="message-label">{p.role === "user" ? "你" : p.role === "assistant" ? "AGENT" : "SYSTEM"}<time>{time(event.timestamp)}</time></div>
     {typeof p.text === "string" ? <MessageText text={p.text} markdown={p.role !== "user"} /> : <div className="message-text">（无文本消息）</div>}
   </article>;
-  if (TOOL_TYPES.has(event.type)) return <ToolLine event={event} />;
+  if (TOOL_TYPES.has(event.type)) return <ToolLine event={event} expanded={expanded} />;
   if (event.type === "progress") return <p className="progress-note">{String(p.summary ?? "正在思考…")}</p>;
   const label: Record<string, string> = { "turn.started": "开始执行", "turn.completed": "本轮完成", "turn.failed": "本轮失败", "turn.interrupted": "本轮已打断",
     "approval.requested": "请求审批", "approval.resolved": "审批已处理", "user_input.requested": "等待回答", "user_input.resolved": "问题已回答", error: "执行异常" };
@@ -436,7 +437,11 @@ function Detail({ control, state, id }: { control: ControlState; state: ViewStat
   const restore = useRef(scrollMemory.get(id));
   const follow = useRef(restore.current?.bottom ?? true), [unread, setUnread] = useState(0), previous = useRef<string[]>([]);
   const anchor = useRef<{ top: number; height: number }>();
-  const rows = useMemo(() => transcriptRows(state.events), [state.events]);
+  const turns = useMemo(() => transcriptTurns(state.events), [state.events]);
+  const [detailMode, setDetailMode] = useState<DetailMode>(() => {
+    try { const saved = localStorage.getItem('bridge-transcript-mode'); return saved && saved in DETAIL_MODES ? saved as DetailMode : 'standard'; }
+    catch { return 'standard'; }
+  });
   useEffect(() => { if (!state.moreLoading) anchor.current = undefined; }, [state.moreLoading]);
   useRememberScroll(id, bottom => { follow.current = bottom; if (bottom) setUnread(0); });
   useLayoutEffect(() => {
@@ -462,7 +467,9 @@ function Detail({ control, state, id }: { control: ControlState; state: ViewStat
       <details className="session-info" style={machineStyle(session.machineId)}><summary><Origin agent={session.agent} workerId={session.workerId} machineId={session.machineId}>{session.projectName}</Origin></summary>
         <p className="break-all">{session.workspace}</p><small className="break-all">Session · {id}</small>
         <p className="hint">历史覆盖：{session.historyCompleteness ?? "未知"} · {session.source ?? "未知来源"}</p></details>
-      <div className="detail-tools"><small>完整消息与事件实时更新</small><button className="quiet" disabled={state.loading} onClick={() => void control.refresh()}>↻ 刷新</button></div>
+      <div className="detail-tools"><label className="transcript-mode">过程显示 <select aria-label="过程显示" value={detailMode} onChange={e => {
+        const mode = e.target.value as DetailMode; setDetailMode(mode); try { localStorage.setItem('bridge-transcript-mode', mode); } catch { /* optional preference */ }
+      }}>{Object.entries(DETAIL_MODES).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><button className="quiet" disabled={state.loading} onClick={() => void control.refresh()}>↻ 刷新</button></div>
       {session.error && <p className="error">{session.error.error.message}</p>}
     </>}
     <div className="transcript" ref={transcript}>
@@ -470,7 +477,7 @@ function Detail({ control, state, id }: { control: ControlState; state: ViewStat
         anchor.current = { top: window.scrollY, height: transcript.current?.scrollHeight ?? 0 }; void control.moreHistory();
       }}>{state.moreLoading ? "读取中…" : "↑ 加载更早内容"}</button>}
       {state.loading && !state.events.length && <Skeleton rows={3} kind="message" />}
-      {rows.map(r => <EventView key={r.key} event={r.event} />)}
+      {turns.map(turn => <TurnView key={`${turn.key}:${detailMode}`} turn={turn} mode={detailMode} render={(event, expanded) => <EventView event={event} expanded={expanded} />} />)}
       {!state.loading && !state.events.length && <div className="empty">还没有已记录的内容。</div>}
       {state.syncing ? <p className="sync-note" role="status"><span className="spinner" aria-hidden="true" />正在加载最新消息…</p>
         : session?.status === "active" && <p className="sync-note working" role="status"><AgentIcon agent={session.agent} workerId={session.workerId} size={14} />正在工作<span className="dots" aria-hidden="true"><i /><i /><i /></span></p>}

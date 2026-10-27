@@ -196,3 +196,17 @@ footer { display: flex; justify-content: center; gap: 10px; padding: 32px 0 max(
 .share-targets { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
 .share-targets button { justify-content: flex-start; text-align: left; flex-direction: column; align-items: stretch; gap: 0; }
 .share-targets button small { color: var(--muted); font-weight: 500; font-size: .72rem; }
+.execution-turn { margin-block: 20px 30px; }
+.turn-work { border-block: 1px solid var(--line); margin-block: 12px; }
+.turn-summary { display: flex; justify-content: flex-start; align-items: baseline; gap: 9px; flex-wrap: wrap; width: 100%; padding: 12px 2px; background: transparent; border: 0; text-align: left; box-shadow: none; }
+.turn-summary span:last-child, .turn-caption { color: var(--muted); font-size: .78rem; }
+.turn-summary:disabled { opacity: 1; cursor: default; }
+.turn-steps { padding-bottom: 12px; }
+.turn-step { display: grid; grid-template-columns: 24px minmax(0, 1fr); gap: 8px; padding-block: 5px; }
+.step-number { color: var(--muted); font-size: .7rem; padding-top: 10px; border-right: 1px solid var(--line); }
+.mode-compact .turn-step { grid-template-columns: minmax(0, 1fr); }
+.turn-step .message { margin-block: 5px; }
+.turn-step pre { overflow: auto; max-height: 440px; }
+.needs-attention .turn-summary strong { color: #b24927; }
+.transcript-mode { display: flex; align-items: center; gap: 8px; font-size: .8rem; color: var(--muted); }
+.transcript-mode select { width: auto; padding: 6px 10px; }
