@@ -117,7 +117,6 @@ export interface BridgeStreamEvent {
 
 export interface BridgeCall {
   operation: 'workers' | 'delete_worker' | 'models' | 'snapshot' | 'sessions' | 'session_groups' | 'session' | 'delete_session' | 'session_events' | 'create_session' |
-    'session_view' | 'session_view_changes' | 'session_view_entry' | 'session_event' |
     'submit_turn' | 'interrupt_turn' | 'approvals' | 'approval' | 'resolve_approval' |
     'user_input' | 'user_input_request' | 'respond_user_input' | 'action' | 'upload' | 'download'
   args?: JsonObject

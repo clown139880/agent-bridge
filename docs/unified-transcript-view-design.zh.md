@@ -1,6 +1,6 @@
 # 统一对话视图接口：设计与核对结论
 
-日期：2026-10-27。状态：0.7.25 实施（服务端视图、Control Center、DSH 插件 0.3.0 面板），见文末“实施记录”。后续用户已确认：DSH 保留侧栏轻量目录，正文改用 Bridge 独立实时视图，不再复制全量历史到原生 session。
+日期：2026-10-27。状态：0.7.25 实施服务端视图与 Control Center；DSH 尚未接入，见文末“实施记录”。后续用户已确认：DSH 保留侧栏轻量目录，正文改用 Bridge 独立实时视图，不再复制全量历史到原生 session。
 
 用户要求 claude@hal 设计，由 Codex 对照代码核对。设计会话：
 `claude-1e4fc611-8cd1-4c3b-9bad-4c7f940304b7`。
@@ -184,7 +184,5 @@ DSH 后续改动仅升插件版本，按 Windows 插件发布流程安装与校�
   超大条目以窗口加 `itemsBefore` 与按 eventId 直读覆盖。
 - `raw` 计数由服务端按客户端提交的 `rawAfter` 精确计算，一问一答，不需要区间对齐。
 - Control Center 可见详情页始终保持订阅，不再因 idle 关流；红点、`markRead`、“↓N”语义不变。
-- DSH 插件在“Agent 控制台”面板内直接渲染 Bridge 视图（不创建原生 session、不读原生历史），
-  发送、中断、审批与提问走 Bridge 接口。原生导入链路暂时保留：Desktop 宿主没有可供插件切换主面板
-  或向原生侧栏添加非原生条目的接口，侧栏点击直达插件视图需在 Windows Desktop 上验证扩展点后再切换，
-  届时停止对应 import/syncHistory。
+- DSH 尚未接入。插件 0.3.0 曾在“Agent 控制台”面板内另做一套 Bridge 对话视图，不符合“侧栏目录直达 Bridge 视图”的约定，
+  已在 0.3.1 撤回。下一步先在 Windows Desktop 上验证侧栏条目点击与对话区替换的扩展点，再按约定接入并停止 import/syncHistory。
