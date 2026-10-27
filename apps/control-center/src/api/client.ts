@@ -33,7 +33,7 @@ export class ControlClient {
     for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
     const content = btoa(binary);
     return this.request<AttachmentRef>("/attachments", { signal, timeoutMs: 120_000,
-      body: { filename: file.name || "image", mimeType: file.type, content } });
+      body: { filename: file.name || "attachment", mimeType: file.type || "application/octet-stream", content } });
   }
   async stream(cursor: string, signal: AbortSignal): Promise<Response> {
     const response = await fetch(`${this.base}/stream`, {

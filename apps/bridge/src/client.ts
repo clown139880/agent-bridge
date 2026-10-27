@@ -71,6 +71,7 @@ export class BridgeClient {
     appServerUrl: string;
     manageAppServer: boolean;
     desktopHome?: string;
+    desktopIpc?: boolean;
     desktopScanIntervalMs: number;
     desktopReplayExisting: boolean;
     claudeCommand?: string;
@@ -121,6 +122,7 @@ export class BridgeClient {
         allowedRoots: options.allowedRoots,
         manageServer: options.manageAppServer,
         desktopHome: options.desktopHome,
+        desktopIpc: options.desktopIpc,
         desktopScanIntervalMs: options.desktopScanIntervalMs,
         desktopReplayExisting: options.desktopReplayExisting,
         fetchAttachment: makeAttachmentFetcher(options.url, options.token),

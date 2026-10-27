@@ -13,6 +13,8 @@ export interface Upload { localId: string; name: string; preview: string; status
 export interface ModelCatalog { status: "loading" | "ready" | "error"; models: ModelInfo[]; error?: string }
 /** Mirrors the API's upload limits so obvious rejections never leave the phone. */
 export const IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"], MAX_IMAGE_BYTES = 15_000_000, MAX_ATTACHMENTS = 8;
+export const FILE_TYPES = ["application/pdf", "text/plain", "text/markdown", "text/csv", "application/json", "application/zip", "application/octet-stream",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "application/vnd.openxmlformats-officedocument.presentationml.presentation"];
 export interface ViewState {
   route: Route; sessions: Session[]; workers: Worker[]; session?: Session; events: SessionEvent[];
   approvals: Pending[]; inputs: Pending[]; loading: boolean; moreLoading: boolean; hasMore: boolean;
@@ -210,10 +212,10 @@ export class ControlState {
     const room = MAX_ATTACHMENTS - (this.state.uploads[id]?.length ?? 0);
     for (const [index, file] of files.entries()) {
       const localId = newIdempotencyKey();
-      const error = index >= room ? `最多 ${MAX_ATTACHMENTS} 张图片` : !IMAGE_TYPES.includes(file.type) ? "仅支持 PNG、JPEG、WebP、GIF"
-        : file.size > MAX_IMAGE_BYTES ? "图片超过 15 MB" : undefined;
+      const error = index >= room ? `最多 ${MAX_ATTACHMENTS} 个附件` : file.type && ![...IMAGE_TYPES, ...FILE_TYPES].includes(file.type) ? "不支持此附件格式"
+        : file.size > MAX_IMAGE_BYTES ? "附件超过 15 MB" : undefined;
       if (index >= room) { this.patch({ error: error! }); break; }
-      this.setUploads(id, rows => [...rows, { localId, name: file.name, preview: URL.createObjectURL(file), status: error ? "error" : "uploading", error }]);
+      this.setUploads(id, rows => [...rows, { localId, name: file.name, preview: IMAGE_TYPES.includes(file.type) ? URL.createObjectURL(file) : "", status: error ? "error" : "uploading", error }]);
       if (error) continue;
       void this.api.upload(file).then(ref => this.setUploads(id, rows => rows.map(u => u.localId === localId ? { ...u, status: "ready", ref } : u)),
         e => this.setUploads(id, rows => rows.map(u => u.localId === localId ? { ...u, status: "error", error: explain(e) } : u)));

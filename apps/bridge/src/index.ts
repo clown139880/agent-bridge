@@ -13,6 +13,7 @@ const client = new BridgeClient({
   appServerUrl: config.appServerUrl,
   manageAppServer: config.manageAppServer,
   desktopHome: config.desktopHome,
+  desktopIpc: config.desktopIpc,
   desktopScanIntervalMs: config.desktopScanIntervalMs,
   desktopReplayExisting: config.desktopReplayExisting,
   claudeCommand: config.claudeCommand,

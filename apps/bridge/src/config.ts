@@ -61,6 +61,7 @@ export const config = {
   appServerUrl: process.env.CODEX_APP_SERVER_URL ?? "ws://127.0.0.1:4500",
   manageAppServer: process.env.CODEX_APP_SERVER_MANAGED !== "false",
   desktopHome: process.env.CODEX_DESKTOP_HOME,
+  desktopIpc: isWindows && process.env.CODEX_DESKTOP_IPC !== "false",
   desktopScanIntervalMs: Number(process.env.CODEX_DESKTOP_SCAN_INTERVAL_MS ?? "3000"),
   desktopReplayExisting: process.env.CODEX_DESKTOP_REPLAY_EXISTING === "true",
   claudeCommand: process.env.CLAUDE_COMMAND ?? "claude",

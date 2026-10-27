@@ -61,13 +61,12 @@ function Attachments({ control, state, id, disabled }: { control: ControlState; 
   const input = useRef<HTMLInputElement>(null), rows = state.uploads[id] ?? [];
   return <div className="attachments">
     {rows.length > 0 && <ul className="attachment-list">{rows.map(u => <li key={u.localId} className={`attachment ${u.status}`}>
-      {u.preview ? <img src={u.preview} alt="" /> : <span className="attachment-thumb" aria-hidden="true">图</span>}<span>{u.status === "uploading" ? "上传中…" : u.status === "error" ? u.error : u.name}</span>
+      {u.preview ? <img src={u.preview} alt="" /> : <span className="attachment-thumb" aria-hidden="true">文件</span>}<span>{u.status === "uploading" ? "上传中…" : u.status === "error" ? u.error : u.name}</span>
       <button type="button" className="quiet" aria-label={`移除 ${u.name}`} onClick={() => control.removeUpload(id, u.localId)}>×</button></li>)}</ul>}
-    {/* image/* lets a WebView offer camera and gallery; addFiles still enforces the accepted types. */}
-    <input ref={input} type="file" accept="image/*" multiple hidden onChange={e => {
+    <input ref={input} type="file" accept="image/*,.pdf,.txt,.md,.csv,.json,.zip,.docx,.xlsx,.pptx" multiple hidden onChange={e => {
       control.addFiles(id, [...(e.target.files ?? [])]); e.target.value = "";
     }} />
-    <button type="button" className="quiet attach" disabled={disabled} onClick={() => input.current?.click()}>＋ 图片</button>
+    <button type="button" className="quiet attach" disabled={disabled} onClick={() => input.current?.click()}>＋ 图片 / 文件</button>
   </div>;
 }
 const attachmentBody = (state: ViewState, id: string) => {

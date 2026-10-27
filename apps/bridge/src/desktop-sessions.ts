@@ -86,6 +86,11 @@ export class CodexDesktopSessionScanner {
     return this.latestThreadFile(threadId)?.cwd;
   }
 
+  recentThreads(): Array<{ id: string; cwd: string }> {
+    return [...this.files.values()].sort((a, b) => b.modifiedAt - a.modifiedAt)
+      .map(file => ({ id: file.threadId, cwd: file.cwd }));
+  }
+
   private latestThreadFile(threadId: string): FileState | undefined {
     return [...this.files.values()]
       .filter((file) => file.threadId === threadId)

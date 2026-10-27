@@ -10,6 +10,11 @@ export class ApiProblem extends Error {
 export const MAX_JSON_BODY_BYTES = 24_000_000;
 /** Attachment (image) upload limits — the control-plane is the authority. */
 export const IMAGE_MIME_ALLOWLIST = ["image/png","image/jpeg","image/webp","image/gif"] as const;
+export const ATTACHMENT_MIME_ALLOWLIST = [...IMAGE_MIME_ALLOWLIST, "application/pdf", "text/plain", "text/markdown", "text/csv",
+  "application/json", "application/zip", "application/octet-stream",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation"] as const;
 export const MAX_IMAGE_BYTES = 15_000_000;
 export const MAX_ATTACHMENTS_PER_MESSAGE = 8;
 
@@ -17,8 +22,8 @@ export const MAX_ATTACHMENTS_PER_MESSAGE = 8;
 export function uploadRequest(body:Record<string,unknown>):{filename:string;mimeType:string;bytes:Buffer}{
   const filename=stringField(body.filename,"filename",true)!.slice(0,255);
   const mimeType=stringField(body.mimeType,"mimeType",true)!;
-  if(!(IMAGE_MIME_ALLOWLIST as readonly string[]).includes(mimeType))
-    throw new ApiProblem(400,"unsupported_media_type",`mimeType must be one of ${IMAGE_MIME_ALLOWLIST.join(", ")}`);
+  if(!(ATTACHMENT_MIME_ALLOWLIST as readonly string[]).includes(mimeType))
+    throw new ApiProblem(400,"unsupported_media_type",`mimeType must be one of ${ATTACHMENT_MIME_ALLOWLIST.join(", ")}`);
   const content=stringField(body.content,"content",true)!;
   let bytes:Buffer;
   try{bytes=Buffer.from(content,"base64");}catch{throw new ApiProblem(400,"invalid_parameter","content must be base64");}

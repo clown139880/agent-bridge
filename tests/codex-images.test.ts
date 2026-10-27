@@ -5,7 +5,7 @@ const ref = { id: 'image-test', filename: 'test.png', mimeType: 'image/png', siz
 const fetchAttachment = async () => ({ ref, mediaType: 'image/png', base64: 'YWJj' });
 test('Codex rejects missing or unsupported image storage instead of silently dropping attachments', async () => {
   await assert.rejects(codexInput('look', [ref]), /unavailable/);
-  await assert.rejects(codexInput('look', [{ ...ref, mimeType: 'text/plain' }], fetchAttachment), /Unsupported/);
+  await assert.rejects(codexInput('look', [{ ...ref, mimeType: 'image/svg+xml' }], fetchAttachment), /Unsupported/);
   await assert.rejects(codexInput('look', [ref], async () => { throw new Error('fetch failed'); }), /fetch failed/);
 });
 test('Codex sends image input for creation, continuation and steering, including image-only turns', async () => {
