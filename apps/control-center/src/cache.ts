@@ -32,7 +32,8 @@ export async function openDetailStore(timeoutMs = 400): Promise<DetailStore> {
   try {
     const [stored, read] = await Promise.race([Promise.all([transact<DetailCache[] | undefined>("readonly", s => s.get(KEY)),
       transact<Record<string, number> | undefined>("readonly", s => s.get(READS))]), timeout.then(() => [undefined, undefined] as const)]);
-    entries = Array.isArray(stored) ? stored.filter(e => e?.session?.sessionId && Date.now() - e.savedAt < MAX_AGE) : [];
+    // Details cached before 0.7.25 hold raw events instead of a view; they are dropped, not migrated.
+    entries = Array.isArray(stored) ? stored.filter(e => e?.session?.sessionId && Array.isArray(e.view?.entries) && Date.now() - e.savedAt < MAX_AGE) : [];
     if (read && typeof read === "object") reads = Object.fromEntries(Object.entries(read).filter(([, n]) => typeof n === "number"));
   } catch { /* private mode or blocked storage */ }
   // Last write wins per key; writes never overlap.

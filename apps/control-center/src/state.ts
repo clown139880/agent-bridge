@@ -107,7 +107,7 @@ export class ControlState {
   constructor(token: string, writable: boolean, snapshot: Snapshot, unauthorized: () => void,
     private navigate: (path: string) => void, base: "/api/v1" | "/control/api/v1" = "/api/v1", private store?: DetailStore) {
     this.api = new ControlClient(token, unauthorized, base);
-    for (const entry of store?.entries ?? []) this.details.set(entry.session.sessionId, entry);
+    for (const entry of store?.entries ?? []) if (Array.isArray(entry?.view?.entries)) this.details.set(entry.session.sessionId, entry);
     this.cursor = snapshot.streamCursor;
     this.state = { route: { page: "sessions" }, sessions: byPrompt(snapshot.sessions), workers: snapshot.workers,
       entries: [], rawAdded: 0, approvals: [], inputs: [], loading: false, moreLoading: false,

@@ -184,6 +184,18 @@ test("recent details persist through the store and a cache from another ordering
   assert.equal(saved.at(-1)![0].view.orderingEpoch, 1);
 });
 
+test("details cached by an earlier version (raw events, no view) never break opening a conversation", async t => {
+  const legacy = { session, events: [event("a").data], approvals: [], inputs: [], before: null, historyMore: false, savedAt: Date.now() } as unknown as DetailCache;
+  const saved: DetailCache[][] = [];
+  const f = fixture(t, { store: { entries: [legacy], save: v => saved.push(v) } });
+  await f.state.open({ page: "detail", id: "s" }); await flush();
+  assert.equal(f.state.snapshot().error, ""); assert.deepEqual(f.state.snapshot().entries.map(e => e.key), ["t:history"]);
+  await f.state.open({ page: "sessions" });
+  await f.state.open({ page: "detail", id: "s" }); await flush();
+  assert.equal(f.state.snapshot().route.id, "s"); assert.equal(f.state.snapshot().error, "");
+  assert.ok(saved.at(-1)!.every(c => Array.isArray(c.view.entries)));
+});
+
 test("the UCTW bridge rings for new requests and finished turns, and its absence or failure is harmless", async t => {
   const calls: string[] = [];
   const g = globalThis as unknown as { window?: unknown };
