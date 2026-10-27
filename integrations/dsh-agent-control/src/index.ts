@@ -5,6 +5,7 @@ import { AgentControlService, type AgentControlConfig } from './service.js'
 import { registerAgentBridgeProvider } from './agent-bridge-provider/provider.js'
 import { MUTATING_TOOL_NAMES, registerTools } from './tools.js'
 import type { DashboardRequest } from './types.js'
+import { ProviderModelCatalog, resolveHostRelayProviders } from './provider-models.js'
 
 export * from './bridge-client.js'
 export * from './errors.js'
@@ -73,7 +74,7 @@ export function createAgentControlRpcHandler(service: AgentControlService) {
 }
 
 export function apply(ctx: Context, config: Config): void {
-  const service = new AgentControlService(config)
+  const service = new AgentControlService(config, new ProviderModelCatalog(undefined, undefined, () => resolveHostRelayProviders(ctx)))
   ctx.provide('agentControl', service)
   ctx.effect(() => () => { service.dispose() }, 'agent-control: service lifecycle')
   registerAgentBridgeProvider(ctx, service)

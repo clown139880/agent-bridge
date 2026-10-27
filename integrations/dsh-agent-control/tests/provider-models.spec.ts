@@ -2,7 +2,7 @@ import { describe, expect, it, vi, afterEach } from 'vitest'
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { ProviderModelCatalog, resolveRelayProviders, type RelayProvider } from '../src/provider-models.js'
+import { ProviderModelCatalog, resolveRelayProviders, resolveHostRelayProviders, type RelayProvider } from '../src/provider-models.js'
 
 const homes: string[] = []
 afterEach(() => { for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true }) })
@@ -16,6 +16,17 @@ function dshHome(settings: string, credentials = ''): string {
 }
 
 describe('resolveRelayProviders', () => {
+  it('reads the active profile and resolves its credential without the removed settings.yaml', async () => {
+    const resolve = vi.fn(async () => ({ value: 'host-secret' }))
+    const settings = { describe: () => [{ value: { providers: { relay: { baseURL: 'https://relay.example/v1/', apiKeyEnv: 'RELAY_KEY' } } } }] }
+    const host = { get: (name: string) => name === 'settings' ? settings : name === 'credentials' ? { resolve } : undefined }
+    expect(await resolveHostRelayProviders(host)).toEqual([{ key: 'relay', displayName: 'relay', baseURL: 'https://relay.example/v1', apiKey: 'host-secret' }])
+    expect(resolve).toHaveBeenCalledWith('RELAY_KEY')
+  })
+
+  it('treats an empty active profile as authoritative instead of reviving old providers', async () => {
+    expect(await resolveHostRelayProviders({ get: () => ({ describe: () => [] }) })).toEqual([])
+  })
   it('reads the endpoint from settings and the credential from the named variable', async () => {
     const home = dshHome(`
 llm-pi-ai:

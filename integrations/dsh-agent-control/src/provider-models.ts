@@ -31,6 +31,31 @@ async function readYaml(path: string): Promise<Record<string, unknown>> {
 
 export interface RelayProvider { key: string; displayName: string; baseURL: string; apiKey?: string }
 
+export interface ProviderSettingsHost {
+  get(name: string): unknown
+}
+
+/** Read the effective profile through DSH, including post-settings.yaml versions. */
+export async function resolveHostRelayProviders(host: ProviderSettingsHost): Promise<RelayProvider[]> {
+  const settings = host.get('settings') as { describe(): { value: unknown }[] } | undefined
+  if (!settings) return resolveRelayProviders()
+  const credentials = host.get('credentials') as { resolve(ref: string): Promise<{ value: string } | undefined> } | undefined
+  const providers: RelayProvider[] = []
+  for (const namespace of settings.describe()) {
+    for (const [key, raw] of Object.entries(record(record(namespace.value)['providers']))) {
+      const provider = record(raw)
+      const baseURL = text(provider['baseURL'])
+      if (!baseURL) continue
+      const variable = text(provider['apiKeyEnv'])
+      const apiKey = text(provider['apiKey']) || (variable
+        ? credentials ? text((await credentials.resolve(variable))?.value) : text(process.env[variable])
+        : '')
+      providers.push({ key, displayName: text(provider['displayName']) || key, baseURL: baseURL.replace(/\/+$/, ''), ...(apiKey ? { apiKey } : {}) })
+    }
+  }
+  return providers
+}
+
 /**
  * Resolve the relay behind DSH's own LLM provider settings. The settings
  * document lists a provider's endpoint and the *name* of the variable holding

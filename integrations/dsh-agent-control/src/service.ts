@@ -16,8 +16,11 @@ export class AgentControlService {
   readonly bridge: BridgeClient
   /** Phase 2: native DSH-session importer; bound by the agent-bridge provider. */
   importTarget: AgentBridgeImportTarget | undefined
-  readonly providerModels = new ProviderModelCatalog()
-  constructor(readonly config: AgentControlConfig) { this.bridge = new BridgeClient(config.bridge) }
+  readonly providerModels: ProviderModelCatalog
+  constructor(readonly config: AgentControlConfig, providerModels = new ProviderModelCatalog()) {
+    this.bridge = new BridgeClient(config.bridge)
+    this.providerModels = providerModels
+  }
   dispose(): void {}
 
   async dispatch(request: DashboardRequest, signal?: AbortSignal): Promise<JsonValue> {
