@@ -1,8 +1,10 @@
 import { BridgeClient, type BridgeConfig } from './bridge-client.js'
 import { ControlError } from './errors.js'
-import type { BridgeCall, DashboardRequest, JsonValue } from './types.js'
+import type { BridgeCall, DashboardRequest, JsonValue, JsonObject } from './types.js'
 import type { AgentBridgeImportTarget } from './agent-bridge-provider/import-target.js'
 import { ProviderModelCatalog } from './provider-models.js'
+import { RemoteSessionLogs, virtualSessionId } from './remote-sessions/log.js'
+import { record, str } from './agent-bridge-provider/mapping.js'
 
 export interface AgentControlConfig { bridge: BridgeConfig }
 
@@ -17,15 +19,28 @@ export class AgentControlService {
   /** Phase 2: native DSH-session importer; bound by the agent-bridge provider. */
   importTarget: AgentBridgeImportTarget | undefined
   readonly providerModels: ProviderModelCatalog
+  readonly remoteLogs: RemoteSessionLogs
   constructor(readonly config: AgentControlConfig, providerModels = new ProviderModelCatalog()) {
     this.bridge = new BridgeClient(config.bridge)
     this.providerModels = providerModels
+    this.remoteLogs = new RemoteSessionLogs(this.bridge, config.bridge.origin)
   }
   dispose(): void {}
 
   async dispatch(request: DashboardRequest, signal?: AbortSignal): Promise<JsonValue> {
     const args = request.args ?? {}
     if (request.domain === 'bridge') {
+      if (request.operation === 'virtual_catalog') {
+        const catalog = this.importTarget?.catalog() ?? { sessions: [] }
+        return { ...catalog, sessions: this.virtualEntries() }
+      }
+      if (request.operation.startsWith('virtual_')) {
+        const id = str(args['id'])
+        if (request.operation === 'virtual_open') return this.remoteLogs.open(id, this.virtualEntries(), signal)
+        if (request.operation === 'virtual_poll') return this.remoteLogs.poll(id, str(args['epoch']), Number(args['after']), signal)
+        if (request.operation === 'virtual_page') return this.remoteLogs.page(id, str(args['epoch']), args)
+        throw new Error('Unknown virtual session operation')
+      }
       if (request.operation === 'provider_status') return { registered: !!this.importTarget, ...(this.importTarget?.status() ?? {}) }
       if (request.operation === 'provider_models') {
         if (args['refresh'] === true || args['refresh'] === 'true') this.providerModels.invalidate()
@@ -69,5 +84,12 @@ export class AgentControlService {
         needsAttention: bridge.approvals.length + bridge.userInput.length + (counts['error'] ?? 0) }
     }
     throw new ControlError('invalid_operation', 'Unknown overview operation.', 400)
+  }
+  private virtualEntries(): JsonObject[] {
+    const catalog = this.importTarget?.catalog()
+    const entries = catalog?.['sessions']
+    return Array.isArray(entries) ? entries.map(record).filter(row => str(row['sessionId'])).map(row => ({ ...row,
+      importedId: row['nativeId'] ?? '', nativeId: virtualSessionId(this.config.bridge.origin, str(row['sessionId'])),
+    })) : []
   }
 }

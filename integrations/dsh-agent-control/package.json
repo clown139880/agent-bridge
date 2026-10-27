@@ -1,6 +1,6 @@
 {
   "name": "dsh-agent-control-plugin",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Out-of-tree DeepSeek Harness Agent Bridge control workspace",
   "type": "module",
   "main": "lib/index.js",

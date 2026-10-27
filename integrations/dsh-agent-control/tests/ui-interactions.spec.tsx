@@ -21,7 +21,7 @@ describe('management UI interactions', () => {
       let failure = 'system/message requires a protected first surface head'
       const call = vi.fn(async () => ({ ok: true, value: { sessionProvider: { registered: true, error: failure }, bridge: {} } }))
       let panel!: ComponentType<Record<string, unknown>>, props!: Record<string, unknown>
-      apply({ connection: { rpc: { call } }, remote: { session: {} }, get: () => undefined, effect: () => {},
+      apply({ connection: { rpc: { call } }, remote: { session: {} }, get: () => undefined, effect: () => {}, inject: () => {},
         slots: { spec: () => ({ kind: 'keyed' }), inject: (_name: string, callback: () => void) => callback(),
           register: (options: { name: string; inject?: () => Record<string, unknown> }, component: ComponentType<Record<string, unknown>>) => {
             if (options.name === 'main') { panel = component; props = options.inject!() }

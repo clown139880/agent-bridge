@@ -1,4 +1,5 @@
 import { installSessionMenu } from './session-menu.js'
+import { installVirtualSessions, READ_ONLY, readonlyResult, virtualTarget, wrapNamespace, type VirtualSessionsFace } from './remote-sessions.js'
 import { useDialog } from './dialog.js'
 import { NativeCatalog, DeleteNativeSession, SessionSourceMetadata, sidebarDecor, type CatalogSessions } from './native-catalog.js'
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
@@ -185,7 +186,7 @@ export function ControlPanelIcon({ size = 16 }: { size?: number }) {
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true"><rect x="3" y="4" width="18" height="13" rx="2" /><path d="M8 21h8M12 17v4M7 9l3 2-3 2M13 13h4" /></svg>
 }
 
-export const inject = ['slots', 'connection', 'layout', 'remote', 'remote.session', 'sessions', 'workspaces', 'uiWorkspace', 'modelDirectories']
+export const inject = ['slots', 'connection', 'layout', 'remote', 'remote.session', 'remote.commands', 'remote.userQuestions', 'remote.subagents', 'sessions', 'workspaces', 'uiWorkspace', 'modelDirectories']
 export function apply(ctx: ClientContext): void {
   connection = (ctx as unknown as { connection: RpcConnection }).connection
   const remote = (ctx as unknown as { remote: { session: {
@@ -194,7 +195,23 @@ export function apply(ctx: ClientContext): void {
   }; $on(event: string, listener: () => void): () => void } }).remote
   const nativeSessions = (ctx as unknown as { get(name: string): unknown }).get('sessions') as unknown as { open(id: string): void } | undefined
   const creation = new SessionCreationController((operation, args) => call('bridge', operation, args))
-  const catalog = new NativeCatalog((operation, args) => call('bridge', operation, args), ctx.get('sessions') as unknown as CatalogSessions)
+  const catalog = new NativeCatalog((operation, args) => call('bridge', operation === 'native_catalog' ? 'virtual_catalog' : operation, args), ctx.get('sessions') as unknown as CatalogSessions)
+  ctx.effect(() => installVirtualSessions(remote as unknown as Record<string, unknown>, ctx.get('sessions') as unknown as VirtualSessionsFace,
+    (operation, args) => call('bridge', operation, args), catalog))
+  for (const namespace of ['fileReferences', 'sessionFeedback', 'skills', 'workspaceFiles', 'sessionReferenceResolver']) {
+    ctx.inject([`remote.${namespace}`], scope => {
+      scope.effect(() => wrapNamespace(scope.get(`remote.${namespace}`) as Record<string, unknown>, (_method, args, original) =>
+        virtualTarget(args) ? Promise.resolve(readonlyResult()) : original(...args)))
+    })
+  }
+  ctx.inject(['conversation'], scope => {
+    const blocks = (scope.get('conversation') as unknown as { blocks: { set(id: string, block: { reason: string } | undefined): void } }).blocks
+    const ids = new Set<string>()
+    const sync = () => { for (const entry of catalog.snapshot()) { ids.add(entry.nativeId); blocks.set(entry.nativeId, { reason: READ_ONLY }) } }
+    sync()
+    const stop = catalog.subscribe(sync)
+    scope.effect(() => () => { stop(); for (const id of ids) blocks.set(id, undefined) })
+  })
   const loadNativeModelCatalog = async (): Promise<JsonValue> => {
     const response = await remote.session.modelCatalog()
     if (!response.ok) throw new Error(`${response.error.code}: ${response.error.message}`)

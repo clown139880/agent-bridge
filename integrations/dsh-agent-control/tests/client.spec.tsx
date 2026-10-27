@@ -11,6 +11,7 @@ describe('client components', () => {
       connection: {}, remote: { session: {} },
       get: () => undefined,
       effect: () => {},
+      inject: () => {},
       slots: { spec: (name: string) => name === 'main' ? { kind: 'keyed' } : undefined,
         inject: (_name: string, callback: () => void) => callback(), register },
     }

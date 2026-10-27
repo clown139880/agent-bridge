@@ -3,6 +3,8 @@ import { useDialog } from './dialog.js'
 import { AGENT_LABELS, AgentIcon, MachineChip, agentKind } from './agent-identity.js'
 import type { SidebarDecor } from './session-menu.js'
 import css from './workspace.module.css'
+import { isVirtualSession } from '../remote-sessions/id.js'
+import { READ_ONLY } from './remote-sessions.js'
 
 export type ExecutionLocation = { workerId: string; workerName: string; agent?: string; machineId: string; machineName: string; workspace: string; online: boolean; available: boolean; local?: boolean }
 export type NativeEntry = { nativeId: string; sessionId: string; workerId: string; model?: string; groupId: string; groupTitle: string; groupUpdatedAt: number; executionLocations: ExecutionLocation[]; machineId: string; workspace: string; projectIdentity?: string; presentationPath?: string; title: string; status: string; worker: string; updatedAt: number; activityAt: number; lastUsedAt?: number }
@@ -41,9 +43,10 @@ export function mergeWorkspaces(rows: readonly WorkspaceRow[], catalog: readonly
     return sessionIds.length ? [{ ...row, sessionIds }] : []
   })
   const entries = new Map(catalog.map(entry => [entry.nativeId, entry]))
+  const imported = new Set(catalog.map(entry => (entry as NativeEntry & { importedId?: string }).importedId).filter(Boolean))
   // A Bridge id the loaded catalog no longer lists was deleted; its host row can
   // linger until archival lands and must not resurface as a local DSH session.
-  const isBridgeId = (id: string) => id.startsWith('agent-bridge-') && !entries.has(id)
+  const isBridgeId = (id: string) => imported.has(id) || id.startsWith('agent-bridge-') && !entries.has(id)
   const groups = new Map<string, NativeEntry[]>()
   for (const entry of catalog) { const values = groups.get(entry.groupId); if (values) values.push(entry); else groups.set(entry.groupId, [entry]) }
   const consumed = new Set<WorkspaceRow>()
@@ -62,7 +65,10 @@ export function mergeWorkspaces(rows: readonly WorkspaceRow[], catalog: readonly
     const localRows = rows.filter(row => !consumed.has(row) && localPaths.has(canonicalPath(row.path))
       && row.sessionIds.filter(id => entries.has(id)).every(id => ids.has(id)))
     const related = [...new Set([...bridgeRows, ...localRows])]
-    const owner = localRows[0] ?? bridgeRows.find(row => !consumed.has(row)) ?? bridgeRows[0]
+    const owner = localRows[0] ?? bridgeRows.find(row => !consumed.has(row)) ?? bridgeRows[0] ?? (members.some(entry => isVirtualSession(entry.nativeId)) ? {
+      workspaceId: `bridge-remote-workspace-${members[0]!.nativeId}`, path: members[0]!.workspace,
+      title: members[0]!.groupTitle, sessionIds: [], createdAt: new Date(0).toISOString(), updatedAt: new Date(members[0]!.updatedAt || 0).toISOString(),
+    } : undefined)
     if (!owner) continue
     for (const row of related) consumed.add(row)
     const nativeIds = [...new Set(localRows.flatMap(row => row.sessionIds).filter(id => !entries.has(id) && !isBridgeId(id)))]
@@ -175,6 +181,7 @@ export class NativeCatalog {
     }
   }
   async remove(entry: Pick<NativeEntry, 'nativeId'>): Promise<void> {
+    if (isVirtualSession(entry.nativeId)) throw new Error(READ_ONLY)
     const result = await this.rpc('delete_native', { nativeId: entry.nativeId }) as { deleted?: boolean }
     if (!result.deleted) throw new Error('尚未确认删除成功')
     // No sessions.clear(): it persists DSH's explicit "no session selected" mode.
@@ -215,12 +222,14 @@ export class NativeCatalog {
         || other.sessionIds.some(session => row.sessionIds.includes(session))))
     }
     workspaces.rename = async (id, title) => {
+      if (projected().items.find(row => row.workspaceId === id)?.sessionIds.some(isVirtualSession)) throw new Error(READ_ONLY)
       const rows = exclusive(id)
       if (!rows.length && originals(id).length) throw new Error('该分组与其他分组共用同一目录，不能单独重命名')
       let result: unknown; for (const row of rows) result = await rename.call(workspaces, row.workspaceId, title); return result
     }
     workspaces.delete = async id => {
       const merged = projected().items.find(row => row.workspaceId === id)
+      if (merged?.sessionIds.some(isVirtualSession)) throw new Error(READ_ONLY)
       const physicalRows = exclusive(id)
       const nativeIds = merged?.sessionIds.filter(session => this.entries.some(entry => entry.nativeId === session)) ?? []
       if (!nativeIds.length && !physicalRows.length && originals(id).length) throw new Error('该目录仍被其他分组使用，不能单独删除')
@@ -239,6 +248,7 @@ export class NativeCatalog {
       }
     }
     workspaces.insertSessionBefore = (id, session, before) => {
+      if (isVirtualSession(session) || isVirtualSession(before)) return Promise.reject(new Error(READ_ONLY))
       const owner = originals(id).find(row => row.sessionIds.includes(session))
       return move.call(workspaces, owner?.workspaceId ?? id, session, before && owner?.sessionIds.includes(before) ? before : undefined)
     }
