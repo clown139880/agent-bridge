@@ -1,4 +1,6 @@
 import type { NativeCatalog, NativeEntry } from './native-catalog.js'
+import { isVirtualSession } from '../remote-sessions/id.js'
+import { READ_ONLY } from './remote-sessions.js'
 
 type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue }
 type ModelSelection = { provider: string; model: string; reasoningEffort?: string }
@@ -354,8 +356,25 @@ export class BridgeModelDirectory implements Directory {
 /** Route only imported Bridge sessions to worker-scoped models; native DSH sessions keep their original directory. */
 export function installBridgeModelDirectories(resolver: Resolver, catalog: NativeCatalog, models: NativeModels, selectModel: SelectModel): () => void {
   const original = resolver.directoryFor.bind(resolver)
-  const directories = new Map<string, BridgeModelDirectory>()
+  const directories = new Map<string, Directory>()
   resolver.directoryFor = (sessionId: string) => {
+    if (isVirtualSession(sessionId)) {
+      let directory = directories.get(sessionId)
+      if (!directory) {
+        const snapshot = (): DirectoryState => {
+          const model = catalog.entry(sessionId)?.model || REMOTE_MODEL
+          return { current: { provider: BRIDGE_PROVIDER, model }, pending: null, routable: false,
+            groups: [{ id: BRIDGE_PROVIDER, name: 'Bridge · 只读', models: [{ id: model, name: model }] }], failures: [], status: 'ready', error: null }
+        }
+        let state = snapshot()
+        const listeners = new Set<() => void>()
+        const stop = catalog.subscribe(() => { const next = snapshot(); if (!sameState(state, next)) { state = next; for (const listener of listeners) listener() } })
+        directory = { store: { getSnapshot: () => state, subscribe: listener => { listeners.add(listener); return () => { listeners.delete(listener) } } },
+          load: async () => state, select: async () => ({ ok: false, error: { code: 'read_only', message: READ_ONLY } }), dispose: stop }
+        directories.set(sessionId, directory)
+      }
+      return directory
+    }
     if (!sessionId.startsWith('agent-bridge-')) return original(sessionId)
     let directory = directories.get(sessionId)
     if (!directory) { directory = new BridgeModelDirectory(sessionId, catalog, models, selectModel); directories.set(sessionId, directory) }
