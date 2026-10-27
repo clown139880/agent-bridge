@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { historyPage, projectRows, RemoteSessionLogs, virtualSessionId } from '../src/remote-sessions/log.js'
 import { isVirtualSession } from '../src/remote-sessions/id.js'
-import { installVirtualSessions, READ_ONLY, virtualTarget, wrapNamespace } from '../src/client/remote-sessions.js'
+import { installVirtualSessions, READ_ONLY, virtualTarget, wrapNamespace, VirtualSessionTransport } from '../src/client/remote-sessions.js'
 import { mergeWorkspaces, type NativeEntry } from '../src/client/native-catalog.js'
 import type { JsonObject, JsonValue } from '../src/types.js'
 
@@ -68,6 +68,20 @@ describe('virtual session log', () => {
 })
 
 describe('client remote interception', () => {
+  it('streams an opening snapshot and live entries, binds pages to the epoch, and aborts on unload', async () => {
+    vi.useFakeTimers()
+    const rpc = vi.fn(async (operation: string): Promise<JsonValue> => operation === 'virtual_open'
+      ? { epoch: 'epoch', snapshot: { type: 'snapshot', cursor: 0, records: [], assistantStream: { revision: 0 } } }
+      : { records: [{ type: 'event', event: { seq: 1 } }], hasMore: false })
+    const transport = new VirtualSessionTransport(rpc), stream = transport.follow(id)[Symbol.asyncIterator]()
+    expect((await stream.next()).value).toMatchObject({ type: 'snapshot', cursor: 0 })
+    const next = stream.next(); await vi.advanceTimersByTimeAsync(1000)
+    expect((await next).value).toMatchObject({ type: 'event', event: { seq: 1 } })
+    await transport.page(id, { throughSeq: 1, beforeSeq: 1 })
+    expect(rpc).toHaveBeenCalledWith('virtual_page', { id, epoch: 'epoch', throughSeq: 1, beforeSeq: 1 })
+    const pending = stream.next(); const aborted = expect(pending).rejects.toBeDefined()
+    transport.dispose(); await aborted
+  })
   it('wraps getter methods with their calling receiver and restores descriptors across reloads', () => {
     const namespace = { value: 'local' }
     Object.defineProperty(namespace, 'follow', { configurable: true, enumerable: true, get() { return () => this.value } })
