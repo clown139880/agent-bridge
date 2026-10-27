@@ -25,7 +25,7 @@ export function controlBrowserApi(api: AgentControlApi, tokens: { read?: string;
       } catch { return fail(403, "browser_origin_required"); }
     }
     const url = new URL(c.req.url), path = url.pathname.slice(PREFIX.length), method = c.req.method;
-    const read = method === "GET" && /^(?:access|snapshot|workers|workers\/[^/]+\/models|sessions|sessions\/[^/]+(?:\/events)?|actions\/[^/]+|approvals|user-input|stream|memory-reviews)$/.test(path);
+    const read = method === "GET" && /^(?:access|snapshot|workers|workers\/[^/]+\/models|sessions|sessions\/[^/]+(?:\/events|\/events\/[^/]+|\/view|\/view\/changes|\/view\/entries\/[^/]+)?|actions\/[^/]+|approvals|user-input|stream|memory-reviews)$/.test(path);
     const write = method === "POST" && /^(?:sessions|sessions\/[^/]+\/(?:turns|interrupt)|attachments|approvals\/[^/]+\/decision|user-input\/[^/]+\/response|memory-reviews\/[^/]+\/decision)$/.test(path);
     if (!read && !write) return fail(404, "not_found");
     if (!principal) return fail(503, "browser_api_unconfigured");

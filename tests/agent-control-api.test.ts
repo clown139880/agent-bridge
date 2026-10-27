@@ -80,6 +80,10 @@ test("browser entrance keeps credentials server-side, preserves Bearer API, bloc
     }
     assert.equal((await fetch(`${browser}/snapshot`, { method: "OPTIONS", headers: { origin: "https://evil.example", "access-control-request-headers": "x-control-center" } })).status, 403);
     assert.equal((await fetch(`${browser}/missing`, { headers })).status, 404);
+    // The detail page reads the conversation view through the browser entrance.
+    for (const path of ["/sessions/thread-1/view", "/sessions/thread-1/view/changes?since=0&rawAfter=0",
+      `/sessions/thread-1/view/entries/${encodeURIComponent("t:initial-turn")}`, "/sessions/thread-1/events/initial-reply"])
+      assert.equal((await fetch(`${browser}${path}`, { headers })).status, 200, path);
     assert.equal((await fetch(`${browser}/workers/codex%40dev`, { method: "DELETE", headers })).status, 404);
     assert.equal((await fetch(`${browser}/sessions/thread-1`, { method: "DELETE", headers })).status, 404);
     const postHeaders = { ...headers, "content-type": "application/json", "idempotency-key": "browser-turn", origin };
