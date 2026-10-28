@@ -208,14 +208,14 @@ describe('effort levels', () => {
 })
 
 describe('BridgeModelDirectory rendering', () => {
-  it('shows a virtual session model without fetching or automatically selecting a model', async () => {
+  it('gives virtual sessions the asynchronous worker directory, never one that answers synchronously', async () => {
     const native = vi.fn(), select = vi.fn(), source = models()
     const resolver = { directoryFor: native }
     const stop = installBridgeModelDirectories(resolver, catalog({ ...entry, nativeId: 'bridge-remote-test' }), source.source, select)
     const directory = resolver.directoryFor('bridge-remote-test')
-    expect((await directory.load()).current?.model).toBe(entry.model)
-    expect(await directory.select({ provider: BRIDGE_PROVIDER, model: 'other' })).toMatchObject({ ok: false, error: { code: 'read_only' } })
-    expect(native).not.toHaveBeenCalled(); expect(select).not.toHaveBeenCalled()
+    expect(directory).toBeInstanceOf(BridgeModelDirectory)
+    expect(directory.store.getSnapshot().status).not.toBe('ready')
+    expect(native).not.toHaveBeenCalled()
     stop()
   })
   it('does not notify subscribers when a reload produces the same snapshot', async () => {
