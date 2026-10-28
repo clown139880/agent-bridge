@@ -121,6 +121,21 @@ describe('client remote interception', () => {
     await invoke('prompt', { sessionId: 'local' }); expect(host).toHaveBeenCalledOnce()
     dispose()
   })
+  it('republishes only sessions whose summary changed: each publish rebuilds the native session list', () => {
+    const other = { ...entry, nativeId: virtualSessionId(origin, 'other'), sessionId: 'other', title: 'Other' } as NativeEntry
+    let rows = [entry, other], notify!: () => void
+    const added = vi.fn(), status = vi.fn()
+    const sessions = { handleSessionAdded: added, handleSessionRemoved: vi.fn(), handleSessionStatus: status, refresh: vi.fn(async () => {}) }
+    const dispose = installVirtualSessions({ session: {} }, sessions, vi.fn(), { snapshot: () => rows, subscribe: listener => { notify = listener; return () => {} } })
+    expect(added).toHaveBeenCalledTimes(2); expect(status).toHaveBeenCalledTimes(2)
+    notify()
+    expect(added).toHaveBeenCalledTimes(2)
+    rows = [{ ...entry, title: 'Renamed' }, other]; notify()
+    expect(added).toHaveBeenCalledTimes(3); expect(status).toHaveBeenCalledTimes(2)
+    rows = [other]; notify()
+    expect(sessions.handleSessionRemoved).toHaveBeenCalledWith(id)
+    dispose()
+  })
   it('synthesizes workspaces and hides the imported copy while preserving native sessions', () => {
     const imported = 'agent-bridge-old'
     const rows = mergeWorkspaces([{ workspaceId: 'old', path: '/presentation', title: 'Old', sessionIds: [imported], createdAt: '', updatedAt: '' }], [{ ...entry, importedId: imported } as NativeEntry])

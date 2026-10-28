@@ -85,14 +85,22 @@ export function installVirtualSessions(remote: Namespace, sessions: VirtualSessi
   const status = (id: string, running: boolean) => { if (!imported.has(id)) originalStatus.call(sessions, id, running) }
   sessions.handleSessionAdded = added
   sessions.handleSessionStatus = status
+  // Each handleSession* call makes DSH rebuild its whole session list: publish only what changed.
+  let published = new Map<string, string>()
   const sync = () => {
-    const entries = catalog.snapshot(), next = new Set(entries.map(row => row.nativeId))
+    const entries = catalog.snapshot(), next = new Map<string, string>()
     const hidden = new Set(entries.map(row => (row as NativeEntry & { importedId?: string }).importedId).filter((id): id is string => !!id))
     for (const id of hidden) if (!imported.has(id)) sessions.handleSessionRemoved(id)
     imported = hidden
-    for (const id of previous) if (!next.has(id)) sessions.handleSessionRemoved(id)
-    for (const entry of entries) { sessions.handleSessionAdded(virtualSummary(entry)); sessions.handleSessionStatus(entry.nativeId, false) }
-    previous = next
+    for (const id of previous) if (!entries.some(row => row.nativeId === id)) sessions.handleSessionRemoved(id)
+    for (const entry of entries) {
+      const summary = virtualSummary(entry), key = JSON.stringify(summary)
+      next.set(entry.nativeId, key)
+      if (published.get(entry.nativeId) === key) continue
+      sessions.handleSessionAdded(summary)
+      if (!published.has(entry.nativeId)) sessions.handleSessionStatus(entry.nativeId, false)
+    }
+    published = next; previous = new Set(next.keys())
   }
   const restores: Array<() => void> = []
   restores.push(wrapNamespace(obj(remote['session']), (name, args, original) => {
