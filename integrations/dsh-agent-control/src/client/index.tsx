@@ -1,4 +1,5 @@
 import { installSessionMenu } from './session-menu.js'
+import { BridgePending, BridgePendingPanel, installBridgePending } from './bridge-pending.js'
 import { installVirtualSessions, readonlyResult, virtualTarget, wrapNamespace, type VirtualSessionsFace } from './remote-sessions.js'
 import { useDialog } from './dialog.js'
 import { NativeCatalog, DeleteNativeSession, SessionSourceMetadata, sidebarDecor, type CatalogSessions } from './native-catalog.js'
@@ -204,6 +205,16 @@ export function apply(ctx: ClientContext): void {
         virtualTarget(args) ? Promise.resolve(readonlyResult()) : original(...args)))
     })
   }
+  // Bridge approvals and questions of virtual sessions, answered in the composer.
+  ctx.inject(['uiSession'], scope => {
+    const ui = scope.get('uiSession') as unknown as { registerPendingInteraction(precedence: () => number): Parameters<typeof installBridgePending>[0] }
+    const publish = ui.registerPendingInteraction(() => 0)
+    scope.effect(() => installBridgePending(publish, (operation, args) => call('bridge', operation, args as RecordValue), catalog))
+  })
+  ctx.slots.inject('conversation.composer', () => (ctx.slots as unknown as { register(options: unknown, component: unknown): () => void }).register({
+    name: 'conversation.composer', priority: 1,
+    select: ({ pendingInteraction }: { pendingInteraction?: unknown }) => pendingInteraction instanceof BridgePending ? pendingInteraction : null,
+  }, BridgePendingPanel))
   const loadNativeModelCatalog = async (): Promise<JsonValue> => {
     const response = await remote.session.modelCatalog()
     if (!response.ok) throw new Error(`${response.error.code}: ${response.error.message}`)

@@ -120,7 +120,9 @@ export class RemoteSessionLogs {
     // Registered before submitting: the echo can arrive before the receipt.
     const list = this.sent.get(remoteId) ?? []; list.push(pending); this.sent.set(remoteId, list.slice(-20))
     const model = str(args['model'])
+    const attachments = Array.isArray(args['attachments']) ? args['attachments'] : []
     const receipt = record(await this.bridge.call({ operation: 'submit_turn', args: { sessionId: remoteId, input: text, delivery: 'auto',
+      ...(attachments.length ? { attachments } : {}),
       ...(model && model !== 'remote' ? { model } : {}), ...(str(args['reasoningEffort']) ? { reasoningEffort: str(args['reasoningEffort']) } : {}) } }, signal))
     if (receipt['status'] === 'failed') {
       this.sent.set(remoteId, (this.sent.get(remoteId) ?? []).filter(item => item !== pending))

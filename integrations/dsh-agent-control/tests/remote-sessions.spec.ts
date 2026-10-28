@@ -131,7 +131,8 @@ describe('client remote interception', () => {
     const host = vi.fn(async () => ({ ok: true, value: { items: [{ sessionId: 'local' }] } }))
     const session: Record<string, unknown> = {}
     for (const name of ['list', 'follow', 'page', 'projections', 'prompt', 'cancel', 'selectModel', 'attachment', 'updateQueue', 'rename', 'fork']) Object.defineProperty(session, name, { configurable: true, enumerable: true, get: () => host })
-    const commands = { execute: host }, rpc = vi.fn(async (_operation: string, _args?: JsonObject): Promise<JsonValue> => ({ accepted: true }))
+    const commands = { execute: host }, rpc = vi.fn(async (operation: string, _args?: JsonObject): Promise<JsonValue> =>
+      operation === 'upload' ? { id: 'att1', filename: 'shot.png', mimeType: 'image/png', size: 3 } : { accepted: true })
     const sessions = { handleSessionAdded: vi.fn(), handleSessionRemoved: vi.fn(), handleSessionStatus: vi.fn(), refresh: vi.fn(async () => {}) }
     const added = sessions.handleSessionAdded
     const dispose = installVirtualSessions({ session, commands }, sessions, rpc, { snapshot: () => [entry], subscribe: () => () => {} })
@@ -142,7 +143,11 @@ describe('client remote interception', () => {
     expect(await invoke('selectModel', { sessionId: id, provider: 'agent-bridge', model: 'gpt-x', reasoningEffort: 'high' })).toMatchObject({ ok: true })
     expect(await invoke('prompt', { sessionId: id, requestId: 'r1', mode: 'queue', content: [{ type: 'text', text: 'hello' }] })).toEqual({ ok: true, value: { accepted: true } })
     expect(rpc).toHaveBeenCalledWith('virtual_prompt', { id, requestId: 'r1', text: 'hello', model: 'gpt-x', reasoningEffort: 'high' })
-    expect(await invoke('prompt', { sessionId: id, requestId: 'r2', content: [{ type: 'image', mediaType: 'image/png', data: 'x' }] })).toMatchObject({ ok: false })
+    expect(await invoke('prompt', { sessionId: id, requestId: 'r2', content: [{ type: 'image', mediaType: 'image/png', data: 'eA==', name: 'shot.png' }] })).toMatchObject({ ok: true })
+    expect(rpc).toHaveBeenCalledWith('upload', { filename: 'shot.png', mimeType: 'image/png', content: 'eA==' })
+    expect(rpc).toHaveBeenCalledWith('virtual_prompt', expect.objectContaining({ requestId: 'r2', text: '（见附图）',
+      attachments: [{ id: 'att1', filename: 'shot.png', mimeType: 'image/png', size: 3 }] }))
+    expect(await invoke('prompt', { sessionId: id, requestId: 'r4', content: [{ type: 'file', receiptId: 'f1' }] })).toMatchObject({ ok: false })
     expect(await invoke('cancel', { sessionId: id })).toEqual({ ok: true, value: { accepted: true } })
     expect(rpc).toHaveBeenCalledWith('virtual_cancel', { id })
     rpc.mockRejectedValueOnce(new Error('worker offline'))

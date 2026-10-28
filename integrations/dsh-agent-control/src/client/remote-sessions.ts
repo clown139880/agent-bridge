@@ -3,7 +3,7 @@ import type { JsonObject, JsonValue } from '../types.js'
 import type { NativeEntry } from './native-catalog.js'
 
 export const READ_ONLY = 'Bridge 远端会话不支持此操作，请在 Control Center 中进行。'
-const ATTACHMENTS = 'Bridge 远端会话暂不支持在 DSH 中发送图片或文件，请在 Control Center 中发送。'
+const FILES = 'Bridge 远端会话暂不支持在 DSH 中发送文件（图片可以），请在 Control Center 中发送。'
 type Rpc = (operation: string, args?: JsonObject) => Promise<JsonValue>
 type Method = (...args: unknown[]) => unknown
 type Namespace = Record<string, unknown>
@@ -71,11 +71,22 @@ export class VirtualSessionTransport {
    */
   async prompt(id: string, request: Record<string, unknown>, choice?: { model: string; reasoningEffort?: string }) {
     const parts = Array.isArray(request['content']) ? request['content'].map(obj) : []
-    if (parts.some(part => part['type'] !== 'text')) return readonlyResult(ATTACHMENTS)
-    const text = parts.map(part => String(part['text'] ?? '')).join('')
-    if (!text.trim()) return readonlyResult('消息为空')
+    if (parts.some(part => part['type'] !== 'text' && part['type'] !== 'image')) return readonlyResult(FILES)
+    const images = parts.filter(part => part['type'] === 'image')
+    // Bridge requires text; an image-only prompt says so.
+    const typed = parts.map(part => part['type'] === 'text' ? String(part['text'] ?? '') : '').join('')
+    const text = typed.trim() ? typed : images.length ? '（见附图）' : ''
+    if (!text) return readonlyResult('消息为空')
     try {
+      // Images go to the Control Plane first; the turn carries their references.
+      const attachments = []
+      for (const [index, image] of images.entries()) {
+        const mimeType = String(image['mediaType'] ?? 'image/png')
+        attachments.push(obj(await this.rpc('upload', { filename: String(image['name'] ?? `image-${index + 1}.${mimeType.split('/')[1] ?? 'png'}`),
+          mimeType, content: String(image['data'] ?? '') })))
+      }
       await this.rpc('virtual_prompt', { id, requestId: String(request['requestId']), text,
+        ...(attachments.length ? { attachments: attachments.map(ref => ({ id: String(ref['id']), filename: String(ref['filename']), mimeType: String(ref['mimeType']), size: Number(ref['size']) || 0 })) } : {}),
         ...(choice?.model ? { model: choice.model } : {}), ...(choice?.reasoningEffort ? { reasoningEffort: choice.reasoningEffort } : {}) })
       return { ok: true as const, value: { accepted: true as const } }
     } catch (error) { return readonlyResult(error instanceof Error ? error.message : String(error)) }
