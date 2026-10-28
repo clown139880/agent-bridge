@@ -53,7 +53,13 @@ Do not create a Windows Hermes database or a competing DSH Host.
 
 ## Updating the installed DSH client
 
-For client-only UI iterations, run from the repository root:
+The plugin is installed from the dev-wsl checkout only (see AGENTS.md): its build
+mirrors into the Desktop's linked plugin through `DSH_PLUGIN_MIRROR`, and the
+dev-wsl Bridge self-update rebuilds it on every root release. The updater below
+is kept for recovery when WSL is unavailable; do not use both, since each
+silently replaces the other's files.
+
+For a recovery install from Windows, run from the repository root:
 
 ```powershell
 pnpm --filter dsh-agent-control-plugin check

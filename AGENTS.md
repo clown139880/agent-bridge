@@ -26,11 +26,12 @@
 
 ## DSH Agent Control plugin deployment
 
-- For changes under `integrations/dsh-agent-control`, run its checks/build and install the compiled plugin with `deploy/windows-native/update-dsh-client.ps1` after pushing. The plugin is used only by the Windows TokensCowork Desktop.
+- For changes under `integrations/dsh-agent-control`, install the plugin only through the dev-wsl checkout `/home/clown/Workspace/uctw/agent-bridge` after pushing: `git pull --ff-only` on `main`, then `pnpm --filter dsh-agent-control-plugin check` (or `build`). Its `.env.local` sets `DSH_PLUGIN_MIRROR` to the Desktop's linked plugin (`C:\Users\clown\.dsh\linked\dsh-agent-control-plugin`), so the build is the install. The dev-wsl Bridge self-update builds the plugin the same way on every root release. The plugin is used only by the Windows TokensCowork Desktop.
+- Do not also install with `deploy/windows-native/update-dsh-client.ps1`: two installers overwrite each other silently. Keep one path.
 - Never install DSH or the plugin on HAL: do not run `sync:hal` / `deploy/hal/sync-dsh-agent-control.sh` there and do not create a `dsh-agent-control.service`.
 - Plugin-only changes do not trigger or restart either Bridge or the Control Plane.
 - Update the installed Host and browser bundles directly even while TokensCowork is running. Restart TokensCowork when needed to activate the installed plugin; deployment may interrupt in-flight plugin calls.
-- Verify source and installed bundle hashes. Verify the served hash when the Desktop endpoint permits it; an authenticated endpoint may be reported as not externally hash-verifiable.
+- Verify the WSL build output and the linked plugin's `lib` hashes match (ignore CRLF). Verify the served hash when the Desktop endpoint permits it; an authenticated endpoint may be reported as not externally hash-verifiable.
 
 ## HAL deployment
 
