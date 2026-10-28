@@ -1,4 +1,4 @@
-# Virtual read-only sessions (0.4.1)
+# Virtual Bridge sessions (0.5.0)
 
 Bridge sessions use `bridge-remote-<sha256(origin + NUL + remoteId)>` identities.
 The existing importer continues in the background. The client catalog hides its
@@ -39,3 +39,17 @@ wire events with the actual installed Session and native Chat projection.
 The latter constructs detached fixtures only and does not start a Host or touch
 user session files. Its Chat loader stubs UI-only imports and can emit React
 component warnings; it validates the reducer, not mounted React rendering.
+
+## Sending (0.5.0)
+
+The composer is no longer blocked. `prompt` (text only; images and files are
+refused with a pointer to the Control Center) becomes a Bridge `submit_turn`
+with `delivery: auto`, carrying the model chosen in the model selector, which
+`selectModel` remembers per session. `cancel` interrupts the session's active
+turn. The Host registers each prompt before submitting and tags Bridge's echo
+of it with the native `requestId` (`source.rpcId`), matched by the action id in
+the echo's event id or else by text sent around then, so the composer retires
+its local copy. The stop button follows the catalog status (`running` while the
+Bridge session is active or waiting). Approvals and questions are not shown in
+the native composer: its cards require the Desktop's own classes, so they are
+answered in the Control Center.

@@ -77,6 +77,30 @@ describe('virtual session log', () => {
   })
 })
 
+describe('sending from DSH', () => {
+  it('submits to Bridge and tags the echoed prompt with the native requestId', async () => {
+    const rows: JsonObject[] = []
+    const call = vi.fn(async ({ operation, args }: { operation: string; args?: JsonObject }): Promise<JsonValue> => {
+      if (operation === 'session') return { sessionId: 'r', viewRevision: rows.length, activeTurnId: 'turn-9' }
+      if (operation === 'session_view_changes') return { hasMore: false, toRevision: rows.length, raw: { through: rows.length } }
+      if (operation === 'submit_turn') return { actionId: 'act1', status: 'accepted' }
+      if (operation === 'interrupt_turn') return { actionId: 'act2', status: 'accepted', args } as never
+      const offset = args?.['after'] ? Number(args['after']) : 0
+      return { data: rows.slice(offset), nextCursor: String(rows.length), hasMore: false }
+    })
+    const logs = new RemoteSessionLogs({ call }, origin), virtual = virtualSessionId(origin, 'r'), entries = [{ sessionId: 'r' }]
+    await logs.open(virtual, entries)
+    expect(await logs.prompt(virtual, entries, { requestId: 'req-1', text: '你好', model: 'remote' })).toEqual({ accepted: true })
+    expect(call).toHaveBeenCalledWith({ operation: 'submit_turn', args: { sessionId: 'r', input: '你好', delivery: 'auto' } }, undefined)
+    rows.push({ eventId: 'claude:r:action:act1:user', sessionId: 'r', turnId: 't1', timestamp: Date.now(), cursor: 'e:1', type: 'message.completed', payload: { role: 'user', text: '你好' } })
+    const opened = await logs.open(virtual, entries)
+    const user = ((opened['snapshot'] as JsonObject)['records'] as Array<{ event: { type: string; data: JsonObject } }>).find(r => r.event.type === 'user/message')!
+    expect(user.event.data['source']).toEqual({ kind: 'user', rpcId: 'req-1' })
+    await logs.cancel(virtual, entries)
+    expect(call).toHaveBeenCalledWith({ operation: 'interrupt_turn', args: { sessionId: 'r', expectedTurnId: 'turn-9' } }, undefined)
+  })
+})
+
 describe('client remote interception', () => {
   it('streams an opening snapshot and live entries, binds pages to the epoch, and aborts on unload', async () => {
     vi.useFakeTimers()
@@ -103,11 +127,11 @@ describe('client remote interception', () => {
       restore(); expect(Object.getOwnPropertyDescriptor(namespace, 'follow')).toEqual(before)
     }
   })
-  it('registers virtual summaries, delegates locals and rejects every addressed write without Host calls', async () => {
+  it('registers virtual summaries, routes prompt/cancel/model to Bridge and rejects other writes without Host calls', async () => {
     const host = vi.fn(async () => ({ ok: true, value: { items: [{ sessionId: 'local' }] } }))
     const session: Record<string, unknown> = {}
     for (const name of ['list', 'follow', 'page', 'projections', 'prompt', 'cancel', 'selectModel', 'attachment', 'updateQueue', 'rename', 'fork']) Object.defineProperty(session, name, { configurable: true, enumerable: true, get: () => host })
-    const commands = { execute: host }, rpc = vi.fn(async () => ({}))
+    const commands = { execute: host }, rpc = vi.fn(async (_operation: string, _args?: JsonObject): Promise<JsonValue> => ({ accepted: true }))
     const sessions = { handleSessionAdded: vi.fn(), handleSessionRemoved: vi.fn(), handleSessionStatus: vi.fn(), refresh: vi.fn(async () => {}) }
     const added = sessions.handleSessionAdded
     const dispose = installVirtualSessions({ session, commands }, sessions, rpc, { snapshot: () => [entry], subscribe: () => () => {} })
@@ -115,10 +139,29 @@ describe('client remote interception', () => {
     const invoke = (name: string, args: unknown) => (session[name] as (args: unknown) => Promise<unknown>)(args)
     expect(await invoke('list', {})).toMatchObject({ value: { items: [{ sessionId: 'local' }, { sessionId: id }] } })
     host.mockClear()
-    for (const name of ['prompt', 'cancel', 'selectModel', 'attachment', 'updateQueue', 'rename', 'fork']) expect(await invoke(name, { sessionId: id })).toMatchObject({ ok: false, error: { message: READ_ONLY } })
+    expect(await invoke('selectModel', { sessionId: id, provider: 'agent-bridge', model: 'gpt-x', reasoningEffort: 'high' })).toMatchObject({ ok: true })
+    expect(await invoke('prompt', { sessionId: id, requestId: 'r1', mode: 'queue', content: [{ type: 'text', text: 'hello' }] })).toEqual({ ok: true, value: { accepted: true } })
+    expect(rpc).toHaveBeenCalledWith('virtual_prompt', { id, requestId: 'r1', text: 'hello', model: 'gpt-x', reasoningEffort: 'high' })
+    expect(await invoke('prompt', { sessionId: id, requestId: 'r2', content: [{ type: 'image', mediaType: 'image/png', data: 'x' }] })).toMatchObject({ ok: false })
+    expect(await invoke('cancel', { sessionId: id })).toEqual({ ok: true, value: { accepted: true } })
+    expect(rpc).toHaveBeenCalledWith('virtual_cancel', { id })
+    rpc.mockRejectedValueOnce(new Error('worker offline'))
+    expect(await invoke('prompt', { sessionId: id, requestId: 'r3', content: [{ type: 'text', text: 'again' }] })).toMatchObject({ ok: false, error: { message: 'worker offline' } })
+    for (const name of ['attachment', 'updateQueue', 'rename', 'fork']) expect(await invoke(name, { sessionId: id })).toMatchObject({ ok: false, error: { message: READ_ONLY } })
     expect(await (commands.execute as (...args: unknown[]) => unknown)(id, '/anything')).toMatchObject({ ok: false })
     expect(host).not.toHaveBeenCalled()
     await invoke('prompt', { sessionId: 'local' }); expect(host).toHaveBeenCalledOnce()
+    dispose()
+  })
+  it('publishes the running flag so the composer offers stop while the Bridge session runs', () => {
+    let rows = [{ ...entry, status: 'idle' }] as NativeEntry[], notify!: () => void
+    const status = vi.fn()
+    const dispose = installVirtualSessions({ session: {} }, { handleSessionAdded: vi.fn(), handleSessionRemoved: vi.fn(), handleSessionStatus: status, refresh: vi.fn(async () => {}) },
+      vi.fn(), { snapshot: () => rows, subscribe: listener => { notify = listener; return () => {} } })
+    expect(status).toHaveBeenLastCalledWith(id, false)
+    rows = [{ ...entry, status: 'active' }] as NativeEntry[]; notify()
+    expect(status).toHaveBeenLastCalledWith(id, true); expect(status).toHaveBeenCalledTimes(2)
+    notify(); expect(status).toHaveBeenCalledTimes(2)
     dispose()
   })
   it('republishes only sessions whose summary changed: each publish rebuilds the native session list', () => {

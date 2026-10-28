@@ -4,7 +4,7 @@ import type { BridgeClient } from '../bridge-client.js'
 import type { JsonObject, JsonValue } from '../types.js'
 import type { NativeEvent } from '../agent-bridge-provider/dsh-compat.js'
 import { readHistory } from '../agent-bridge-provider/import-target.js'
-import { projectNativeEvents, record, str } from '../agent-bridge-provider/mapping.js'
+import { projectNativeEvents, record, sameUserText, str } from '../agent-bridge-provider/mapping.js'
 import { VIRTUAL_PREFIX } from './id.js'
 
 export function virtualSessionId(origin: string, remoteId: string): string {
@@ -104,10 +104,60 @@ export class RemoteSessionLogs {
     if (log.baseline) log.rowsAfterBaseline += fresh.filter(row => rowId(row) > log.baseline!.high).length
     if (revision !== undefined && log.baseline && revision - log.baseline.revision > log.rowsAfterBaseline) log.invalid = true
     if (log.invalid) throw new Error('Bridge 历史已原地修订，请切换后重新打开会话')
-    log.events.push(...projectRows(fresh, log.events, str(log.summary['model'], 'remote')))
+    const projected = projectRows(fresh, log.events, str(log.summary['model'], 'remote'))
+    this.claimEchoes(log.remoteId, fresh, projected)
+    log.events.push(...projected)
     for (const row of fresh) log.rows.add(str(row['eventId']))
     log.cursor = history.cursor ?? log.cursor
     if (revision !== undefined) log.revision = revision
+  }
+  /** Prompts sent from DSH whose Bridge echo has not arrived yet, by remote session. */
+  private readonly sent = new Map<string, Array<{ requestId: string; text: string; time: number; actionId?: string }>>()
+  /** Submit a prompt typed in the native composer to the Bridge session. */
+  async prompt(id: string, entries: JsonObject[], args: JsonObject, signal?: AbortSignal): Promise<JsonObject> {
+    const remoteId = str(this.resolve(id, entries)['sessionId']), text = str(args['text'])
+    const pending = { requestId: str(args['requestId']), text, time: Date.now() } as { requestId: string; text: string; time: number; actionId?: string }
+    // Registered before submitting: the echo can arrive before the receipt.
+    const list = this.sent.get(remoteId) ?? []; list.push(pending); this.sent.set(remoteId, list.slice(-20))
+    const model = str(args['model'])
+    const receipt = record(await this.bridge.call({ operation: 'submit_turn', args: { sessionId: remoteId, input: text, delivery: 'auto',
+      ...(model && model !== 'remote' ? { model } : {}), ...(str(args['reasoningEffort']) ? { reasoningEffort: str(args['reasoningEffort']) } : {}) } }, signal))
+    if (receipt['status'] === 'failed') {
+      this.sent.set(remoteId, (this.sent.get(remoteId) ?? []).filter(item => item !== pending))
+      throw new Error(str(record(record(receipt['error'])['error'])['message'], str(record(receipt['error'])['message'], 'Bridge 拒绝了这条消息')))
+    }
+    pending.actionId = str(receipt['actionId'])
+    return { accepted: true }
+  }
+  /** Interrupt the Bridge session's running turn. */
+  async cancel(id: string, entries: JsonObject[], signal?: AbortSignal): Promise<JsonObject> {
+    const remoteId = str(this.resolve(id, entries)['sessionId'])
+    const session = record(await this.bridge.call({ operation: 'session', args: { sessionId: remoteId } }, signal))
+    const turn = str(session['activeTurnId'])
+    const receipt = record(await this.bridge.call({ operation: 'interrupt_turn', args: { sessionId: remoteId, ...(turn ? { expectedTurnId: turn } : {}) } }, signal))
+    if (receipt['status'] === 'failed') throw new Error(str(record(receipt['error'])['message'], '中断失败'))
+    return { accepted: true }
+  }
+  /**
+   * Tag Bridge's echo of a prompt sent from DSH with its requestId (`source.rpcId`): the native
+   * composer retires its local copy only on that. By action id when the worker names it in the
+   * event id, otherwise by text sent around then.
+   */
+  private claimEchoes(remoteId: string, rows: readonly JsonObject[], events: NativeEvent[]): void {
+    const pending = this.sent.get(remoteId)
+    if (!pending?.length) return
+    for (const event of events) {
+      if (event.type !== 'user/message') continue
+      const eventId = str(event.data['id']).replace(/^bridge:/, '')
+      const row = rows.find(item => str(item['eventId']) === eventId)
+      if (!row) continue
+      const at = Number(row['timestamp']) || Date.now(), text = str(record(row['payload'])['text'])
+      const match = pending.find(item => item.actionId && eventId.includes(`:action:${item.actionId}:`))
+        ?? pending.find(item => at >= item.time - 120_000 && at <= item.time + 6 * 3600_000 && sameUserText(text, item.text))
+      if (!match) continue
+      event.data = { ...event.data, source: { kind: 'user', rpcId: match.requestId } }
+      pending.splice(pending.indexOf(match), 1)
+    }
   }
   /** The revision and highest event id at one instant (Control Plane 0.7.25+); none from older servers. */
   private async baseline(sessionId: string, since: number, signal?: AbortSignal): Promise<Log['baseline']> {

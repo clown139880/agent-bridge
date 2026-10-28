@@ -37,6 +37,8 @@ export class AgentControlService {
         if (request.operation === 'virtual_open') return this.remoteLogs.open(id, this.virtualEntries(), signal)
         if (request.operation === 'virtual_poll') return this.remoteLogs.poll(id, str(args['epoch']), Number(args['after']), signal)
         if (request.operation === 'virtual_page') return this.remoteLogs.page(id, str(args['epoch']), args)
+        if (request.operation === 'virtual_prompt') return this.remoteLogs.prompt(id, this.virtualEntries(), args, signal)
+        if (request.operation === 'virtual_cancel') return this.remoteLogs.cancel(id, this.virtualEntries(), signal)
         throw new Error('Unknown virtual session operation')
       }
       if (request.operation === 'provider_status') return { registered: !!this.importTarget, ...(this.importTarget?.status() ?? {}) }

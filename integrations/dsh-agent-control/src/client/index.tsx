@@ -1,5 +1,5 @@
 import { installSessionMenu } from './session-menu.js'
-import { installVirtualSessions, READ_ONLY, readonlyResult, virtualTarget, wrapNamespace, type VirtualSessionsFace } from './remote-sessions.js'
+import { installVirtualSessions, readonlyResult, virtualTarget, wrapNamespace, type VirtualSessionsFace } from './remote-sessions.js'
 import { useDialog } from './dialog.js'
 import { NativeCatalog, DeleteNativeSession, SessionSourceMetadata, sidebarDecor, type CatalogSessions } from './native-catalog.js'
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
@@ -204,14 +204,6 @@ export function apply(ctx: ClientContext): void {
         virtualTarget(args) ? Promise.resolve(readonlyResult()) : original(...args)))
     })
   }
-  ctx.inject(['conversation'], scope => {
-    const blocks = (scope.get('conversation') as unknown as { blocks: { set(id: string, block: { reason: string } | undefined): void } }).blocks
-    const ids = new Set<string>()
-    const sync = () => { for (const entry of catalog.snapshot()) { ids.add(entry.nativeId); blocks.set(entry.nativeId, { reason: READ_ONLY }) } }
-    sync()
-    const stop = catalog.subscribe(sync)
-    scope.effect(() => () => { stop(); for (const id of ids) blocks.set(id, undefined) })
-  })
   const loadNativeModelCatalog = async (): Promise<JsonValue> => {
     const response = await remote.session.modelCatalog()
     if (!response.ok) throw new Error(`${response.error.code}: ${response.error.message}`)

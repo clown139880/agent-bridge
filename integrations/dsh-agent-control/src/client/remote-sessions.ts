@@ -2,7 +2,8 @@ import { isVirtualSession } from '../remote-sessions/id.js'
 import type { JsonObject, JsonValue } from '../types.js'
 import type { NativeEntry } from './native-catalog.js'
 
-export const READ_ONLY = 'Bridge 远端会话当前仅供只读查看，请在 Bridge 中操作。'
+export const READ_ONLY = 'Bridge 远端会话不支持此操作，请在 Control Center 中进行。'
+const ATTACHMENTS = 'Bridge 远端会话暂不支持在 DSH 中发送图片或文件，请在 Control Center 中发送。'
 type Rpc = (operation: string, args?: JsonObject) => Promise<JsonValue>
 type Method = (...args: unknown[]) => unknown
 type Namespace = Record<string, unknown>
@@ -12,7 +13,9 @@ export function virtualTarget(value: unknown): string | undefined {
   if (value && typeof value === 'object') for (const nested of Object.values(value)) { const id = virtualTarget(nested); if (id) return id }
   return undefined
 }
-export function readonlyResult() { return { ok: false as const, error: { code: 'gateway/bad-request', message: READ_ONLY, details: {} } } }
+export function readonlyResult(message = READ_ONLY) { return { ok: false as const, error: { code: 'gateway/bad-request', message, details: {} } } }
+const RUNNING = new Set(['creating', 'active', 'waiting_for_approval', 'waiting_for_input'])
+export const virtualRunning = (entry: Pick<NativeEntry, 'status'>) => RUNNING.has(String(entry.status ?? ''))
 /** Preserve the generated getter's caller Context, not a bound root Remote. */
 export function wrapNamespace(namespace: Namespace, dispatch: (name: string, args: unknown[], original: Method) => unknown): () => void {
   const restorers: Array<() => void> = []
@@ -29,7 +32,7 @@ export function wrapNamespace(namespace: Namespace, dispatch: (name: string, arg
   return () => { for (const restore of restorers.reverse()) restore() }
 }
 export function virtualSummary(entry: NativeEntry): JsonObject {
-  return { sessionId: entry.nativeId, agentAvailable: false, running: false, blank: false, cwd: entry.workspace, updatedAt: entry.activityAt,
+  return { sessionId: entry.nativeId, agentAvailable: false, running: virtualRunning(entry), blank: false, cwd: entry.workspace, updatedAt: entry.activityAt,
     projections: { kind: 'sequenced', asOfSeq: -1, values: { title: entry.title, modelSelection: { lastUsed: { provider: 'agent-bridge', model: entry.model || 'remote' }, next: { provider: 'agent-bridge', model: entry.model || 'remote' } } } } }
 }
 const pause = (signal: AbortSignal) => new Promise<void>((resolve, reject) => {
@@ -62,6 +65,25 @@ export class VirtualSessionTransport {
       }
     } finally { controller.abort(); this.active.delete(controller) }
   }
+  /**
+   * The native composer already shows the prompt; the Host tags Bridge's echo of it with
+   * this requestId (`source.rpcId`) so the composer retires its local copy.
+   */
+  async prompt(id: string, request: Record<string, unknown>, choice?: { model: string; reasoningEffort?: string }) {
+    const parts = Array.isArray(request['content']) ? request['content'].map(obj) : []
+    if (parts.some(part => part['type'] !== 'text')) return readonlyResult(ATTACHMENTS)
+    const text = parts.map(part => String(part['text'] ?? '')).join('')
+    if (!text.trim()) return readonlyResult('消息为空')
+    try {
+      await this.rpc('virtual_prompt', { id, requestId: String(request['requestId']), text,
+        ...(choice?.model ? { model: choice.model } : {}), ...(choice?.reasoningEffort ? { reasoningEffort: choice.reasoningEffort } : {}) })
+      return { ok: true as const, value: { accepted: true as const } }
+    } catch (error) { return readonlyResult(error instanceof Error ? error.message : String(error)) }
+  }
+  async cancel(id: string) {
+    try { await this.rpc('virtual_cancel', { id }); return { ok: true as const, value: { accepted: true as const } } }
+    catch (error) { return readonlyResult(error instanceof Error ? error.message : String(error)) }
+  }
   async page(id: string, request: Record<string, unknown>) {
     const epoch = this.epochs.get(id)
     if (!epoch) throw new Error('请先打开 Bridge 会话')
@@ -87,20 +109,22 @@ export function installVirtualSessions(remote: Namespace, sessions: VirtualSessi
   sessions.handleSessionStatus = status
   // Each handleSession* call makes DSH rebuild its whole session list: publish only what changed.
   let published = new Map<string, string>()
+  let runningPublished = new Map<string, boolean>()
+  const choices = new Map<string, { model: string; reasoningEffort?: string }>()
   const sync = () => {
-    const entries = catalog.snapshot(), next = new Map<string, string>()
+    const entries = catalog.snapshot(), next = new Map<string, string>(), running = new Map<string, boolean>()
     const hidden = new Set(entries.map(row => (row as NativeEntry & { importedId?: string }).importedId).filter((id): id is string => !!id))
     for (const id of hidden) if (!imported.has(id)) sessions.handleSessionRemoved(id)
     imported = hidden
     for (const id of previous) if (!entries.some(row => row.nativeId === id)) sessions.handleSessionRemoved(id)
     for (const entry of entries) {
       const summary = virtualSummary(entry), key = JSON.stringify(summary)
-      next.set(entry.nativeId, key)
-      if (published.get(entry.nativeId) === key) continue
-      sessions.handleSessionAdded(summary)
-      if (!published.has(entry.nativeId)) sessions.handleSessionStatus(entry.nativeId, false)
+      next.set(entry.nativeId, key); running.set(entry.nativeId, virtualRunning(entry))
+      if (published.get(entry.nativeId) !== key) sessions.handleSessionAdded(summary)
+      // The stop button follows the session's running flag.
+      if (runningPublished.get(entry.nativeId) !== running.get(entry.nativeId)) sessions.handleSessionStatus(entry.nativeId, running.get(entry.nativeId)!)
     }
-    published = next; previous = new Set(next.keys())
+    published = next; runningPublished = running; previous = new Set(next.keys())
   }
   const restores: Array<() => void> = []
   restores.push(wrapNamespace(obj(remote['session']), (name, args, original) => {
@@ -114,6 +138,14 @@ export function installVirtualSessions(remote: Namespace, sessions: VirtualSessi
     if (!id) return original(...args)
     if (name === 'follow') return transport.follow(id, args[1] as AbortSignal | undefined)
     if (name === 'page') return transport.page(id, obj(args[0]))
+    if (name === 'prompt') return transport.prompt(id, obj(args[0]), choices.get(id))
+    if (name === 'cancel') return transport.cancel(id)
+    if (name === 'selectModel') {
+      // Remembered for the next prompt: a Bridge turn takes its model when it starts.
+      const request = obj(args[0])
+      choices.set(id, { model: String(request['model'] ?? ''), ...(typeof request['reasoningEffort'] === 'string' ? { reasoningEffort: request['reasoningEffort'] } : {}) })
+      return Promise.resolve({ ok: true, value: {} })
+    }
     if (name === 'projections') {
       const entry = catalog.snapshot().find(row => row.nativeId === id)
       const block = obj(entry ? virtualSummary(entry)['projections'] : {})
