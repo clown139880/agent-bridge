@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { BridgeClient, type BridgeConfig } from './bridge-client.js'
 import { ControlError } from './errors.js'
 import type { BridgeCall, DashboardRequest, JsonValue, JsonObject } from './types.js'
@@ -30,10 +31,7 @@ export class AgentControlService {
   async dispatch(request: DashboardRequest, signal?: AbortSignal): Promise<JsonValue> {
     const args = request.args ?? {}
     if (request.domain === 'bridge') {
-      if (request.operation === 'virtual_catalog') {
-        const catalog = this.importTarget?.catalog() ?? { sessions: [] }
-        return { ...catalog, sessions: this.virtualEntries() }
-      }
+      if (request.operation === 'virtual_catalog') return this.catalogChanges(Number(args['since']) || 0, str(args['epoch']))
       if (request.operation.startsWith('virtual_')) {
         const id = str(args['id'])
         if (request.operation === 'virtual_open') return this.remoteLogs.open(id, this.virtualEntries(), signal)
@@ -84,6 +82,30 @@ export class AgentControlService {
         needsAttention: bridge.approvals.length + bridge.userInput.length + (counts['error'] ?? 0) }
     }
     throw new ControlError('invalid_operation', 'Unknown overview operation.', 400)
+  }
+  /**
+   * The catalog as changes since a revision: polled every few seconds by every
+   * window, it would otherwise resend hundreds of unchanged sessions each time.
+   * Per-entry revisions; a client from another epoch (Host restart) gets all.
+   */
+  private readonly catalog = { epoch: randomUUID(), rev: 0, entries: new Map<string, { json: string; rev: number }>(),
+    removed: new Map<string, number>(), order: '', orderRev: 0 }
+  private catalogChanges(since: number, epoch: string): JsonObject {
+    const state = this.catalog, entries = this.virtualEntries(), seen = new Set<string>()
+    for (const entry of entries) {
+      const id = str(entry['nativeId']), json = JSON.stringify(entry)
+      seen.add(id); state.removed.delete(id)
+      if (state.entries.get(id)?.json !== json) state.entries.set(id, { json, rev: ++state.rev })
+    }
+    for (const id of [...state.entries.keys()]) if (!seen.has(id)) { state.entries.delete(id); state.removed.set(id, ++state.rev) }
+    const order = entries.map(entry => str(entry['nativeId'])).join('\n')
+    if (order !== state.order) { state.order = order; state.orderRev = ++state.rev }
+    const full = epoch !== state.epoch || since > state.rev
+    const after = full ? 0 : since
+    return { epoch: state.epoch, rev: state.rev, full,
+      sessions: [...state.entries.values()].filter(entry => entry.rev > after).map(entry => JSON.parse(entry.json) as JsonObject),
+      removed: full ? [] : [...state.removed].filter(([, rev]) => rev > after).map(([id]) => id),
+      ...(state.orderRev > after ? { order: entries.map(entry => str(entry['nativeId'])) } : {}) }
   }
   private virtualEntries(): JsonObject[] {
     const catalog = this.importTarget?.catalog()

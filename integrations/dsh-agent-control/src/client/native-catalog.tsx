@@ -16,7 +16,7 @@ type Workspaces = { list: Source<WorkspaceSnapshot>; rename(id: string, title: s
 type SessionSnapshot = { current?: string; byId?: Record<string, { updatedAt?: number }> }
 export type CatalogSessions = { list: Source<SessionSnapshot>; clear(): void; refresh(): Promise<void> }
 export const DELETE_SESSION_EVENT = 'agent-control:delete-session'
-type Rpc = (operation: string, args?: Record<string, string | string[]>) => Promise<unknown>
+type Rpc = (operation: string, args?: Record<string, string | number | string[]>) => Promise<unknown>
 
 const EMPTY_SNAPSHOT: WorkspaceSnapshot = { items: [], archivedSessionIds: [] }
 const EMPTY_WORKSPACES: Source<WorkspaceSnapshot> = { getSnapshot: () => EMPTY_SNAPSHOT, subscribe: () => () => {} }
@@ -173,12 +173,22 @@ export class NativeCatalog {
     }
     return [...machines].map(([machineId, machineName]) => ({ machineId, machineName }))
   }
+  private position = { epoch: '', rev: 0 }
+  /** Applies the changes since the last revision; the whole catalog only on the first call or a Host restart. */
   async refresh(): Promise<void> {
-    const data = await this.rpc('native_catalog') as { sessions: NativeEntry[] }
+    const data = await this.rpc('native_catalog', { since: this.position.rev, epoch: this.position.epoch }) as
+      { sessions: NativeEntry[]; removed?: string[]; order?: string[]; full?: boolean; epoch?: string; rev?: number }
     if (!Array.isArray(data.sessions)) throw new Error('会话目录不可用')
-    if (!this.loaded || JSON.stringify(this.entries) !== JSON.stringify(data.sessions)) {
-      this.loaded = true; this.entries = data.sessions; this.emit()
-    }
+    // Hosts before 0.4.3 always answer with the whole catalog and no revision.
+    const whole = data.full !== false || typeof data.rev !== 'number'
+    if (!whole && !data.sessions.length && !data.removed?.length && !data.order) { this.position.rev = data.rev!; return }
+    const byId = new Map((whole ? [] : this.entries).map(row => [row.nativeId, row]))
+    for (const id of data.removed ?? []) byId.delete(id)
+    for (const row of data.sessions) byId.set(row.nativeId, row)
+    const order = data.order ?? (whole ? data.sessions.map(row => row.nativeId) : this.entries.map(row => row.nativeId).concat(data.sessions.map(row => row.nativeId)))
+    const next = [...new Set(order)].map(id => byId.get(id)).filter((row): row is NativeEntry => !!row)
+    if (typeof data.rev === 'number') this.position = { epoch: data.epoch ?? '', rev: data.rev }
+    this.loaded = true; this.entries = next; this.emit()
   }
   async remove(entry: Pick<NativeEntry, 'nativeId'>): Promise<void> {
     if (isVirtualSession(entry.nativeId)) throw new Error(READ_ONLY)

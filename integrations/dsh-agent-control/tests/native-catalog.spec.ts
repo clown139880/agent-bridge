@@ -47,7 +47,7 @@ describe('native catalog', () => {
     const catalogRows = [entry('a', 'windows', local.path, 0, 'one', 200), entry('b', 'windows', local.path, 0, 'two', 100)]
     for (const item of catalogRows) item.executionLocations[0]!.local = true
     const calls: string[] = []
-    const rpc = async (operation: string, args?: Record<string, string | string[]>) => {
+    const rpc = async (operation: string, args?: Record<string, string | number | string[]>) => {
       if (operation === 'native_catalog') return { sessions: catalogRows }
       calls.push(operation + ':' + JSON.stringify(args)); return { deleted: true }
     }
@@ -205,7 +205,7 @@ describe('native catalog', () => {
     const listeners = new Set<() => void>()
     const source = { getSnapshot: () => snapshot, subscribe: (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener) } } }
     const calls: string[] = []
-    const rpc = async (operation: string, args?: Record<string, string | string[]>) => {
+    const rpc = async (operation: string, args?: Record<string, string | number | string[]>) => {
       if (operation === 'native_catalog') return { sessions: [entry('first'), entry('second')] }
       calls.push(operation + ':' + JSON.stringify(args)); return { deleted: true }
     }
@@ -248,5 +248,25 @@ describe('native catalog', () => {
     expect(promptTitle({ title: '手动命名' }, [user('hello')])).toBe('手动命名')
     expect(promptTitle({}, [user('继续'), user('【恢复的首条用户消息】\n最初的任务')])).toBe('最初的任务')
     expect(promptTitle({}, [user('中'.repeat(100))])).toHaveLength(65)
+  })
+})
+
+describe('catalog deltas', () => {
+  it('merges changes in order and keeps the snapshot when nothing changed', async () => {
+    const { NativeCatalog } = await import('../src/client/native-catalog.js')
+    const row = (id: string, title = id) => ({ nativeId: id, sessionId: id, title, activityAt: 1 }) as never
+    const responses: unknown[] = [
+      { epoch: 'e', rev: 2, full: true, sessions: [row('a'), row('b')], removed: [], order: ['a', 'b'] },
+      { epoch: 'e', rev: 2, full: false, sessions: [], removed: [] },
+      { epoch: 'e', rev: 4, full: false, sessions: [row('a', 'A2')], removed: ['b'], order: ['a'] },
+    ]
+    const calls: unknown[] = []
+    const catalog = new NativeCatalog(async (_operation, args) => { calls.push(args); return responses.shift() }, { list: { getSnapshot: () => ({}), subscribe: () => () => {} }, clear() {}, refresh: async () => {} } as never)
+    let emits = 0; catalog.subscribe(() => emits++)
+    await catalog.refresh(); const first = catalog.snapshot()
+    expect(first.map(entry => entry.nativeId)).toEqual(['a', 'b'])
+    await catalog.refresh(); expect(catalog.snapshot()).toBe(first); expect(emits).toBe(1)
+    await catalog.refresh(); expect(catalog.snapshot().map(entry => [entry.nativeId, entry.title])).toEqual([['a', 'A2']])
+    expect(calls.at(-1)).toEqual({ since: 2, epoch: 'e' })
   })
 })
