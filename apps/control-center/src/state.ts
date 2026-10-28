@@ -292,7 +292,10 @@ export class ControlState {
     const selected = this.state.route.page === "detail" && e.sessionId === this.state.route.id;
     if (e.type === "approval.upserted" || e.type === "user_input.upserted") this.notifyPending(e.data as Pending);
     if (e.type === "session.updated") {
-      const s = e.data as Session;
+      // Streamed sessions carry an empty capabilities placeholder; only the detail GET knows
+      // what the worker supports. Keep the known list, or every action stays disabled.
+      const { capabilities, ...rest } = e.data as Session;
+      const s = (capabilities?.length ? { ...rest, capabilities } : rest) as Session;
       if (selected) {
         this.revision++; this.patch({ session: { ...this.state.session, ...s } });
         if (this.model && (s.viewRevision ?? 0) > this.model.viewRevision) void this.pull();

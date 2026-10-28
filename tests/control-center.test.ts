@@ -196,6 +196,14 @@ test("details cached by an earlier version (raw events, no view) never break ope
   assert.ok(saved.at(-1)!.every(c => Array.isArray(c.view.entries)));
 });
 
+test("a streamed session update never drops the capabilities the detail read returned", async t => {
+  const f = fixture(t);
+  await f.state.open({ page: "detail", id: "s" }); await flush();
+  assert.ok(f.state.snapshot().session?.capabilities?.includes("session-actions"));
+  f.emit(event("cap", "session.updated", { ...session, capabilities: [], status: "idle", viewRevision: 1 })); await flush();
+  assert.ok(f.state.snapshot().session?.capabilities?.includes("session-actions"), "the stream's empty placeholder must not disable sending");
+});
+
 test("the UCTW bridge rings for new requests and finished turns, and its absence or failure is harmless", async t => {
   const calls: string[] = [];
   const g = globalThis as unknown as { window?: unknown };
