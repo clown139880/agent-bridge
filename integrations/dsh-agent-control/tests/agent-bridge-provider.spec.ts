@@ -486,6 +486,22 @@ describe('native session catalog', () => {
     expect(f.bridge.call.mock.calls.some(([request]) => request.operation === 'create_session')).toBe(false)
     await f.target.dispose()
   })
+  it('resolves cold catalog bindings without loading their native agents and keeps the draft in the same group', async () => {
+    const f = await fixture()
+    const original = f.bridge.call.getMockImplementation()!
+    f.bridge.call.mockImplementation(async (request, signal) => request.operation === 'workers'
+      ? { workers: [{ id: 'w', machineId: 'remote', hostname: 'remote-host', status: 'online' }] } : original(request, signal))
+    await f.target.refresh()
+    const id = nativeSessionId('http://bridge.test', 'remote-1')
+    const cwd = nativeSession(f.agents.get(id)!).header.cwd!
+    f.agents.delete(id)
+    const sources = (await f.target.creationSources(cwd))['sources'] as JsonObject[]
+    expect(sources.map(source => source['id'])).toEqual(['w\0/remote/repo'])
+    const draft = await f.target.createInWorkspace(cwd, 'w\0/remote/repo')
+    expect(f.target.binding(String(draft.id))?.['groupId']).toBe(f.target.binding(id)?.['groupId'])
+    expect(f.agents.has(id)).toBe(false)
+    await f.target.dispose()
+  })
   it('creates a new session as a local draft and only creates the Bridge session with its first message', async () => {
     const f = await fixture([])
     const summaries: JsonObject[] = [summary]

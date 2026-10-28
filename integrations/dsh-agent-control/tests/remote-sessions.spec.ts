@@ -184,6 +184,16 @@ describe('client remote interception', () => {
     expect(sessions.handleSessionRemoved).toHaveBeenCalledWith(id)
     dispose()
   })
+  it('keeps drafts in their workspace without publishing synthetic remote summaries for them', () => {
+    const draft = { ...entry, nativeId: 'agent-bridge-draft', sessionId: '', presentationPath: '/presentation' }
+    const added = vi.fn()
+    const dispose = installVirtualSessions({ session: {} }, { handleSessionAdded: added, handleSessionRemoved: vi.fn(), handleSessionStatus: vi.fn(), refresh: vi.fn(async () => {}) },
+      vi.fn(), { snapshot: () => [entry, draft], subscribe: () => () => {} })
+    expect(added).toHaveBeenCalledTimes(1)
+    const rows = mergeWorkspaces([{ workspaceId: 'w', path: '/presentation', title: 'Project', sessionIds: [draft.nativeId], createdAt: '', updatedAt: '' }], [entry, draft])
+    expect(rows[0]!.sessionIds).toContain(draft.nativeId)
+    dispose()
+  })
   it('synthesizes workspaces and hides the imported copy while preserving native sessions', () => {
     const imported = 'agent-bridge-old'
     const rows = mergeWorkspaces([{ workspaceId: 'old', path: '/presentation', title: 'Old', sessionIds: [imported], createdAt: '', updatedAt: '' }], [{ ...entry, importedId: imported } as NativeEntry])

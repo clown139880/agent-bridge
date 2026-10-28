@@ -195,8 +195,8 @@ export function apply(ctx: ClientContext): void {
     selectModel(request: { sessionId: string; provider: string; model: string; reasoningEffort?: string }): Promise<{ ok: boolean; error?: { code?: string; message?: string } }>
   }; $on(event: string, listener: () => void): () => void } }).remote
   const nativeSessions = (ctx as unknown as { get(name: string): unknown }).get('sessions') as unknown as { open(id: string): void } | undefined
-  const creation = new SessionCreationController((operation, args) => call('bridge', operation, args))
   const catalog = new NativeCatalog((operation, args) => call('bridge', operation === 'native_catalog' ? 'virtual_catalog' : operation, args), ctx.get('sessions') as unknown as CatalogSessions)
+  const creation = new SessionCreationController((operation, args) => call('bridge', operation, args), () => catalog.refresh())
   ctx.effect(() => installVirtualSessions(remote as unknown as Record<string, unknown>, ctx.get('sessions') as unknown as VirtualSessionsFace,
     (operation, args) => call('bridge', operation, args), catalog))
   for (const namespace of ['fileReferences', 'sessionFeedback', 'skills', 'workspaceFiles', 'sessionReferenceResolver']) {

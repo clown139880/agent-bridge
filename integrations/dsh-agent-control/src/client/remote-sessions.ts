@@ -123,7 +123,7 @@ export function installVirtualSessions(remote: Namespace, sessions: VirtualSessi
   let runningPublished = new Map<string, boolean>()
   const choices = new Map<string, { model: string; reasoningEffort?: string }>()
   const sync = () => {
-    const entries = catalog.snapshot(), next = new Map<string, string>(), running = new Map<string, boolean>()
+    const entries = catalog.snapshot().filter(row => isVirtualSession(row.nativeId)), next = new Map<string, string>(), running = new Map<string, boolean>()
     const hidden = new Set(entries.map(row => (row as NativeEntry & { importedId?: string }).importedId).filter((id): id is string => !!id))
     for (const id of hidden) if (!imported.has(id)) sessions.handleSessionRemoved(id)
     imported = hidden
@@ -142,7 +142,7 @@ export function installVirtualSessions(remote: Namespace, sessions: VirtualSessi
     if (name === 'list') return Promise.resolve(original(...args)).then(result => {
       const response = obj(result), value = obj(response['value'])
       if (!response['ok']) return result
-      const entries = catalog.snapshot(), hidden = new Set(entries.map(entry => (entry as NativeEntry & { importedId?: string }).importedId))
+      const entries = catalog.snapshot().filter(row => isVirtualSession(row.nativeId)), hidden = new Set(entries.map(entry => (entry as NativeEntry & { importedId?: string }).importedId))
       return { ...response, value: { ...value, items: [...(value['items'] as Array<{ sessionId: string }>).filter(row => !hidden.has(row.sessionId) && !isVirtualSession(row.sessionId)), ...entries.map(virtualSummary)] } }
     })
     const id = virtualTarget(args[0])

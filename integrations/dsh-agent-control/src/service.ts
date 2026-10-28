@@ -112,7 +112,7 @@ export class AgentControlService {
   private virtualEntries(): JsonObject[] {
     const catalog = this.importTarget?.catalog()
     const entries = catalog?.['sessions']
-    return Array.isArray(entries) ? entries.map(record).filter(row => str(row['sessionId'])).map(row => ({ ...row,
+    return Array.isArray(entries) ? entries.map(record).map(row => !str(row['sessionId']) ? row : ({ ...row,
       importedId: row['nativeId'] ?? '', nativeId: virtualSessionId(this.config.bridge.origin, str(row['sessionId'])),
     })) : []
   }

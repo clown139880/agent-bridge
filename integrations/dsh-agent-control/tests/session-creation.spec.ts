@@ -18,7 +18,8 @@ describe('native directory creation', () => {
   it('lets the original action select a source and refreshes before returning its native identity', async () => {
     const source = {id:'remote',name:'Claude',workerId:'claude@machine',machineId:'machine',workspace:'/repo',available:true}
     const rpc = vi.fn(async (op: string) => op === 'creation_sources' ? {sources:[source]} : {nativeSessionId:'native-remote'})
-    const controller = new SessionCreationController(rpc)
+    const refreshCatalog = vi.fn(async () => {})
+    const controller = new SessionCreationController(rpc, refreshCatalog)
     const original = vi.fn(async (_options?: {workspaceId?:string}) => 'native-local')
     const sessions = {create:original,refresh:vi.fn(async () => {})}
     const reuseBlank = vi.fn(async (_workspaceId: string) => 'wrong-dsh-blank')
@@ -32,6 +33,8 @@ describe('native directory creation', () => {
     expect(original).not.toHaveBeenCalled()
     expect(reuseBlank).not.toHaveBeenCalled()
     expect(sessions.refresh).toHaveBeenCalledOnce()
+    expect(refreshCatalog).toHaveBeenCalledOnce()
+    expect(refreshCatalog.mock.invocationCallOrder[0]).toBeLessThan(sessions.refresh.mock.invocationCallOrder[0]!)
     expect(rpc).toHaveBeenLastCalledWith('create_native',{cwd:'/presentation',sourceId:'remote'})
     dispose()
     expect(sessions.create).toBe(original)

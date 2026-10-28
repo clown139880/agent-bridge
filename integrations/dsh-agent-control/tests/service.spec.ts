@@ -31,6 +31,14 @@ describe('AgentControlService', () => {
 })
 
 describe('virtual session catalog', () => {
+  it('keeps a local Bridge draft under its native identity until its first remote turn', async () => {
+    const service = new AgentControlService(config())
+    const draft = { nativeId: 'agent-bridge-draft', sessionId: '', groupId: 'g', workspace: '/repo' }
+    service.importTarget = { catalog: () => ({ sessions: [draft] }) } as never
+    const result = await service.dispatch({ domain: 'bridge', operation: 'virtual_catalog' }) as any
+    expect(result.sessions).toEqual([draft])
+    service.dispose()
+  })
   it('sends only what changed since the client revision, and everything after a Host restart', async () => {
     const service = new AgentControlService(config())
     let rows = [{ sessionId: 'a', title: 'A', activityAt: 1 }, { sessionId: 'b', title: 'B', activityAt: 1 }]

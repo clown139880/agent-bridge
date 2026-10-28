@@ -15,7 +15,7 @@ type Pending = { cwd: string; sources: Source[]; resolve(source: Source): void; 
 export class SessionCreationController {
   private pending: Pending | undefined
   private readonly listeners = new Set<() => void>()
-  constructor(private readonly rpc: Rpc) {}
+  constructor(private readonly rpc: Rpc, private readonly refreshCatalog: () => Promise<void> = async () => {}) {}
   snapshot = () => this.pending
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener) } }
   private emit() { for (const listener of this.listeners) listener() }
@@ -45,6 +45,7 @@ export class SessionCreationController {
       const created = await controller.rpc('create_native', { cwd, sourceId: source.id }) as { nativeSessionId?: string }
       if (!created.nativeSessionId) throw new Error('Bridge returned no native session identity')
       // Preserve the native create contract: the returned session is immediately addressable.
+      await controller.refreshCatalog()
       await sessions.refresh()
       return created.nativeSessionId
     }

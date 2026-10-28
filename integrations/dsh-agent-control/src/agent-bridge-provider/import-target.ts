@@ -304,7 +304,9 @@ export class AgentBridgeImportTarget {
     if (relative(this.dataRoot, canonical) === '') local = false
     for (const [id, binding] of this.bindings) {
       const agent = this.host.agents.get(id)
-      if (!agent || (this.placementOverrides.get(id) ?? nativeSession(agent).header.cwd) !== canonical) continue
+      const placement = this.placementOverrides.get(id) ?? this.presentationPlacements.get('group\0' + str(binding['groupId']))
+        ?? (agent ? nativeSession(agent).header.cwd : undefined)
+      if (!placement || await realpath(placement).catch(() => '') !== canonical) continue
       const worker = this.workers.get(str(binding['workerId']))
       const machineId = str(worker?.['machineId'], str(binding['workerId']))
       const workspace = str(binding['workspace'])
@@ -358,7 +360,9 @@ export class AgentBridgeImportTarget {
     // lists the draft with it, not in a group of its own.
     const placedIn = (nativeId: string) => {
       const agent = this.host.agents.get(nativeId)
-      return this.placementOverrides.get(nativeId) ?? (agent ? nativeSession(agent).header.cwd : undefined)
+      const binding = this.bindings.get(nativeId)
+      return this.placementOverrides.get(nativeId) ?? this.presentationPlacements.get('group\0' + str(binding?.['groupId']))
+        ?? (agent ? nativeSession(agent).header.cwd : undefined)
     }
     const sibling = [...this.bindings].find(([nativeId, binding]) => str(binding['sessionId']) && str(binding['workspace']) === workspace && placedIn(nativeId) === cwd)?.[1]
     const time = Date.now()
