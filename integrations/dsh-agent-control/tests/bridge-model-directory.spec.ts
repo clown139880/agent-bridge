@@ -218,6 +218,25 @@ describe('BridgeModelDirectory rendering', () => {
     expect(native).not.toHaveBeenCalled()
     stop()
   })
+  it('stays the outermost directoryFor so the Desktop model manager never sees Bridge sessions', async () => {
+    vi.useFakeTimers()
+    try {
+      const native = vi.fn(() => ({ native: true })), note = vi.fn()
+      const resolver = { directoryFor: native } as unknown as { directoryFor(id: string): unknown }
+      const stop = installBridgeModelDirectories(resolver as never, catalog({ ...entry, nativeId: 'bridge-remote-test' }), models().source, vi.fn(), 100)
+      // The model manager wraps afterwards, the way it does after its own async start.
+      const base = resolver.directoryFor
+      Object.defineProperty(resolver, 'directoryFor', { configurable: true, writable: true,
+        value: function(this: unknown, id: string) { const directory = base.call(this, id); note(id); return directory } })
+      resolver.directoryFor('bridge-remote-test'); expect(note).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(100)
+      expect(resolver.directoryFor('bridge-remote-test')).toBeInstanceOf(BridgeModelDirectory)
+      expect(note).toHaveBeenCalledTimes(1)
+      expect(resolver.directoryFor('native-session')).toEqual({ native: true }); expect(note).toHaveBeenCalledWith('native-session')
+      stop()
+      resolver.directoryFor('native-session'); expect(note).toHaveBeenCalledTimes(3)
+    } finally { vi.useRealTimers() }
+  })
   it('does not notify subscribers when a reload produces the same snapshot', async () => {
     const directory = new BridgeModelDirectory(nativeId, catalog(), models().source, vi.fn())
     await directory.load()

@@ -352,21 +352,46 @@ export class BridgeModelDirectory implements Directory {
   dispose(): void { this.disposed = true; this.stopCatalog(); this.listeners.clear() }
 }
 
-/** Route only imported Bridge sessions to worker-scoped models; native DSH sessions keep their original directory. */
-export function installBridgeModelDirectories(resolver: Resolver, catalog: NativeCatalog, models: NativeModels, selectModel: SelectModel): () => void {
-  const original = resolver.directoryFor.bind(resolver)
+/**
+ * Route Bridge sessions (imported and virtual) to worker-scoped models; native DSH sessions keep
+ * their original directory.
+ *
+ * This wrapper must stay outermost. The Desktop model manager wraps `directoryFor` too (after its
+ * own asynchronous start) and marks every looked-up session as the composer's; for two Bridge
+ * sessions whose activations overlapped it re-marked them in turn forever, entirely in microtasks,
+ * until the renderer was killed. Answering Bridge sessions before it sees them breaks that chain;
+ * our directories carry no `sessionId`, so its store-subscription hook never marks them either.
+ * The property is defined on the shared resolver (a plain write through the Cordis proxy may land
+ * in a per-call shadow) and re-taken whenever another plugin wraps over it.
+ */
+export function installBridgeModelDirectories(resolver: Resolver, catalog: NativeCatalog, models: NativeModels, selectModel: SelectModel, recheckMs = 1000): () => void {
   const directories = new Map<string, Directory>()
-  resolver.directoryFor = (sessionId: string) => {
-    // Virtual sessions use the same asynchronous worker catalog as imported ones. A directory that
-    // answered synchronously let the Desktop model manager re-select two sessions in turn forever,
-    // entirely in microtasks, until the renderer was killed.
-    if (!sessionId.startsWith('agent-bridge-') && !isVirtualSession(sessionId)) return original(sessionId)
+  let disposed = false
+  const own = (sessionId: string): Directory | undefined => {
+    if (disposed || (!sessionId.startsWith('agent-bridge-') && !isVirtualSession(sessionId))) return undefined
     let directory = directories.get(sessionId)
     if (!directory) { directory = new BridgeModelDirectory(sessionId, catalog, models, selectModel); directories.set(sessionId, directory) }
     return directory
   }
+  const layers: Array<{ previous: PropertyDescriptor | undefined; wrapper: Resolver['directoryFor'] }> = []
+  const outermost = () => {
+    const descriptor = Object.getOwnPropertyDescriptor(resolver, 'directoryFor')
+    if (disposed || (layers.length && descriptor?.value === layers.at(-1)!.wrapper)) return
+    const inner = resolver.directoryFor
+    const wrapper = function(this: unknown, sessionId: string) { return own(sessionId) ?? inner.call(this ?? resolver, sessionId) }
+    Object.defineProperty(resolver, 'directoryFor', { value: wrapper, configurable: true, writable: true })
+    layers.push({ previous: descriptor, wrapper })
+  }
+  outermost()
+  const stopCatalog = catalog.subscribe(outermost)
+  const timer = setInterval(outermost, recheckMs)
   return () => {
-    resolver.directoryFor = original
+    disposed = true; clearInterval(timer); stopCatalog()
+    // Remove only our outermost layer; inner ones now pass everything through.
+    const top = layers.at(-1)
+    if (top && Object.getOwnPropertyDescriptor(resolver, 'directoryFor')?.value === top.wrapper) {
+      if (top.previous) Object.defineProperty(resolver, 'directoryFor', top.previous); else delete (resolver as Partial<Resolver>).directoryFor
+    }
     for (const directory of directories.values()) directory.dispose()
     directories.clear()
   }
