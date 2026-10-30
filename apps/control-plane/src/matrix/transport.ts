@@ -63,7 +63,7 @@ export class SdkMatrixTransport implements MatrixTransport {
       ...(since ? { since } : {}), timeout: since ? 25_000 : 0,
       filter: JSON.stringify({ room: { rooms: this.config.rooms.map(r => r.roomId),
         timeline: { limit: 100 }, ephemeral: { types: [] } }, presence: { types: [] } }),
-      set_presence: "offline",
+      set_presence: "online",
     }, undefined, { abortSignal: this.abort.signal, localTimeoutMs: 40_000 });
   }
   history(roomId: string, from: string): Promise<{ chunk: MatrixEvent[]; end?: string }> {

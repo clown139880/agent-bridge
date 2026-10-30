@@ -9,13 +9,13 @@ import type { MatrixConfig } from "../apps/control-plane/src/matrix/config.js";
 
 test("SDK transport persists its device, preserves transaction ids and downloads authenticated bounded media", { timeout: 20000 }, async t => {
   const dir = mkdtempSync(join(tmpdir(), "matrix-sdk-"));
-  const requests: Array<{ path: string; method?: string; body: any; auth?: string }> = [];
+  const requests: Array<{ path: string; query: URLSearchParams; method?: string; body: any; auth?: string }> = [];
   let large = false;
   const server = createServer(async (req, res) => {
     let body = ""; for await (const chunk of req) body += chunk;
-    const path = new URL(req.url!, "http://localhost").pathname;
+    const url = new URL(req.url!, "http://localhost"), path = url.pathname;
     if (process.env.MATRIX_TEST_TRACE) process.stderr.write(`${req.method} ${path}\n`);
-    requests.push({ path, method: req.method, body: body ? JSON.parse(body) : undefined, auth: req.headers.authorization });
+    requests.push({ path, query: url.searchParams, method: req.method, body: body ? JSON.parse(body) : undefined, auth: req.headers.authorization });
     const json = (data: unknown): void => { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify(data)); };
     if (path.endsWith("/login")) return json({ user_id: "@bot:test", access_token: "fixture-access-token", device_id: "device" });
     if (path.endsWith("/account/whoami")) return json({ user_id: "@bot:test", device_id: "device" });
@@ -35,7 +35,11 @@ test("SDK transport persists its device, preserves transaction ids and downloads
   await first.open();
   assert.equal(statSync(config.stateFile).mode & 0o777, 0o600);
   assert.equal(JSON.parse(readFileSync(config.stateFile, "utf8")).deviceId, "device");
+  assert.equal((await first.sync()).next_batch, "next");
   assert.equal((await first.sync("before")).next_batch, "next");
+  const syncs = requests.filter(r => r.path.endsWith("/sync"));
+  assert.equal(syncs.length, 2);
+  assert.ok(syncs.every(r => r.query.get("set_presence") === "online"));
   assert.equal(await first.send("!room:test", "m.room.message", { body: "hello", msgtype: "m.notice" }, "stable-txn"), "$sent");
   assert.equal((await first.download("mxc://test/file", 20)).toString(), "image");
   large = true; await assert.rejects(first.download("mxc://test/file", 20), /too_large/);
