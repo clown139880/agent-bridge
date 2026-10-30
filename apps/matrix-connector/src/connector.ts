@@ -72,8 +72,8 @@ export class MatrixConnector {
     while (!this.stopped) {
       try {
         const sync = await this.matrix.sync(this.state.since, this.abort.signal);
-        // The first sync only sets a baseline: history is never replayed as new work.
-        if (this.state.since) await this.ingest(sync);
+        // The first sync only sets a baseline: history is never replayed as new work. Invites still count.
+        await this.ingest(sync, !this.state.since);
         this.state.since = sync.next_batch;
         this.scheduleSave();
       } catch (error) {
@@ -84,14 +84,20 @@ export class MatrixConnector {
     }
   }
 
-  private async ingest(sync: SyncResponse): Promise<void> {
+  private async ingest(sync: SyncResponse, baseline = false): Promise<void> {
     for (const [roomId, invite] of Object.entries(sync.rooms?.invite ?? {})) {
       const member = invite.invite_state?.events?.find((event) => event.type === "m.room.member" && event.state_key === this.config.userId);
       if (member && this.config.allowedUsers.includes(member.sender))
         await this.matrix.join(roomId).catch((error) => log("warn", "Unable to join room", { roomId, error: describe(error) }));
     }
-    for (const [roomId, joined] of Object.entries(sync.rooms?.join ?? {}))
-      for (const event of joined.timeline?.events ?? []) this.receive(roomId, event);
+    if (baseline) return;
+    for (const [roomId, joined] of Object.entries(sync.rooms?.join ?? {})) {
+      const events = joined.timeline?.events ?? [];
+      // A room just joined arrives with its recent history: only what follows the join is new.
+      const join = events.findLastIndex((event) => event.type === "m.room.member" && event.state_key === this.config.userId
+        && event.content?.membership === "join");
+      for (const event of events.slice(join + 1)) this.receive(roomId, event);
+    }
   }
 
   private receive(roomId: string, event: MatrixEvent): void {

@@ -114,3 +114,19 @@ test("attachments wait for the next text and go with it", async () => {
   h.text("看看这张图"); await tick();
   assert.deepEqual(h.calls.find((call) => call.path === "/sessions")!.body.attachments, [{ id: "att1", filename: "a.png", mimeType: "image/png", size: 3 }]);
 });
+
+test("invites from allowed people are accepted even on the baseline sync; a joined room's history is skipped", async () => {
+  const h = harness();
+  const joined: string[] = [];
+  h.connector.matrix.join = async (roomId: string) => { joined.push(roomId); };
+  const invite = (sender: string) => ({ invite_state: { events: [{ type: "m.room.member", state_key: "@bot:example.org", sender, content: { membership: "invite" } }] } });
+  await h.connector.ingest({ next_batch: "1", rooms: { invite: { "!a:x": invite("@me:example.org"), "!b:x": invite("@stranger:example.org") },
+    join: { "!room:example.org": { timeline: { events: [{ event_id: "$old", sender: "@me:example.org", type: "m.room.message", content: { msgtype: "m.text", body: "历史" } }] } } } } }, true);
+  assert.deepEqual(joined, ["!a:x"]);
+  await h.connector.ingest({ next_batch: "2", rooms: { join: { "!room:example.org": { timeline: { events: [
+    { event_id: "$before", sender: "@me:example.org", type: "m.room.message", content: { msgtype: "m.text", body: "加入前" } },
+    { event_id: "$join", sender: "@bot:example.org", type: "m.room.member", state_key: "@bot:example.org", content: { membership: "join" } },
+    { event_id: "$after", sender: "@me:example.org", type: "m.room.message", content: { msgtype: "m.text", body: "加入后" } }] } } } } });
+  await tick();
+  assert.deepEqual(h.calls.filter((call) => call.path === "/sessions").map((call) => call.body.input), ["加入后"]);
+});
