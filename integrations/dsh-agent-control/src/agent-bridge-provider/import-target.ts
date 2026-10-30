@@ -12,7 +12,6 @@ import type { JsonObject } from '../types.js'
 import { appendSessionEvent, guardImportedTurnNumbers, nativeSession, sessionEvents, toolResultShape, type NativeHost, type NativeHandle, type NativeEvent } from './dsh-compat.js'
 import { ACK_EVENT, BINDING_EVENT, PROVIDER, openStep, projectNativeEvents, record, str } from './mapping.js'
 import { isStoredSessionCorruption, repairStoredToolResults } from './session-repair.js'
-import { relayPendingInteractions } from './approval-bridge.js'
 import { readSyncVersions, writeSyncSidecar } from './sync-version-cache.js'
 
 const hash = (value: string) => createHash('sha256').update(value).digest('hex').slice(0, 32)
@@ -82,7 +81,6 @@ export class AgentBridgeImportTarget {
   private readonly workers = new Map<string, JsonObject>()
   private readonly cursors = new Map<string, string>()
   private readonly busy = new Set<string>()
-  private readonly interactions = new Map<string, Map<string, Promise<void>>>()
   private readonly abort = new AbortController()
   private timer: ReturnType<typeof setTimeout> | undefined
   private refreshJob: Promise<void> | undefined
@@ -177,6 +175,11 @@ export class AgentBridgeImportTarget {
     const counts: Record<string, number> = {}
     for (const [id, binding] of this.bindings) if (this.host.agents.get(id)) counts[str(binding['workerId'])] = (counts[str(binding['workerId'])] ?? 0) + 1
     return { sourceSelection: true, imageForwarding: true, nativeSessions: Object.values(counts).reduce((a, b) => a + b, 0), workers: Object.entries(counts).map(([workerId, sessions]) => ({ workerId, name: str(this.workers.get(workerId)?.['name'], workerId), sessions })), error: this.error, lastSyncAt: this.lastSyncAt }
+  }
+  /** The catalog's Bridge identities and statuses, without assembling the rest of each entry. */
+  sessionStatuses(): { sessionId: string; status: string }[] {
+    return [...this.bindings].filter(([id]) => !this.deleted.has(id))
+      .map(([, binding]) => ({ sessionId: str(binding['sessionId']), status: str(binding['status']) }))
   }
   catalog(): JsonObject {
     const groups = [...this.presentationGroups.values()].map(group => ({ ...group, executionLocations: Array.isArray(group['executionLocations'])
@@ -493,7 +496,6 @@ export class AgentBridgeImportTarget {
     if (this.timer) clearTimeout(this.timer)
     await this.refreshJob?.catch(() => {})
     await Promise.allSettled(this.jobs.values())
-    await Promise.allSettled([...this.interactions.values()].flatMap(jobs => [...jobs.values()]))
     // Owned idle presentation agents only. Plugin reload must be refused while a native turn is running.
     await Promise.allSettled([...this.handles.values()].map(handle => handle.dispose()))
     this.handles.clear()
@@ -513,7 +515,7 @@ export class AgentBridgeImportTarget {
     // Every session, worker and pending-interaction change advances the stream cursor. When it has
     // not moved since a clean pass, the catalog is unchanged; skip it, with a periodic full backstop.
     const stream = str(workerPage['streamCursor'])
-    if (stream && this.synced?.cursor === stream && Date.now() - this.synced.at < FULL_SYNC_MS && !this.interactions.size) {
+    if (stream && this.synced?.cursor === stream && Date.now() - this.synced.at < FULL_SYNC_MS) {
       this.lastSyncAt = Date.now()
       return
     }
@@ -581,7 +583,7 @@ export class AgentBridgeImportTarget {
           const current = this.host.agents.get(id)
           const running = ['active', 'waiting_for_approval', 'waiting_for_input'].includes(str(row['status']))
           const unchanged = !!current && this.versions.get(id) === Number(row['updatedAt'])
-          const cold = !current && !running && !this.interactions.has(id) && !hot.has(id)
+          const cold = !current && !running && !hot.has(id)
           if (cold && (this.versions.has(id) || await this.host.sessionPersistence.stat(id))) {
             // Stored and not loaded: keep only its catalog binding until it is opened or turns hot.
             this.bindings.set(id, { ...row, origin: new URL(this.origin).origin })
@@ -599,14 +601,8 @@ export class AgentBridgeImportTarget {
             this.published.set(id, running)
             this.host.emit('api-session/status', id, running)
           }
-          if ((['waiting_for_approval', 'waiting_for_input'].includes(str(row['status'])) || this.interactions.has(id)) && !this.isBusy(id)) {
-            const agent = this.host.agents.get(id)
-            if (agent) {
-              let jobs = this.interactions.get(id)
-              if (!jobs) { jobs = new Map(); this.interactions.set(id, jobs) }
-              await relayPendingInteractions(this.bridge, agent, remoteId, jobs, this.abort.signal, this.host as unknown as Context)
-            }
-          }
+          // Pending approvals and questions are relayed by the virtual session's stand-in agent
+          // (remote-sessions/virtual-agents.ts); relaying here too would ask twice.
         } catch (error) { failures.push(remoteId + ': ' + String(error)) }
       }
     }))

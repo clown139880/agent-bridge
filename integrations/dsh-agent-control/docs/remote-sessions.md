@@ -1,4 +1,4 @@
-# Virtual Bridge sessions (0.6.0)
+# Virtual Bridge sessions (0.7.0)
 
 Bridge sessions use `bridge-remote-<sha256(origin + NUL + remoteId)>` identities.
 The existing importer continues in the background. The client catalog hides its
@@ -51,9 +51,28 @@ turn. The Host registers each prompt before submitting and tags Bridge's echo
 of it with the native `requestId` (`source.rpcId`), matched by the action id in
 the echo's event id or else by text sent around then, so the composer retires
 its local copy. The stop button follows the catalog status (`running` while the
-Bridge session is active or waiting). Approvals and questions (0.6.0): the Desktop's own cards accept only its own
-classes, so the plugin publishes its own pending interaction (`{key, kind,
-sessionId}`) through `uiSession.registerPendingInteraction` while the catalog
-shows the session waiting, and renders it from the `conversation.composer`
-chain (`bridge-pending.tsx`). Answers go to Bridge (`resolve_approval`,
-`respond_user_input`).
+Bridge session is active or waiting).
+
+## Approvals and questions (0.7.0)
+
+The Desktop's native approval and question cards answer requests that the Host
+raises for an agent, so the plugin Host acts as the agent of a waiting virtual
+session (`remote-sessions/virtual-agents.ts`). While the catalog shows the
+Bridge session `waiting_for_approval` or `waiting_for_input`, it enters a
+stand-in agent under the virtual ID into `agents` without announcing it (no
+`agent/created`), with a child fiber of the plugin as its context and an
+in-memory session holding one open turn and an `approval/policy: ask`
+override. It runs no model and writes nothing; values Host code reads while
+walking `agents.list()` are safe defaults (idle, no request context, empty
+header). Other sessions, including old ones, never get an agent.
+
+Every 2.5 s the stand-in relays the session's pending Bridge items: an approval
+offering exactly `allow`/`deny` goes through `approval.request` (native
+approval card; allowed-once → allow, rejected → deny, cancelled/unavailable
+decides nothing). Any other approval becomes a native question with all of its
+choices; `user_input` becomes native questions. Before answering it re-reads
+the item and only resolves it while still pending. An item answered elsewhere
+(Control Center) aborts its native request, which withdraws the card. When the
+session leaves the waiting state or the catalog, its requests are aborted, the
+agent is detached and its fiber disposed. The importer no longer relays for its
+hidden imported copies, so nothing is asked twice.

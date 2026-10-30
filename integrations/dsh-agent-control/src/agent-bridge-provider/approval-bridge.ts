@@ -59,7 +59,9 @@ async function pendingRows(bridge: Pick<BridgeClient, 'call'>, operation: 'appro
 /** Polling never awaits the human. Each pending id has one scoped, cancellable native request. */
 const interactionControllers = new WeakMap<Map<string, Promise<void>>, Map<string, AbortController>>()
 export async function relayPendingInteractions(bridge: Pick<BridgeClient, 'call'>, agent: Agent, remoteId: string,
-  jobs: Map<string, Promise<void>>, signal: AbortSignal, services = agent.ctx): Promise<void> {
+  jobs: Map<string, Promise<void>>, signal: AbortSignal, services = agent.ctx,
+  // The approval card needs an open turn: a running imported agent, or a virtual session's stand-in agent.
+  approvalCard = agent.status === 'running'): Promise<void> {
   const [approvals, questions] = await Promise.all([
     pendingRows(bridge, 'approvals', remoteId, signal), pendingRows(bridge, 'user_input', remoteId, signal),
   ])
@@ -80,7 +82,7 @@ export async function relayPendingInteractions(bridge: Pick<BridgeClient, 'call'
       if (kind === 'approval') {
         const choices = Array.isArray(row['choices']) ? row['choices'].map(value => str(value)).filter(Boolean) : []
         let choice = ''
-        if (agent.status === 'running' && choices.length === 2 && choices.includes('allow') && choices.includes('deny')) {
+        if (approvalCard && choices.length === 2 && choices.includes('allow') && choices.includes('deny')) {
           const outcome = await services.approval.request({ agent, signal, ...bridgeApprovalToRequest(row) })
           if (outcome === 'allowed-once') choice = 'allow'
           else if (outcome === 'rejected') choice = 'deny'

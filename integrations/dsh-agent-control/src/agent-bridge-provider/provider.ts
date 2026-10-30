@@ -8,6 +8,7 @@ import { AgentBridgeLlmAdapter } from './adapter.js'
 import { AgentBridgeImportTarget } from './import-target.js'
 import { nativeHost } from './dsh-compat.js'
 import { ACK_EVENT, BINDING_EVENT, PROVIDER } from './mapping.js'
+import { VirtualBridgeAgents } from '../remote-sessions/virtual-agents.js'
 
 // Retained plugin events must remain readable even during dependency reload.
 ;(KNOWN_SESSION_EVENT_TYPES as Set<string>).add(BINDING_EVENT)
@@ -38,9 +39,12 @@ export function registerAgentBridgeProvider(ctx: Context, service: AgentControlS
       const ready = target.restoreLocalDeletions().then(() => target.ensurePreset()).then(() => { if (!disposed) target.start() }).catch(error => {
         target.error = String(error); scoped.logger.warn('Agent Bridge provider: ' + String(error))
       })
+      const interactions = new VirtualBridgeAgents(scoped as never, service.bridge, service.config.bridge.origin, () => target.sessionStatuses())
+      interactions.start()
       return async () => {
         disposed = true
         if (service.importTarget === target) service.importTarget = undefined
+        await interactions.dispose()
         await ready
         await target.dispose()
         registration()
