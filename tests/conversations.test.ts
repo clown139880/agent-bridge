@@ -73,7 +73,7 @@ test("a room's scope picks the workspace; the room keeps one session until new, 
     assert.equal(dispatched?.type === "action.create_session" && dispatched.memoryScope, "repo-app");
     assert.equal((await f.call("POST", "/sessions", { workerId: "pi@hal", workspace: "/root/repo", memoryScope: "nope" }, "create-2")).status, 400);
 
-    conversation = (await f.call("PUT", room, { sessionId: "older" })).body;
+    conversation = (await f.call("PUT", room, { threadId: "", sessionId: "older" })).body;
     assert.equal(conversation.sessionId, "older"); assert.equal(conversation.agent, "codex", "binding a session remembers its agent");
     assert.deepEqual(conversation.target, { workerId: "codex@hal", workspace: "/root/repo" });
     // The same session bound in a thread leaves the main timeline.

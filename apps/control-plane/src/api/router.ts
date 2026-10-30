@@ -155,7 +155,9 @@ export class AgentControlApi {
     if(request.method==="GET"&&!sub){this.ok(response,conversations.get(connector,roomId,url.searchParams.get("threadId")??""));return;}
     const body=await jsonBody(request) as Record<string,unknown>;
     if(request.method==="PUT"&&!sub){
-      const threadId=string(body.threadId,"threadId")??"",agent=string(body.agent,"agent");
+      // "" is the room's main timeline.
+      if(body.threadId!==undefined&&typeof body.threadId!=="string")throw new ApiProblem(400,"invalid_parameter","threadId must be a string");
+      const threadId=(body.threadId as string|undefined)??"",agent=string(body.agent,"agent");
       if(agent&&!(CONVERSATION_AGENTS as readonly string[]).includes(agent))throw new ApiProblem(400,"invalid_agent",`agent must be one of ${CONVERSATION_AGENTS.join(", ")}`);
       if(body.sessionId!==undefined&&body.sessionId!==null&&(typeof body.sessionId!=="string"||!this.store.session(body.sessionId)))throw new ApiProblem(404,"session_not_found","session not found");
       this.ok(response,conversations.set(connector,roomId,threadId,{sessionId:body.sessionId as string|null|undefined,agent:agent as ConversationAgent|undefined}));return;}
