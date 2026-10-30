@@ -3,7 +3,7 @@ import type { DatabaseSync } from "node:sqlite";
 import {
   workerId as buildWorkerId,
   type AgentType, type ActionKind, type ActionResultMessage, type ApprovalChoice, type SessionActivityStatus,
-  type SessionState, type StructuredSessionEventMessage, type TurnStatus, type UserInputQuestion,
+  type SessionState, type SessionMemoryContext, type StructuredSessionEventMessage, type TurnStatus, type UserInputQuestion,
 } from "@agent-bridge/protocol";
 import { decodeEventBody, encodeEventBody, EVENT_COLUMNS, eventWire, indexEvent, type EventRow } from "./events.js";
 import { markChanged, signalStream, type StreamKind } from "./stream.js";
@@ -135,7 +135,37 @@ function legacyStatus(activity: SessionActivityStatus, lastTurn?: TurnStatus): s
 }
 
 export class AgentControlStore {
-  constructor(readonly db: DatabaseSync, readonly retention: RetentionOptions) {}
+  constructor(readonly db: DatabaseSync, readonly retention: RetentionOptions) {
+    db.exec(`CREATE TABLE IF NOT EXISTS session_memory (
+      session_id TEXT PRIMARY KEY, scope_id TEXT NOT NULL, room_id TEXT, revision TEXT
+    ); CREATE TABLE IF NOT EXISTS action_memory (
+      action_id TEXT PRIMARY KEY, context TEXT NOT NULL, delivered INTEGER NOT NULL
+    );`);
+  }
+
+  sessionMemory(sessionId: string): { scopeId: string; roomId?: string; revision?: string } | undefined {
+    const row = this.db.prepare("SELECT * FROM session_memory WHERE session_id=?").get(sessionId) as
+      { scope_id: string; room_id: string | null; revision: string | null } | undefined;
+    return row ? { scopeId: row.scope_id, roomId: row.room_id ?? undefined, revision: row.revision ?? undefined } : undefined;
+  }
+
+  bindMemory(sessionId: string, scopeId: string, roomId?: string): void {
+    const previous = this.sessionMemory(sessionId);
+    if (previous && previous.scopeId !== scopeId) throw new Error("session_memory_scope_conflict");
+    this.db.prepare(`INSERT INTO session_memory(session_id,scope_id,room_id) VALUES(?,?,?)
+      ON CONFLICT(session_id) DO UPDATE SET room_id=COALESCE(session_memory.room_id,excluded.room_id)`)
+      .run(sessionId, scopeId, roomId ?? null);
+  }
+
+  saveActionMemory(actionId: string, context: SessionMemoryContext | undefined, delivered: boolean): void {
+    if (context) this.db.prepare("INSERT OR IGNORE INTO action_memory VALUES(?,?,?)")
+      .run(actionId, JSON.stringify(context), Number(delivered));
+  }
+
+  actionMemory(actionId: string): SessionMemoryContext | undefined {
+    const row = this.db.prepare("SELECT context FROM action_memory WHERE action_id=?").get(actionId) as { context: string } | undefined;
+    return row ? JSON.parse(row.context) as SessionMemoryContext : undefined;
+  }
 
   transaction<T>(fn: () => T): T {
     this.db.exec("BEGIN IMMEDIATE");
@@ -490,7 +520,7 @@ export class AgentControlStore {
           throw new Error("idempotency_key_reused");
         return { action: this.action(String(prior.action_id))!, existing: true };
       }
-      const now = Date.now(), id = randomUUID(), expires = now + this.retention.actionsMs;
+      const now = Date.now(), id = randomUUID(), expires = input.principal.startsWith("control:matrix:") ? Number.MAX_SAFE_INTEGER : now + this.retention.actionsMs;
       this.db.prepare(`INSERT INTO actions
         (id,principal,kind,machine_id,session_id,status,result_json,created_at,updated_at,expires_at)
         VALUES (?,?,?,?,?,'accepted',?,?,?,?)`).run(id, input.principal, input.kind, input.machineId,
@@ -522,6 +552,13 @@ export class AgentControlStore {
           message.turnId ?? null, message.resolvedAction ?? null, message.error ? JSON.stringify(message.error) : null,
           JSON.stringify(message), message.timestamp, message.actionId);
       const action = this.action(message.actionId)!;
+      const context = this.actionMemory(message.actionId);
+      if (message.status === "succeeded" && message.sessionId && context) {
+        this.bindMemory(message.sessionId, context.scopeId, context.roomId);
+        const row = this.db.prepare("SELECT delivered FROM action_memory WHERE action_id=?").get(message.actionId) as { delivered: number };
+        if (row.delivered) this.db.prepare("UPDATE session_memory SET revision=? WHERE session_id=?")
+          .run(context.revision, message.sessionId);
+      }
       markChanged(this.db, "action", action.actionId);
       const pending = this.db.prepare("SELECT * FROM pending_requests WHERE resolving_action_id=?")
         .get(message.actionId) as Record<string,unknown>|undefined;
@@ -710,6 +747,7 @@ export class AgentControlStore {
       // Keep action receipts and idempotency keys until their normal retention
       // deadline so callers can observe the result of the delete action.
       this.db.prepare("DELETE FROM pending_requests WHERE session_id=?").run(id);
+      this.db.prepare("DELETE FROM session_memory WHERE session_id=?").run(id);
       // The contentless index is keyed by event id and has no trigger on `events`.
       this.db.prepare("DELETE FROM event_search WHERE rowid IN (SELECT id FROM events WHERE session_id=?)").run(id);
       this.db.prepare("DELETE FROM events WHERE session_id=?").run(id);
@@ -779,6 +817,7 @@ export class AgentControlStore {
     this.transaction(() => {
       this.db.prepare("DELETE FROM idempotency_keys WHERE expires_at<?").run(now);
       this.db.prepare("DELETE FROM actions WHERE expires_at<?").run(now);
+      this.db.prepare("DELETE FROM action_memory WHERE action_id NOT IN (SELECT id FROM actions)").run();
       this.db.prepare("DELETE FROM attachments WHERE created_at<?").run(now-this.retention.attachmentsMs);
     });
   }
@@ -827,7 +866,9 @@ export class AgentControlStore {
       .all(String(row.machine_id),String(row.project_path)) as Array<{project_identity:string}>;
     const projectIdentity=directProjectIdentity??(inheritedProjectIdentities.length===1
       ?String(inheritedProjectIdentities[0]!.project_identity):undefined);
+    const memory = this.sessionMemory(String(row.id));
     const result:Record<string,unknown>={sessionId:String(row.id),nativeSessionId:row.native_session_id?String(row.native_session_id):null,
+      ...(memory ? { memoryScopeId: memory.scopeId, memoryRevision: memory.revision ?? null, originRoomId: memory.roomId ?? null } : {}),
       workerId:buildWorkerId(String(row.agent_type) as AgentType,String(row.machine_id)),machineId:String(row.machine_id),agent:String(row.agent_type),
       title:row.title?String(row.title):null,promptSummary,
       projectName:String(row.project_name),workspace:String(row.project_path),status:String(row.activity_status??"unknown"),

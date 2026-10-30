@@ -1,3 +1,4 @@
+import { waitForTurnSettlement } from "../turn-settlement.js";
 import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
@@ -71,6 +72,7 @@ interface PendingApproval {
 }
 
 interface AcpSession {
+  interrupting?: boolean;
   sessionId: string;
   nativeSessionId?: string;
   requestId?: string;
@@ -405,21 +407,22 @@ export class AcpAdapter implements AgentAdapter {
     this.appendLog(session, `Approval answered: ${choice}`);
   }
 
-  private resolveApproval(session: AcpSession, approval: PendingApproval, result: unknown, choice: ApprovalChoice): void {
+  private resolveApproval(session: AcpSession, approval: PendingApproval, result: unknown, choice?: ApprovalChoice): void {
     session.approvals.delete(approval.approvalId);
     approval.resolve(result);
     this.emit({ type: "approval_resolved", sessionId: session.sessionId, approvalId: approval.approvalId, resolvedAt: Date.now() });
-    this.emitSessionEvent(session, "approval.resolved", `approval:${approval.approvalId}:resolved`, { approvalId: approval.approvalId, choice }, approval.turnId);
+    this.emitSessionEvent(session, "approval.resolved", `approval:${approval.approvalId}:resolved`, { approvalId: approval.approvalId, ...(choice ? {choice} : {resolution: "cancelled"}) }, approval.turnId);
   }
 
   /** ACP requires answering outstanding permission requests with `cancelled` when a turn is cancelled. */
   private cancelApprovals(session: AcpSession): void {
-    for (const approval of [...session.approvals.values()]) this.resolveApproval(session, approval, { outcome: { outcome: "cancelled" } }, "deny");
+    for (const approval of [...session.approvals.values()]) this.resolveApproval(session, approval, { outcome: { outcome: "cancelled" } });
   }
 
   // ---- turns -------------------------------------------------------------
 
   private startPrompt(session: AcpSession, text: string, images: FetchedAttachment[]): string {
+    if (images.length && !session.capabilities.promptCapabilities?.image) throw domainError("image_unsupported", "This worker does not support images; no input was sent");
     const turnId = this.startTurnEvents(session);
     const prompt: Array<Record<string, unknown>> = [{ type: "text", text }];
     if (images.length && session.capabilities.promptCapabilities?.image) {
@@ -481,6 +484,8 @@ export class AcpAdapter implements AgentAdapter {
 
   private finishTurn(session: AcpSession, status: "completed" | "failed" | "interrupted", summary?: string): void {
     const turnId = session.activeTurnId;
+    if (session.interrupting) status = "interrupted";
+    session.interrupting = false;
     session.activeTurnId = undefined;
     session.settledAt = Date.now();
     session.lastTurnStatus = status;
@@ -501,9 +506,10 @@ export class AcpAdapter implements AgentAdapter {
 
   private cancelTurn(session: AcpSession): void {
     session.queued = [];
+    session.interrupting = true;
+    this.cancelApprovals(session);
     session.conn.notify("session/cancel", { sessionId: session.nativeSessionId });
     this.flushMessage(session);
-    this.finishTurn(session, "interrupted");
   }
 
   private onProcEnd(session: AcpSession, error: Error): void {
@@ -647,13 +653,14 @@ export class AcpAdapter implements AgentAdapter {
     if (!activeTurnId) throw domainError("no_active_turn", "session has no active turn");
     if (expectedTurnId && expectedTurnId !== activeTurnId) throw domainError("turn_changed", "active turn changed");
     this.cancelTurn(session);
+    await waitForTurnSettlement(() => session.activeTurnId, activeTurnId);
     return { sessionId, turnId: activeTurnId };
   }
 
   async stopSession(sessionId: string): Promise<void> {
     const session = this.require(sessionId);
     if (!session.activeTurnId) throw new Error(`Session ${sessionId} has no active turn`);
-    this.cancelTurn(session);
+    await this.interruptAction(sessionId, session.activeTurnId);
   }
 
   async deleteSessionAction(sessionId: string): Promise<{ sessionId: string }> {
@@ -754,12 +761,10 @@ export class AcpAdapter implements AgentAdapter {
 
   /** Fetch image attachments; whether they are sent depends on the agent's prompt capabilities. */
   private async materialize(attachments?: AttachmentRef[]): Promise<FetchedAttachment[]> {
-    if (!attachments?.length || !this.options.fetchAttachment) return [];
-    const fetched = await Promise.all(attachments.filter((ref) => ref.mimeType.toLowerCase().startsWith("image/")).map(async (ref) => {
-      try { return await this.options.fetchAttachment!(ref); }
-      catch (error) { log.warn({ error, id: ref.id }, "Unable to fetch attachment"); return undefined; }
-    }));
-    return fetched.filter((item): item is FetchedAttachment => Boolean(item));
+    if (!attachments?.length) return [];
+    if (!this.options.fetchAttachment) throw new Error("attachment_unavailable");
+    if (attachments.some(ref => !ref.mimeType.startsWith("image/"))) throw new Error("This worker accepts image attachments only");
+    return Promise.all(attachments.map(ref => this.options.fetchAttachment!(ref)));
   }
 
   private require(sessionId: string): AcpSession {

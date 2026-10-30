@@ -6,6 +6,7 @@ import { BridgeRegistry } from "../bridge-registry.js";
 import type { MemoryReviewRoutes } from "../memory-review.js";
 import { AgentControlSse, SseCursorError } from "./sse.js";
 import { ActionServiceError, SessionActionService } from "./session-actions.js";
+import type { SessionMemory } from "../session-memory.js";
 import { ApiProblem, integerParam as integer, jsonBody, stringField as string, attachmentsField, uploadRequest } from "./validation.js";
 
 /** Map a worker-id prefix to an agent type, or undefined for an unknown prefix. */
@@ -30,6 +31,7 @@ interface ApiOptions {
   /** AGENT_TOKENS: each agent drives sessions as `agent:<name>`, recorded on every action it starts. */
   agents?: Array<{ name: string; token: string }>;
   memoryReviews?: MemoryReviewRoutes;
+  sessionMemory?: SessionMemory;
   sseKeepaliveMs: number; ssePollMs: number; sseMaxBackpressure: number; actionTimeoutMs: number; }
 
 function equalSecret(left: string, right: string): boolean {
@@ -273,8 +275,10 @@ export class AgentControlApi {
     const machineId=parsed.machineId,workspace=string(body.workspace,"workspace",true)!,input=string(body.input,"input"),
       model=string(body.model,"model"),reasoningEffort=string(body.reasoningEffort,"reasoningEffort"),attachments=attachmentsField(body.attachments);
     this.requireActionBridge(machineId);
+    const memoryContext=this.options.sessionMemory?.prepare({ scopeId:string(body.memoryScopeId,"memoryScopeId"), roomId:string(body.originRoomId,"originRoomId"), input });
     const created=this.createAction(principal,key,"/api/v1/sessions",body,"create_session",machineId);
-    if(!created.existing)this.dispatch(created.action,{type:"action.create_session",actionId:created.action.actionId,agentType,projectPath:workspace,input,model,reasoningEffort,attachments});
+    this.store.saveActionMemory(created.action.actionId,memoryContext,Boolean(input));
+    if(!created.existing)this.dispatch(created.action,{type:"action.create_session",actionId:created.action.actionId,agentType,projectPath:workspace,input,model,reasoningEffort,attachments,memoryContext});
     this.ok(response,actionJson(this.store.action(created.action.actionId)!),202);
   }
 
@@ -349,9 +353,11 @@ export class AgentControlApi {
     if(delivery==="start_turn"&&active)throw new ApiProblem(409,"turn_already_active","session already has an active turn",false,{activeTurnId:active});
     if((model||reasoningEffort)&&active)throw new ApiProblem(409,"model_not_applicable","model and reasoning effort cannot be changed while steering an active turn");
     const machineId=String(session.machineId);this.requireActionBridge(machineId);
+    const memoryContext=this.options.sessionMemory?.prepare({sessionId:String(session.sessionId),input});
     const created=this.createAction(principal,key,path,body,"submit_turn",machineId,String(session.sessionId));
+    this.store.saveActionMemory(created.action.actionId,memoryContext,true);
     if(!created.existing)this.dispatch(created.action,{type:"action.submit_turn",actionId:created.action.actionId,
-      sessionId:String(session.sessionId),input,delivery:delivery as "auto"|"steer"|"start_turn",expectedTurnId:expected,model,reasoningEffort,attachments,
+      sessionId:String(session.sessionId),input,delivery:delivery as "auto"|"steer"|"start_turn",expectedTurnId:expected,model,reasoningEffort,attachments,memoryContext,
       resume:resumeContext(session,this.store.lastEventAt(String(session.sessionId)))});
     this.ok(response,actionJson(this.store.action(created.action.actionId)!),202);
   }

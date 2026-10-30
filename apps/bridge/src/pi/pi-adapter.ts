@@ -1,3 +1,4 @@
+import { waitForTurnSettlement } from "../turn-settlement.js";
 import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
@@ -33,6 +34,7 @@ interface PiModelInfo {
 }
 
 interface PiSession {
+  interrupting?: boolean;
   sessionId: string;        // stable bridge-assigned public id
   nativeSessionId?: string; // pi uuid (from get_state), used for resume
   sessionFile?: string;     // pi session .jsonl path, used for resume
@@ -549,6 +551,8 @@ export class PiAdapter implements AgentAdapter {
 
   private finishTurn(session: PiSession, status: "completed" | "failed" | "interrupted", summary?: string): void {
     const turnId = session.activeTurnId;
+    if (session.interrupting) status = "interrupted";
+    session.interrupting = false;
     session.activeTurnId = undefined;
     session.settledAt = Date.now();
     session.lastTurnStatus = status;
@@ -638,16 +642,16 @@ export class PiAdapter implements AgentAdapter {
     const activeTurnId = session.activeTurnId;
     if (!activeTurnId) throw domainError("no_active_turn", "session has no active turn");
     if (expectedTurnId && expectedTurnId !== activeTurnId) throw domainError("turn_changed", "active turn changed");
+    session.interrupting = true;
     this.sendCommand(session, { type: "abort" });
-    this.finishTurn(session, "interrupted");
+    await waitForTurnSettlement(() => session.activeTurnId, activeTurnId);
     return { sessionId, turnId: activeTurnId };
   }
 
   async stopSession(sessionId: string): Promise<void> {
     const session = this.require(sessionId);
     if (!session.activeTurnId) throw new Error(`Session ${sessionId} has no active turn`);
-    this.sendCommand(session, { type: "abort" });
-    this.finishTurn(session, "interrupted");
+    await this.interruptAction(sessionId, session.activeTurnId);
   }
 
   async deleteSessionAction(sessionId: string): Promise<{ sessionId: string }> {
@@ -661,12 +665,10 @@ export class PiAdapter implements AgentAdapter {
 
   /** Fetch the image attachments pi can read; other files stay with the control plane. */
   private async materialize(attachments?: AttachmentRef[]): Promise<FetchedAttachment[]> {
-    if (!attachments?.length || !this.options.fetchAttachment) return [];
-    const fetched = await Promise.all(attachments.filter((ref) => ref.mimeType.toLowerCase().startsWith("image/")).map(async (ref) => {
-      try { return await this.options.fetchAttachment!(ref); }
-      catch (error) { log.warn({ error, id: ref.id }, "Unable to fetch attachment"); return undefined; }
-    }));
-    return fetched.filter((item): item is FetchedAttachment => Boolean(item));
+    if (!attachments?.length) return [];
+    if (!this.options.fetchAttachment) throw new Error("attachment_unavailable");
+    if (attachments.some(ref => !ref.mimeType.startsWith("image/"))) throw new Error("This worker accepts image attachments only");
+    return Promise.all(attachments.map(ref => this.options.fetchAttachment!(ref)));
   }
 
   async approve(_sessionId: string, _approvalId: string, _choice: ApprovalChoice): Promise<void> {

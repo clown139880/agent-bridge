@@ -331,11 +331,23 @@ export interface StructuredSessionEventMessage {
   payload: Record<string, unknown>;
 }
 
+/** Authoritative project context, assembled centrally; execution cwd never changes its identity. */
+export interface SessionMemoryContext {
+  scopeId: string;
+  roomId?: string;
+  revision: string;
+  text: string;
+  /** Inject a supplemental context block only when its content changed / has not been delivered. */
+  changed: boolean;
+  recall?: string;
+}
+
 export interface CreateSessionActionMessage {
   type: "action.create_session";
   actionId: string;
   agentType?: AgentType;
   projectPath: string;
+  memoryContext?: SessionMemoryContext;
   input?: string;
   model?: string;
   /** An agent effort level, or DEFAULT_EFFORT; omitted keeps the session's current effort. */
@@ -348,6 +360,7 @@ export interface SubmitTurnActionMessage {
   type: "action.submit_turn";
   actionId: string;
   sessionId: string;
+  memoryContext?: SessionMemoryContext;
   input: string;
   delivery: "auto" | "steer" | "start_turn";
   expectedTurnId?: string;

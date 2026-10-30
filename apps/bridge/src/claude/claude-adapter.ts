@@ -1,3 +1,5 @@
+import { waitForTurnSettlement } from "../turn-settlement.js";
+import type { SessionMemoryContext } from "@agent-bridge/protocol";
 import { randomUUID } from "node:crypto";
 import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
@@ -104,6 +106,8 @@ interface PendingUserInput {
 }
 
 interface ClaudeSession {
+  interrupting?: boolean;
+  memoryContext?: SessionMemoryContext;
   sessionId: string; // stable bridge-assigned public id; never changes for the session's lifetime
   nativeSessionId?: string; // Claude's own session uuid, learned from system/init; used for resume
   requestId?: string; // bridge-side start id (run id / action id) used to link discovered session to its run
@@ -198,15 +202,12 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     private readonly emit: AdapterEmit,
   ) {}
 
-  /** Fetch attachment bytes for image blocks; non-image types are skipped in v1. */
+  /** Non-image attachments fail explicitly; a partial batch must never run. */
   private async materialize(attachments?: AttachmentRef[]): Promise<FetchedAttachment[]> {
-    if (!attachments?.length || !this.options.fetchAttachment) return [];
-    const images = attachments.filter((ref) => ref.mimeType.toLowerCase().startsWith("image/"));
-    const fetched = await Promise.all(images.map(async (ref) => {
-      try { return await this.options.fetchAttachment!(ref); }
-      catch (error) { log.warn({ error, id: ref.id }, "Unable to fetch attachment"); return undefined; }
-    }));
-    return fetched.filter((item): item is FetchedAttachment => Boolean(item));
+    if (!attachments?.length) return [];
+    if (!this.options.fetchAttachment) throw new Error("attachment_unavailable");
+    if (attachments.some(ref => !ref.mimeType.startsWith("image/"))) throw new Error("Claude currently accepts image attachments only");
+    return Promise.all(attachments.map(ref => this.options.fetchAttachment!(ref)));
   }
 
   async start(): Promise<void> {
@@ -242,12 +243,17 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     return this.ready;
   }
 
+  setSessionMemory(sessionId: string, context: SessionMemoryContext): void {
+    const session = this.sessions.get(sessionId);
+    if (session) session.memoryContext = context;
+  }
+
   // ---- session lifecycle -------------------------------------------------
 
-  async startSession(requestId: string, projectPath: string, prompt?: string, resume?: ResumeTarget, model?: string, attachments?: AttachmentRef[], reasoningEffort?: string): Promise<string> {
+  async startSession(requestId: string, projectPath: string, prompt?: string, resume?: ResumeTarget, model?: string, attachments?: AttachmentRef[], reasoningEffort?: string, memoryContext?: SessionMemoryContext): Promise<string> {
     const effort = claudeEffort(reasoningEffort) ?? undefined;
     if (!resume) {
-      return this.launch({ publicSessionId: `claude-${randomUUID()}`, requestId, projectPath, prompt, model, effort, attachments });
+      return this.launch({ publicSessionId: `claude-${randomUUID()}`, requestId, projectPath, prompt, model, effort, attachments, memoryContext });
     }
     // Continue under the public id, resuming Claude's own uuid. The public id is a
     // uuid only for sessions discovered from a transcript on disk.
@@ -265,7 +271,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     // A held, idle subprocess still owns the conversation; replace it rather than
     // leaving two processes writing one transcript.
     if (held) this.close(held);
-    return this.launch({ publicSessionId: resume.sessionId, requestId, projectPath, prompt, resumeNativeId, model, effort: effort ?? held?.effort, attachments });
+    return this.launch({ publicSessionId: resume.sessionId, requestId, projectPath, prompt, resumeNativeId, model, effort: effort ?? held?.effort, attachments, memoryContext: memoryContext ?? held?.memoryContext });
   }
 
   /**
@@ -280,10 +286,10 @@ export class ClaudeCodeAdapter implements AgentAdapter {
    * turn with "No conversation found", so it starts fresh instead and init
    * re-announces the real uuid.
    */
-  async resumeSession(sessionId: string, projectPath: string, nativeSessionId?: string, model?: string, syncedAt?: number): Promise<void> {
+  async resumeSession(sessionId: string, projectPath: string, nativeSessionId?: string, model?: string, syncedAt?: number, memoryContext?: SessionMemoryContext): Promise<void> {
     if (this.sessions.has(sessionId)) return;
     const resumeNativeId = claudeResumeId(nativeSessionId);
-    await this.launch({ publicSessionId: sessionId, requestId: sessionId, projectPath, resumeNativeId, model });
+    await this.launch({ publicSessionId: sessionId, requestId: sessionId, projectPath, resumeNativeId, model, memoryContext });
     if (resumeNativeId && syncedAt !== undefined) this.backfillTranscript(this.require(sessionId), syncedAt);
   }
 
@@ -343,7 +349,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     log.info({ sessionId: session.sessionId }, "transcript continued outside the bridge; relaunching session");
     this.close(session);
     await this.launch({ publicSessionId: session.sessionId, requestId: session.sessionId, projectPath: session.projectPath,
-      resumeNativeId: nativeId, ...(session.model ? { model: session.model } : {}), ...(session.effort ? { effort: session.effort } : {}) });
+      memoryContext: session.memoryContext, resumeNativeId: nativeId, ...(session.model ? { model: session.model } : {}), ...(session.effort ? { effort: session.effort } : {}) });
     const relaunched = this.require(session.sessionId);
     this.backfillTranscript(relaunched, settled);
     return relaunched;
@@ -366,7 +372,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     this.sessions.delete(session.sessionId);
   }
 
-  private async launch(params: { publicSessionId: string; requestId: string; projectPath: string; prompt?: string; resumeNativeId?: string; model?: string; effort?: string; attachments?: AttachmentRef[] }): Promise<string> {
+  private async launch(params: { publicSessionId: string; requestId: string; projectPath: string; prompt?: string; resumeNativeId?: string; model?: string; effort?: string; attachments?: AttachmentRef[]; memoryContext?: SessionMemoryContext }): Promise<string> {
     const { publicSessionId: sessionId, requestId, projectPath, prompt, resumeNativeId, model, effort, attachments } = params;
     const cwd = await resolveProjectPath(projectPath, this.options.allowedRoots);
     // The public id is bridge-assigned and stable for the session's lifetime.
@@ -408,7 +414,8 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     initPromise.catch(() => undefined);
 
     const permissions = this.options.permissions;
-    const memory = await this.options.memoryBootstrap?.(cwd);
+    session.memoryContext = params.memoryContext;
+    const memory = params.memoryContext ? undefined : await this.options.memoryBootstrap?.(cwd);
     session.query = query({
       prompt: session.input,
       options: {
@@ -796,7 +803,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     const failed = message.is_error || message.subtype !== "success";
     // On failure, fall back to the result subtype so DSH shows a reason instead of a bare "Turn failed".
     const summary = failed ? (message.result?.trim() || message.subtype || "error") : message.result;
-    if (!failed && !summary?.trim() && session.turnStartedAt !== undefined
+    if (!session.interrupting && !failed && !summary?.trim() && session.turnStartedAt !== undefined
       && Date.now() - session.turnStartedAt < STRAY_RESULT_WINDOW_MS) {
       log.info({ sessionId: session.sessionId, turnId: session.activeTurnId }, "ignoring empty Claude result at turn start");
       return;
@@ -847,6 +854,8 @@ export class ClaudeCodeAdapter implements AgentAdapter {
 
   private finishTurn(session: ClaudeSession, status: "completed" | "failed" | "interrupted", summary?: string): void {
     const turnId = session.activeTurnId;
+    if (session.interrupting) status = "interrupted";
+    session.interrupting = false;
     session.activeTurnId = undefined;
     session.turnStartedAt = undefined;
     session.settledAt = Date.now();
@@ -924,8 +933,8 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     log.info({ sessionId: session.sessionId, effort: effort ?? "default" }, "claude effort switched");
   }
 
-  async createSessionAction(actionId: string, projectPath: string, input?: string, model?: string, reasoningEffort?: string, attachments?: AttachmentRef[]): Promise<{ sessionId: string; turnId?: string }> {
-    const sessionId = await this.startSession(actionId, projectPath, input, undefined, model, attachments, reasoningEffort);
+  async createSessionAction(actionId: string, projectPath: string, input?: string, model?: string, reasoningEffort?: string, attachments?: AttachmentRef[], memoryContext?: SessionMemoryContext): Promise<{ sessionId: string; turnId?: string }> {
+    const sessionId = await this.startSession(actionId, projectPath, input, undefined, model, attachments, reasoningEffort, memoryContext);
     return { sessionId, turnId: this.sessions.get(sessionId)?.activeTurnId };
   }
 
@@ -965,29 +974,19 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     if (!activeTurnId) throw domainError("no_active_turn", "session has no active turn");
     if (expectedTurnId && expectedTurnId !== activeTurnId) throw domainError("turn_changed", "active turn changed");
     this.interruptTurn(session);
-    this.finishTurn(session, "interrupted");
+    await waitForTurnSettlement(() => session.activeTurnId, activeTurnId);
     return { sessionId, turnId: activeTurnId };
   }
 
   async stopSession(sessionId: string): Promise<void> {
     const session = this.require(sessionId);
     if (!session.activeTurnId) throw new Error(`Session ${sessionId} has no active turn`);
-    this.interruptTurn(session);
-    this.finishTurn(session, "interrupted");
+    await this.interruptAction(sessionId, session.activeTurnId);
   }
 
-  /**
-   * Break a turn out of any wedged state without blocking the caller. Denying the
-   * pending approval/user-input unblocks Claude when it is parked in canCallTool;
-   * the graceful interrupt is fired best-effort and force-aborts after a bound.
-   *
-   * The previous `await session.query.interrupt()` could hang forever when the
-   * subprocess was stuck in the permission control-protocol, which stalled the
-   * interrupt action past the control-plane timeout (bridge_timeout) and left the
-   * turn permanently "active" — an unrecoverable session. The caller finishes the
-   * turn synchronously so the action always acknowledges quickly.
-   */
+  /** Cancel permission waits and request a real terminal event; force-abort a wedged process. */
   private interruptTurn(session: ClaudeSession): void {
+    session.interrupting = true;
     this.denyPendingInteractions(session, "interrupted");
     const query = session.query;
     const abort = () => { try { session.abort.abort(); } catch { /* already aborted */ } };
@@ -1007,7 +1006,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       session.pendingApprovals.delete(approvalId);
       approval.resolve({ behavior: "deny", message: reason });
       this.emit({ type: "approval_resolved", sessionId: session.sessionId, approvalId, resolvedAt: Date.now() });
-      this.emitSessionEvent(session, "approval.resolved", `approval:${approvalId}:resolved`, { approvalId, choice: "deny" }, approval.turnId);
+      this.emitSessionEvent(session, "approval.resolved", `approval:${approvalId}:resolved`, { approvalId, resolution: reason === "interrupted" ? "cancelled" : "closed", reason }, approval.turnId);
     }
     const pending = session.pendingUserInput;
     if (pending) {

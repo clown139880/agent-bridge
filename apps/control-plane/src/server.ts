@@ -1,3 +1,8 @@
+import { MatrixGateway } from "./matrix/gateway.js";
+import { SdkMatrixTransport } from "./matrix/transport.js";
+import { MatrixControlApi } from "./matrix/api.js";
+import type { MatrixConfig } from "./matrix/config.js";
+import { SessionMemory } from "./session-memory.js";
 import { timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server as HttpServer } from "node:http";
 import type { Context } from "hono";
@@ -58,10 +63,12 @@ export class ControlPlane {
   private readonly webhook: WebhookNotifier;
   private readonly ntfy: NtfyNotifier;
   private readonly messages?: AgentMessagePublisher;
+  private readonly matrix?: MatrixGateway;
   private readonly memory: ConversationMemoryStore;
   private readonly memoryMcp?: ConversationMcpServer;
   private readonly memoryReviews?: MemoryReviews;
   private readonly agentMemory?: AgentMemory;
+  private readonly sessionMemory: SessionMemory;
   private readonly approvalsById = new Map<string, PendingApproval>();
   private readonly resolvedApprovalIds = new Set<string>();
   private readonly seenAgentEvents = new Set<string>();
@@ -97,6 +104,7 @@ export class ControlPlane {
       webhook?: WebhookOptions;
       ntfy?: NtfyOptions;
       messages?: MessageMqttOptions;
+      matrix?: MatrixConfig;
     },
   ) {
     this.webhook = new WebhookNotifier(options.webhook);
@@ -132,14 +140,17 @@ export class ControlPlane {
     this.controlStore = new AgentControlStore(store.db, options.retention ?? {
       actionsMs: 86_400_000, attachmentsMs: 7 * 86_400_000,
     });
+    this.sessionMemory = new SessionMemory(this.controlStore, agentMemory, agentSkills);
     if (options.messages) this.messages = new AgentMessagePublisher(store, this.controlStore, options.messages);
     this.controlApi = new AgentControlApi(store, this.controlStore, this.registry, {
       readToken: options.controlApiReadToken, writeToken: options.controlApiWriteToken, bridgeToken: options.bridgeToken,
-      agents, memoryReviews: this.memoryReviews,
+      agents, memoryReviews: this.memoryReviews, sessionMemory: this.sessionMemory,
       sseKeepaliveMs: options.sse?.keepaliveMs ?? 15_000,
       ssePollMs: options.sse?.pollMs ?? 2_000, sseMaxBackpressure: options.sse?.maxBackpressure ?? 3,
       actionTimeoutMs: options.sse?.actionTimeoutMs ?? 30_000,
     });
+    if (options.matrix) this.matrix = new MatrixGateway(this.controlStore, options.matrix, new SdkMatrixTransport(options.matrix),
+      new MatrixControlApi(this.controlApi), this.sessionMemory);
     this.postDeploy = new PostDeployResumer(options.postDeployDir, {
       resolveSession: (intent) => {
         const session = (intent.sessionId ? this.store.getSession(intent.sessionId) : undefined)
@@ -150,13 +161,16 @@ export class ControlPlane {
         const created = this.controlStore.createAction({ principal: "system:post-deploy", key, method: "POST",
           path: `/api/v1/sessions/${sessionId}/turns`, body: { input, delivery: "auto" }, kind: "submit_turn", machineId, sessionId });
         if (created.existing) return;
+        const memoryContext = this.sessionMemory.prepare({sessionId, input});
+        this.controlStore.saveActionMemory(created.action.actionId, memoryContext, true);
         this.controlApi.actionsForBridge().dispatch(created.action, { type: "action.submit_turn", actionId: created.action.actionId,
-          sessionId, input, delivery: "auto", resume: this.resumeContext(sessionId) });
+          sessionId, input, delivery: "auto", memoryContext, resume: this.resumeContext(sessionId) });
       },
     });
     const apiEnabled = Boolean(options.controlApiReadToken || options.controlApiWriteToken || agents.length);
     const app = createHttpApp({
       health: () => ({ ok: true, bridges: this.bridges.size, legacyMcpCalls: this.memoryMcp?.legacyCalls ?? 0,
+        matrix: this.matrix?.status() ?? { enabled: false },
         messages: this.messages ? { enabled: true, ...this.messages.status() } : { enabled: false } }),
       memoryBootstrap: (c) => this.handleMemoryBootstrap(c),
       mcp: {
@@ -181,6 +195,7 @@ export class ControlPlane {
     this.controlStore.resetTransientSessionActivity();
     await new Promise<void>((resolve) => this.http.listen(this.options.port, this.options.host, resolve));
     this.messages?.start();
+    this.matrix?.start();
     setInterval(() => this.store.markStaleMachinesOffline(Date.now() - 45_000), 15_000).unref();
     this.controlStore.cleanup();
     this.memoryReviews?.resume();
@@ -200,6 +215,7 @@ export class ControlPlane {
 
   async stop(): Promise<void> {
     clearInterval(this.cleanupTimer);
+    await this.matrix?.stop();
     await this.messages?.stop();
     for (const bridge of this.bridges.values()) bridge.socket.close(1001, "server shutdown");
     await new Promise<void>((resolve) => this.http.close(() => resolve()));
@@ -528,14 +544,22 @@ export class ControlPlane {
 
   private replayControlActions(machineId: string): void {
     for (const { action, request, path } of this.controlStore.pendingActions(machineId)) {
+      if (this.controlStore.actionMemory(action.actionId) && !this.bridges.get(machineId)?.features?.includes("session-memory")) {
+        this.controlApi.actionsForBridge().complete({ type: "action.result", actionId: action.actionId, kind: action.kind, status: "failed",
+          sessionId: action.sessionId ?? undefined, error: { code: "memory_context_unsupported", message: "Worker lacks room memory support", retryable: true }, timestamp: Date.now() });
+        continue;
+      }
       if (action.kind === "create_session") this.registry.send(machineId, { type: "action.create_session",
         actionId: action.actionId, projectPath: String(request.workspace),
+        agentType: String(request.workerId).startsWith("claude@") ? "claude-code" : String(request.workerId).startsWith("pi@") ? "pi" : String(request.workerId).startsWith("grok@") ? "grok" : "codex-cli",
+        memoryContext: this.controlStore.actionMemory(action.actionId),
         input: typeof request.input === "string" ? request.input : undefined,
         model: typeof request.model === "string" ? request.model : undefined,
         reasoningEffort: typeof request.reasoningEffort === "string" ? request.reasoningEffort : undefined,
         attachments: attachmentsFromBody(request) });
       else if (action.kind === "submit_turn" && action.sessionId) this.registry.send(machineId, {
         type: "action.submit_turn", actionId: action.actionId, sessionId: action.sessionId,
+        memoryContext: this.controlStore.actionMemory(action.actionId),
         input: String(request.input), delivery: (request.delivery ?? "auto") as "auto"|"steer"|"start_turn",
         expectedTurnId: typeof request.expectedTurnId === "string" ? request.expectedTurnId : undefined,
         model: typeof request.model === "string" ? request.model : undefined,
