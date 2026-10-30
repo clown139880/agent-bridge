@@ -379,6 +379,8 @@ async function stageCompiledArtifact(sourceRoot: string, releasePath: string): P
   }
   await cp(join(sourceRoot, "apps", "bridge", "dist"), join(releasePath, "apps", "bridge", "dist"), { recursive: true });
   await cp(join(sourceRoot, "package.json"), join(releasePath, "package.json"));
+  if (existsSync(join(sourceRoot, "apps", "bridge", "pi-extension")))
+    await cp(join(sourceRoot, "apps", "bridge", "pi-extension"), join(releasePath, "apps", "bridge", "pi-extension"), { recursive: true });
   if (existsSync(join(sourceRoot, "apps", "bridge", "package.json")))
     await cp(join(sourceRoot, "apps", "bridge", "package.json"), join(releasePath, "apps", "bridge", "package.json"));
   await symlink(join(sourceRoot, "node_modules"), join(releasePath, "node_modules"), process.platform === "win32" ? "junction" : "dir");

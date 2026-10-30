@@ -19,7 +19,7 @@ import { ClaudeCodeAdapter } from "./claude/claude-adapter.js";
 import { PiAdapter } from "./pi/pi-adapter.js";
 import { AcpAdapter } from "./acp/acp-adapter.js";
 import { acpProfiles } from "./acp/profiles.js";
-import { makeAttachmentFetcher } from "./attachments.js";
+import { controlHttpBase, makeAttachmentFetcher } from "./attachments.js";
 import { makeMemoryBootstrapFetcher } from "./memory-bootstrap.js";
 import type { AgentAdapter } from "./agent-adapter.js";
 import { BridgeSelfUpdater } from "./self-updater.js";
@@ -156,6 +156,7 @@ export class BridgeClient {
         allowedRoots: options.allowedRoots,
         fetchAttachment: makeAttachmentFetcher(options.url, options.token),
         memoryBootstrap,
+        controlUrl: controlHttpBase(options.url),
       }, this.adapterEmit("pi")));
     }
     for (const profile of acpProfiles()) {

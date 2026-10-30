@@ -2,7 +2,9 @@ import { waitForTurnSettlement } from "../turn-settlement.js";
 import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
+import { existsSync } from "node:fs";
 import { basename } from "node:path";
+import { fileURLToPath } from "node:url";
 import pino from "pino";
 import type {
   ApprovalChoice,
@@ -18,6 +20,8 @@ import { resolveProjectPath, summarizePrompt } from "../app-server.js";
 import { deriveProjectIdentity } from "../path-utils.js";
 
 const log = pino({ name: "pi-adapter" });
+/** pi has no MCP client; this extension gives it the Control Plane's memory and bridge tools. */
+const MCP_EXTENSION = fileURLToPath(new URL("../../pi-extension/agent-bridge-mcp.ts", import.meta.url));
 const LOG_LIMIT = 2_000;
 const INIT_TIMEOUT_MS = 60_000;
 const PI_SESSION_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -103,6 +107,8 @@ export class PiAdapter implements AgentAdapter {
       allowedRoots: string[];
       fetchAttachment?: AttachmentFetcher;
       memoryBootstrap?: MemoryBootstrapFetcher;
+      /** Control Plane HTTP base for the MCP extension; with AGENT_TOKEN in the environment pi gets memory/bridge tools. */
+      controlUrl?: string;
     },
     private readonly emit: AdapterEmit,
   ) {}
@@ -182,13 +188,16 @@ export class PiAdapter implements AgentAdapter {
     // pi keeps no system prompt in its session file, so every launch appends core memory again.
     const memory = await this.options.memoryBootstrap?.(cwd, memoryScope);
     if (memory) args.push("--append-system-prompt", memory);
+    const mcp = Boolean(this.options.controlUrl && process.env.AGENT_TOKEN && existsSync(MCP_EXTENSION));
+    if (mcp) args.push("--extension", MCP_EXTENSION);
     if (prompt) {
       const title = summarizePrompt(prompt, 60);
       if (title) args.push("--name", title);
     }
 
     // AGENT_BRIDGE_SESSION_ID lets a tool pi runs name its own Bridge session (deploy/hal/deploy.sh).
-    const proc = spawn(this.options.command, args, { cwd, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, AGENT_BRIDGE_SESSION_ID: sessionId } });
+    const proc = spawn(this.options.command, args, { cwd, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, AGENT_BRIDGE_SESSION_ID: sessionId,
+      ...(mcp ? { AGENT_BRIDGE_CONTROL_URL: this.options.controlUrl } : {}) } });
     const session: PiSession = {
       sessionId,
       memoryScope,
