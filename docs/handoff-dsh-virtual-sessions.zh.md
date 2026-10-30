@@ -11,26 +11,21 @@
     `/view/entries/:key`、`/events/:eventId`；`session.updated` 携带 `viewRevision` 作为唯一唤醒。
   - Control Center 详情页用视图渲染，可见即保持订阅（不因 idle 断流）。0.7.27～0.7.29 修了：旧 IndexedDB 缓存崩溃、
     清单上报擦掉 `active_turn_id`、流里 `capabilities: []` 覆盖真实能力导致发送按钮变灰。
-- DSH 插件：main 上 0.6.1（`0a63feb`，用户另一会话提交：保留工作区来源和原生草稿）。Windows 已装到 0.6.0（`12c6bb8`），
-  0.6.1 尚未确认安装。
+- DSH 插件：main 上 0.7.0（`54d8286`），已装到 Windows（构建产物与链接插件 lib 哈希一致）。
   - Bridge 会话以虚拟 ID `bridge-remote-<sha256>` 进入原生侧栏，客户端包装 `remote.session`，插件宿主在内存用
     `readHistory + projectNativeEvents` 生成 DSH 事件，不读写本地会话文件。
   - 已支持：只读历史与实时追加、发送文字和图片（`virtual_prompt` → `submit_turn`，回显按 `source.rpcId` 认领）、
-    中断、模型选择（记到下一次发送）、审批和提问（插件自绘卡片，见下）。
+    中断、模型选择（记到下一次发送）、审批和提问（原生卡片，0.7.0）。
   - 性能修复：目录增量（1.43 MB/5s → 375 B）、只重发变化的会话、模型目录包装保持最外层
     （绕开 `@tokens/dsh-model-manager` 0.2.28 在两个 Bridge 会话间的微任务死循环）。
     实测 8 次来回切换 215～297 ms，无卡死。
 
 ## 待办（按优先级）
 
-1. **审批/提问改用原生 UI。** 现在是插件自绘卡片（`src/client/bridge-pending.tsx`，经
-   `uiSession.registerPendingInteraction` + `conversation.composer` 链）。用户要求复用原生卡片，思路是把插件当作
-   该虚拟会话的 agent：在宿主注册一个代表 Bridge 的轻量 agent（不落盘、不跑本地模型），使
-   `ctx.approval.request({agent, ...})` / `ctx.userQuestions.ask(...)` 能用，再把结果转给 Bridge
-   （`resolve_approval` / `respond_user_input`）。先只读核实（源码 `C:\Users\clown\Workspace\tokens_TokensHarness_code`，
-   对照安装版 0.2.1-rc.2）：approval 服务对 agent 的具体检查（作用域、开放轮次、是否须在 `agents` 注册表）、
-   客户端 `sessions.scopeOf(this)` 如何从宿主作用域得到会话 ID、能否不经持久化和会话控制器 promote 创建。
-   可行再实施，替换自绘卡片；不可行则报告缺什么宿主接口。
+1. ~~审批/提问改用原生 UI~~（插件 0.7.0 已完成，`54d8286`）：会话 waiting 时宿主临时 enter 一个代表 Bridge 的替身 agent，
+   经 `approval.request` / `userQuestions.ask` 走原生卡片，答完或会话离开 waiting 即撤下；自绘卡片和导入器里的旧转发已删。
+   机制见 `remote-sessions.md`「Approvals and questions (0.7.0)」。已在 TokensCowork 实测原生提问卡和三选项审批卡；
+   “在 Control Center 处理后卡片撤下”尚未实测（只有单测）。
 2. **停掉旧导入同步（原计划第 3 步）。** `import-target.ts` 的 `refreshAll/materialize/syncHistory` 仍在后台把
    Bridge 会话复制成原生会话（侧栏已隐藏这些副本）。虚拟目录目前取自 `importTarget.catalog()`，需先把目录与导入解耦，
    再停导入；旧原生副本保留不删。
