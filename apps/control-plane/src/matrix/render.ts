@@ -3,12 +3,12 @@ import sanitize from "sanitize-html";
 
 export type MatrixContent = Record<string, any>;
 export const numberKeys = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣"];
-export function message(text: string, threadId?: string): MatrixContent {
+export function message(text: string, threadId?: string, msgtype: "m.text" | "m.notice" = "m.text"): MatrixContent {
   const html = sanitize(marked.parse(text, { async: false, gfm: true }), {
     allowedTags: ["p", "br", "strong", "em", "del", "blockquote", "pre", "code", "ul", "ol", "li", "a", "h1", "h2", "h3", "h4", "table", "thead", "tbody", "tr", "th", "td", "hr"],
     allowedAttributes: { a: ["href", "title"], code: ["class"] }, allowedSchemes: ["http", "https", "mailto", "matrix"],
   });
-  return { msgtype: "m.notice", body: text, format: "org.matrix.custom.html", formatted_body: html,
+  return { msgtype, body: text, format: "org.matrix.custom.html", formatted_body: html,
     ...(threadId ? { "m.relates_to": { rel_type: "m.thread", event_id: threadId,
       is_falling_back: true, "m.in_reply_to": { event_id: threadId } } } : {}) };
 }

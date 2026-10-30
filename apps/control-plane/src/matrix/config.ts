@@ -17,14 +17,13 @@ export interface MatrixConfig {
   password?: string;
   deviceId?: string;
   stateFile: string;
-  controlCenterUrl?: string;
   rooms: MatrixRoomConfig[];
 }
 
 export function matrixConfig(env: NodeJS.ProcessEnv, databasePath: string): MatrixConfig | undefined {
   if (env.MATRIX_ENABLED !== "true") return undefined;
   if (!env.MATRIX_CONFIG_FILE) throw new Error("MATRIX_ENABLED requires MATRIX_CONFIG_FILE (explicit room/project/worker bindings)");
-  const document = JSON.parse(readFileSync(env.MATRIX_CONFIG_FILE, "utf8")) as { rooms?: MatrixRoomConfig[]; controlCenterUrl?: string };
+  const document = JSON.parse(readFileSync(env.MATRIX_CONFIG_FILE, "utf8")) as { rooms?: MatrixRoomConfig[] };
   const homeserver = env.MATRIX_HOMESERVER, userId = env.MATRIX_USER_ID;
   if (!homeserver || !/^https?:\/\//.test(homeserver) || !userId?.startsWith("@")) throw new Error("Invalid Matrix homeserver or user ID");
   const rooms = document.rooms;
@@ -42,6 +41,5 @@ export function matrixConfig(env: NodeJS.ProcessEnv, databasePath: string): Matr
   }
   return { homeserver: homeserver.replace(/\/$/, ""), userId, accessToken: env.MATRIX_ACCESS_TOKEN,
     password: env.MATRIX_PASSWORD, deviceId: env.MATRIX_DEVICE_ID,
-    stateFile: env.MATRIX_STATE_FILE ?? join(dirname(databasePath), "matrix-device.json"),
-    controlCenterUrl: document.controlCenterUrl, rooms };
+    stateFile: env.MATRIX_STATE_FILE ?? join(dirname(databasePath), "matrix-device.json"), rooms };
 }

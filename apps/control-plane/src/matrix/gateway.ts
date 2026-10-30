@@ -220,7 +220,7 @@ export class MatrixGateway {
     else if (cmd.name === "status") {
       const session = binding.session_id ? this.control.session(binding.session_id) : undefined;
       const target = JSON.parse(binding.target) as MatrixTarget;
-      notice(`作用域：${binding.scope_id}\nWorker：${session?.workerId ?? target.workerId}\n会话：${binding.session_id ?? "将在提交时创建"}\n状态：${session?.status ?? "空闲"}\n模型：${(session?.context as Json)?.model ?? target.model ?? "worker 默认"}${binding.session_id ? `\n${this.link(binding.session_id)}` : ""}`);
+      notice(`作用域：${binding.scope_id}\nWorker：${session?.workerId ?? target.workerId}\n会话：${binding.session_id ?? "将在提交时创建"}\n状态：${session?.status ?? "空闲"}\n模型：${(session?.context as Json)?.model ?? target.model ?? "worker 默认"}`);
     } else if (cmd.name === "drafts") {
       const rows = this.store.db.prepare(`SELECT generation,COUNT(*) n FROM matrix_media WHERE binding_id=? AND sender=?
         AND status!='discarded' AND (batch_id IS NULL OR batch_id IN (SELECT id FROM matrix_batches WHERE status='held')) GROUP BY generation`)
@@ -485,12 +485,12 @@ export class MatrixGateway {
         .run(String(event.payload.text ?? ""), item.sessionId, event.turnId);
     }
     const key = `turn:${item.sessionId}:${event.turnId}`;
-    this.store.enqueue(`${key}:status`, route.room_id, route.thread_id, message(`正在处理…\n${this.link(item.sessionId)}`, route.thread_id));
+    this.store.enqueue(`${key}:status`, route.room_id, route.thread_id, message("正在处理…", route.thread_id, "m.notice"));
     if (terminal.has(event.type)) {
       const current = this.store.db.prepare("SELECT last_text FROM matrix_turns WHERE session_id=? AND turn_id=?")
         .get(item.sessionId, event.turnId) as { last_text: string | null };
       const label = event.type === "turn.completed" ? "已完成" : event.type === "turn.interrupted" ? "已停止" : "执行失败";
-      this.store.enqueue(`${key}:terminal`, route.room_id, route.thread_id, message(`${label}\n${this.link(item.sessionId)}`, route.thread_id), { replaceKey: `${key}:status` });
+      this.store.enqueue(`${key}:terminal`, route.room_id, route.thread_id, message(label, route.thread_id, "m.notice"), { replaceKey: `${key}:status` });
       const summary = event.payload.summary ?? event.payload.error?.message;
       const text = current.last_text || (typeof summary === "string" ? summary : "");
       if (text) this.store.say(`${key}:answer`, route.room_id, route.thread_id, event.type === "turn.interrupted" ? `（停止前的输出）\n\n${text}` : text);
@@ -498,7 +498,7 @@ export class MatrixGateway {
     } else if (Date.now() - route.status_at > 3000) {
       const summary = String(event.payload.summary ?? (event.type === "message.completed" ? event.payload.text ?? "" : event.type)).slice(0, 1200);
       this.store.enqueue(`${key}:progress:${item.eventId}`, route.room_id, route.thread_id,
-        message(`正在处理：${summary}\n${this.link(item.sessionId)}`, route.thread_id), { replaceKey: `${key}:status` });
+        message(`正在处理：${summary}`, route.thread_id, "m.notice"), { replaceKey: `${key}:status` });
       this.store.db.prepare("UPDATE matrix_turns SET status_at=? WHERE session_id=? AND turn_id=?").run(Date.now(), item.sessionId, event.turnId);
     }
   }
@@ -511,7 +511,7 @@ export class MatrixGateway {
     const key = `pending:${pending.id}`;
     if (pending.status !== "pending") {
       if (this.store.db.prepare("SELECT key FROM matrix_outbox WHERE key=?").get(`${key}:0`)) this.store.enqueue(`${key}:resolved`, route.room_id, route.thread_id,
-        message(`已处理（${pending.status}）`, route.thread_id), { replaceKey: `${key}:0`, pendingId: pending.id });
+        message(`已处理（${pending.status}）`, route.thread_id, "m.notice"), { replaceKey: `${key}:0`, pendingId: pending.id });
       return;
     }
     let text: string;
@@ -525,9 +525,8 @@ export class MatrixGateway {
         `${i + 1}. ${q.question}\n${(q.options ?? []).map((o: Json, j: number) => `${numberKeys[j] ?? j + 1} ${o.label}${o.description ? `：${o.description}` : ""}`).join("\n")}`).join("\n\n")
         + (questions.length > 1 ? "\n逐行回复，例如：1: 答案\n2: 答案" : "\n请回复本消息；有选项时也可使用对应反应。");
     }
-    this.store.say(key, route.room_id, route.thread_id, `${text}\n${this.link(pending.sessionId)}`, pending.id);
+    this.store.say(key, route.room_id, route.thread_id, text, pending.id);
   }
-  private link(sessionId: string): string { return `${this.config.controlCenterUrl?.replace(/\/$/, "") ?? ""}/control/sessions/${enc(sessionId)}`; }
 
   async flush(): Promise<void> {
     for (let i = 0; i < 100 && !this.closed; i++) {

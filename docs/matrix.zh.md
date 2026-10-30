@@ -20,7 +20,6 @@ MATRIX_STATE_FILE=/var/lib/agent-bridge/matrix-device.json
 
 ```json
 {
-  "controlCenterUrl": "https://bridge.example.com",
   "rooms": [{
     "roomId": "!project:example.com",
     "scopeId": "repo-project",
@@ -50,7 +49,7 @@ MATRIX_STATE_FILE=/var/lib/agent-bridge/matrix-device.json
 | --- | --- |
 | `!new` / `!new claude` | 切换到默认/指定目标的新会话，收到普通文字后才创建 |
 | `!use <sessionId>` | 继续已有同项目会话；已有不同作用域时拒绝绑定 |
-| `!status` | 显示作用域、worker、会话状态、模型和 Control Center 链接 |
+| `!status` | 显示作用域、worker、会话状态和模型 |
 | `!stop` | 请求停止当前 turn，保留真实结束状态；不撤销已经执行的操作 |
 | `!help` | 显示帮助 |
 | `!retry` | 核对并重试保留的输入；结果不明的已发动作沿用原幂等键 |
@@ -81,7 +80,7 @@ MATRIX_STATE_FILE=/var/lib/agent-bridge/matrix-device.json
 
 收件 ledger 与 `/sync` cursor 在同一事务提交；出站使用持久 outbox 和稳定 Matrix transaction ID。输入动作和去重记录保留超过普通 API 的 24 小时动作窗口，防止长时间停机后重跑。附件字节继续按既有保留期清理，过期未提交附件可重新下载。未明确核对的 `bridge_timeout` / `action_outcome_unknown` 不自动生成新动作。
 
-每个 turn 的目的房间/线程在观察到事件时固定。切换绑定不会把旧输出送往新会话；绑定现有会话从当前事件位置开始，审批另行对账，不倾倒历史。状态消息节流编辑，终态输出正常消息；Markdown 经 HTML 白名单清洗，长消息按字节切分。当前协议没有所有 harness 通用的 final/commentary 区分，最后一条完整助手消息作为最终回复，中间进展进入状态消息。
+每个 turn 的目的房间/线程在观察到事件时固定。切换绑定不会把旧输出送往新会话；绑定现有会话从当前事件位置开始，审批另行对账，不倾倒历史。状态消息以 `m.notice` 节流编辑，回复正文以普通 `m.text` 发送，采用客户端正常正文颜色；消息不附带 Control Center 会话链接。Markdown 经 HTML 白名单清洗，长消息按字节切分。当前协议没有所有 harness 通用的 final/commentary 区分，最后一条完整助手消息作为最终回复，中间进展进入状态消息。
 
 ## 验证
 
