@@ -74,7 +74,9 @@ export function reviewContext(agentMemory: AgentMemoryMcpOptions, tool: string, 
   }
   if (store && scope && text("topic") && text("kind")) {
     const current = store.get(scope, text("topic")!, text("kind")!);
-    parts.push(current.length ? `Current ${text("topic")}/${text("kind")}: ${current[0]!.value}\n${current[0]!.body}` : "No current fact in this slot.");
+    parts.push(current.length
+      ? `Current ${text("topic")}/${text("kind")} (${current[0]!.pinned ? "pinned" : "not pinned"}): ${current[0]!.value}\n${current[0]!.body}`
+      : "No current fact in this slot.");
   }
   if (skills && text("name") && tool !== "skill_write") {
     try {
@@ -203,7 +205,7 @@ function baseTools(history: ConversationMemoryStore, agentMemory?: AgentMemoryMc
       inputSchema: object({
         scope: SCOPE, topic: { type: "string" }, kind: { type: "string" }, value: { type: "string" },
         topic_display: { type: "string" }, aliases: { type: "array", items: { type: "string" } }, body: { type: "string" },
-        pin: { type: "boolean", description: "Default true: shown in the bootstrap. false: search only." },
+        pin: { type: "boolean", description: "true: shown in every session's bootstrap; only for rules and preferences nearly every task in the scope needs. Omitted: false for a new fact (search and recall still find it), unchanged on an update." },
         derived_from: { type: "array", items: { type: "string" }, description: "Evidence, e.g. session:<id> e:<n>." },
         valid_from: { type: "string" },
       }, ["scope", "topic", "kind", "value"]),

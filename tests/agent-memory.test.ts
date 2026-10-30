@@ -99,6 +99,24 @@ test("writes declare topics, supersede with history, answer as-of queries and to
   assert.equal(memory.get("_global", "reply-style", "preference")[0]!.value, "重新设定");
 });
 
+test("new facts are not pinned unless asked; an update keeps the slot's pin unless it says otherwise", () => {
+  const { memory } = fixture();
+  const pinned = () => memory.get("travel", "visa", "rule")[0]!.pinned;
+  memory.write(hermes, { scope: "travel", topic: "visa", kind: "rule", value: "出境先查签证" });
+  assert.equal(pinned(), false);
+  memory.write(hermes, { scope: "travel", topic: "visa", kind: "rule", value: "出境先查签证", pin: true });
+  assert.equal(pinned(), true);
+  memory.write(hermes, { scope: "travel", topic: "visa", kind: "rule", value: "出境先查签证和护照有效期" });
+  assert.equal(pinned(), true);
+  memory.write(hermes, { scope: "travel", topic: "visa", kind: "rule", value: "出境先查签证和护照有效期", pin: false });
+  assert.equal(pinned(), false);
+  // A retracted slot starts over: its old pin does not come back.
+  memory.write(hermes, { scope: "travel", topic: "visa", kind: "rule", value: "v", pin: true });
+  memory.retract(hermes, { scope: "travel", topic: "visa", kind: "rule", reason: "重写" });
+  memory.write(hermes, { scope: "travel", topic: "visa", kind: "rule", value: "重新设定" });
+  assert.equal(pinned(), false);
+});
+
 test("writes are validated: kinds, slugs, one-line values, secrets, aliases and project writers on _global", () => {
   const { memory } = fixture();
   const code = (fn: () => unknown) => { try { fn(); return "ok"; } catch (error) { return (error as MemoryError).code; } };
@@ -116,11 +134,11 @@ test("writes are validated: kinds, slugs, one-line values, secrets, aliases and 
 
 test("bootstrap is deterministic, budgeted by whole items and scoped; search hides undiscoverable scopes", () => {
   const { memory, vault, tick } = fixture();
-  memory.write(hermes, { scope: "_global", topic: "simon", kind: "profile", value: "住杭州，一家三口" });
-  memory.write(hermes, { scope: "travel", topic: "altitude", kind: "fact", value: "孩子在 3600m 血氧掉到 87%" });
-  memory.write(hermes, { scope: "travel", topic: "draft", kind: "fact", value: "未置顶的事实", pin: false });
-  memory.write(hermes, { scope: "travel", topic: "plan", kind: "decision", value: "定稿方案A+，10/3 出发" });
-  memory.write(hermes, { scope: "card-negumi", topic: "nickname", kind: "preference", value: "叫老公" });
+  memory.write(hermes, { scope: "_global", topic: "simon", kind: "profile", value: "住杭州，一家三口", pin: true });
+  memory.write(hermes, { scope: "travel", topic: "altitude", kind: "fact", value: "孩子在 3600m 血氧掉到 87%", pin: true });
+  memory.write(hermes, { scope: "travel", topic: "draft", kind: "fact", value: "未置顶的事实" });
+  memory.write(hermes, { scope: "travel", topic: "plan", kind: "decision", value: "定稿方案A+，10/3 出发", pin: true });
+  memory.write(hermes, { scope: "card-negumi", topic: "nickname", kind: "preference", value: "叫老公", pin: true });
   tick("2026-10-12T09:00:00Z");
 
   const first = memory.sessionBootstrap("travel");
@@ -204,7 +222,7 @@ test("MCP gives every agent token reads and writes, and keeps project agents out
     assert.ok((await names("hermes-token-0123456789")).includes("memory_write"));
 
     const written = await call("hermes-token-0123456789", "memory_write",
-      { scope: "travel", topic: "visa", topic_display: "签证", kind: "fact", value: "免签" });
+      { scope: "travel", topic: "visa", topic_display: "签证", kind: "fact", value: "免签", pin: true });
     assert.equal(written.result.structuredContent.path, "scopes/travel/facts/visa/fact.md");
     assert.equal(memory.get("travel", "visa", "fact")[0]!.by, "hermes");
     assert.match((await call("codex-token-0123456789", "memory_write",
@@ -260,7 +278,7 @@ test("/mcp/memory serves the short tool names over the MCP SDK with the same tok
     const denied = await rpc("codex-token-0123456789", "tools/call", { name: "write", arguments: { scope: "_global", topic: "visa", kind: "fact", value: "v" } });
     assert.ok(denied.body.error || denied.body.result?.isError, "a project agent cannot write _global without review");
     const written = await rpc("hermes-token-0123456789", "tools/call", { name: "write",
-      arguments: { scope: "travel", topic: "visa", topic_display: "签证", kind: "fact", value: "免签" } });
+      arguments: { scope: "travel", topic: "visa", topic_display: "签证", kind: "fact", value: "免签", pin: true } });
     assert.equal(written.body.result.structuredContent.path, "scopes/travel/facts/visa/fact.md");
     const boot = await rpc("codex-token-0123456789", "tools/call", { name: "bootstrap", arguments: { scope: "travel" } });
     assert.match(boot.body.result.structuredContent.text, /^- 免签$/m);

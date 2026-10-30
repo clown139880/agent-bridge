@@ -137,6 +137,13 @@ test("archive moves a skill out of the library and move changes its scope", () =
   assert.equal(git(repo, "status", "--porcelain"), "");
 });
 
+test("move into a memory scope the library has no directory for yet; unknown scopes stay rejected", () => {
+  const repo = fixture().repo;
+  const skills = new AgentSkills({ repo, archiveDir: join(repo, "..", "archive"), knownScope: (scope) => scope === "_assistants" });
+  assert.equal(skills.move(dorothy, { name: "openlist", scopes: ["_global"], to: "_assistants" }).path, "scopes/_assistants/media/openlist");
+  assert.throws(() => skills.move(dorothy, { name: "openlist", scopes: "all", to: "nowhere" }), /unknown_scope/);
+});
+
 test("MCP exposes skill tools to agent tokens and keeps project agents out of the shared scopes", async () => {
   const { skills } = fixture();
   const vault = mkdtempSync(join(tmpdir(), "agent-skills-vault-"));

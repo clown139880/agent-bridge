@@ -75,6 +75,7 @@ export interface FactInput {
   topicDisplay?: string;
   aliases?: string[];
   body?: string;
+  /** Shown in the bootstrap. Omitted: false for a new fact, unchanged on an update. */
   pin?: boolean;
   derivedFrom?: string[];
   validFrom?: string;
@@ -406,8 +407,11 @@ export class AgentMemory {
     const now = this.now(), today = isoDate(now);
     const validFrom = input.validFrom ?? today;
     let supersedes: string | null = null;
+    // New facts are search-only unless pinned on purpose; an update keeps the slot's pin.
+    let pinned = input.pin ?? false;
     if (existsSync(current)) {
       const previous = parseDocument(readFileSync(current, "utf8"));
+      if (input.pin === undefined) pinned = previous.data.pinned === true && previous.data.status !== "retracted";
       const historyDir = join(scopeDir, "facts", input.topic, input.kind);
       const start = str(previous.data.valid_from) || str(previous.data.recorded_at).slice(0, 10) || today;
       let target = join(historyDir, `${start}.md`), n = 2;
@@ -421,7 +425,7 @@ export class AgentMemory {
       type: "fact", id: `fact-${input.topic}-${input.kind}-${today}-${randomBytes(4).toString("hex")}`,
       entity: input.topic, predicate: input.kind, value, recorded_at: now.toISOString(),
       valid_from: validFrom, valid_until: null, supersedes, derived_from: input.derivedFrom ?? [],
-      assertion: "stated", pinned: input.pin ?? true, by: writer.name,
+      assertion: "stated", pinned, by: writer.name,
     };
     mkdirSync(dirname(current), { recursive: true });
     writeAtomic(current, renderDocument({ data, body: input.body ?? "" }));

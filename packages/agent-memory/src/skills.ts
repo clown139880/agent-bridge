@@ -21,6 +21,8 @@ export interface AgentSkillsOptions {
   push?: boolean;
   /** Called when a background push fails; the commit stays local and the next push carries it. */
   onPushError?: (message: string) => void;
+  /** Memory scopes a skill may move into before the library has a directory for them. */
+  knownScope?: (scope: string) => boolean;
   now?: () => Date;
 }
 
@@ -187,7 +189,7 @@ export class AgentSkills {
     const entry = this.find(input.name, input.scopes);
     authorize(writer, entry.scope);
     authorize(writer, input.to);
-    if (!existsSync(join(this.scopesDir, input.to))) throw new MemoryError("unknown_scope", input.to);
+    if (!existsSync(join(this.scopesDir, input.to)) && !this.options.knownScope?.(input.to)) throw new MemoryError("unknown_scope", input.to);
     if (entry.scope === input.to) return { name: entry.name, scope: entry.scope, path: entry.path, commit: null };
     const target = ["scopes", input.to, ...entry.category.split("/"), entry.name].join("/");
     if (existsSync(join(this.options.repo, target))) throw new MemoryError("target_exists", target);

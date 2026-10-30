@@ -112,7 +112,9 @@ export class ControlPlane {
     let agentSkills: AgentSkills | undefined;
     if (agentMemory && options.agentMemory?.skills) {
       try {
+        const memory = agentMemory;
         agentSkills = new AgentSkills({ ...options.agentMemory.skills,
+          knownScope: (scope) => memory.scopes().some((item) => item.id === scope && item.status !== "archived"),
           onPushError: (message) => log.warn({ message }, "Skill library push failed; the next write retries") });
       }
       catch (error) { log.error({ error }, "Skill library disabled: repository unavailable"); }
