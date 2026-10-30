@@ -46,6 +46,18 @@ test("a deploying session is continued once, and only after its Bridge runs the 
   assert.deepEqual(readdirSync(dir), []);
 });
 
+test("a Control Plane-only release continues once the Bridge registers its own, unchanged release", () => {
+  const dir = intentsDir({ deploy: intent({ version: "0.7.40", bridgeVersion: "0.7.37" }) });
+  const submitted: string[] = [];
+  const resumer = new PostDeployResumer(dir, {
+    resolveSession: () => ({ id: "s", machineId: "hal" }), submitTurn: (_s, _m, _k, input) => { submitted.push(input); },
+  });
+  resumer.bridgeRegistered("hal", "0.7.36");
+  assert.equal(submitted.length, 0);
+  resumer.bridgeRegistered("hal", "0.7.37");
+  assert.equal(submitted.length, 1); assert.match(submitted[0]!, /版本 0\.7\.40/);
+});
+
 test("a turn the Bridge refuses keeps the intent for the next registration", () => {
   const dir = intentsDir({ deploy: intent() });
   let refuse = true;

@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { cp, lstat, mkdir, readFile, readdir, readlink, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
@@ -154,7 +155,7 @@ export class BridgeSelfUpdater {
         this.report("fetched", announcement.latestVersion, true);
         this.report("validating", announcement.latestVersion, true);
         const sourceRoot = this.options.sourceCheckout ?? releasePath;
-        const packageVersion = await readPackageVersion(join(sourceRoot, "package.json"));
+        const packageVersion = await readBridgeVersion(sourceRoot);
         if (compareVersions(packageVersion, announcement.latestVersion) !== 0) {
           throw new Error(`fetched package version ${packageVersion} does not match ${announcement.latestVersion}`);
         }
@@ -257,6 +258,12 @@ function parseVersion(value: string): { numbers: [number, number, number]; prere
   const match = value.trim().match(/^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/);
   if (!match) throw new Error(`Invalid bridge version: ${value}`);
   return { numbers: [Number(match[1]), Number(match[2]), Number(match[3])], prerelease: match[4] ?? "" };
+}
+
+/** The Bridge release version: apps/bridge/package.json, or the root one in older checkouts. */
+async function readBridgeVersion(sourceRoot: string): Promise<string> {
+  const own = join(sourceRoot, "apps", "bridge", "package.json");
+  return readPackageVersion(existsSync(own) ? own : join(sourceRoot, "package.json"));
 }
 
 async function readPackageVersion(path: string): Promise<string> {
@@ -372,6 +379,8 @@ async function stageCompiledArtifact(sourceRoot: string, releasePath: string): P
   }
   await cp(join(sourceRoot, "apps", "bridge", "dist"), join(releasePath, "apps", "bridge", "dist"), { recursive: true });
   await cp(join(sourceRoot, "package.json"), join(releasePath, "package.json"));
+  if (existsSync(join(sourceRoot, "apps", "bridge", "package.json")))
+    await cp(join(sourceRoot, "apps", "bridge", "package.json"), join(releasePath, "apps", "bridge", "package.json"));
   await symlink(join(sourceRoot, "node_modules"), join(releasePath, "node_modules"), process.platform === "win32" ? "junction" : "dir");
   const appNodeModules = join(sourceRoot, "apps", "bridge", "node_modules");
   try {

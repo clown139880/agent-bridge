@@ -134,6 +134,7 @@ if [ "$(readlink /usr/local/bin/abctl 2>/dev/null)" = "$repo/packages/cli/bin/ab
 fi
 
 version=$(node -p 'require("./package.json").version')
+bridge_version=$(node -p 'require("./apps/bridge/package.json").version')
 # The commit the services were running, which HEAD before the fast-forward is not
 # when the release was committed in this checkout.
 running=$(cat "$marker" 2>/dev/null || echo "$previous")
@@ -151,14 +152,14 @@ if "$hosted"; then
     machine=$(sed -n 's/^MACHINE_ID=//p' "$bridge_env" 2>/dev/null | tail -n 1)
     mkdir -p "$intents"
     intent="$intents/$(date +%s)-$$.json"
-    SESSION="$session" NATIVE="$native" MACHINE="${machine:-$(hostname)}" VERSION="$version" COMMIT="$target" \
+    SESSION="$session" NATIVE="$native" MACHINE="${machine:-$(hostname)}" VERSION="$version" BRIDGE_VERSION="$bridge_version" COMMIT="$target" \
       PREVIOUS="$running" NOTE="$note" node -e '
-        const e = process.env, out = { machineId: e.MACHINE, version: e.VERSION, commit: e.COMMIT,
+        const e = process.env, out = { machineId: e.MACHINE, version: e.VERSION, bridgeVersion: e.BRIDGE_VERSION, commit: e.COMMIT,
           previousCommit: e.PREVIOUS, note: e.NOTE || undefined, createdAt: Date.now() };
         if (e.SESSION) out.sessionId = e.SESSION; else out.nativeSessionId = e.NATIVE;
         process.stdout.write(JSON.stringify(out));' > "$intent.tmp"
     mv "$intent.tmp" "$intent"
-    log "this session (${session:-native $native}) is continued once ${machine:-the Bridge} runs $version"
+    log "this session (${session:-native $native}) is continued once ${machine:-the Bridge} runs Bridge $bridge_version"
   else
     log "no session id in the environment; nobody will be told when the deploy is up"
   fi

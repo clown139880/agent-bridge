@@ -6,7 +6,8 @@
 - Resolve non-fast-forward updates by fetching and integrating the remote branch without force-pushing unless the user explicitly requests a force push.
 - Do not claim that a machine or desktop client is updated based only on a clean Git worktree or successful commit.
 - Never deploy source by copying files between Windows and HAL, and never use an automatic stash to make a deployment checkout appear clean. Deployments must start from pushed commits and a clean `git pull --ff-only` on HAL.
-- Maintain release versions. Changes to the Bridge, Control Plane, protocol, database, or runtime deployment code must bump the root package version. Changes confined to `integrations/dsh-agent-control` bump only that package version and must not trigger a Bridge or Control Plane deployment.
+- Maintain release versions. Changes to the Control Plane, protocol, database, or runtime deployment code must bump the root package version. Changes confined to `integrations/dsh-agent-control` bump only that package version and must not trigger a Bridge or Control Plane deployment.
+- The Bridge has its own release version in `apps/bridge/package.json`; the Control Plane offers that version to the fleet, and every Bridge self-updates (and restarts) when it rises. Bump it, together with the root version, only when the Bridge's runtime changes: `apps/bridge`, `packages/protocol`, or `deploy/windows-native`. A Control Plane-only release leaves it unchanged, so no Bridge updates.
 
 ## Tool approvals and permissions
 
@@ -27,7 +28,7 @@
 
 ## DSH Agent Control plugin deployment
 
-- For changes under `integrations/dsh-agent-control`, install the plugin only through the dev-wsl checkout `/home/clown/Workspace/uctw/agent-bridge` after pushing: `git pull --ff-only` on `main`, then `pnpm --filter dsh-agent-control-plugin check` (or `build`). Its `.env.local` sets `DSH_PLUGIN_MIRROR` to the Desktop's linked plugin (`C:\Users\clown\.dsh\linked\dsh-agent-control-plugin`), so the build is the install. The dev-wsl Bridge self-update builds the plugin the same way on every root release. The plugin is used only by the Windows TokensCowork Desktop.
+- For changes under `integrations/dsh-agent-control`, install the plugin only through the dev-wsl checkout `/home/clown/Workspace/uctw/agent-bridge` after pushing: `git pull --ff-only` on `main`, then `pnpm --filter dsh-agent-control-plugin check` (or `build`). Its `.env.local` sets `DSH_PLUGIN_MIRROR` to the Desktop's linked plugin (`C:\Users\clown\.dsh\linked\dsh-agent-control-plugin`), so the build is the install. The dev-wsl Bridge self-update builds the plugin the same way on every Bridge release. The plugin is used only by the Windows TokensCowork Desktop.
 - Do not also install with `deploy/windows-native/update-dsh-client.ps1`: two installers overwrite each other silently. Keep one path.
 - Never install DSH or the plugin on HAL: do not run `sync:hal` / `deploy/hal/sync-dsh-agent-control.sh` there and do not create a `dsh-agent-control.service`.
 - Plugin-only changes do not trigger or restart either Bridge or the Control Plane.
@@ -48,6 +49,6 @@
 - To restart the HAL services without a new commit (after editing `/root/agent-bridge/.env`, `/etc/agent-bridge/bridge.env` or other service configuration), run `deploy/hal/deploy.sh --force --note "<what to verify afterwards>"`. It rebuilds the current commit and restarts through systemd with the same post-deploy continuation; the `[post-deploy]` turn arrives even though the version is unchanged.
 - Never restart the services with `systemctl` directly: from behind the HAL Bridge it kills your turn with no continuation, and it skips the build check. Quote `--note` text with single quotes so the shell does not expand `$VARS` (a note is stored and echoed back verbatim).
 - Never edit `.env` to register a version: the Control Plane advertises its own `package.json` version. Do not deploy with `deploy/hal/deploy-bridge.sh` or enable Bridge auto-update on HAL.
-- Deployment is confirmed by the notification room messages “🟢 控制面已启动 · 版本 <version>” and “🔄 更新完成：hal · <old> → <version>” (sent when the HAL Bridge registers on the new version). If the script reports a failure before the restart, report its output.
+- Deployment is confirmed by the notification room message “🟢 控制面已启动 · 版本 <version>”, and, when the Bridge version rose, “🔄 更新完成：hal · <old> → <bridge version>” (sent when the HAL Bridge registers on it). The `[post-deploy]` turn waits for the HAL Bridge to register on the deployed Bridge version. If the script reports a failure before the restart, report its output.
 - Never continue from a dirty HAL checkout, never stash, and never copy source into the checkout. Stop and investigate unexpected changes.
 - Keep SQLite data and secrets outside the Git checkout. Database backups must use SQLite's online backup mechanism and live outside the repository.

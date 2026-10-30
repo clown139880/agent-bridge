@@ -5,14 +5,17 @@ import { fileURLToPath } from "node:url";
 
 // The fleet version lives in the repo-root package.json (same value BRIDGE_LATEST_VERSION
 // tracks). Report it in lifecycle webhooks so the operator sees which control-plane is live.
-const controlPlaneVersion = ((): string => {
+const packageVersion = (path: string): string => {
   try {
-    return String(JSON.parse(readFileSync(
-      fileURLToPath(new URL("../../../package.json", import.meta.url)), "utf8")).version ?? "unknown");
+    return String(JSON.parse(readFileSync(fileURLToPath(new URL(path, import.meta.url)), "utf8")).version ?? "unknown");
   } catch {
     return "unknown";
   }
-})();
+};
+const controlPlaneVersion = packageVersion("../../../package.json");
+// The fleet follows the Bridge's own release version, so a Control Plane-only release
+// does not make every Bridge update and restart.
+const bridgeReleaseVersion = packageVersion("../../bridge/package.json");
 
 const controlApiReadToken = process.env.CONTROL_API_READ_TOKEN;
 const controlApiWriteToken = process.env.CONTROL_API_WRITE_TOKEN;
@@ -29,7 +32,7 @@ if (process.env.BRIDGE_LATEST_VERSION && !bridgeUpdateSource) {
   throw new Error("BRIDGE_LATEST_VERSION requires BRIDGE_UPDATE_SOURCE");
 }
 const bridgeLatestVersion = process.env.BRIDGE_LATEST_VERSION
-  || (bridgeUpdateSource && controlPlaneVersion !== "unknown" ? controlPlaneVersion : undefined);
+  || (bridgeUpdateSource && bridgeReleaseVersion !== "unknown" ? bridgeReleaseVersion : undefined);
 if (bridgeLatestVersion && !/^v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(bridgeLatestVersion)) {
   throw new Error("BRIDGE_LATEST_VERSION must be a semantic version");
 }

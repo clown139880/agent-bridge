@@ -21,6 +21,8 @@ export interface PostDeployIntent {
   /** The agent's own session id (e.g. Claude's uuid) when the public one was unknown. */
   nativeSessionId?: string;
   version: string;
+  /** The Bridge release the deploy runs; it is what the restarted Bridge registers with. */
+  bridgeVersion?: string;
   commit: string;
   previousCommit?: string;
   /** What the deploying agent wants to be reminded of. */
@@ -53,7 +55,7 @@ export class PostDeployResumer {
       }
       if (intent.machineId !== machineId) continue;
       // The Bridge restarts once more if it registered an older build; wait for the deployed one.
-      if (!bridgeVersion || compareBridgeVersions(bridgeVersion, intent.version) < 0) continue;
+      if (!bridgeVersion || compareBridgeVersions(bridgeVersion, intent.bridgeVersion ?? intent.version) < 0) continue;
       const session = this.host.resolveSession(intent);
       if (!session) {
         log.warn({ intent }, "Post-deploy intent names no known session; dropped");
@@ -81,7 +83,7 @@ export class PostDeployResumer {
         const text = (key: string) => typeof raw[key] === "string" && raw[key] ? String(raw[key]) : undefined;
         const machineId = text("machineId"), version = text("version"), commit = text("commit");
         if (!machineId || !version || !commit || (!text("sessionId") && !text("nativeSessionId"))) throw new Error("incomplete intent");
-        intents.push({ id, machineId, version, commit, sessionId: text("sessionId"), nativeSessionId: text("nativeSessionId"),
+        intents.push({ id, machineId, version, bridgeVersion: text("bridgeVersion"), commit, sessionId: text("sessionId"), nativeSessionId: text("nativeSessionId"),
           previousCommit: text("previousCommit"), note: text("note"), createdAt: Number(raw.createdAt) || 0 });
       } catch (error) {
         log.warn({ file: name, error: error instanceof Error ? error.message : String(error) }, "Unreadable post-deploy intent; dropped");

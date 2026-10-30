@@ -8,7 +8,15 @@ import { splitAllowedRoots } from "./path-utils.js";
 // .env, whose human and agent tokens must never reach the agents it starts (0.7.13).
 loadEnv({ path: process.env.BRIDGE_ENV_FILE ?? ".env.bridge", override: true, quiet: true });
 
-const packageVersion = (JSON.parse(readFileSync(new URL("../../../package.json", import.meta.url), "utf8")) as { version: string }).version;
+// The Bridge has its own release version (apps/bridge/package.json), so Control Plane-only
+// releases do not restart the fleet. Releases staged before 0.7.37 carry only the root one.
+const packageVersion = (() => {
+  for (const path of ["../package.json", "../../../package.json"]) {
+    try { return (JSON.parse(readFileSync(new URL(path, import.meta.url), "utf8")) as { version: string }).version; }
+    catch { /* try the next */ }
+  }
+  throw new Error("Bridge package.json not found");
+})();
 const isWindows = platform() === "win32";
 
 const updateInstallRoot = process.env.BRIDGE_UPDATE_INSTALL_ROOT ?? (isWindows ? `${process.env.LOCALAPPDATA ?? process.cwd()}\\agent-bridge` : "/opt/agent-bridge");

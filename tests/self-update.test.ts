@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { readFileSync, existsSync, mkdirSync, mkdtempSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
@@ -140,7 +140,9 @@ test("source checkout updates stage a compiled artifact without cloning a second
   mkdirSync(join(source, "apps", "bridge", "node_modules", "@agent-bridge", "protocol"), { recursive: true });
   mkdirSync(join(source, "deploy", "windows-native"), { recursive: true });
   mkdirSync(oldRelease, { recursive: true });
-  writeFileSync(join(source, "package.json"), JSON.stringify({ version: "0.4.0" }));
+  // The root (Control Plane) release may move ahead; the Bridge follows apps/bridge/package.json.
+  writeFileSync(join(source, "package.json"), JSON.stringify({ version: "0.9.0" }));
+  writeFileSync(join(source, "apps", "bridge", "package.json"), JSON.stringify({ version: "0.4.0" }));
   writeFileSync(join(source, "apps", "bridge", "dist", "index.js"), "console.log('compiled');");
   writeFileSync(join(source, "apps", "bridge", "node_modules", "@agent-bridge", "protocol", "package.json"), JSON.stringify({ name: "@agent-bridge/protocol" }));
   writeFileSync(join(source, "deploy", "windows-native", "start-bridge.ps1"), "start");
@@ -160,6 +162,7 @@ test("source checkout updates stage a compiled artifact without cloning a second
     assert.ok(commands.some((command) => command.join(" ").includes("fetch origin main")));
     const artifact = resolve(dirname(currentLink), readlinkSync(currentLink));
     assert.equal(existsSync(join(artifact, "apps", "bridge", "dist", "index.js")), true);
+    assert.equal(JSON.parse(readFileSync(join(artifact, "apps", "bridge", "package.json"), "utf8")).version, "0.4.0");
     assert.equal(existsSync(join(artifact, "apps", "bridge", "node_modules", "@agent-bridge", "protocol", "package.json")), true);
   } finally {
     rmSync(root, { recursive: true, force: true });
