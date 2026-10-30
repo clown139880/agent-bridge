@@ -21,6 +21,7 @@
 ## Windows Bridge deployment
 
 - Native Windows Bridge releases update through the Bridge self-updater after the versioned commit is pushed. Do not replace its source manually when automatic update is configured.
+- The updater fast-forwards `C:\Users\clown\Workspace\agent-bridge` itself, so that checkout must stay on `main`. A branch there makes every update fail and leaves the Bridge draining, refusing new work. Develop in a separate worktree, or on HAL/WSL.
 - Verify the new Bridge version, process, and Control Plane registration after the updater finishes. A clean checkout or successful push alone is not a deployment.
 - Deployment may restart the Windows Bridge and interrupt active turns, pending approvals, or pending user input when needed to activate the release.
 
