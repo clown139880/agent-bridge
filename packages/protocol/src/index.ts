@@ -331,28 +331,18 @@ export interface StructuredSessionEventMessage {
   payload: Record<string, unknown>;
 }
 
-/** Authoritative project context, assembled centrally; execution cwd never changes its identity. */
-export interface SessionMemoryContext {
-  scopeId: string;
-  roomId?: string;
-  revision: string;
-  text: string;
-  /** Inject a supplemental context block only when its content changed / has not been delivered. */
-  changed: boolean;
-  recall?: string;
-}
-
 export interface CreateSessionActionMessage {
   type: "action.create_session";
   actionId: string;
   agentType?: AgentType;
   projectPath: string;
-  memoryContext?: SessionMemoryContext;
   input?: string;
   model?: string;
   /** An agent effort level, or DEFAULT_EFFORT; omitted keeps the session's current effort. */
   reasoningEffort?: string;
   attachments?: AttachmentRef[];
+  /** Memory scope to bootstrap from instead of resolving it from the workspace (a room's project). */
+  memoryScope?: string;
 }
 /** `reasoningEffort` value that returns a session to its agent's default effort. */
 export const DEFAULT_EFFORT = "default";
@@ -360,7 +350,6 @@ export interface SubmitTurnActionMessage {
   type: "action.submit_turn";
   actionId: string;
   sessionId: string;
-  memoryContext?: SessionMemoryContext;
   input: string;
   delivery: "auto" | "steer" | "start_turn";
   expectedTurnId?: string;
@@ -376,7 +365,7 @@ export interface SubmitTurnActionMessage {
    * the time of the newest stored event: transcript entries after it were written
    * outside the bridge (e.g. the session was resumed in a CLI) and are backfilled.
    */
-  resume?: { agentType: AgentType; workspace: string; nativeSessionId?: string; syncedAt?: number };
+  resume?: { agentType: AgentType; workspace: string; nativeSessionId?: string; syncedAt?: number; memoryScope?: string };
 }
 export interface InterruptTurnActionMessage {
   type: "action.interrupt_turn";

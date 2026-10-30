@@ -34,12 +34,6 @@ export class SessionActionService {
   }
 
   dispatch(action:ActionRow,message:ControlToBridgeMessage):void{
-    if ((message.type === "action.create_session" || message.type === "action.submit_turn") && message.memoryContext
-      && !this.bridges.get(action.machineId)?.features?.includes("session-memory")) {
-      this.store.completeAction({type:"action.result",actionId:action.actionId,kind:action.kind,status:"failed",
-        sessionId:action.sessionId??undefined,error:{code:"memory_context_unsupported",message:"Upgrade this Bridge before continuing a room-bound session",retryable:true},timestamp:Date.now()});
-      throw new ActionServiceError(409,"memory_context_unsupported","worker has not upgraded its room memory support");
-    }
     if(!this.bridges.send(action.machineId,message)){
       this.store.completeAction({type:"action.result",actionId:action.actionId,kind:action.kind,status:"failed",
         sessionId:action.sessionId??undefined,error:{code:"worker_offline",message:"worker is offline",retryable:true},timestamp:Date.now()});

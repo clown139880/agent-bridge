@@ -22,7 +22,6 @@ const control = new ControlPlane(store, {
   webhook: config.webhook,
   ntfy: config.ntfy,
   messages: config.messages,
-  matrix: config.matrix,
 });
 
 await control.start();

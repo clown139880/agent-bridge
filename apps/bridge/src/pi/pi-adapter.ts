@@ -13,6 +13,7 @@ import type {
 } from "@agent-bridge/protocol";
 import type { AgentAdapter, AdapterEmit, ResumeTarget } from "../agent-adapter.js";
 import type { AttachmentFetcher, FetchedAttachment } from "../attachments.js";
+import type { MemoryBootstrapFetcher } from "../memory-bootstrap.js";
 import { resolveProjectPath, summarizePrompt } from "../app-server.js";
 import { deriveProjectIdentity } from "../path-utils.js";
 
@@ -38,6 +39,7 @@ interface PiSession {
   sessionId: string;        // stable bridge-assigned public id
   nativeSessionId?: string; // pi uuid (from get_state), used for resume
   sessionFile?: string;     // pi session .jsonl path, used for resume
+  memoryScope?: string;     // memory scope named at creation; relaunches bootstrap from it again
   requestId?: string;
   model?: string;           // current model id (bare, without provider prefix)
   cwd: string;
@@ -85,6 +87,8 @@ interface PiSession {
  */
 export class PiAdapter implements AgentAdapter {
   private readonly sessions = new Map<string, PiSession>();
+  /** How long an interrupted turn may take to settle before its process is killed. */
+  private settleTimeoutMs = 10_000;
   private ready = false;
   /** Cached pi catalog (shared across sessions; one provider config per adapter). */
   private availableModels: PiModelInfo[] = [];
@@ -98,6 +102,7 @@ export class PiAdapter implements AgentAdapter {
       sessionDir?: string;
       allowedRoots: string[];
       fetchAttachment?: AttachmentFetcher;
+      memoryBootstrap?: MemoryBootstrapFetcher;
     },
     private readonly emit: AdapterEmit,
   ) {}
@@ -123,11 +128,11 @@ export class PiAdapter implements AgentAdapter {
 
   // ---- session lifecycle -------------------------------------------------
 
-  async startSession(requestId: string, projectPath: string, prompt?: string, resume?: ResumeTarget, model?: string, attachments?: AttachmentRef[]): Promise<string> {
+  async startSession(requestId: string, projectPath: string, prompt?: string, resume?: ResumeTarget, model?: string, attachments?: AttachmentRef[], _reasoningEffort?: string, memoryScope?: string): Promise<string> {
     const images = await this.materialize(attachments);
     if (!resume) {
       const publicSessionId = `pi-${randomUUID()}`;
-      await this.launch({ publicSessionId, requestId, projectPath, prompt, model, images });
+      await this.launch({ publicSessionId, requestId, projectPath, prompt, model, images, memoryScope });
       return publicSessionId;
     }
     // Continue under the public id, resuming pi's own session uuid.
@@ -144,17 +149,17 @@ export class PiAdapter implements AgentAdapter {
       this.kill(held);
       this.sessions.delete(held.sessionId);
     }
-    await this.launch({ publicSessionId: resume.sessionId, requestId, projectPath, prompt, resumeNativeId, model, images });
+    await this.launch({ publicSessionId: resume.sessionId, requestId, projectPath, prompt, resumeNativeId, model, images, memoryScope: memoryScope ?? held?.memoryScope });
     return resume.sessionId;
   }
 
-  async resumeSession(sessionId: string, projectPath: string, nativeSessionId?: string, model?: string): Promise<void> {
+  async resumeSession(sessionId: string, projectPath: string, nativeSessionId?: string, model?: string, _syncedAt?: number, memoryScope?: string): Promise<void> {
     if (this.sessions.has(sessionId)) return;
-    await this.launch({ publicSessionId: sessionId, requestId: sessionId, projectPath, resumeNativeId: piResumeId(nativeSessionId), model });
+    await this.launch({ publicSessionId: sessionId, requestId: sessionId, projectPath, resumeNativeId: piResumeId(nativeSessionId), model, memoryScope });
   }
 
-  private async launch(params: { publicSessionId: string; requestId: string; projectPath: string; prompt?: string; resumeNativeId?: string; model?: string; images?: FetchedAttachment[] }): Promise<string> {
-    const { publicSessionId: sessionId, requestId, projectPath, prompt, resumeNativeId, model, images } = params;
+  private async launch(params: { publicSessionId: string; requestId: string; projectPath: string; prompt?: string; resumeNativeId?: string; model?: string; images?: FetchedAttachment[]; memoryScope?: string }): Promise<string> {
+    const { publicSessionId: sessionId, requestId, projectPath, prompt, resumeNativeId, model, images, memoryScope } = params;
     const cwd = await resolveProjectPath(projectPath, this.options.allowedRoots);
 
     const args = ["--mode", "rpc"];
@@ -174,6 +179,9 @@ export class PiAdapter implements AgentAdapter {
     if (this.options.sessionDir) { args.push("--session-dir", this.options.sessionDir); }
     // Without --session pi starts a new session: the resume id must reach pi itself.
     if (resumeNativeId) { args.push("--session", resumeNativeId); }
+    // pi keeps no system prompt in its session file, so every launch appends core memory again.
+    const memory = await this.options.memoryBootstrap?.(cwd, memoryScope);
+    if (memory) args.push("--append-system-prompt", memory);
     if (prompt) {
       const title = summarizePrompt(prompt, 60);
       if (title) args.push("--name", title);
@@ -183,6 +191,7 @@ export class PiAdapter implements AgentAdapter {
     const proc = spawn(this.options.command, args, { cwd, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, AGENT_BRIDGE_SESSION_ID: sessionId } });
     const session: PiSession = {
       sessionId,
+      memoryScope,
       nativeSessionId: resumeNativeId,
       requestId,
       model: bareModelId(effectiveModel),
@@ -606,8 +615,8 @@ export class PiAdapter implements AgentAdapter {
     this.beginTurn(session, text, model, await this.materialize(attachments));
   }
 
-  async createSessionAction(actionId: string, projectPath: string, input?: string, model?: string, _reasoningEffort?: string, attachments?: AttachmentRef[]): Promise<{ sessionId: string; turnId?: string }> {
-    const sessionId = await this.startSession(actionId, projectPath, input, undefined, model, attachments);
+  async createSessionAction(actionId: string, projectPath: string, input?: string, model?: string, reasoningEffort?: string, attachments?: AttachmentRef[], memoryScope?: string): Promise<{ sessionId: string; turnId?: string }> {
+    const sessionId = await this.startSession(actionId, projectPath, input, undefined, model, attachments, reasoningEffort, memoryScope);
     return { sessionId, turnId: this.sessions.get(sessionId)?.activeTurnId };
   }
 
@@ -644,7 +653,14 @@ export class PiAdapter implements AgentAdapter {
     if (expectedTurnId && expectedTurnId !== activeTurnId) throw domainError("turn_changed", "active turn changed");
     session.interrupting = true;
     this.sendCommand(session, { type: "abort" });
-    await waitForTurnSettlement(() => session.activeTurnId, activeTurnId);
+    try { await waitForTurnSettlement(() => session.activeTurnId, activeTurnId, this.settleTimeoutMs); }
+    catch {
+      // pi ignored the abort: end the process; the next turn resumes from its session file.
+      log.warn({ sessionId, turnId: activeTurnId }, "pi did not settle an aborted turn; killing its process");
+      this.kill(session);
+      this.finishTurn(session, "interrupted");
+      if (this.sessions.get(sessionId) === session) this.sessions.delete(sessionId);
+    }
     return { sessionId, turnId: activeTurnId };
   }
 

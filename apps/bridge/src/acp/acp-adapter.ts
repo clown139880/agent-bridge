@@ -118,6 +118,8 @@ interface AcpSession {
  */
 export class AcpAdapter implements AgentAdapter {
   private readonly sessions = new Map<string, AcpSession>();
+  /** How long an interrupted turn may take to settle before its process is killed. */
+  private settleTimeoutMs = 10_000;
   private ready = false;
   private modelCache?: { at: number; models: CodexModelInfo[] };
   private modelQuery?: Promise<CodexModelInfo[]>;
@@ -653,7 +655,14 @@ export class AcpAdapter implements AgentAdapter {
     if (!activeTurnId) throw domainError("no_active_turn", "session has no active turn");
     if (expectedTurnId && expectedTurnId !== activeTurnId) throw domainError("turn_changed", "active turn changed");
     this.cancelTurn(session);
-    await waitForTurnSettlement(() => session.activeTurnId, activeTurnId);
+    try { await waitForTurnSettlement(() => session.activeTurnId, activeTurnId, this.settleTimeoutMs); }
+    catch {
+      // The agent ignored session/cancel: end the process; the next turn revives the session.
+      log.warn({ sessionId, turnId: activeTurnId }, "ACP agent did not settle a cancelled turn; killing its process");
+      this.kill(session);
+      this.finishTurn(session, "interrupted");
+      if (this.sessions.get(sessionId) === session) this.sessions.delete(sessionId);
+    }
     return { sessionId, turnId: activeTurnId };
   }
 

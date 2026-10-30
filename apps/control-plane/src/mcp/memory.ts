@@ -193,7 +193,7 @@ function baseTools(history: ConversationMemoryStore, agentMemory?: AgentMemoryMc
       run: () => {
         const all = store!.scopes();
         return { scopes: all.filter((item) => item.discoverable).map((item) => ({ id: item.id, title: item.title, status: item.status,
-          matrixRooms: item.matrixRooms, repositories: item.repositories, locations: item.locations })),
+          rooms: item.rooms, matrixRooms: item.matrixRooms, repositories: item.repositories, locations: item.locations })),
           hidden: all.filter((item) => !item.discoverable).length };
       },
     },

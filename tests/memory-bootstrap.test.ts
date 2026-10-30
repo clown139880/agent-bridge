@@ -45,6 +45,10 @@ test("a Bridge gets _global plus its project's memory for a new session, and not
     // Outside any bound project only _global is shared.
     const other = await makeMemoryBootstrapFetcher(url, "bridge-secret", "dev")(dir);
     assert.ok(other?.includes("作用域 _global") && !other.includes("演示项目。"));
+    // A room's session names its scope; an unknown one falls back to resolving the cwd.
+    const named = await makeMemoryBootstrapFetcher(url, "bridge-secret", "dev")(dir, "repo-demo");
+    assert.ok(named?.includes("作用域 repo-demo") && named.includes("演示项目。"));
+    assert.ok((await makeMemoryBootstrapFetcher(url, "bridge-secret", "dev")(dir, "missing"))?.includes("作用域 _global"));
     assert.equal(await makeMemoryBootstrapFetcher(url, "wrong", "dev")(repo), undefined);
   } finally {
     await control.stop(); store.db.close();

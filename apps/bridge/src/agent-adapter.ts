@@ -1,4 +1,4 @@
-import type { SessionMemoryContext, ApprovalChoice, AttachmentRef, BridgeToControlMessage, CodexModelInfo, SessionState } from "@agent-bridge/protocol";
+import type { ApprovalChoice, AttachmentRef, BridgeToControlMessage, CodexModelInfo, SessionState } from "@agent-bridge/protocol";
 
 /**
  * Common surface every agent backend exposes to {@link BridgeClient}. Codex talks
@@ -18,8 +18,6 @@ export interface ResumeTarget {
 }
 
 export interface AgentAdapter {
-  /** Preserve centrally bound context when a held session later relaunches its native process. */
-  setSessionMemory?(sessionId: string, context: SessionMemoryContext): void;
   /** Begin connecting / spawning. Resolves once ready (or keeps retrying internally). */
   start(): Promise<void>;
   /** Tear down connections/processes. */
@@ -29,19 +27,19 @@ export interface AgentAdapter {
    * Start a session for a project, or continue `resume`, optionally kicking off a
    * first turn. Returns the public session id the session reports under.
    */
-  startSession(requestId: string, projectPath: string, prompt?: string, resume?: ResumeTarget, model?: string, attachments?: AttachmentRef[], reasoningEffort?: string, memoryContext?: SessionMemoryContext): Promise<string>;
+  startSession(requestId: string, projectPath: string, prompt?: string, resume?: ResumeTarget, model?: string, attachments?: AttachmentRef[], reasoningEffort?: string, memoryScope?: string): Promise<string>;
   /**
    * Revive a session this bridge no longer holds in memory (e.g. after a restart/
    * self-update killed its subprocess), keeping the same public sessionId, so a
    * subsequent turn continues the conversation. Optional: adapters that cannot resume
    * simply omit it and unknown sessions keep failing as before.
    */
-  resumeSession?(sessionId: string, projectPath: string, nativeSessionId?: string, model?: string, syncedAt?: number, memoryContext?: SessionMemoryContext): Promise<void>;
+  resumeSession?(sessionId: string, projectPath: string, nativeSessionId?: string, model?: string, syncedAt?: number, memoryScope?: string): Promise<void>;
   /** Deliver free-form text to a session (answers pending input, steers an active turn, or starts a new turn). */
   input(sessionId: string, text: string, model?: string, attachments?: AttachmentRef[]): Promise<void>;
 
   /** Idempotent action: create a session. */
-  createSessionAction(actionId: string, projectPath: string, input?: string, model?: string, reasoningEffort?: string, attachments?: AttachmentRef[], memoryContext?: SessionMemoryContext): Promise<{ sessionId: string; turnId?: string }>;
+  createSessionAction(actionId: string, projectPath: string, input?: string, model?: string, reasoningEffort?: string, attachments?: AttachmentRef[], memoryScope?: string): Promise<{ sessionId: string; turnId?: string }>;
   /** Idempotent action: submit a turn with explicit delivery semantics. */
   submitTurnAction(
     actionId: string,

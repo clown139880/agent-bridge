@@ -4,9 +4,9 @@ import type { Store, AgentControlStore, PendingRow, ActionRow } from "@agent-bri
 import { parseWorkerId, workerId as buildWorkerId, type AgentType, type ActionKind, type ApprovalChoice, type ControlToBridgeMessage } from "@agent-bridge/protocol";
 import { BridgeRegistry } from "../bridge-registry.js";
 import type { MemoryReviewRoutes } from "../memory-review.js";
+import { CONVERSATION_AGENTS, type ConversationAgent, type Conversations } from "../conversations.js";
 import { AgentControlSse, SseCursorError } from "./sse.js";
 import { ActionServiceError, SessionActionService } from "./session-actions.js";
-import type { SessionMemory } from "../session-memory.js";
 import { ApiProblem, integerParam as integer, jsonBody, stringField as string, attachmentsField, uploadRequest } from "./validation.js";
 
 /** Map a worker-id prefix to an agent type, or undefined for an unknown prefix. */
@@ -29,9 +29,10 @@ interface ApiOptions {
   /** CONTROL_API_*: the human's tokens (Control Center, DSH). */
   readToken?: string; writeToken?: string; bridgeToken?: string;
   /** AGENT_TOKENS: each agent drives sessions as `agent:<name>`, recorded on every action it starts. */
-  agents?: Array<{ name: string; token: string }>;
+  agents?: Array<{ name: string; token: string; role?: "agent" | "project" }>;
   memoryReviews?: MemoryReviewRoutes;
-  sessionMemory?: SessionMemory;
+  /** Chat connectors' room/thread → session bindings (/api/v1/conversations). */
+  conversations?: Conversations;
   sseKeepaliveMs: number; ssePollMs: number; sseMaxBackpressure: number; actionTimeoutMs: number; }
 
 function equalSecret(left: string, right: string): boolean {
@@ -56,11 +57,11 @@ function pendingJson(row: PendingRow): Record<string,unknown> {
 // (Claude subprocess killed by a restart). workspace is the cwd to relaunch in;
 // nativeSessionId is the agent's own resumable id. Only emitted when both the
 // agent type and workspace are known.
-function resumeContext(session:Record<string,unknown>,syncedAt?:number):{agentType:AgentType;workspace:string;nativeSessionId?:string;syncedAt?:number}|undefined{
+function resumeContext(session:Record<string,unknown>,syncedAt?:number,memoryScope?:string):{agentType:AgentType;workspace:string;nativeSessionId?:string;syncedAt?:number;memoryScope?:string}|undefined{
   const agent=session.agent,workspace=session.workspace;
   if((agent!=="codex-cli"&&agent!=="claude-code"&&agent!=="pi"&&agent!=="grok")||typeof workspace!=="string"||!workspace)return undefined;
   const nativeSessionId=typeof session.nativeSessionId==="string"?session.nativeSessionId:undefined;
-  return {agentType:agent,workspace,nativeSessionId,syncedAt};
+  return {agentType:agent,workspace,nativeSessionId,syncedAt,...(memoryScope?{memoryScope}:{})};
 }
 function queryScope(name:string,url:URL):string{const entries=[...url.searchParams.entries()].filter(([key])=>key!=="cursor"&&key!=="limit").sort();return `${name}:${createHash("sha256").update(JSON.stringify(entries)).digest("hex").slice(0,16)}`;}
 function pageCursor(scope:string,time:number,id:string):string{return Buffer.from(JSON.stringify({scope,time,id})).toString("base64url");}
@@ -134,10 +135,40 @@ export class AgentControlApi {
       if(approval){await this.pendingRoute("approval",request,response,principal,decodeURIComponent(approval[1]!),approval[2]);return true;}
       const review=url.pathname.match(/^\/api\/v1\/memory-reviews(?:\/([^/]+)(?:\/(decision))?)?$/);
       if(review&&this.options.memoryReviews){await this.memoryReviewRoute(request,response,url,principal,review[1]&&decodeURIComponent(review[1]),review[2]);return true;}
+      const conversation=url.pathname.match(/^\/api\/v1\/conversations(?:\/([a-z][a-z0-9_-]*)(?:\/([^/]+)(?:\/(bind))?)?)?$/);
+      if(conversation&&this.options.conversations){await this.conversationRoute(request,response,url,principal,conversation[1],conversation[2]&&decodeURIComponent(conversation[2]),conversation[3]);return true;}
       const input=url.pathname.match(/^\/api\/v1\/user-input\/([^/]+)(?:\/(response))?$/);
       if(input){await this.pendingRoute("user_input",request,response,principal,decodeURIComponent(input[1]!),input[2]);return true;}
       throw new ApiProblem(404,"not_found","endpoint not found");
     } catch(error){this.problem(response,error,requestId);return true;}
+  }
+
+  /**
+   * GET /conversations/:connector lists bound sessions; GET/PUT …/:room reads or changes one room's
+   * thread binding (?threadId=, body {threadId, sessionId, agent}); POST …/:room/bind binds the room to a scope.
+   */
+  private async conversationRoute(request:IncomingMessage,response:ServerResponse,url:URL,principal:Principal,connector:string|undefined,roomId:string|undefined,sub:string|undefined):Promise<void>{
+    const conversations=this.options.conversations!;
+    if(!connector)throw new ApiProblem(404,"not_found","endpoint not found");
+    if(request.method==="GET"&&!roomId){this.ok(response,{data:conversations.list(connector)});return;}
+    if(!roomId)throw new ApiProblem(404,"not_found","endpoint not found");
+    if(request.method==="GET"&&!sub){this.ok(response,conversations.get(connector,roomId,url.searchParams.get("threadId")??""));return;}
+    const body=await jsonBody(request) as Record<string,unknown>;
+    if(request.method==="PUT"&&!sub){
+      const threadId=string(body.threadId,"threadId")??"",agent=string(body.agent,"agent");
+      if(agent&&!(CONVERSATION_AGENTS as readonly string[]).includes(agent))throw new ApiProblem(400,"invalid_agent",`agent must be one of ${CONVERSATION_AGENTS.join(", ")}`);
+      if(body.sessionId!==undefined&&body.sessionId!==null&&(typeof body.sessionId!=="string"||!this.store.session(body.sessionId)))throw new ApiProblem(404,"session_not_found","session not found");
+      this.ok(response,conversations.set(connector,roomId,threadId,{sessionId:body.sessionId as string|null|undefined,agent:agent as ConversationAgent|undefined}));return;}
+    if(request.method==="POST"&&sub==="bind"){
+      const scopeId=string(body.scopeId,"scopeId",true)!,location=string(body.location,"location");
+      const at=location?.indexOf(":")??-1;if(location&&at<1)throw new ApiProblem(400,"invalid_location","location must be machine:/path");
+      const name=principal.id.replace(/^(agent|control):/,"");
+      const role=this.options.agents?.find(agent=>`agent:${agent.name}`===principal.id)?.role??(principal.id.startsWith("control:")?"agent":"project");
+      try{this.ok(response,conversations.bind({name,role},connector,roomId,scopeId,location?{machine:location.slice(0,at),path:location.slice(at+1)}:undefined));}
+      catch(error){const message=error instanceof Error?error.message:String(error);
+        throw new ApiProblem(message.startsWith("unknown_scope")||message.startsWith("invalid_scope")?404:409,message.split(":")[0]!,message);}
+      return;}
+    throw new ApiProblem(404,"not_found","endpoint not found");
   }
 
   /** Memory reviews: anyone may read them; only the human decides one the reviewer handed over. */
@@ -273,12 +304,12 @@ export class AgentControlApi {
     const parsed=parseWorkerId(workerId);const agentType=parsed?agentTypeForWorkerPrefix(parsed.prefix):undefined;
     if(!parsed||!agentType)throw new ApiProblem(400,"invalid_worker_id","workerId must be <codex|claude|pi>@machine");
     const machineId=parsed.machineId,workspace=string(body.workspace,"workspace",true)!,input=string(body.input,"input"),
-      model=string(body.model,"model"),reasoningEffort=string(body.reasoningEffort,"reasoningEffort"),attachments=attachmentsField(body.attachments);
+      model=string(body.model,"model"),reasoningEffort=string(body.reasoningEffort,"reasoningEffort"),attachments=attachmentsField(body.attachments),
+      memoryScope=string(body.memoryScope,"memoryScope");
+    if(memoryScope&&!this.options.conversations?.validScope(memoryScope))throw new ApiProblem(400,"invalid_memory_scope","memoryScope must name an active memory scope");
     this.requireActionBridge(machineId);
-    const memoryContext=this.options.sessionMemory?.prepare({ scopeId:string(body.memoryScopeId,"memoryScopeId"), roomId:string(body.originRoomId,"originRoomId"), input });
     const created=this.createAction(principal,key,"/api/v1/sessions",body,"create_session",machineId);
-    this.store.saveActionMemory(created.action.actionId,memoryContext,Boolean(input));
-    if(!created.existing)this.dispatch(created.action,{type:"action.create_session",actionId:created.action.actionId,agentType,projectPath:workspace,input,model,reasoningEffort,attachments,memoryContext});
+    if(!created.existing)this.dispatch(created.action,{type:"action.create_session",actionId:created.action.actionId,agentType,projectPath:workspace,input,model,reasoningEffort,attachments,memoryScope});
     this.ok(response,actionJson(this.store.action(created.action.actionId)!),202);
   }
 
@@ -353,12 +384,10 @@ export class AgentControlApi {
     if(delivery==="start_turn"&&active)throw new ApiProblem(409,"turn_already_active","session already has an active turn",false,{activeTurnId:active});
     if((model||reasoningEffort)&&active)throw new ApiProblem(409,"model_not_applicable","model and reasoning effort cannot be changed while steering an active turn");
     const machineId=String(session.machineId);this.requireActionBridge(machineId);
-    const memoryContext=this.options.sessionMemory?.prepare({sessionId:String(session.sessionId),input});
     const created=this.createAction(principal,key,path,body,"submit_turn",machineId,String(session.sessionId));
-    this.store.saveActionMemory(created.action.actionId,memoryContext,true);
     if(!created.existing)this.dispatch(created.action,{type:"action.submit_turn",actionId:created.action.actionId,
-      sessionId:String(session.sessionId),input,delivery:delivery as "auto"|"steer"|"start_turn",expectedTurnId:expected,model,reasoningEffort,attachments,memoryContext,
-      resume:resumeContext(session,this.store.lastEventAt(String(session.sessionId)))});
+      sessionId:String(session.sessionId),input,delivery:delivery as "auto"|"steer"|"start_turn",expectedTurnId:expected,model,reasoningEffort,attachments,
+      resume:resumeContext(session,this.store.lastEventAt(String(session.sessionId)),this.options.conversations?.scopeForSession(String(session.sessionId)))});
     this.ok(response,actionJson(this.store.action(created.action.actionId)!),202);
   }
 

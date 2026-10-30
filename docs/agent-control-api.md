@@ -85,6 +85,9 @@ SSE 直接派发到现有 node:http handler，不经过 Hono Response 或 fetch 
 | 新增 | `GET` | `/user-input/{requestId}` | 结构化问题详情 |
 | 新增 | `POST` | `/user-input/{requestId}/response` | 原子提交结构化回答 |
 | 新增 | `GET` | `/stream` | 可恢复的全局 SSE 实时流 |
+| 0.7.34 | `GET` | `/conversations/{connector}` | 聊天连接器已绑定会话的房间/线程 |
+| 0.7.34 | `GET`/`PUT` | `/conversations/{connector}/{roomId}` | 读取/修改房间或线程的会话绑定与新会话 agent |
+| 0.7.34 | `POST` | `/conversations/{connector}/{roomId}/bind` | 把房间（和目录）绑定到记忆作用域 |
 
 `/health` 继续在 origin 根下且无需纳入此 UI 契约。Bridge 自身使用的 `/bridge` WebSocket 是内部协议，不对
 UI 开放。
@@ -534,6 +537,7 @@ interface CreateSessionRequest {
   model?: string;            // optional; only for the initial turn
   reasoningEffort?: string;  // optional; the session's starting effort
   attachments?: AttachmentRef[]; // optional; images only
+  memoryScope?: string;      // optional (0.7.34); bootstrap this memory scope instead of resolving it from workspace
 }
 ```
 
@@ -709,6 +713,30 @@ interface UserInputResponseRequest {
 `ActionReceipt`。竞争、已本地处理和过期语义与 approval 相同，对应错误为
 `user_input_already_resolved`。首版对任一 `isSecret=true` 问题固定返回 409
 `secret_input_unsupported` 并要求在本机处理；secret answer 不进入数据库、日志、SSE 或 action。
+
+### 6.7 Conversations（0.7.34，聊天连接器）
+
+聊天连接器（Matrix、以后的微信）不保存项目状态。房间的项目是中央记忆作用域（`bindings.rooms: ["<connector>:<roomId>"]`），
+这里记录每个房间/线程继续哪个会话（详见 `docs/matrix.zh.md`）。
+
+```ts
+interface Conversation {
+  connector: string; roomId: string;
+  threadId: string;                 // "" 为主时间线，否则为线程根消息 id
+  sessionId: string | null;         // null：下一条消息时创建
+  agent: "pi" | "codex" | "claude" | "grok"; // 新会话用的 agent，默认 pi
+  scope: { id: string; title: string } | null;
+  target: { workerId: string; workspace: string } | null; // 新会话在哪运行
+  problem?: "room_unbound" | "scope_has_no_workspace" | "memory_unavailable";
+}
+```
+
+- `GET /conversations/{connector}` → `{ data: [{ roomId, threadId, sessionId }] }`。
+- `GET /conversations/{connector}/{roomId}?threadId=` → `Conversation`。
+- `PUT /conversations/{connector}/{roomId}`，body `{ threadId?, sessionId?: string | null, agent? }` → `Conversation`。
+  绑定一个会话会把它从其他房间/线程解绑，并记下它的 agent；`sessionId: null` 即 `new`。
+- `POST /conversations/{connector}/{roomId}/bind`，body `{ scopeId, location?: "machine:/path" }` → `Conversation`。
+  写入中央记忆并提交；房间或目录已绑定到别的作用域时 `409 binding_conflict`。
 
 ## 7. SSE 实时协议
 

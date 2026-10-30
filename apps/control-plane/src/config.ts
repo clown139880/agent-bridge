@@ -1,4 +1,3 @@
-import { matrixConfig } from "./matrix/config.js";
 import "dotenv/config";
 import { dirname, join } from "node:path";
 import { readFileSync } from "node:fs";
@@ -44,7 +43,6 @@ if (bridgeUpdatePublishedAt !== undefined && !Number.isFinite(bridgeUpdatePublis
 export const config = {
   version: controlPlaneVersion,
   databasePath,
-  matrix: matrixConfig(process.env, databasePath),
   // deploy/hal/deploy.sh writes post-deploy intents beside the database (outside the checkout).
   postDeployDir: process.env.POST_DEPLOY_DIR ?? join(dirname(databasePath), "post-deploy"),
   host: process.env.CONTROL_HOST ?? "0.0.0.0",

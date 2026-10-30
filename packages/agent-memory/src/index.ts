@@ -34,6 +34,9 @@ export interface ScopeInfo {
   title: string;
   status: string;
   discoverable: boolean;
+  /** Chat rooms as `<connector>:<id>` (matrix:!room:server, wechat:…); one room binds one scope. */
+  rooms: string[];
+  /** The Matrix entries of `rooms` without their prefix (older readers). */
   matrixRooms: string[];
   repositories: string[];
   locations: Array<{ machine: string; path: string }>;
@@ -141,10 +144,11 @@ export class AgentMemory {
     const text = readFileSync(file, "utf8");
     const { data, body } = parseDocument(text);
     const bindings = (data.bindings ?? {}) as Record<string, unknown>;
+    const rooms = [...new Set([...strings(bindings.rooms), ...strings(bindings.matrix_rooms)].map(roomRef))];
     return {
       id, title: str(data.title) || id, status: str(data.status) || "active",
       discoverable: data.discoverable !== false,
-      matrixRooms: strings(bindings.matrix_rooms).map(roomKey),
+      rooms, matrixRooms: rooms.filter((room) => room.startsWith("matrix:")).map((room) => room.slice(7)),
       repositories: strings(bindings.repositories).map(normalizeRepository),
       locations: (Array.isArray(bindings.locations) ? bindings.locations : [])
         .filter((item): item is Record<string, unknown> => !!item && typeof item === "object")
@@ -164,11 +168,11 @@ export class AgentMemory {
    */
   resolveScope(locator: ScopeLocator, create?: { writer: Writer }): ScopeResolution {
     const scopes = this.scopes().filter((scope) => scope.status !== "archived");
-    const room = locator.roomId ? roomKey(locator.roomId) : undefined;
+    const room = locator.roomId ? roomRef(locator.roomId) : undefined;
     const repository = locator.repository ? normalizeRepository(locator.repository) : undefined;
     const path = locator.cwd ? normalizePath(locator.cwd) : undefined;
     const attempts: Array<[ScopeResolution["matched"], ScopeInfo[]]> = [
-      ["room", room ? scopes.filter((scope) => scope.matrixRooms.includes(room)) : []],
+      ["room", room ? scopes.filter((scope) => scope.rooms.includes(room)) : []],
       ["repository", repository ? scopes.filter((scope) => scope.repositories.includes(repository)) : []],
       ["location", path && locator.machineId
         ? scopes.filter((scope) => scope.locations.some((item) => item.machine === locator.machineId && item.path === path)) : []],
@@ -181,14 +185,14 @@ export class AgentMemory {
     if (create) {
       if (room) {
         const id = `room-${createHash("sha256").update(room).digest("hex").slice(0, 8)}`;
-        this.createScope(id, locator.roomName || id, { matrix_rooms: [room], repositories: [], locations: [] }, create.writer);
+        this.createScope(id, locator.roomName || id, { rooms: [room], repositories: [], locations: [] }, create.writer);
         return this.resolution(id, "room", true);
       }
       if (repository || (path && locator.machineId)) {
         const name = slugify(basename(repository ?? path!)) || "project";
         const id = this.freeScopeId(`repo-${name}`);
         this.createScope(id, basename(repository ?? path!), {
-          matrix_rooms: [], repositories: repository ? [repository] : [],
+          rooms: [], repositories: repository ? [repository] : [],
           locations: !repository && path ? [{ machine: locator.machineId!, path }] : [],
         }, create.writer);
         return this.resolution(id, repository ? "repository" : "location", true);
@@ -200,6 +204,36 @@ export class AgentMemory {
   private resolution(scope: string, matched: ScopeResolution["matched"], created: boolean): ScopeResolution {
     const info = this.scope(scope);
     return { scope, matched, created, revision: info.revision, prefetch: info.prefetch, warnings: this.syncConflicts(scope) };
+  }
+
+  /**
+   * Bind a chat room and/or a machine path to a scope. A key another scope already holds is a
+   * conflict, never moved silently. Legacy `matrix_rooms` entries are folded into `rooms`.
+   */
+  bind(writer: Writer, scope: string, add: { room?: string; location?: { machine: string; path: string } }): ScopeInfo {
+    this.authorize(writer, scope);
+    const room = add.room ? roomRef(add.room) : undefined;
+    const location = add.location ? { machine: add.location.machine.trim(), path: normalizePath(add.location.path) } : undefined;
+    if (location && (!location.machine || !location.path)) throw new MemoryError("invalid_location");
+    for (const other of this.scopes()) {
+      if (other.id === scope || other.status === "archived") continue;
+      if (room && other.rooms.includes(room)) throw new MemoryError("binding_conflict", `${room} → ${other.id}`);
+      if (location && other.locations.some((l) => l.machine === location.machine && l.path === location.path))
+        throw new MemoryError("binding_conflict", `${location.machine}:${location.path} → ${other.id}`);
+    }
+    const file = join(this.scopesDir, scope, "scope.md");
+    const doc = parseDocument(readFileSync(file, "utf8"));
+    const bindings = (doc.data.bindings ?? {}) as Record<string, unknown>;
+    const current = this.scope(scope);
+    const rooms = room && !current.rooms.includes(room) ? [...current.rooms, room] : current.rooms;
+    const locations = location && !current.locations.some((l) => l.machine === location.machine && l.path === location.path)
+      ? [...current.locations, location] : current.locations;
+    if (rooms === current.rooms && locations === current.locations && !("matrix_rooms" in bindings)) return current;
+    delete bindings.matrix_rooms;
+    doc.data.bindings = { ...bindings, rooms, repositories: bindings.repositories ?? [], locations };
+    writeAtomic(file, renderDocument(doc));
+    this.commit(scope, writer, `memory(${scope}): bind ${[room, location && `${location.machine}:${location.path}`].filter(Boolean).join(", ")}`);
+    return this.scope(scope);
   }
 
   private freeScopeId(base: string): string {
@@ -418,7 +452,7 @@ export class AgentMemory {
       if (!SCOPE_SLUG.test(name)) continue;
       let info: ScopeInfo;
       try { info = this.scope(name); } catch (error) { problems.push(`${name}/scope.md: ${message(error)}`); continue; }
-      for (const key of [...info.matrixRooms.map((r) => `room ${r}`), ...info.repositories.map((r) => `repository ${r}`),
+      for (const key of [...info.rooms.map((r) => `room ${r}`), ...info.repositories.map((r) => `repository ${r}`),
         ...info.locations.map((l) => `location ${l.machine}:${l.path}`)]) owners.set(key, [...(owners.get(key) ?? []), name]);
       const entities = this.entities(name, problems);
       const seen = new Map<string, string>();
@@ -583,6 +617,13 @@ function message(error: unknown): string {
 export function roomKey(chatId: string): string {
   const index = chatId.indexOf(":$");
   return index >= 0 ? chatId.slice(0, index) : chatId;
+}
+
+/** `<connector>:<room>`; a bare id is a Matrix room (`!room:server`), as Hermes passes it. */
+export function roomRef(chatId: string): string {
+  const id = chatId.trim();
+  const prefixed = /^([a-z][a-z0-9_-]*):(?!\/)(.+)$/.exec(id);
+  return prefixed && !id.startsWith("!") ? `${prefixed[1]}:${prefixed[1] === "matrix" ? roomKey(prefixed[2]!) : prefixed[2]}` : `matrix:${roomKey(id)}`;
 }
 
 /** Same credential-free form as apps/bridge deriveProjectIdentity (sessions.project_identity). */

@@ -1,4 +1,3 @@
-import { contextualInput, originalUserInput } from "./session-context.js";
 import pino from "pino";
 import WebSocket from "ws";
 import { createHash } from "node:crypto";
@@ -156,6 +155,7 @@ export class BridgeClient {
         sessionDir: options.piSessionDir,
         allowedRoots: options.allowedRoots,
         fetchAttachment: makeAttachmentFetcher(options.url, options.token),
+        memoryBootstrap,
       }, this.adapterEmit("pi")));
     }
     for (const profile of acpProfiles()) {
@@ -191,12 +191,6 @@ export class BridgeClient {
   /** Build the per-adapter emit callback: tag session ownership, forward, and poke the updater. */
   private adapterEmit(agentType: AgentType): (message: BridgeToControlMessage) => void {
     return (message) => {
-      if (message.type === "session.event" && message.eventType === "message.completed"
-        && message.payload.role === "user" && typeof message.payload.text === "string") {
-        message = { ...message, payload: { ...message.payload, text: originalUserInput(message.payload.text) } };
-      }
-      if (message.type === "session.discovered" && message.promptSummary)
-        message = { ...message, promptSummary: originalUserInput(message.promptSummary) };
       if (message.type === "session.discovered" && "sessionId" in message) {
         this.sessionOwner.set(message.sessionId, agentType);
       }
@@ -240,17 +234,13 @@ export class BridgeClient {
    */
   private async ensureTurnOwner(message: Extract<ControlToBridgeMessage, { type: "action.submit_turn" }>): Promise<AgentAdapter> {
     const owned = this.ownedBy(message.sessionId);
-    if (owned) {
-      if (message.memoryContext) owned.setSessionMemory?.(message.sessionId, message.memoryContext);
-      return owned;
-    }
+    if (owned) return owned;
     const resume = message.resume;
     const adapter = resume ? this.adapters.get(resume.agentType) : undefined;
     if (resume && adapter?.resumeSession) {
-      if (message.memoryContext && !resume.nativeSessionId) message.memoryContext.changed = true;
       log.info({ sessionId: message.sessionId, agentType: resume.agentType, workspace: resume.workspace },
         "Reviving session before turn — bridge no longer held it");
-      await adapter.resumeSession(message.sessionId, resume.workspace, resume.nativeSessionId, message.model, resume.syncedAt, message.memoryContext);
+      await adapter.resumeSession(message.sessionId, resume.workspace, resume.nativeSessionId, message.model, resume.syncedAt, resume.memoryScope);
       this.sessionOwner.set(message.sessionId, resume.agentType);
       return adapter;
     }
@@ -315,7 +305,7 @@ export class BridgeClient {
           "local-first", "git",
         ],
         protocolVersion: BRIDGE_PROTOCOL_VERSION,
-        features: ["session-inventory", "session-events", "session-actions", "session-memory", "turn-steer",
+        features: ["session-inventory", "session-events", "session-actions", "turn-steer",
           "turn-interrupt", "approvals", "user-input", "desktop-terminal-history"],
         bridgeVersion: this.options.version,
         sharedSkills: this.sharedSkillsStatus(),
@@ -465,10 +455,10 @@ export class BridgeClient {
         throw Object.assign(new Error(this.admissionMessage()), { code: "update_required", retryable: true });
       }
       if(message.type==="action.create_session"){
-        const value=await this.adapterForType(message.agentType).createSessionAction(message.actionId,message.projectPath,contextualInput(message.input,message.memoryContext),message.model,message.reasoningEffort,message.attachments,message.memoryContext);
+        const value=await this.adapterForType(message.agentType).createSessionAction(message.actionId,message.projectPath,message.input,message.model,message.reasoningEffort,message.attachments,message.memoryScope);
         result={type:"action.result",actionId:message.actionId,kind,status:"succeeded",...value,timestamp:Date.now()};
       }else if(message.type==="action.submit_turn"){
-        const value=await (await this.ensureTurnOwner(message)).submitTurnAction(message.actionId,message.sessionId,contextualInput(message.input,message.memoryContext)!,message.delivery,message.expectedTurnId,message.model,message.reasoningEffort,message.attachments);
+        const value=await (await this.ensureTurnOwner(message)).submitTurnAction(message.actionId,message.sessionId,message.input,message.delivery,message.expectedTurnId,message.model,message.reasoningEffort,message.attachments);
         result={type:"action.result",actionId:message.actionId,kind,status:"succeeded",...value,timestamp:Date.now()};
       }else if(message.type==="action.interrupt_turn"){
         const value=await this.adapterForSession(message.sessionId).interruptAction(message.sessionId,message.expectedTurnId);

@@ -34,6 +34,11 @@
 - Update the installed Host and browser bundles directly even while TokensCowork is running. Restart TokensCowork when needed to activate the installed plugin; deployment may interrupt in-flight plugin calls.
 - Verify the WSL build output and the linked plugin's `lib` hashes match (ignore CRLF). Verify the served hash when the Desktop endpoint permits it; an authenticated endpoint may be reported as not externally hash-verifiable.
 
+## Matrix connector deployment
+
+- `apps/matrix-connector` is a separate process (`agent-matrix-connector.service`) that uses only `/api/v1` and its own `AGENT_TOKENS` token (`docs/matrix.zh.md`). Changes confined to it bump only `apps/matrix-connector/package.json` and must not trigger a Bridge or Control Plane deployment.
+- After pushing, deploy it with `deploy/hal/deploy-matrix-connector.sh`. It fast-forwards, builds only the connector and restarts only its unit, so it does not end a turn hosted by the HAL Bridge. Verify `journalctl -u agent-matrix-connector` shows `Matrix connector signed in`.
+
 ## HAL deployment
 
 - After the versioned commit is pushed, deploy HAL yourself by running `deploy/hal/deploy.sh --note "<what to verify or finish afterwards>"` in `/root/agent-bridge`. Do not hand the deployment to Hermes/Dorothy or another agent.

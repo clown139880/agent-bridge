@@ -1,0 +1,18 @@
+[Unit]
+Description=Agent Bridge Matrix connector
+After=network-online.target agent-control-plane.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/agent-bridge
+EnvironmentFile=/etc/agent-bridge/matrix-connector.env
+ExecStart=/usr/bin/node apps/matrix-connector/dist/index.js
+MemoryMax=256M
+Restart=always
+RestartSec=5
+TimeoutStopSec=10
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

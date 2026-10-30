@@ -74,7 +74,7 @@ test("a key bound by two scopes is reported as a conflict, not guessed", () => {
   const result = memory.resolveScope({ roomId: "!travel:example.org" });
   assert.equal(result.scope, "_global");
   assert.deepEqual(result.conflict, ["agent-bridge", "travel"]);
-  assert.ok(memory.lint().some((line) => line.startsWith("binding conflict: room !travel:example.org")));
+  assert.ok(memory.lint().some((line) => line.startsWith("binding conflict: room matrix:!travel:example.org")));
 });
 
 test("writes declare topics, supersede with history, answer as-of queries and tombstone retractions", () => {

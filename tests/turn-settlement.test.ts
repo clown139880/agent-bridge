@@ -4,7 +4,6 @@ import { ClaudeCodeAdapter } from "../apps/bridge/src/claude/claude-adapter.js";
 import { PiAdapter } from "../apps/bridge/src/pi/pi-adapter.js";
 import { CodexAppServerAdapter } from "../apps/bridge/src/app-server.js";
 import { waitForTurnSettlement } from "../apps/bridge/src/turn-settlement.js";
-import { contextualInput, originalUserInput } from "../apps/bridge/src/session-context.js";
 
 const delay = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms));
 test("Claude and Pi interrupts do not publish a false terminal event when cancellation merely acknowledges", async t => {
@@ -36,12 +35,19 @@ test("unconfirmed cancellation retains the active turn and returns a specific fa
   finally { clearTimeout(timer); }
 });
 
-test("supplemental context reaches the model while original user text remains clean in the UI", () => {
-  const original = "compare my attachments\nwith yesterday's result";
-  const combined = contextualInput(original, { scopeId: "room", revision: "v", text: "saved core memory", changed: true, recall: "relevant fact" })!;
-  assert.ok(combined.startsWith(original)); assert.match(combined, /saved core memory/); assert.match(combined, /relevant fact/);
-  assert.equal(originalUserInput(combined), original);
-  assert.equal(originalUserInput(original), original);
+test("Pi kills a process that ignores abort, so the session is not stuck active", async t => {
+  const keepalive = setInterval(() => {}, 1000);
+  t.after(() => clearInterval(keepalive));
+  const events: any[] = [];
+  const adapter = new PiAdapter({ command: "", allowedRoots: [] }, e => events.push(e));
+  const seam = adapter as any;
+  let killed = false;
+  const session = { sessionId: "session", activeTurnId: "turn", cwd: "/tmp", logs: [], turnSeq: 1,
+    proc: { stdin: { end() {} }, kill() { killed = true; } } };
+  seam.sessions.set("session", session); seam.sendCommand = () => {}; seam.settleTimeoutMs = 30;
+  await adapter.interruptAction("session", "turn");
+  assert.equal(killed, true); assert.equal(session.activeTurnId, undefined); assert.equal(seam.sessions.has("session"), false);
+  assert.equal(events.filter(e => e.eventType === "turn.interrupted").length, 1);
 });
 
 test("Codex interrupted turns close only their own interactions without inventing a deny decision", () => {

@@ -3,7 +3,8 @@ import { controlHttpBase } from "./attachments.js";
 import { deriveProjectIdentity } from "./path-utils.js";
 
 /** Core memory (_global plus the project scope) to add to a new session's instructions, or undefined. */
-export type MemoryBootstrapFetcher = (cwd: string) => Promise<string | undefined>;
+/** `scope` names the project explicitly (a chat room's scope); otherwise it is resolved from `cwd`. */
+export type MemoryBootstrapFetcher = (cwd: string, scope?: string) => Promise<string | undefined>;
 
 const TIMEOUT_MS = 2_000;
 const log = pino({ name: "memory-bootstrap" });
@@ -14,8 +15,9 @@ const log = pino({ name: "memory-bootstrap" });
  */
 export function makeMemoryBootstrapFetcher(wsUrl: string, token: string | undefined, machineId: string): MemoryBootstrapFetcher {
   const base = controlHttpBase(wsUrl);
-  return async (cwd) => {
+  return async (cwd, scope) => {
     const params = new URLSearchParams({ machine_id: machineId, cwd });
+    if (scope) params.set("scope", scope);
     const repository = await deriveProjectIdentity(cwd);
     if (repository) params.set("repository", repository);
     try {
