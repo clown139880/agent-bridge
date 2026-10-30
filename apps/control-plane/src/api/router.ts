@@ -48,7 +48,7 @@ function pendingJson(row: PendingRow): Record<string,unknown> {
     status:row.status,requestedAt:row.requestedAt,resolvedAt:row.resolvedAt};
   if(row.kind==="approval")return {approvalId:row.id,...common,kind:row.request.kind,summary:row.request.summary,
     choices:row.request.choices,decision:row.decision?.choice??null};
-  return {requestId:row.id,...common,questions:row.request.questions,answers:row.decision?.answers??null};
+  return {requestId:row.id,...common,questions:row.request.questions,blocking:row.request.blocking!==false,answers:row.decision?.answers??null};
 }
 // Resume hint for a turn: lets the bridge revive a session it no longer holds
 // (Claude subprocess killed by a restart). workspace is the cwd to relaunch in;

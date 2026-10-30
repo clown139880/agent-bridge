@@ -242,6 +242,8 @@ export interface UserInputRequestMessage {
   turnId?: string;
   questions: UserInputQuestion[];
   requestedAt: number;
+  /** false: the turn keeps running while the question waits; it does not block new input. Default true. */
+  blocking?: boolean;
 }
 
 export interface UserInputResolvedMessage {

@@ -104,6 +104,30 @@ test("approvalSummary shows network targets instead of relying on a command", ()
   }), /Network: https:\/\/example\.com/);
 });
 
+test("MCP tool approval elicitations become Bridge approvals", () => {
+  const method = "mcpServer/elicitation/request";
+  const params = { threadId: "t", turnId: "u", serverName: "memory", mode: "form",
+    message: "Allow the memory MCP server to run tool \"scopes\"?",
+    requestedSchema: { type: "object", properties: {} },
+    _meta: { codex_approval_kind: "mcp_tool_call", persist: ["session", "always"] } };
+  assert.deepEqual(approvalChoicesFor(method, params), ["allow", "deny", "allow-session"]);
+  assert.deepEqual(approvalResponseFor(method, params, "allow"), { action: "accept", content: {}, _meta: null });
+  assert.deepEqual(approvalResponseFor(method, params, "allow-session"), { action: "accept", content: {}, _meta: { persist: "session" } });
+  assert.deepEqual(approvalResponseFor(method, params, "deny"), { action: "decline", content: null, _meta: null });
+  assert.match(approvalSummary(method, params), /Server: memory\nAllow the memory MCP server to run tool "scopes"\?/);
+  assert.deepEqual(approvalChoicesFor(method, { ...params, _meta: null }), ["allow", "deny"]);
+});
+
+test("MCP elicitations that need form data or a URL can only be declined remotely", () => {
+  const method = "mcpServer/elicitation/request";
+  const form = { serverName: "x", mode: "form", message: "Token?", _meta: null,
+    requestedSchema: { type: "object", properties: { token: { type: "string" } } } };
+  assert.deepEqual(approvalChoicesFor(method, form), ["deny"]);
+  const url = { serverName: "x", mode: "url", message: "Sign in", url: "https://example.com/auth", elicitationId: "e", _meta: null };
+  assert.deepEqual(approvalChoicesFor(method, url), ["deny"]);
+  assert.match(approvalSummary(method, url), /URL: https:\/\/example\.com\/auth\nComplete this request in Codex/);
+});
+
 test("askUserQuestionAnswers keys Claude answers by question text", () => {
   assert.deepEqual(
     askUserQuestionAnswers(questions, {

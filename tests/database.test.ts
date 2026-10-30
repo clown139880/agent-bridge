@@ -371,3 +371,24 @@ test("a session state without a native id never erases the one on record", () =>
   store.db.close();
   rmSync(path, { force: true });
 });
+
+test("non-blocking questions are listed without holding the session", () => {
+  const store = new Store(":memory:");
+  store.upsertMachine({ id: "hal", name: "hal", platform: "linux", hostname: "hal", capabilities: [] });
+  store.createSession({ id: "s", machineId: "hal", agentType: "codex-cli", projectName: "p", projectPath: "/work/p",
+    matrixRoomId: "", matrixThreadId: null, nativeSessionId: "s", status: "working", createdAt: 1, updatedAt: 1 });
+  const control = new AgentControlStore(store.db, { actionsMs: 1_000, attachmentsMs: 1_000 });
+  control.updateSessionActivity("s", "active", "turn");
+  const questions = [{ id: "q", header: "账号", question: "沿用现有账号？", isOther: false, isSecret: false, options: null }];
+  control.upsertUserInput("hal", { requestId: "later", sessionId: "s", turnId: "turn", questions, requestedAt: 2, blocking: false });
+  assert.equal(control.session("s")?.status, "active");
+  assert.equal(control.session("s")?.pendingUserInputCount, 0);
+  assert.equal(control.pending("later")?.request.blocking, false);
+  control.updateSessionActivity("s", "idle", undefined, "completed");
+  control.resolvePending("later", "resolved_elsewhere");
+  assert.equal(control.session("s")?.status, "idle");
+  control.upsertUserInput("hal", { requestId: "now", sessionId: "s", turnId: "turn", questions, requestedAt: 3 });
+  assert.equal(control.session("s")?.status, "waiting_for_input");
+  assert.equal(control.session("s")?.pendingUserInputCount, 1);
+  store.db.close();
+});

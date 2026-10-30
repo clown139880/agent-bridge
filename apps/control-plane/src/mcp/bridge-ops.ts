@@ -133,7 +133,7 @@ export class BridgeOps {
     const result = (state: WaitState, extra: Partial<WaitResult> = {}, current: Json = session): WaitResult =>
       ({ state, sessionId, turnId: target ?? null, cursor, session: sessionBrief(current), ...extra });
 
-    const pending = await this.pending(sessionId);
+    const pending = await this.pending(sessionId, false);
     if (pending) return result(pending.state, pending.extra);
     if (target) {
       const finished = await this.finishedTurn(sessionId, target);
@@ -164,7 +164,7 @@ export class BridgeOps {
               return result(data.type.slice(5) as WaitState, terminalExtra(data));
             }
             if ((envelope.type === "approval.upserted" || envelope.type === "user_input.upserted") && data.status === "pending") {
-              const now = await this.pending(sessionId);
+              const now = await this.pending(sessionId, true);
               if (now) return result(now.state, now.extra);
             }
             if (envelope.type === "session.deleted") return result("deleted");
@@ -192,10 +192,14 @@ export class BridgeOps {
     return (await this.client.get("/approvals", { limit: 1 })).streamCursor as string;
   }
 
-  private async pending(sessionId: string): Promise<{ state: WaitState; extra: Partial<WaitResult> } | undefined> {
+  /**
+   * A non-blocking question does not stop the turn, so it ends a wait only when it arrives
+   * (`arrived`); one already left unanswered must not make every later wait return at once.
+   */
+  private async pending(sessionId: string, arrived: boolean): Promise<{ state: WaitState; extra: Partial<WaitResult> } | undefined> {
     const approvals = await this.approvals({ sessionId });
     if (approvals.length) return { state: "approval", extra: { approvals } };
-    const userInput = await this.userInput({ sessionId });
+    const userInput = (await this.userInput({ sessionId })).filter(item => arrived || item.blocking !== false);
     if (userInput.length) return { state: "user_input", extra: { userInput } };
     return undefined;
   }

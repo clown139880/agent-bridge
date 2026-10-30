@@ -11,6 +11,8 @@ import { eventById, recordAppendedEvent, recordRevisedEvent, viewChanges, viewEn
 
 /** Settled tool and task work that counts as session activity. Starts and ticks do not, to keep the feed quiet. */
 const TOOL_PROGRESS_TYPES = new Set(["command.completed", "file_change.completed", "tool.completed", "task.started", "task.completed"]);
+/** Pending rows that hold the session; non-blocking questions are listed but never counted as waiting. */
+const BLOCKING_PENDING = "NOT (kind='user_input' AND json_extract(request_json,'$.blocking') IS 0)";
 const TERMINAL_TURN_TYPES = new Set(["turn.completed", "turn.failed", "turn.interrupted"]);
 
 export interface RetentionOptions {
@@ -410,9 +412,10 @@ export class AgentControlStore {
   }
 
   upsertUserInput(machineId: string, input: { requestId: string; sessionId: string; turnId?: string;
-    questions: UserInputQuestion[]; requestedAt: number }): void {
+    questions: UserInputQuestion[]; requestedAt: number; blocking?: boolean }): void {
     this.upsertPending(machineId, "user_input", input.requestId, input.sessionId, input.turnId,
-      { requestId: input.requestId, questions: input.questions }, input.requestedAt);
+      { requestId: input.requestId, questions: input.questions, ...(input.blocking === false ? { blocking: false } : {}) },
+      input.requestedAt);
   }
 
   private upsertPending(machineId: string, kind: "approval" | "user_input", id: string, sessionId: string,
@@ -426,7 +429,8 @@ export class AgentControlStore {
         turn_id=excluded.turn_id,request_json=excluded.request_json,requested_at=excluded.requested_at`)
         .run(id, kind, sessionId, run?.id ?? null, turnId ?? null, machineId, JSON.stringify(request), requestedAt, id);
       const activity = kind === "approval" ? "waiting_for_approval" : "waiting_for_input";
-      if(this.pending(id)?.status==="pending")this.db.prepare("UPDATE sessions SET activity_status=?,active_turn_id=COALESCE(?,active_turn_id) WHERE id=?")
+      // A non-blocking question leaves the turn running; it never puts the session in a waiting state.
+      if(this.pending(id)?.status==="pending"&&(request as { blocking?: boolean }).blocking!==false)this.db.prepare("UPDATE sessions SET activity_status=?,active_turn_id=COALESCE(?,active_turn_id) WHERE id=?")
         .run(activity, turnId ?? null, sessionId);
       markChanged(this.db, kind, id);
       markChanged(this.db, "session", sessionId);
@@ -442,7 +446,8 @@ export class AgentControlStore {
         .run(status, decision ? JSON.stringify(decision) : null, now, id);
       const resolved = this.pending(id)!;
       markChanged(this.db, current.kind, id);
-      this.refreshPendingActivity(current.sessionId, now);
+      if (current.request.blocking === false) markChanged(this.db, "session", current.sessionId);
+      else this.refreshPendingActivity(current.sessionId, now);
       return resolved;
     });
   }
@@ -529,7 +534,8 @@ export class AgentControlStore {
           this.db.prepare(`UPDATE pending_requests SET status=?,decision_json=?,resolved_at=?,resolving_action_id=NULL WHERE id=?`)
             .run(status, JSON.stringify(decision), message.timestamp, String(pending.id));
           markChanged(this.db, pending.kind as StreamKind, String(pending.id));
-          this.refreshPendingActivity(String(pending.session_id), message.timestamp);
+          if (parseJson<{ blocking?: boolean }>(pending.request_json, {}).blocking === false) markChanged(this.db, "session", String(pending.session_id));
+          else this.refreshPendingActivity(String(pending.session_id), message.timestamp);
         }
       }
       return action;
@@ -560,7 +566,7 @@ export class AgentControlStore {
   }
 
   private refreshPendingActivity(sessionId: string, now: number): void {
-    const kinds=this.db.prepare("SELECT kind FROM pending_requests WHERE session_id=? AND status='pending'")
+    const kinds=this.db.prepare(`SELECT kind FROM pending_requests WHERE session_id=? AND status='pending' AND ${BLOCKING_PENDING}`)
       .all(sessionId) as Array<{kind:string}>;
     const activity=kinds.some(row=>row.kind==="user_input")?"waiting_for_input"
       :kinds.some(row=>row.kind==="approval")?"waiting_for_approval":"active";
@@ -797,7 +803,7 @@ export class AgentControlStore {
   private mapSession(row: Record<string, unknown>, detail: boolean): Record<string, unknown> {
     const latest = this.db.prepare("SELECT * FROM worker_runs WHERE session_id=? ORDER BY created_at DESC,id DESC LIMIT 1")
       .get(String(row.id)) as Record<string, unknown> | undefined;
-    const counts = this.db.prepare(`SELECT kind,COUNT(*) AS n FROM pending_requests WHERE session_id=? AND status='pending' GROUP BY kind`)
+    const counts = this.db.prepare(`SELECT kind,COUNT(*) AS n FROM pending_requests WHERE session_id=? AND status='pending' AND ${BLOCKING_PENDING} GROUP BY kind`)
       .all(String(row.id)) as Array<{kind:string;n:number}>;
     const count=(kind:string)=>Number(counts.find(item=>item.kind===kind)?.n??0);
     const run=latest?{runId:String(latest.id),taskId:latest.task_id?String(latest.task_id):null,

@@ -150,7 +150,8 @@ export class CodexDesktop {
   async submit(threadId: string, input: DesktopRecord[], delivery: "auto" | "steer" | "start_turn", expectedTurnId?: string, model?: string, effort?: string): Promise<{ turnId?: string; resolvedAction: "steer" | "start_turn" }> {
     const state = this.state(threadId), turns = desktopTurns(state);
     const active = [...turns].reverse().find(turn => turn.status === "inProgress");
-    if (state.requests?.length) throw desktopError("desktop_interaction_pending", "Resolve the pending Desktop interaction before sending");
+    const blocking = (state.requests ?? []).filter((request: DesktopRecord) => !(request.method === "item/tool/requestUserInput" && request.params?.isBlocking === false));
+    if (blocking.length) throw desktopError("desktop_interaction_pending", "Resolve the pending Desktop interaction before sending");
     if (expectedTurnId && expectedTurnId !== active?.turnId) throw desktopError("turn_changed", "Desktop active turn changed");
     if (delivery === "steer" && !active) throw desktopError("no_active_turn", "Desktop session has no active turn");
     if (delivery === "start_turn" && active) throw desktopError("turn_already_active", "Desktop session already has an active turn");

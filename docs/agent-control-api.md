@@ -256,6 +256,8 @@ export interface UserInputRequest {
   turnId: string | null;
   workerId: string;
   questions: UserInputQuestion[];
+  /** false: the turn keeps running; the question does not count toward pendingUserInputCount or block new input. */
+  blocking: boolean;
   status: PendingResolutionStatus;
   answers: Record<string, { answers: string[] }> | null;
   requestedAt: EpochMs;

@@ -49,6 +49,9 @@ claude 进程还会读取所在机器的 `~/.claude/settings.json`（Bridge 没�
 - 非 Bash、非文件编辑的工具，审批摘要会带上调用参数（截到 400 字），不再只显示 “X requested”。
 - HAL 的 `/root/.claude/settings.json` 另外放行了只读工具 `Read`、`Grep`、`Glob`、`WebFetch`、`WebSearch` 和 `/mcp/bridge` 的只读工具 `mcp__bridge__sessions` / `session` / `pending` / `workers` / `wait`（clown 2026-10-24：读和回顾不需要逐个授权）。`create`、`turn`、`approve`、`answer`、`interrupt` 仍要审批。
 - Codex app-server 的审批（`apps/bridge/src/app-server.ts`）由 Codex 自己的 approval policy 决定什么时候请求，Bridge 只负责转发。
+  - 转发的请求：命令、文件改动、权限（`item/*/requestApproval`），以及 MCP 工具授权（`mcpServer/elicitation/request`，如 “Allow the memory MCP server to run tool …”）。0.7.30 之前 Bridge 不认 MCP 授权，它只出现在本地 TUI，远端看起来是工具一直在跑。
+  - MCP 授权：`allow` 回 `accept`，`allow-session` 回 `accept` + `_meta.persist: "session"`（仅当 Codex 提供），`deny` 回 `decline`；Codex 的 “Always allow” 不经 Bridge 提供。要填表单字段或走 URL 的 elicitation 只能在 Codex 里完成，Bridge 只提供 `deny`。Codex Desktop 跟随会话的 MCP 授权仍需在 Desktop 里答。
+  - 问答（`item/tool/requestUserInput`）带 `isBlocking: false` 时不阻塞 turn：会话保持 `active`，不计入 `pendingUserInputCount`，照常可以 steer；问题仍列在 `/user-input`（`blocking: false`），`wait` 只在它到达时返回一次。
 
 ## 3. Control Plane 与人工
 

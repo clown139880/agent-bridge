@@ -113,6 +113,8 @@ interface PendingUserInput {
   sessionId: string;
   questions: UserInputQuestion[];
   requestedAt: number;
+  /** Codex lets the turn keep running while a non-blocking question waits for an answer. */
+  blocking: boolean;
 }
 
 interface PendingApproval {
@@ -134,6 +136,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
   private child?: ChildProcess;
   private nextRequestId = 1;
   private readonly pending = new Map<number | string, PendingRequest>();
+  /** Keyed by public request id; a session may hold several non-blocking questions. */
   private readonly pendingUserInput = new Map<string, PendingUserInput>();
   private readonly pendingApprovals = new Map<string, PendingApproval>();
   private readonly activeTurns = new Map<string, string>();
@@ -302,13 +305,13 @@ export class CodexAppServerAdapter implements AgentAdapter {
   async input(sessionId: string, text: string, model?: string, attachments?: AttachmentRef[]): Promise<void> {
     const desktopOwned = this.desktop && await this.desktop.follow(sessionId);
     if (!desktopOwned) await this.ensureReady();
-    const userInput = this.pendingUserInput.get(sessionId);
+    const userInput = this.userInputsFor(sessionId).sort((a, b) => Number(b.blocking) - Number(a.blocking))[0];
     if (userInput) {
       if (attachments?.length) throw domainError("user_input_pending", "answer the pending question before sending images");
       const answers = parseUserInputAnswers(text, userInput.questions);
       if (String(userInput.requestId).startsWith("desktop:")) await this.desktop!.reply(sessionId, String(userInput.requestId), { answers });
       else this.respond(userInput.requestId, { answers });
-      this.pendingUserInput.delete(sessionId);
+      this.pendingUserInput.delete(userInput.publicId);
       this.appendLog(sessionId, "User input answered from Matrix");
       return;
     }
@@ -395,7 +398,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
       }
       if (!this.activeTurns.has(sessionId)) await this.ensureRuntimeForNewWork(actionId);
       await this.ensureReady();
-      if (this.pendingUserInput.has(sessionId)) throw domainError("user_input_pending", "structured user input is pending");
+      if (this.waitingForInput(sessionId)) throw domainError("user_input_pending", "structured user input is pending");
       if ([...this.pendingApprovals.values()].some((item) => item.sessionId === sessionId && !item.answered))
         throw domainError("approval_pending", "approval is pending");
       await this.ensureThreadSubscribed(sessionId);
@@ -440,12 +443,20 @@ export class CodexAppServerAdapter implements AgentAdapter {
   async respondUserInput(sessionId: string, publicId: string,
     answers: Record<string, { answers: string[] }>): Promise<void> {
     if (!this.desktop || !await this.desktop.follow(sessionId)) await this.ensureReady();
-    const pending=this.pendingUserInput.get(sessionId);
-    if (!pending || pending.publicId !== publicId) throw domainError("user_input_already_resolved", "user input is no longer pending");
+    const pending=this.pendingUserInput.get(publicId);
+    if (!pending || pending.sessionId !== sessionId) throw domainError("user_input_already_resolved", "user input is no longer pending");
     if (pending.questions.some((question) => question.isSecret)) throw domainError("secret_input_unsupported", "secret input must be answered locally");
     if (String(pending.requestId).startsWith("desktop:")) await this.desktop!.reply(sessionId, String(pending.requestId), { answers });
     else this.respond(pending.requestId, { answers });
-    this.pendingUserInput.delete(sessionId);
+    this.pendingUserInput.delete(publicId);
+  }
+
+  private userInputsFor(sessionId: string): PendingUserInput[] {
+    return [...this.pendingUserInput.values()].filter(item => item.sessionId === sessionId);
+  }
+
+  private waitingForInput(sessionId: string): boolean {
+    return this.userInputsFor(sessionId).some(item => item.blocking);
   }
 
   async deleteSessionAction(sessionId: string): Promise<{ sessionId: string }> {
@@ -454,7 +465,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
     if (this.activeTurns.has(sessionId) || this.activeThreads.has(sessionId))
       throw domainError("session_active", "interrupt the active turn before deleting this session");
     if ([...this.pendingApprovals.values()].some((approval) => approval.sessionId === sessionId)
-      || this.pendingUserInput.has(sessionId))
+      || this.userInputsFor(sessionId).length)
       throw domainError("session_pending", "resolve pending interaction before deleting this session");
     await this.request("thread/delete", { threadId: sessionId });
     return { sessionId };
@@ -464,7 +475,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
     const now=Date.now();
     const sessions=[...this.threadsById.values()].filter(isConversationThread).map(thread=>({
       sessionId:thread.id,nativeSessionId:thread.id,agentType:"codex-cli" as const,projectPath:thread.cwd,
-      projectName:basename(thread.cwd),title:thread.name??undefined,activityStatus:this.pendingUserInput.has(thread.id)
+      projectName:basename(thread.cwd),title:thread.name??undefined,activityStatus:this.waitingForInput(thread.id)
         ? "waiting_for_input" as const : [...this.pendingApprovals.values()].some(item=>item.sessionId===thread.id&&!item.answered)
           ? "waiting_for_approval" as const : this.activeTurns.has(thread.id)||this.activeThreads.has(thread.id)
             ? "active" as const : "idle" as const,activeTurnId:this.activeTurns.get(thread.id),
@@ -476,7 +487,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
     const approvals=[...this.pendingApprovals.values()].filter(item=>!item.answered).map(item=>({approvalId:item.approvalId,
       sessionId:item.sessionId,turnId:item.turnId,kind:item.kind,summary:item.summary,choices:item.choices,requestedAt:item.requestedAt}));
     const userInputs=[...this.pendingUserInput.values()].map(item=>({requestId:item.publicId,sessionId:item.sessionId,
-      turnId:this.activeTurns.get(item.sessionId),questions:item.questions,requestedAt:item.requestedAt}));
+      turnId:this.activeTurns.get(item.sessionId),questions:item.questions,requestedAt:item.requestedAt,
+      ...(item.blocking?{}:{blocking:false})}));
     return {sessions,approvals,userInputs};
   }
 
@@ -522,7 +534,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
     return this.activeThreads.size > 0
       || this.activeTurns.size > 0
       || this.pendingApprovals.size > 0
-      || this.pendingUserInput.size > 0
+      || [...this.pendingUserInput.values()].some(item => item.blocking)
       || Boolean(this.desktopScanner?.hasActiveThreads());
   }
 
@@ -531,7 +543,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
     waitingSessionIds: string[];
     blockedSessionIds: string[];
   } {
-    const waitingSessionIds = [...this.pendingUserInput.keys()];
+    const waitingSessionIds = [...new Set([...this.pendingUserInput.values()].filter(item => item.blocking).map(item => item.sessionId))];
     const blockedSessionIds = [...new Set([...this.pendingApprovals.values()].map((approval) => approval.sessionId))];
     return {
       activeSessionIds: [...new Set([
@@ -656,7 +668,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
 
   private hasManagedActivity(): boolean {
     return this.activeThreads.size > 0 || this.activeTurns.size > 0 || this.pendingApprovals.size > 0
-      || this.pendingUserInput.size > 0 || this.pending.size > 0;
+      || [...this.pendingUserInput.values()].some(item => item.blocking) || this.pending.size > 0;
   }
 
   private spawnServer(): void {
@@ -955,14 +967,15 @@ export class CodexAppServerAdapter implements AgentAdapter {
       }
       const publicId = randomUUID();
       const requestedAt = Date.now();
-      this.pendingUserInput.set(threadId, { publicId, requestId: message.id!, sessionId: threadId, questions, requestedAt });
+      const blocking = params.isBlocking !== false;
+      this.pendingUserInput.set(publicId, { publicId, requestId: message.id!, sessionId: threadId, questions, requestedAt, blocking });
       const summary = formatUserInputRequest(questions);
       this.appendLog(threadId, summary);
-      this.emit({ type: "agent.waiting", sessionId: threadId, timestamp: Date.now(), summary });
+      if (blocking) this.emit({ type: "agent.waiting", sessionId: threadId, timestamp: Date.now(), summary });
       this.emit({ type: "user_input_request", sessionId: threadId, requestId: publicId,
-        turnId: this.activeTurns.get(threadId), questions, requestedAt });
+        turnId: this.activeTurns.get(threadId), questions, requestedAt, ...(blocking ? {} : { blocking: false }) });
       this.emitSessionEvent("user_input.requested", threadId, `user-input:${publicId}:requested`,
-        { requestId: publicId, questions }, this.activeTurns.get(threadId));
+        { requestId: publicId, questions, ...(blocking ? {} : { blocking: false }) }, this.activeTurns.get(threadId));
       return;
     }
     const kind = approvalKind(message.method ?? "");
@@ -1047,7 +1060,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
       this.subscribedThreads.delete(threadId);
       this.activeThreads.delete(threadId);
       this.activeTurns.delete(threadId);
-      this.pendingUserInput.delete(threadId);
+      for (const input of this.userInputsFor(threadId)) this.pendingUserInput.delete(input.publicId);
       for (const [approvalId, approval] of this.pendingApprovals)
         if (approval.sessionId === threadId) this.pendingApprovals.delete(approvalId);
       this.emit({ type: "session.deleted", sessionId: threadId, timestamp: Date.now() });
@@ -1057,9 +1070,9 @@ export class CodexAppServerAdapter implements AgentAdapter {
       const requestId = typeof params.requestId === "string" || typeof params.requestId === "number"
         ? params.requestId
         : undefined;
-      const pending = this.pendingUserInput.get(threadId);
-      if (pending && (requestId === undefined || pending.requestId === requestId)) {
-        this.pendingUserInput.delete(threadId);
+      for (const pending of this.userInputsFor(threadId)) {
+        if (requestId !== undefined && pending.requestId !== requestId) continue;
+        this.pendingUserInput.delete(pending.publicId);
         this.emit({ type: "user_input_resolved", sessionId: threadId, requestId: pending.publicId, resolvedAt: Date.now() });
         this.emitSessionEvent("user_input.resolved", threadId, `user-input:${pending.publicId}:resolved`,
           { requestId: pending.publicId }, this.activeTurns.get(threadId));
@@ -1448,7 +1461,27 @@ function approvalKind(method: string): ApprovalKind | undefined {
   if (method === "item/commandExecution/requestApproval") return "command";
   if (method === "item/fileChange/requestApproval") return "file-change";
   if (method === "item/permissions/requestApproval") return "permissions";
+  if (method === MCP_ELICITATION) return "permissions";
   return undefined;
+}
+
+const MCP_ELICITATION = "mcpServer/elicitation/request";
+
+/** Persist scopes Codex offers for an MCP tool approval elicitation (`_meta.persist`). */
+function elicitationPersist(params: Record<string, unknown>): string[] {
+  const meta = params._meta as Record<string, unknown> | null | undefined;
+  const persist = meta?.persist;
+  return (Array.isArray(persist) ? persist : [persist]).filter((value): value is string => typeof value === "string");
+}
+
+/**
+ * Only an elicitation that asks for nothing but consent can be accepted remotely. A form with
+ * fields or a URL flow must be completed in Codex; the Bridge can still decline it.
+ */
+function elicitationAcceptable(params: Record<string, unknown>): boolean {
+  if (params.mode === "url") return false;
+  const schema = params.requestedSchema as { properties?: Record<string, unknown> } | null | undefined;
+  return !schema?.properties || Object.keys(schema.properties).length === 0;
 }
 
 export function approvalResponseFor(
@@ -1461,6 +1494,13 @@ export function approvalResponseFor(
       permissions: choice === "deny" ? {} : (params.permissions ?? {}),
       scope: choice === "allow-session" ? "session" : "turn",
     };
+  }
+  if (method === MCP_ELICITATION) {
+    if (choice === "deny") return { action: "decline", content: null, _meta: null };
+    if (!elicitationAcceptable(params)) throw new Error("This MCP request must be completed in Codex");
+    if (choice === "allow") return { action: "accept", content: {}, _meta: null };
+    if (!elicitationPersist(params).includes("session")) throw new Error("This MCP request cannot be allowed for the session");
+    return { action: "accept", content: {}, _meta: { persist: "session" } };
   }
   const available = Array.isArray(params.availableDecisions) ? params.availableDecisions : undefined;
   const named = (name: string): unknown | undefined => available?.find((decision) =>
@@ -1501,6 +1541,13 @@ export function approvalSummary(method: string, params: Record<string, unknown>)
   }
   if (method === "item/fileChange/requestApproval") return `File change approval required${typeof params.grantRoot === "string" ? `\nPath: ${params.grantRoot}` : ""}${typeof params.reason === "string" ? `\nReason: ${params.reason}` : ""}`;
   if (method === "item/permissions/requestApproval") return `Permission approval required${typeof params.cwd === "string" ? `\nDirectory: ${params.cwd}` : ""}${typeof params.reason === "string" ? `\nReason: ${params.reason}` : ""}`;
+  if (method === MCP_ELICITATION) {
+    const server = typeof params.serverName === "string" ? `\nServer: ${params.serverName}` : "";
+    const message = typeof params.message === "string" ? `\n${params.message}` : "";
+    const url = params.mode === "url" && typeof params.url === "string" ? `\nURL: ${params.url}` : "";
+    const local = elicitationAcceptable(params) ? "" : "\nComplete this request in Codex, or deny it here.";
+    return `MCP approval required${server}${message}${url}${local}`;
+  }
   return `Codex requires attention: ${method}`;
 }
 
