@@ -1,6 +1,6 @@
 # 设计：中央工具库、按作用域置顶与自动审批
 
-状态：第 1 期已实现（0.7.45，2026-10-31）：`/mcp/tools`、登记表、`auto` 直接放行，其余档位暂时都等人在控制中心确认。第 2–4 期为方案。本仓库只写机制；具体有哪些工具、怎么分配，放在私有 agent-skills 仓库的 `tools/registry.yaml`。
+状态（2026-10-31）：0.7.45 第 1 期（`/mcp/tools`、登记表）；0.7.46 自动审核（`review` 档交 DeepSeek 审核员）、内置网页搜索、开局列出置顶工具。置顶工具不单独挂载，经 `/mcp/tools` 调用（见 §4.5）。
 
 相关文档：[agent-skills-design.zh.md](agent-skills-design.zh.md)（技能的置顶与搜索，本设计照搬）、[approval-permissions.zh.md](approval-permissions.zh.md)（审批链路现状）、[jev-approval-triage-design.zh.md](jev-approval-triage-design.zh.md)（硬边界清单，本设计沿用）、[agent-dispatch-and-review.zh.md](agent-dispatch-and-review.zh.md) §4（审核员模型）。
 
@@ -114,6 +114,13 @@ servers:
 - 上游连接按需建立，空闲 10 分钟关闭；工具清单缓存 10 分钟。`${KEY}` 由 `secrets` 列出的 OpenBao 路径填充（[secrets-design.zh.md](secrets-design.zh.md)）。
 - `tool_call` 遇到非 `auto` 的工具：写一条 `tool_approvals`，推一条 alert 到 App，调用阻塞到人在控制中心首页允许或拒绝（最多 10 分钟，超时按过期失败）。决定接口 `POST /api/v1/tool-approvals/:id/decision` 只接受 `control:*`。
 - HAL 上 Claude、Codex 的 MCP 配置加了 `tools`，Claude 的 `permissions.allow` 放行 `mcp__tools`：档位由 Control Plane 判断，不再让 Claude 自己的审批问第二遍。pi 由 Bridge 加载的扩展注册 `tools_tool_search`、`tools_tool_call`。
+
+## 4.6 0.7.46 的实现
+
+- **自动审核**：`review` 档的调用先交审核员：DeepSeek（Anthropic 兼容端点，`deepseek-flash`，关闭思考，不带任何工具），密钥从 OpenBao `shared/deepseek` 取。只返回 `allow` 或 `human`；`allow` 直接执行并记一条 `decided_by=review` 的记录、推一条 silent 通知到 App；其他结果、超时（15 秒）或出错都交给人。`human` 档不经审核员。实测约 0.6–1 秒，门锁类和带注入文字的参数会交给人。`TOOL_REVIEW=off` 关闭，`TOOL_REVIEW_MODEL` 换模型。
+- **网页搜索**：登记表里 `transport.builtin: web` 的条目由 Control Plane 自己实现 `web.web_search`、`web.web_fetch`。免费后端是 Hermes 用的 keyless 端点：Exa MCP、Parallel MCP、Keenable，轮换起点；实时短事实走 DeepSeek 原生搜索；新闻走 OpenRouter exa；X 走 grok-4.3 + `x_search`（约 45 秒）。抓取先用 Keenable 公共抓取，失败再直接请求。浏览器兜底未做。
+- **置顶**：会话开局的记忆注入（`/memory/bootstrap`）后面附上本作用域置顶服务的工具名和是否需确认。所有 agent 都经同一个 `/mcp/tools` 调用，所以置顶只影响开局列不列，不另挂 MCP 服务，Bridge 不用改。
+- **脱敏**：Control Plane 启动时和每小时读取 OpenBao `kv/shared/*` 的全部值，写入会话事件和 notice 之前把出现的值（12 个字符以上）替换成 `‹secret:路径#名字›`。流式增量和记忆写入不经过这一层。
 
 ## 5. 分期
 

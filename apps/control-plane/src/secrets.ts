@@ -56,6 +56,20 @@ export class SecretStore {
     return text.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (_, name: string) => values[name]!);
   }
 
+  /** Every value under `prefix` (listed through KV metadata), keyed `path#KEY`, for redaction. */
+  async all(prefix = "shared"): Promise<Record<string, string>> {
+    const token = readFileSync(this.options.tokenFile, "utf8").trim(), mount = this.options.mount ?? "kv";
+    const response = await fetch(`${this.options.address.replace(/\/$/, "")}/v1/${mount}/metadata/${prefix}?list=true`,
+      { headers: { "x-vault-token": token }, signal: AbortSignal.timeout(5_000) });
+    if (!response.ok) throw new Error(`list ${prefix}: HTTP ${response.status}`);
+    const keys = ((await response.json()) as { data?: { keys?: string[] } }).data?.keys ?? [];
+    const values: Record<string, string> = {};
+    for (const key of keys.filter((item) => !item.endsWith("/"))) {
+      for (const [name, value] of Object.entries(await this.read(`${prefix}/${key}`))) values[`${prefix}/${key}#${name}`] = value;
+    }
+    return values;
+  }
+
   /** Every secret value currently cached, for redacting them from output. */
   knownValues(): string[] {
     return [...this.cache.values()].flatMap((entry) => Object.values(entry.data)).filter((value) => value.length >= 8);

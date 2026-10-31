@@ -5,7 +5,7 @@ import {
   type AgentType, type ActionKind, type ActionResultMessage, type ApprovalChoice, type SessionActivityStatus,
   type SessionState, type StructuredSessionEventMessage, type TurnStatus, type UserInputQuestion,
 } from "@agent-bridge/protocol";
-import { decodeEventBody, encodeEventBody, EVENT_COLUMNS, eventWire, indexEvent, type EventRow } from "./events.js";
+import { decodeEventBody, encodeEventBody, EVENT_COLUMNS, eventWire, indexEvent, redactSecrets, type EventRow } from "./events.js";
 import { markChanged, signalStream, type StreamKind } from "./stream.js";
 import { eventById, recordAppendedEvent, recordRevisedEvent, viewChanges, viewEntryItems, viewPage, ViewError } from "./view.js";
 
@@ -856,7 +856,7 @@ export class AgentControlStore {
       const existing = this.notice(id);
       if (existing) return existing;
       this.db.prepare(`INSERT INTO notices(id,connector,room_id,thread_id,text,level,source,session_id,created_at)
-        VALUES (?,?,?,?,?,?,?,?,?)`).run(id, input.connector, input.roomId, input.threadId ?? "", input.text, input.level ?? "notice",
+        VALUES (?,?,?,?,?,?,?,?,?)`).run(id, input.connector, input.roomId, input.threadId ?? "", redactSecrets(input.text), input.level ?? "notice",
         input.source, input.sessionId ?? null, Date.now());
       markChanged(this.db, "notice", id);
       return this.notice(id)!;

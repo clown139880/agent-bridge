@@ -87,3 +87,21 @@ test("a queued notice reaches the stream, is idempotent per key, and records whe
     assert.equal((await f.call("PUT", "/notices/missing", { eventId: "$x" })).status, 404);
   } finally { await f.close(); }
 });
+
+test("known secret values never reach stored notices or events", async () => {
+  const { setRedactedSecrets, decodeEventBody } = await import("../packages/database/src/index.js");
+  const store = new Store(":memory:");
+  const control = new AgentControlStore(store.db, { actionsMs: 1, attachmentsMs: 1 });
+  setRedactedSecrets({ "shared/x#API_KEY": "sk-abcdefghijklmnop", "shared/x#SHORT": "short" });
+  try {
+    const notice = control.createNotice({ connector: "app", roomId: "op", text: "key is sk-abcdefghijklmnop, short stays", source: "t" });
+    assert.equal(notice.text, "key is ‹secret:shared/x#API_KEY›, short stays");
+    store.upsertMachine({ id: "hal", name: "hal", hostname: "hal", platform: "linux", capabilities: [] });
+    store.createSession({ id: "s", machineId: "hal", agentType: "pi", projectName: "p", projectPath: "/p", matrixRoomId: "", matrixThreadId: null,
+      nativeSessionId: "n", status: "working", createdAt: 1, updatedAt: 1 });
+    control.appendSessionEvent({ type: "session.event", eventId: "e1", eventType: "command.completed", sessionId: "s", timestamp: 1,
+      payload: { command: "cat .env", output: "API_KEY=sk-abcdefghijklmnop" } } as any);
+    const row = store.db.prepare("SELECT body FROM events WHERE session_id='s'").get() as { body: unknown };
+    assert.equal(decodeEventBody(row.body).output, "API_KEY=‹secret:shared/x#API_KEY›");
+  } finally { setRedactedSecrets({}); store.db.close(); }
+});

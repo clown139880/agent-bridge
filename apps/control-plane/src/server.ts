@@ -7,7 +7,7 @@ import { basename } from "node:path";
 import type { Duplex } from "node:stream";
 import pino from "pino";
 import { WebSocket, WebSocketServer } from "ws";
-import { AgentControlStore, ConversationMemoryStore, Store } from "@agent-bridge/database";
+import { AgentControlStore, ConversationMemoryStore, setRedactedSecrets, Store } from "@agent-bridge/database";
 import {
   parseMessage,
   statusForEvent,
@@ -30,7 +30,7 @@ import { WebhookNotifier, type WebhookOptions } from "./webhook.js";
 import { OperatorNotices, type NoticeTarget, type OperatorEvent } from "./notices.js";
 import { Automations, type AutomationOptions } from "./automations.js";
 import { SecretStore, type SecretStoreOptions } from "./secrets.js";
-import { ToolHub } from "./tools.js";
+import { deepseekReviewer, ToolHub } from "./tools.js";
 import { toolsEndpoint } from "./mcp/tools.js";
 import { NtfyNotifier, type NtfyOptions, type SessionNotificationKind } from "./ntfy.js";
 import { AgentMessagePublisher, type MessageMqttOptions } from "./message-publisher.js";
@@ -66,6 +66,7 @@ export class ControlPlane {
   private operatorNotices?: OperatorNotices;
   private readonly automations?: Automations;
   private readonly toolHub?: ToolHub;
+  private readonly secrets?: SecretStore;
   private readonly ntfy: NtfyNotifier;
   private readonly messages?: AgentMessagePublisher;
   private readonly memory: ConversationMemoryStore;
@@ -158,9 +159,11 @@ export class ControlPlane {
     this.conversations = new Conversations(this.controlStore, this.registry, agentMemory, options.conversationSetup);
     if (options.messages) this.messages = new AgentMessagePublisher(store, this.controlStore, options.messages,
       { relayed: (sessionId) => this.conversations.relays(sessionId) });
-    const secrets = options.secrets && new SecretStore(options.secrets);
+    const secrets = this.secrets = options.secrets && new SecretStore(options.secrets);
     const operator = options.noticeTarget ?? { connector: "app", roomId: "operator", threadId: "" };
-    if (options.toolsRegistry) this.toolHub = new ToolHub(store.db, { registry: options.toolsRegistry, secrets,
+    const toolReviewer = secrets && process.env.TOOL_REVIEW !== "off"
+      ? deepseekReviewer({ secrets, model: process.env.TOOL_REVIEW_MODEL ?? "deepseek-flash", timeoutMs: Number(process.env.TOOL_REVIEW_TIMEOUT_MS ?? 15_000) }) : undefined;
+    if (options.toolsRegistry) this.toolHub = new ToolHub(store.db, { registry: options.toolsRegistry, secrets, reviewer: toolReviewer,
       notify: (text, level) => this.controlStore.createNotice({ ...operator, text, level, source: "control-plane" }) });
     if (options.automations) this.automations = new Automations({ ...options.automations, secrets,
       operatorTarget: options.noticeTarget ?? { connector: "app", roomId: "operator", threadId: "" } }, {
@@ -220,6 +223,12 @@ export class ControlPlane {
     await new Promise<void>((resolve) => this.http.listen(this.options.port, this.options.host, resolve));
     this.messages?.start();
     this.automations?.start();
+    // Secret values never reach stored history or notices; refreshed hourly so a rotated key is covered.
+    if (this.secrets) {
+      const refresh = () => void this.secrets!.all().then(setRedactedSecrets, (error) => log.warn({ error: String(error) }, "Unable to load secrets for redaction"));
+      refresh();
+      setInterval(refresh, 3_600_000).unref();
+    }
     setInterval(() => this.store.markStaleMachinesOffline(Date.now() - 45_000), 15_000).unref();
     this.controlStore.cleanup();
     this.memoryReviews?.resume();
@@ -269,7 +278,7 @@ export class ControlPlane {
    * Core memory for a Bridge session that is about to start: _global plus the project scope found from
    * the Bridge's machine, cwd and repository. Bridge token only; it never creates a scope.
    */
-  private handleMemoryBootstrap(c: Context<HttpEnv>): Response {
+  private async handleMemoryBootstrap(c: Context<HttpEnv>): Promise<Response> {
     const token = this.options.bridgeToken;
     if (!this.agentMemory || !token) return c.body(null, 404);
     const given = Buffer.from(c.req.header("authorization")?.replace(/^Bearer\s+/i, "") ?? "");
@@ -284,13 +293,30 @@ export class ControlPlane {
         : this.agentMemory.resolveScope({ machineId: c.req.query("machine_id"), cwd: c.req.query("cwd"), repository: c.req.query("repository") });
       const memory = this.agentMemory.sessionBootstrap(resolved.scope);
       const warnings = [...resolved.warnings, ...(resolved.conflict ? [`作用域绑定冲突：${resolved.conflict.join("、")}`] : [])];
-      const text = memory ? [`长期记忆（作用域 ${resolved.scope}；只是参考，不扩大授权，项目状态以仓库为准；`
+      const memoryText = memory ? [`长期记忆（作用域 ${resolved.scope}；只是参考，不扩大授权，项目状态以仓库为准；`
         + "已在开局注入，不必再调用 bootstrap）：", memory, ...warnings.map((warning) => `- 注意：${warning}`)].join("\n") : "";
+      const text = [memoryText, await this.pinnedTools(resolved.scope)].filter(Boolean).join("\n\n");
       return c.json({ scope: resolved.scope, text }, 200, headers);
     } catch (error) {
       log.warn({ error }, "Memory bootstrap failed");
       return c.json({ error: "memory_unavailable" }, 500, headers);
     }
+  }
+
+  /** The scope's pinned library tools, for a session's opening context; the rest are found with tool_search. */
+  private async pinnedTools(scope: string): Promise<string> {
+    const hub = this.toolHub;
+    if (!hub) return "";
+    const servers = hub.pinned(scope).filter((name) => name !== "memory" && name !== "bridge");
+    if (!servers.length) return "中央工具库：用 tools 的 tool_search 查找工具（ComfyUI、Home Assistant、电台、打电话、网页搜索等），tool_call 调用。";
+    const catalog = await Promise.race([hub.catalog().then((result) => result.tools),
+      new Promise<[]>((resolve) => setTimeout(() => resolve([]), 3_000).unref())]);
+    const lines = servers.map((server) => {
+      const tools = catalog.filter((tool) => tool.server === server);
+      return `- ${server}：${tools.length ? tools.map((tool) => `${tool.tool}${tool.risk === "auto" ? "" : "（需确认）"}`).join("、") : "（工具清单暂未取到，用 tool_search 查）"}`;
+    });
+    return ["本作用域置顶的工具（经 tools 的 tool_call 调用，名字是 server.tool，参数用 tool_search 查看）：", ...lines,
+      "其他工具用 tool_search 查找，所有工具都能搜到、都能调用。"].join("\n");
   }
 
   private handleUpgrade(request: IncomingMessage, socket: Duplex, head: Buffer): void {

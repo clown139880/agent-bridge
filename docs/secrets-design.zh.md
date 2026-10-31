@@ -1,6 +1,6 @@
 # 设计：密钥统一存放（OpenBao）
 
-状态：设计稿，未实现（2026-10-31）。与 [tool-hub-design.zh.md](tool-hub-design.zh.md) 配合：工具库和定时任务需要的密钥都从这里取。
+状态（2026-10-31）：OpenBao 2.7.2 已部署（HAL，`127.0.0.1:8200`，static seal 自动解封，文件审计）；Control Plane 0.7.45 起读取，0.7.46 起对会话事件和 notice 脱敏。各服务的 `.env` 还未迁移。与 [tool-hub-design.zh.md](tool-hub-design.zh.md) 配合：工具库和定时任务需要的密钥都从这里取。
 
 ## 1. 决定（clown 2026-10-31）
 

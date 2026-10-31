@@ -5,8 +5,26 @@ import type { DatabaseSync } from "node:sqlite";
 const COMPRESSED_TYPES = new Set(["command.completed", "file_change.completed", "tool.completed", "task.completed"]);
 const COMPRESS_MIN_BYTES = 1024;
 
+/** Secret values (name → value) that must never be stored; set by the Control Plane from its secret store. */
+let secretValues: Array<[string, string]> = [];
+
+export function setRedactedSecrets(values: Record<string, string>): void {
+  // Longest first, so a secret that contains another is replaced whole. Short values are too likely to be ordinary text.
+  secretValues = Object.entries(values).filter(([, value]) => value.length >= 12).sort((a, b) => b[1].length - a[1].length);
+}
+
+/** Replace every known secret value in `text` (raw or JSON-escaped) with ‹secret:NAME›. */
+export function redactSecrets(text: string): string {
+  if (!secretValues.length) return text;
+  let result = text;
+  for (const [name, value] of secretValues) {
+    for (const form of new Set([value, JSON.stringify(value).slice(1, -1)])) if (result.includes(form)) result = result.split(form).join(`‹secret:${name}›`);
+  }
+  return result;
+}
+
 export function encodeEventBody(type: string, payload: unknown): string | Uint8Array {
-  const json = JSON.stringify(payload ?? {});
+  const json = redactSecrets(JSON.stringify(payload ?? {}));
   if (!COMPRESSED_TYPES.has(type) || Buffer.byteLength(json, "utf8") < COMPRESS_MIN_BYTES) return json;
   return gzipSync(json);
 }
