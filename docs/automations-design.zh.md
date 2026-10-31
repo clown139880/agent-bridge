@@ -112,6 +112,7 @@ enabled: true
   - 也接受 GitLab 风格的 `X-Gitlab-Token: <secret>`（ComfyUI 机器的回调用它），以及 Hermes 通用 HMAC：`X-Webhook-Signature`（只签请求体）和 `X-Webhook-Signature-V2` + `X-Webhook-Timestamp`（签 `<ts>.<body>`，±5 分钟）。
 - 先校验长度上限（1 MB）和签名，再读请求体。立即返回 `202 {runId}`，运行异步进行。
 - 去重：有投递 ID 头时按它去重，否则按 body 哈希，10 分钟窗口。
+- 别名与查询参数（0.7.48）：`webhook.aliases` 列出也指向这个任务的旧名字，可带固定参数（`comfy-chain?continue=1`）。请求的查询参数以 `query` 并入请求体；`agent.when`（如 `{query.continue}`）渲染为空、`0`、`false` 时不唤醒 agent，按通知型投递。是否接续处理因此由派任务时写的回调地址决定。
 - 模板：`{a.b}` 取 JSON 路径，缺失的字段渲染为空。也可以不用模板，改用 `script` 转换，stdout 即消息。
 
 ## 7. 管理与确认

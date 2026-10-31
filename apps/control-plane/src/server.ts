@@ -205,7 +205,7 @@ export class ControlPlane {
       },
       legacyMcp: this.memoryMcp && ((request, response) => this.memoryMcp!.handle(request, response)),
       controlApi: this.controlApi,
-      hooks: this.automations && ((id, headers, body) => this.automations!.hook(id, headers, body)),
+      hooks: this.automations && ((id, headers, body, query) => this.automations!.hook(id, headers, body, query)),
       apiEnabled,
       browserTokens: { read: options.controlApiReadToken, write: options.controlApiWriteToken },
       version: options.version,

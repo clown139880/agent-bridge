@@ -26,9 +26,13 @@ const AGENT_TYPES: Record<string, AgentType> = { pi: "pi", codex: "codex-cli", c
 export interface AutomationDefinition {
   title: string;
   trigger: { schedule?: { cron?: string; everyMinutes?: number; tz?: string; catchUp?: "once" | "skip" };
-    webhook?: { secretRef?: string; template?: string } };
+    webhook?: { secretRef?: string; template?: string;
+      /** Other hook names that reach this task, optionally with fixed query parameters: `comfy-chain?continue=1`. */
+      aliases?: string[] } };
   script?: { path: string; cwd?: string; timeoutSec?: number; envFile?: string };
-  agent?: { prompt: string; agent?: string; model?: string; target?: string; timeoutMin?: number };
+  agent?: { prompt: string; agent?: string; model?: string; target?: string; timeoutMin?: number;
+    /** Run the agent only when this renders non-empty (not "0"/"false"), e.g. `{query.continue}`; otherwise deliver like a notify task. */
+    when?: string };
   /** Notify only: the message, with `{a.b}` placeholders filled from the webhook body or the script's JSON. */
   template?: string;
   deliver?: string[];
@@ -279,8 +283,14 @@ export class Automations {
    * POST /hooks/<id>: verify the signature (GitHub `X-Hub-Signature-256`, GitLab `X-Gitlab-Token`,
    * Hermes `X-Webhook-Signature[-V2]`), drop a redelivery, and start the run.
    */
-  async hook(id: string, headers: Record<string, string | string[] | undefined>, body: Buffer): Promise<{ status: number; body: Record<string, unknown> }> {
-    const task = this.tasks.get(id), webhook = task?.definition?.trigger.webhook;
+  async hook(id: string, headers: Record<string, string | string[] | undefined>, body: Buffer, query: Record<string, string> = {}): Promise<{ status: number; body: Record<string, unknown> }> {
+    let task = this.tasks.get(id);
+    if (!task?.definition?.trigger.webhook) for (const candidate of this.tasks.values()) {
+      const alias = candidate.definition?.trigger.webhook?.aliases?.find((item) => item.split("?")[0] === id);
+      if (alias) { task = candidate; query = { ...Object.fromEntries(new URLSearchParams(alias.split("?")[1] ?? "")), ...query }; break; }
+    }
+    id = task?.id ?? id;
+    const webhook = task?.definition?.trigger.webhook;
     if (!task || !webhook || task.error) return { status: 404, body: { error: "not_found" } };
     // A hook without secretRef is open: it can only start the run its definition describes.
     if (webhook.secretRef) {
@@ -293,6 +303,7 @@ export class Automations {
       try { const parsed = JSON.parse(body.toString("utf8")); payload = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : { value: parsed }; }
       catch { payload = { text: body.toString("utf8") }; }
     }
+    if (Object.keys(query).length) payload = { ...payload, query };
     const header = (name: string) => { const value = headers[name]; return Array.isArray(value) ? value[0] : value; };
     const delivery = header("x-github-delivery") ?? header("webhook-id") ?? header("x-request-id") ?? header("idempotency-key") ?? hash(body.toString("binary"));
     const seenKey = `${id}\n${delivery}`, now = this.now();
@@ -346,7 +357,9 @@ export class Automations {
       if (!definition.agent && !definition.template && !definition.trigger.webhook?.template) return { status: silent(output) ? "silent" : "ok", output, text: output };
     }
     const template = definition.template ?? definition.trigger.webhook?.template;
-    if (!definition.agent) {
+    const when = definition.agent?.when === undefined ? "1" : renderTemplate(definition.agent.when, data).trim();
+    if (!definition.agent || !when || when === "0" || when === "false") {
+      if (definition.script && !template) return { status: silent(output) ? "silent" : "ok", output, text: output };
       const text = template ? renderTemplate(template, data) : JSON.stringify(payload, null, 2).slice(0, 4000);
       return { status: (definition.script && silent(output)) || silent(text) ? "silent" : "ok", output: output || undefined, text };
     }

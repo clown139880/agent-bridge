@@ -210,3 +210,26 @@ test("a webhook without secretRef is open", async () => {
     await settle(() => f.automations.runs("open")[0]?.status === "ok");
   } finally { f.close(); }
 });
+
+test("one hook, old names as aliases; ?continue=1 decides at dispatch time whether an agent picks it up", async () => {
+  const f = fixture({ "repo-app/velvet/automation.yaml": [
+    "title: 回调", "trigger:", "  webhook:", "    template: \"{text}\"", "    aliases: [gen-done, \"gen-next?continue=1\"]",
+    "script: { path: v.sh }", "agent:", "  when: \"{query.continue}\"", "  prompt: \"接着做：{text}\"", "deliver: [\"matrix:!v:x\"]", ""].join("\n"),
+    "repo-app/velvet/v.sh": "#!/bin/sh\necho '{\"text\":\"第 3 镜完成\"}'\n" });
+  try {
+    assert.equal((await f.automations.hook("velvet", {}, Buffer.from("{}"))).status, 202);
+    await settle(() => f.automations.runs("velvet")[0]?.status === "ok");
+    assert.deepEqual(f.notices().map((row) => row.text), ["第 3 镜完成"]);
+    assert.equal(f.dispatched.length, 0, "no agent without ?continue=1");
+    assert.equal((await f.automations.hook("gen-next", {}, Buffer.from('{"n":1}'))).status, 202);
+    await settle(() => f.dispatched.length === 1);
+    assert.equal(f.dispatched[0]!.message.input, "接着做：第 3 镜完成");
+    assert.equal((await f.automations.hook("velvet", {}, Buffer.from('{"n":2}'), { continue: "1" })).status, 202);
+    await settle(() => f.automations.runs("velvet").some((run) => run.status === "skipped"), 3_000);
+    assert.equal((await f.automations.hook("nope", {}, Buffer.from("{}"))).status, 404);
+    const { action } = f.dispatched[0]!;
+    f.control.completeAction({ type: "action.result", actionId: action.actionId, kind: "create_session", status: "failed",
+      error: { code: "x", message: "stop", retryable: false }, timestamp: Date.now() } as any);
+    await settle(() => !f.automations.runs("velvet").some((run) => run.status === "running"));
+  } finally { f.close(); }
+});
