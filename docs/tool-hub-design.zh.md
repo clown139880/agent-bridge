@@ -10,7 +10,9 @@
 - **搜索全开放**：所有工具对所有会话都能搜到、能调用；作用域只决定哪些开局置顶，不限制可见范围。
 - **自动审批**：所有工具调用的审批都经过 Agent Bridge，所以可以在人之前加一层自动审核。原生规则已经放行的（只读等）不变；需要审核的，交给一个独立的审核会话，用 DeepSeek / Qwen 这类便宜模型判断。
 - **搜索中心化**：网页搜索由 Control Plane 统一提供。后端有原生 DeepSeek 搜索、照搬 Hermes 的免费搜索轮询，最后用浏览器兜底。
-- **Home Assistant 用官方 MCP Server 集成**，不另做适配层。
+- **Home Assistant 用官方 MCP Server 集成**，不另做适配层，沿用现有的 `HASS_URL` / `HASS_TOKEN`。
+- **不是所有能力都做成工具**：小红书这类按需使用、步骤多的，写成技能按需读取；TTS 写成直接调接口的技能（`mimo-tts`），不再单独跑服务。
+- **审批的目的是减少人工**：登记表里的档位尽量放宽（ComfyUI、打给用户的电话全部免审批；替别的会话答审批归入自动审核），硬边界只留真正不可逆或外发的操作。
 
 ## 2. 结构
 
@@ -36,8 +38,8 @@ servers:
     pinned: [velvet-room]                  # 在这些作用域开局置顶
     risk:                                  # 每个工具的默认风险；没写的按 review
       auto: [get_*, list_*, queue, get_history, visualize_workflow]
-      review: [enqueue_workflow, upload_image, save_workflow]
-      human: [clear_vram]
+      review: [save_workflow]
+      human: []
 ```
 
 - `risk` 三档：`auto` 直接放行；`review` 先交自动审核；`human` 一定问人。置顶不改变风险档：置顶的工具多数操作在 `auto`，危险操作仍是 `review` 或 `human`。
@@ -91,16 +93,20 @@ servers:
 
 ## 4. 中心化网页搜索
 
-在 `/mcp/tools` 内置一个服务 `web`，工具 `web_search(query, engine?)`、`web_fetch(url)`，对所有会话置顶（`_global`）。
+在 `/mcp/tools` 内置一个服务 `web`，工具 `web_search(query, kind?)`、`web_fetch(url)`，对所有会话置顶（`_global`），免审批。
 
-| 后端 | 用途 | 说明 |
-| --- | --- | --- |
-| DeepSeek 原生搜索 | 默认的“搜索并总结” | 待实测接口和费用 |
-| 免费轮询 | 默认的“只要结果列表” | 照搬 Hermes 的后端：ddgs、SearXNG、Brave 免费档；按可用性轮询，失败换下一个 |
-| OpenRouter（exa / x_search） | 新闻、X 实时讨论 | 已实测（`todo.zh.md`），按需付费，显式 `engine` 选用 |
-| 浏览器 | 兜底：动态页面、反爬 | 无头浏览器抓取，`web_fetch` 失败时用 |
+**免费优先，按内容路由**。`kind` 可由调用方给出，否则按查询内容判断：
 
-结果统一为 `{title, url, snippet, publishedAt?, source}`，同一查询短期缓存。
+| 内容 | 先用 | 再用 | 依据 |
+| --- | --- | --- | --- |
+| 一般资料、文档、代码问题 | 免费轮询：ddgs → SearXNG → Brave 免费档（照搬 Hermes 的后端顺序，失败换下一个） | DeepSeek 原生搜索 | 免费够用 |
+| 实时短事实（天气、时间、比分、现价） | DeepSeek 原生搜索 | 免费轮询 | call-bridge 已在用：`api.deepseek.com/anthropic/v1/messages`，`web_search_20250305` 工具，`max_uses: 2`，关闭 thinking，只接受真的搜过的回答 |
+| 新闻、事件归因 | OpenRouter `exa` | DeepSeek 原生搜索 | 2026-10-21 实测（`todo.zh.md`）：exa 召回最好，$0.015/次 |
+| X 实时讨论 | OpenRouter grok + `x_search`（提示里明确“搜 X”并给关键词） | — | 同上实测 |
+| 页面内容 | `web_fetch` 直接抓取 | 无头浏览器 | 动态页面、反爬时兜底 |
+
+- 返回统一为 `{title, url, snippet, publishedAt?, source}`；DeepSeek 这类“搜索并回答”的后端另带 `answer` 和引用。
+- 同一查询短期缓存；每个后端记录用时、失败率和费用，路由按可用性降级。
 
 ## 5. 分期
 
