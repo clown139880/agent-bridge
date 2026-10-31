@@ -58,14 +58,17 @@ export function createHttpApp(deps: HttpAppDeps) {
   if (deps.legacyMcp) app.all("/mcp", nodeRoute("Conversation MCP", deps.legacyMcp));
   if (deps.hooks) {
     const hooks = deps.hooks;
-    app.post("/hooks/:id", async (c) => {
+    // /webhooks/<id> is the path Hermes callers already use: moving one is a change of host and port.
+    const route = async (c: Context<HttpEnv>) => {
       const length = Number(c.req.header("content-length") ?? 0);
       if (length > HOOK_MAX_BYTES) return c.json({ error: "payload_too_large" }, 413);
       const body = Buffer.from(await c.req.arrayBuffer());
       if (body.length > HOOK_MAX_BYTES) return c.json({ error: "payload_too_large" }, 413);
-      const result = hooks(c.req.param("id"), c.env.incoming.headers, body);
+      const result = hooks(c.req.param("id") ?? "", c.env.incoming.headers, body);
       return c.json(result.body, result.status as 202);
-    });
+    };
+    app.post("/hooks/:id", route);
+    app.post("/webhooks/:id", route);
   }
   if (deps.apiEnabled) app.all("/api/v1/*", nodeRoute("Control API", (request, response) => deps.controlApi.handle(request, response)));
   app.all("/control/api/v1/*", controlBrowserApi(deps.controlApi, deps.browserTokens, deps.version));

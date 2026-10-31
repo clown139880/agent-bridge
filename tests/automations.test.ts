@@ -177,7 +177,7 @@ test("over HTTP: hooks are served at /hooks/<id>; an agent may propose but only 
         body: body === undefined ? undefined : JSON.stringify(body) });
       return { status: response.status, body: await response.json() as any };
     };
-    const hook = await fetch(`${base}/hooks/washer`, { method: "POST", headers: { "x-gitlab-token": "w", "content-type": "application/json" }, body: '{"text":"快洗完了"}' });
+    const hook = await fetch(`${base}/webhooks/washer`, { method: "POST", headers: { "x-gitlab-token": "w", "content-type": "application/json" }, body: '{"text":"快洗完了"}' });
     assert.equal(hook.status, 202);
     assert.equal((await fetch(`${base}/hooks/washer`, { method: "POST", body: "{}" })).status, 401);
     await settle(() => (control as any).controlStore.notices({ connector: "app", limit: 10 }).some((row: any) => row.text === "🧺 快洗完了"));
