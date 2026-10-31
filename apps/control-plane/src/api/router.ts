@@ -1,6 +1,6 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import type { Store, AgentControlStore, PendingRow, ActionRow } from "@agent-bridge/database";
+import { NOTICE_LEVELS, type Store, type AgentControlStore, type PendingRow, type ActionRow, type NoticeLevel } from "@agent-bridge/database";
 import { parseWorkerId, workerId as buildWorkerId, type AgentType, type ActionKind, type ApprovalChoice, type ControlToBridgeMessage } from "@agent-bridge/protocol";
 import { BridgeRegistry } from "../bridge-registry.js";
 import type { MemoryReviewRoutes } from "../memory-review.js";
@@ -182,7 +182,7 @@ export class AgentControlApi {
   }
 
   /**
-   * Notices: messages for a chat room that no turn asked for. POST queues one ({target, text, sessionId?};
+   * Notices: messages for a chat room that no turn asked for. POST queues one ({target, text, level?, sessionId?};
    * an Idempotency-Key makes it safe to retry); GET lists a connector's (?connector=&roomId=&threadId=&undelivered=1&after=);
    * PUT …/:id {eventId} is the connector reporting it posted the notice.
    */
@@ -204,9 +204,11 @@ export class AgentControlApi {
       if(!text.trim()||text.length>NOTICE_MAX_CHARS)throw new ApiProblem(400,"invalid_text",`text must be 1..${NOTICE_MAX_CHARS} characters`);
       const sessionId=string(body.sessionId,"sessionId");
       if(sessionId&&!this.store.session(sessionId))throw new ApiProblem(404,"session_not_found","session not found");
+      const level=string(body.level,"level");
+      if(level&&!(NOTICE_LEVELS as readonly string[]).includes(level))throw new ApiProblem(400,"invalid_level",`level must be one of ${NOTICE_LEVELS.join(", ")}`);
       const key=request.headers["idempotency-key"];
       const noticeId=typeof key==="string"&&key?`n-${createHash("sha256").update(`${principal.id}\n${key}`).digest("hex").slice(0,32)}`:undefined;
-      this.ok(response,this.store.createNotice({id:noticeId,...target,text,source:principal.id,sessionId}),201);return;}
+      this.ok(response,this.store.createNotice({id:noticeId,...target,text,level:level as NoticeLevel|undefined,source:principal.id,sessionId}),201);return;}
     if(request.method==="PUT"&&id){
       const eventId=string(body.eventId,"eventId",true)!;
       const row=this.store.deliverNotice(id,eventId);

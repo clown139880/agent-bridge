@@ -218,3 +218,21 @@ test("a real MQTT QoS1 publication stays pending until PUBACK", async t => {
   assert.equal(producer.status().pending, 1);
   acknowledge(); await flushing; assert.equal(producer.status().accepted, 1);
 });
+
+test("an App notice becomes one agent.notice message, its first line the title, and counts as delivered", async () => {
+  const f = fixture();
+  try {
+    const producer = f.publisher();
+    const app = f.control.createNotice({ connector: "app", roomId: "operator", text: "🔄 更新失败：hal · 0.7.1 → 0.7.2\n回滚到 0.7.1", level: "alert", source: "control-plane" });
+    f.control.createNotice({ connector: "matrix", roomId: "!room", text: "房间里的", source: "control-plane" });
+    producer.capture(); await producer.flush();
+    assert.equal(f.deliveries.length, 1);
+    const message = JSON.parse(f.deliveries[0]!.payload) as BusinessMessage;
+    assert.equal(message.type, "agent.notice"); assert.equal(message.state, "message"); assert.equal(message.level, "alert");
+    assert.equal(message.title, "🔄 更新失败：hal · 0.7.1 → 0.7.2"); assert.equal(message.body, "回滚到 0.7.1");
+    assert.equal(message.url, "/control/"); assert.equal(f.deliveries[0]!.topic, "uctw/messages/agent-bridge/events");
+    assert.ok(f.control.notice(app.id)?.deliveredAt);
+    producer.capture(); await producer.flush();
+    assert.equal(f.deliveries.length, 1, "the delivered notice's own change does not publish again");
+  } finally { f.store.db.close(); }
+});

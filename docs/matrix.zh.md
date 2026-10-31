@@ -43,7 +43,8 @@ turn 运行时显示“正在输入”，结束后把最后一条助手消息作
 - 连接器从事件流收到 `notice.upserted` 就发，发完回报消息 id；启动时补发还没发出的。Matrix 事务 ID 由 notice id 派生，重试不会重复发。机器人要先是目标房间的成员。
 - notice 若代表某个会话（`sessionId`），以这条消息为根的线程绑定到该会话：在线程里回复，就接着那个会话继续。
 - 在房间（或线程）里发消息时，这个位置自上一条消息以来（最多 12 小时、5 条）收到的 notice 会附在用户消息前面，标明“不是用户写的”。这样直接回一句“要”，会话也知道指的是哪条通知。代表当前会话自己的 notice 不附。
-- Control Plane 设 `CONTROL_NOTICE_TARGET=matrix:!room:server` 后，生命周期通知发到这个房间：每 60 秒窗口内只立即发第一条，其余合并到下一条里；部署和更新结果（`🟢 控制面已启动 · 版本 …`、`🔄 更新完成：…`）、记忆审核结果从不合并。
+- 目标为 `app:<名字>` 的 notice 不经 Matrix，由 MQTT 发布器推给 App（`agent.notice`，见 [MQTT 业务消息 v1](message-events-v1.zh.md)）。HAL 上的生命周期通知用 `CONTROL_NOTICE_TARGET=app:operator`。
+- `CONTROL_NOTICE_TARGET` 指向房间（`matrix:!room:server`）时，生命周期通知发到该房间：每 60 秒窗口内只立即发第一条，其余合并到下一条里；部署和更新结果（`🟢 控制面已启动 · 版本 …`、`🔄 更新完成：…`）、记忆审核结果从不合并。
 
 ## 状态与可靠性
 

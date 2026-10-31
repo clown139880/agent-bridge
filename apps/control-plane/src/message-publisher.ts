@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { connectAsync, type MqttClient } from "mqtt";
 import pino from "pino";
-import { AgentControlStore, Store, streamSignal, type PendingRow, type StreamItem } from "@agent-bridge/database";
+import { AgentControlStore, Store, streamSignal, type NoticeRow, type PendingRow, type StreamItem } from "@agent-bridge/database";
 
 const log = pino({ name: "message-publisher" });
 const DAY = 86_400_000;
@@ -30,7 +30,7 @@ export interface BusinessMessage {
   url: string;
   createdAt: number;
   expiresAt: number;
-  data: { sessionId: string; machineId: string; agent: string; turnId?: string; requestId?: string };
+  data: { sessionId: string; machineId?: string; agent?: string; turnId?: string; requestId?: string; noticeId?: string };
 }
 
 type Draft = Omit<BusinessMessage, "v" | "source" | "revision">;
@@ -169,6 +169,9 @@ export class AgentMessagePublisher {
         expiresAt: event.timestamp + (completed ? 600_000 : 1_800_000),
         data: { sessionId: session.id, machineId: session.machineId, agent: session.agentType,
           ...(event.turnId ? { turnId: event.turnId } : {}) } });
+    } else if (item.type === "notice.upserted") {
+      const notice = item.payload as NoticeRow;
+      if (notice.connector === "app" && !notice.deliveredAt) this.notice(notice);
     } else if (item.type === "approval.upserted" || item.type === "user_input.upserted") {
       const pending = this.control.pending(item.resourceId);
       if (pending) this.pending(pending, item.eventId);
@@ -182,6 +185,18 @@ export class AgentMessagePublisher {
           createdAt: this.now(), expiresAt: this.now() + DAY });
       }
     }
+  }
+
+  /** A notice for the App: its first line is the title. Queued in the outbox, it counts as delivered. */
+  private notice(notice: NoticeRow): void {
+    const [first = "", ...rest] = notice.text.trim().split("\n");
+    const eventId = `ab:notice:${notice.id}`;
+    this.enqueue({ eventId, type: "agent.notice", key: `notice:${notice.id}`, state: "message", level: notice.level,
+      title: first.trim() || "通知", body: rest.join("\n").trim(),
+      url: notice.sessionId ? `/control/sessions/${encodeURIComponent(notice.sessionId)}` : "/control/",
+      createdAt: notice.createdAt, expiresAt: notice.createdAt + DAY,
+      data: { sessionId: notice.sessionId ?? "", noticeId: notice.id } });
+    this.control.markNoticeDelivered(notice.id, eventId);
   }
 
   private pending(pending: PendingRow, eventId: string): void {

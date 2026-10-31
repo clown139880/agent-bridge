@@ -1,4 +1,4 @@
-import type { AgentControlStore } from "@agent-bridge/database";
+import type { AgentControlStore, NoticeLevel } from "@agent-bridge/database";
 
 /** Where a notice goes: `<connector>:<room>`, optionally `#<thread root>`, e.g. `matrix:!room:server#$event`. */
 export interface NoticeTarget { connector: string; roomId: string; threadId: string }
@@ -47,6 +47,12 @@ export function formatOperatorEvent(event: OperatorEvent): string {
   return !detail ? `${emoji} ${title}` : detail.includes("\n") ? `${emoji} ${title}\n${detail}` : `${emoji} ${title} · ${detail}`;
 }
 
+/** An update that failed or rolled back, or a memory write that failed: worth an alert. */
+function failure(event: OperatorEvent): boolean {
+  return (event.type === "bridge_update.status" && ["failed", "rolled_back"].includes(text(event.phase)))
+    || (event.type === "memory_review.status" && event.status === "failed");
+}
+
 /** Deploy and update outcomes are rare and are exactly what the operator waits for: never folded. */
 function verdict(event: OperatorEvent): boolean {
   return event.type === "control_plane.up" || event.type === "memory_review.status"
@@ -66,7 +72,7 @@ export class OperatorNotices {
     private readonly windowMs = 60_000, private readonly now: () => number = Date.now) {}
 
   notify(event: OperatorEvent): void {
-    if (verdict(event)) { this.post(formatOperatorEvent(event)); return; }
+    if (verdict(event)) { this.post(formatOperatorEvent(event), failure(event) ? "alert" : "notice"); return; }
     const now = this.now();
     if (now - this.windowStart < this.windowMs) { this.folded.push(event.type); return; }
     this.windowStart = now;
@@ -81,7 +87,7 @@ export class OperatorNotices {
     this.post(message);
   }
 
-  private post(message: string): void {
-    this.store.createNotice({ ...this.target, text: message, source: "control-plane" });
+  private post(message: string, level: NoticeLevel = "notice"): void {
+    this.store.createNotice({ ...this.target, text: message, level, source: "control-plane" });
   }
 }

@@ -61,8 +61,11 @@
 | agent.input.requested | active | alert | 24 小时 | session + input request |
 | agent.approval.resolved | resolved | alert | 24 小时 | 沿用原审批 key |
 | agent.input.resolved | resolved | alert | 24 小时 | 沿用原提问 key |
+| agent.notice | message | notice（失败为 alert，可由发送方指定） | 24 小时 | notice + id |
 
 Matrix 等聊天房间当前对应的会话（`conversation_threads` 里还连着房间）由房间提醒，App 只收到 silent：完成、待审批和待回答进通知栏但不响不震，撤回照常；失败仍为 alert，两边都响。`!new` 后旧会话不再连着房间，之后在别处继续它时恢复正常级别。是否静音在发布时按会话当前的房间关联判断。
+
+`agent.notice` 来自 notice 出站箱里目标为 `app:<名字>` 的通知（Control Plane 生命周期，以后的定时任务和 webhook，见 [automations-design.zh.md](automations-design.zh.md)）：第一行作标题，其余作正文；有会话时链接到会话，否则 `/control/`。进入发件箱即记为已投递。App 网关需允许该类型（uctw-app `016a3f7` 起）。
 
 不推片段、工具进度或主动打断。已解决通知只用于撤回和同步状态，不另行震动。相同 pending 内容被 Bridge 再次报告时不产生新消息，不重置有效期。
 

@@ -428,6 +428,16 @@ export function migrateDatabase(db: DatabaseSync): void {
       db.exec("COMMIT");
     } catch (error) { try { db.exec("ROLLBACK"); } catch {} throw error; }
   }
+
+  // How loudly a notice interrupts on devices that have levels (the App).
+  if (!db.prepare("SELECT 1 FROM schema_migrations WHERE version=16").get()) {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      addColumn(db, "notices", "level", "TEXT NOT NULL DEFAULT 'notice'");
+      db.prepare("INSERT INTO schema_migrations(version,applied_at) VALUES (16,?)").run(Date.now());
+      db.exec("COMMIT");
+    } catch (error) { try { db.exec("ROLLBACK"); } catch {} throw error; }
+  }
 }
 
 /**

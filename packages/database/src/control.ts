@@ -102,6 +102,8 @@ export interface NoticeRow {
   /** "" is the room's main timeline. */
   threadId: string;
   text: string;
+  /** How loudly it interrupts where devices have levels (the App). */
+  level: NoticeLevel;
   /** Who queued it: `control-plane`, or the principal that posted it. */
   source: string;
   /** The session the notice speaks for; a reply in its thread continues that session. */
@@ -112,11 +114,15 @@ export interface NoticeRow {
   deliveredAt: number | null;
 }
 
+export const NOTICE_LEVELS = ["silent", "notice", "alert"] as const;
+export type NoticeLevel = typeof NOTICE_LEVELS[number];
+
 const NOTICE_RETENTION_MS = 30 * 86_400_000;
 
 function noticeWire(row: Record<string, unknown>): NoticeRow {
   return { id: String(row.id), connector: String(row.connector), roomId: String(row.room_id), threadId: String(row.thread_id),
-    text: String(row.text), source: String(row.source), sessionId: row.session_id == null ? null : String(row.session_id),
+    text: String(row.text), level: (NOTICE_LEVELS as readonly string[]).includes(String(row.level)) ? row.level as NoticeLevel : "notice",
+    source: String(row.source), sessionId: row.session_id == null ? null : String(row.session_id),
     eventId: row.event_id == null ? null : String(row.event_id), createdAt: Number(row.created_at),
     deliveredAt: row.delivered_at == null ? null : Number(row.delivered_at) };
 }
@@ -844,14 +850,14 @@ export class AgentControlStore {
    * the notice already queued. The connector posts it and reports back with `deliverNotice`.
    */
   createNotice(input: { id?: string; connector: string; roomId: string; threadId?: string; text: string;
-    source: string; sessionId?: string }): NoticeRow {
+    level?: NoticeLevel; source: string; sessionId?: string }): NoticeRow {
     const id = input.id ?? randomUUID();
     return this.transaction(() => {
       const existing = this.notice(id);
       if (existing) return existing;
-      this.db.prepare(`INSERT INTO notices(id,connector,room_id,thread_id,text,source,session_id,created_at)
-        VALUES (?,?,?,?,?,?,?,?)`).run(id, input.connector, input.roomId, input.threadId ?? "", input.text, input.source,
-        input.sessionId ?? null, Date.now());
+      this.db.prepare(`INSERT INTO notices(id,connector,room_id,thread_id,text,level,source,session_id,created_at)
+        VALUES (?,?,?,?,?,?,?,?,?)`).run(id, input.connector, input.roomId, input.threadId ?? "", input.text, input.level ?? "notice",
+        input.source, input.sessionId ?? null, Date.now());
       markChanged(this.db, "notice", id);
       return this.notice(id)!;
     });
@@ -875,12 +881,15 @@ export class AgentControlStore {
 
   /** Record where a connector posted a notice; a repeated report keeps the first event id. */
   deliverNotice(id: string, eventId: string): NoticeRow | undefined {
-    return this.transaction(() => {
-      const changed = this.db.prepare("UPDATE notices SET event_id=?,delivered_at=? WHERE id=? AND delivered_at IS NULL")
-        .run(eventId, Date.now(), id).changes;
-      if (changed) markChanged(this.db, "notice", id);
-      return this.notice(id);
-    });
+    return this.transaction(() => this.markNoticeDelivered(id, eventId));
+  }
+
+  /** `deliverNotice` inside a transaction the caller already holds. */
+  markNoticeDelivered(id: string, eventId: string): NoticeRow | undefined {
+    const changed = this.db.prepare("UPDATE notices SET event_id=?,delivered_at=? WHERE id=? AND delivered_at IS NULL")
+      .run(eventId, Date.now(), id).changes;
+    if (changed) markChanged(this.db, "notice", id);
+    return this.notice(id);
   }
 
   /** Store attachment bytes content-addressed by sha256; returns the ref (deduped). */
