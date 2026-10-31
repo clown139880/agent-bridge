@@ -200,6 +200,16 @@ export class AgentSkills {
     return { name: entry.name, scope: input.to, path: target, commit };
   }
 
+  /** Move every skill of a scope to its new id (after the memory scope was renamed). */
+  renameScope(writer: Writer, from: string, to: string): { moved: boolean; commit: string | null } {
+    if (!SCOPE_SLUG.test(to)) throw new MemoryError("invalid_scope", to);
+    const source = join(this.scopesDir, from), target = join(this.scopesDir, to);
+    if (!existsSync(source)) return { moved: false, commit: null };
+    if (existsSync(target)) throw new MemoryError("target_exists", `scopes/${to}`);
+    renameSync(source, target);
+    return { moved: true, commit: this.commit([`scopes/${from}`, `scopes/${to}`], writer, `skills: rename scope ${from} -> ${to}`) };
+  }
+
   // ---- internals ----
 
   private entry(scope: string, dir: string): SkillEntry | undefined {

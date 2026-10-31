@@ -501,6 +501,7 @@ function setupInput(roomId: string, text: string): string {
   return [
     `[Matrix 房间设置] 这条消息来自一个还没绑定记忆作用域的 Matrix 房间（${roomId}）。`,
     "按用户的描述帮这个房间准备作用域和工作目录：已有合适的作用域就用它；没有就用中央记忆的 scope 工具（machine_id + cwd，create=true）为工作目录建一个，目录不存在先建好。",
+    "新作用域一定用 scope_hint 给一个能看懂的 id（小写字母、数字和短横线，说明它是什么，如 ops、travel），不要用生成的 id；已经是生成 id（room-xxxx）的，用 scope_rename 改名。",
     "房间由用户在房间里发 `!bind <scope> [机器:/路径]` 绑定；绑定后这次会话结束，下一条消息在该作用域开新会话。最后把要发的那条 `!bind` 命令告诉用户。",
     "", "用户消息：", text,
   ].join("\n");

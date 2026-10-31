@@ -184,14 +184,17 @@ export class AgentMemory {
       if (hits.length > 1) return { ...this.resolution(GLOBAL, "global", false), conflict: hits.map((scope) => scope.id) };
     }
     if (create) {
+      // A hint that names no scope yet is the id the caller wants for the new one.
+      const wanted = locator.scopeHint && SCOPE_SLUG.test(locator.scopeHint) && !locator.scopeHint.startsWith("_")
+        && !existsSync(join(this.scopesDir, locator.scopeHint)) ? locator.scopeHint : undefined;
       if (room) {
-        const id = `room-${createHash("sha256").update(room).digest("hex").slice(0, 8)}`;
+        const id = wanted ?? `room-${createHash("sha256").update(room).digest("hex").slice(0, 8)}`;
         this.createScope(id, locator.roomName || id, { rooms: [room], repositories: [], locations: [] }, create.writer);
         return this.resolution(id, "room", true);
       }
       if (repository || (path && locator.machineId)) {
         const name = slugify(basename(repository ?? path!)) || "project";
-        const id = this.freeScopeId(`repo-${name}`);
+        const id = wanted ?? this.freeScopeId(`repo-${name}`);
         this.createScope(id, basename(repository ?? path!), {
           rooms: [], repositories: repository ? [repository] : [],
           locations: !repository && path ? [{ machine: locator.machineId!, path }] : [],
@@ -235,6 +238,25 @@ export class AgentMemory {
     writeAtomic(file, renderDocument(doc));
     this.commit(scope, writer, `memory(${scope}): bind ${[room, location && `${location.machine}:${location.path}`].filter(Boolean).join(", ")}`);
     return this.scope(scope);
+  }
+
+  /**
+   * Give a scope a new id: its directory and `id` move in one commit, bindings and facts come along.
+   * Callers move what lives under the id elsewhere (skills, automations). `_` scopes are not renamed.
+   */
+  renameScope(writer: Writer, from: string, to: string, title?: string): ScopeInfo {
+    this.authorize(writer, from);
+    if (from.startsWith("_") || to.startsWith("_")) throw new MemoryError("forbidden", "_-prefixed scopes keep their ids");
+    if (!SCOPE_SLUG.test(to)) throw new MemoryError("invalid_scope", to);
+    if (existsSync(join(this.scopesDir, to))) throw new MemoryError("scope_exists", to);
+    renameSync(join(this.scopesDir, from), join(this.scopesDir, to));
+    const file = join(this.scopesDir, to, "scope.md");
+    const doc = parseDocument(readFileSync(file, "utf8"));
+    doc.data.id = to;
+    if (title?.trim()) doc.data.title = title.trim();
+    writeAtomic(file, renderDocument(doc));
+    this.commitPaths([from, to], writer, `memory(${to}): rename scope ${from} -> ${to}`);
+    return this.scope(to);
   }
 
   private freeScopeId(base: string): string {
@@ -543,12 +565,16 @@ export class AgentMemory {
 
   /** Commit only this scope's directory, under the vault lock shared with the auto-commit job. */
   private commit(scope: string, writer: Writer, subject: string): string | null {
+    return this.commitPaths([scope], writer, subject);
+  }
+
+  private commitPaths(scopes: string[], writer: Writer, subject: string): string | null {
     const vault = this.options.vault;
     if (!existsSync(join(vault, ".git"))) return null;
-    const pathspec = relative(vault, join(this.scopesDir, scope)).split(/[\\/]/).join("/");
+    const pathspecs = scopes.map((scope) => relative(vault, join(this.scopesDir, scope)).split(/[\\/]/).join("/"));
     const lock = this.options.lockPath;
-    const script = 'git add -A -- "$1" && { git diff --cached --quiet -- "$1" || git commit -q -m "$2" -- "$1"; }';
-    const command = ["sh", "-c", script, "agent-memory-commit", pathspec, `${subject}\n\nby: ${writer.name}`];
+    const script = 'm="$1"; shift; git add -A -- "$@" && { git diff --cached --quiet -- "$@" || git commit -q -m "$m" -- "$@"; }';
+    const command = ["sh", "-c", script, "agent-memory-commit", `${subject}\n\nby: ${writer.name}`, ...pathspecs];
     const env = { ...process.env, GIT_AUTHOR_NAME: `agent-memory (${writer.name})`, GIT_AUTHOR_EMAIL: "agent-memory@localhost",
       GIT_COMMITTER_NAME: "agent-memory", GIT_COMMITTER_EMAIL: "agent-memory@localhost" };
     try {

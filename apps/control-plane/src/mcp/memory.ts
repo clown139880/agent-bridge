@@ -12,6 +12,8 @@ export interface AgentMemoryMcpOptions {
   writers: Array<Writer & { token: string }>;
   /** Holds writes a project agent may not make alone for review instead of refusing them. */
   review?: MemoryReviews;
+  /** Things kept under a scope's id outside memory and skills (automations) follow a rename. */
+  onScopeRenamed?(from: string, to: string, by: string): void;
 }
 
 /** Tools whose refusal for a project writer becomes a review. */
@@ -140,7 +142,7 @@ function baseTools(history: ConversationMemoryStore, agentMemory?: AgentMemoryMc
     },
     {
       name: "scope", legacy: "memory_resolve_scope", allowed: memoryRead,
-      description: "Find the memory scope for a Matrix room or a project (repository remote, or machine_id + cwd). Unbound keys fall back to _global; create=true (writers only) makes a provisional scope for an unbound room/repository.",
+      description: "Find the memory scope for a Matrix room or a project (repository remote, or machine_id + cwd). Unbound keys fall back to _global; create=true (writers only) makes a provisional scope for an unbound room/repository; give scope_hint as the new scope's id (a short lowercase slug naming what it is, e.g. ops, travel), otherwise the id is generated.",
       inputSchema: object({
         room_id: { type: "string" }, room_name: { type: "string" }, repository: { type: "string" },
         machine_id: { type: "string" }, cwd: { type: "string" }, scope_hint: { type: "string" }, create: { type: "boolean" },
@@ -148,6 +150,18 @@ function baseTools(history: ConversationMemoryStore, agentMemory?: AgentMemoryMc
       run: (args, principal) => ({ ...store!.resolveScope({ roomId: stringArg(args.room_id), roomName: stringArg(args.room_name),
         repository: stringArg(args.repository), machineId: stringArg(args.machine_id), cwd: stringArg(args.cwd),
         scopeHint: stringArg(args.scope_hint) }, args.create === true ? { writer: writer(principal) } : undefined) }),
+    },
+    {
+      name: "scope_rename", allowed: memoryWrite,
+      description: "Give a scope a readable id (and optionally a title): memory, bindings, skills and automations under the old id move with it. Use when a scope was created with a generated id such as room-1a2b3c4d.",
+      inputSchema: object({ from: SCOPE, to: { type: "string", description: "new id: lowercase letters, digits and dashes" }, title: { type: "string" } }, ["from", "to"]),
+      run: (args, principal) => {
+        const from = required(args, "from"), to = required(args, "to"), who = writer(principal);
+        const scope = store!.renameScope(who, from, to, stringArg(args.title));
+        const skills = agentMemory!.skills?.renameScope(who, from, to);
+        agentMemory!.onScopeRenamed?.(from, to, who.name);
+        return { scope: scope.id, title: scope.title, skillsMoved: skills?.moved ?? false };
+      },
     },
     {
       name: "bootstrap", legacy: "memory_bootstrap", allowed: memoryRead,

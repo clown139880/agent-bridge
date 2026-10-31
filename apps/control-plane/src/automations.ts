@@ -1,6 +1,6 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { spawn, execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import pino from "pino";
@@ -468,6 +468,17 @@ export class Automations {
     return (definition.deliver ?? ["app"]).map((item) => item === "app" ? this.options.operatorTarget : parseNoticeTarget(item)!);
   }
 
+  /** Follow a renamed memory scope: its task directory moves too, in one commit. */
+  renameScope(from: string, to: string, by: string): boolean {
+    const source = join(this.options.dir, from), target = join(this.options.dir, to);
+    if (!existsSync(source)) return false;
+    if (existsSync(target)) throw new AutomationError(409, "target_exists", `automations/${to} exists`);
+    renameSync(source, target);
+    this.commit(source, `automations: rename scope ${from} -> ${to}`, by, [target]);
+    this.reload(true);
+    return true;
+  }
+
   // ---- proposals ------------------------------------------------------------
 
   /** An agent's change waits here until the human confirms it; nothing is written or scheduled before. */
@@ -528,13 +539,13 @@ export class Automations {
     return this.proposal(id)!;
   }
 
-  private commit(file: string, subject: string, by: string): void {
+  private commit(file: string, subject: string, by: string, more: string[] = []): void {
     let repo: string;
     try { repo = execFileSync("git", ["rev-parse", "--show-toplevel"], { cwd: this.options.dir, encoding: "utf8" }).trim(); }
     catch { return; }
-    const path = relative(repo, file).split(sep).join("/");
+    const paths = [file, ...more].map((item) => relative(repo, item).split(sep).join("/"));
     const script = 'm="$1"; shift; git add -A -- "$@" && { git diff --cached --quiet -- "$@" || git commit -q -m "$m" -- "$@"; }';
-    const command = ["sh", "-c", script, "automation-commit", `${subject}\n\nby: ${by}`, path];
+    const command = ["sh", "-c", script, "automation-commit", `${subject}\n\nby: ${by}`, ...paths];
     const env = { ...process.env, GIT_AUTHOR_NAME: "agent-automations", GIT_AUTHOR_EMAIL: "agent-skills@localhost",
       GIT_COMMITTER_NAME: "agent-automations", GIT_COMMITTER_EMAIL: "agent-skills@localhost" };
     const lock = this.options.lockPath;

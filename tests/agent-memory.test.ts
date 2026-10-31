@@ -288,3 +288,31 @@ test("/mcp/memory serves the short tool names over the MCP SDK with the same tok
     store.db.close();
   }
 });
+
+test("a new scope takes the id the caller asked for, and a rename carries its memory and bindings", async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { AgentMemory } = await import("../packages/agent-memory/src/index.js");
+  const vault = mkdtempSync(join(tmpdir(), "rename-")), root = join(vault, "agent-memory", "scopes");
+  mkdirSync(join(root, "_global"), { recursive: true });
+  writeFileSync(join(root, "_global", "scope.md"), "---\ntype: scope\nid: _global\ntitle: g\nstatus: active\ndiscoverable: true\nbindings:\n  rooms: []\n  repositories: []\n  locations: []\nbootstrap_budget: 1500\n---\n");
+  writeFileSync(join(root, "_global", "entities.md"), "---\ntype: entity-index\nentities: []\n---\n");
+  writeFileSync(join(vault, "agent-memory", "predicates.yaml"), "predicates:\n  - id: rule\n");
+  const memory = new AgentMemory({ vault });
+  const writer = { name: "claude@hal", role: "agent" as const };
+  try {
+    const named = memory.resolveScope({ roomId: "!ops:x", roomName: "全局运维", scopeHint: "ops" }, { writer });
+    assert.equal(named.scope, "ops"); assert.equal(memory.scope("ops").title, "全局运维");
+    const generated = memory.resolveScope({ roomId: "!b:x", roomName: "B" }, { writer });
+    assert.match(generated.scope, /^room-[0-9a-f]{8}$/);
+    memory.write(writer, { scope: generated.scope, topic: "role", kind: "rule", value: "测试规则" });
+    const renamed = memory.renameScope(writer, generated.scope, "bee", "蜜蜂");
+    assert.equal(renamed.id, "bee"); assert.equal(renamed.title, "蜜蜂");
+    assert.deepEqual(renamed.rooms, ["matrix:!b:x"]);
+    assert.equal(memory.resolveScope({ roomId: "!b:x" }).scope, "bee");
+    assert.ok(existsSync(join(root, "bee", "facts", "role", "rule.md")) && !existsSync(join(root, generated.scope)));
+    assert.throws(() => memory.renameScope(writer, "bee", "ops"), /scope_exists/);
+    assert.throws(() => memory.renameScope(writer, "_global", "x"), /forbidden/);
+  } finally { rmSync(vault, { recursive: true, force: true }); }
+});
