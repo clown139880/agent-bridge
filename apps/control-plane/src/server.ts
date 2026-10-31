@@ -138,8 +138,9 @@ export class ControlPlane {
     this.controlStore = new AgentControlStore(store.db, options.retention ?? {
       actionsMs: 86_400_000, attachmentsMs: 7 * 86_400_000,
     });
-    if (options.messages) this.messages = new AgentMessagePublisher(store, this.controlStore, options.messages);
     this.conversations = new Conversations(this.controlStore, this.registry, agentMemory, options.conversationSetup);
+    if (options.messages) this.messages = new AgentMessagePublisher(store, this.controlStore, options.messages,
+      { relayed: (sessionId) => this.conversations.relays(sessionId) });
     this.controlApi = new AgentControlApi(store, this.controlStore, this.registry, {
       readToken: options.controlApiReadToken, writeToken: options.controlApiWriteToken, bridgeToken: options.bridgeToken,
       agents, memoryReviews: this.memoryReviews, conversations: this.conversations,

@@ -79,6 +79,7 @@ test("a room's scope picks the workspace; the room keeps one session until new, 
     // The same session bound in a thread leaves the main timeline.
     await f.call("PUT", room, { threadId: "$root", sessionId: "older" });
     assert.equal((await f.call("GET", room)).body.sessionId, null);
+    assert.equal((f.internals as unknown as { conversations: { relays(id: string): boolean } }).conversations.relays("older"), true);
     assert.deepEqual((await f.call("GET", "/conversations/matrix")).body.data, [{ roomId: "!app:example.org", threadId: "$root", sessionId: "older" }]);
 
     await f.call("POST", "/sessions/older/turns", { input: "go", delivery: "start_turn" }, "turn-1");
@@ -88,6 +89,13 @@ test("a room's scope picks the workspace; the room keeps one session until new, 
     conversation = (await f.call("PUT", room, { threadId: "$root", sessionId: null, agent: "claude" })).body;
     assert.equal(conversation.sessionId, null); assert.equal(conversation.agent, "claude");
     assert.equal((await f.call("PUT", room, { agent: "gpt" })).status, 400);
+    // After new, the room no longer relays the old session, but its resume still bootstraps from the room's scope.
+    const conversations = (f.internals as unknown as { conversations: { relays(id: string): boolean } }).conversations;
+    assert.equal(conversations.relays("older"), false);
+    f.sent.length = 0;
+    await f.call("POST", "/sessions/older/turns", { input: "again", delivery: "start_turn" }, "turn-2");
+    const resumed = f.sent.find((message) => message.type === "action.submit_turn");
+    assert.equal(resumed?.type === "action.submit_turn" && resumed.resume?.memoryScope, "repo-app");
   } finally { await f.close(); }
 });
 

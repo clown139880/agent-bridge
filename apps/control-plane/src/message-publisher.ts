@@ -24,7 +24,7 @@ export interface BusinessMessage {
   key: string;
   revision: number;
   state: "message" | "active" | "resolved";
-  level: "notice" | "alert";
+  level: "silent" | "notice" | "alert";
   title: string;
   body?: string;
   url: string;
@@ -60,7 +60,11 @@ export class AgentMessagePublisher {
 
   constructor(private readonly store: Store, private readonly control: AgentControlStore,
     private readonly options: MessageMqttOptions,
-    private readonly dependencies: { now?: () => number; publish?: Publish } = {}) {
+    private readonly dependencies: {
+      now?: () => number; publish?: Publish;
+      /** A chat room (Matrix) already reports this session, so the phone gets its completions and requests quietly. */
+      relayed?: (sessionId: string) => boolean;
+    } = {}) {
     const url = new URL(options.url);
     if (!["mqtt:", "mqtts:"].includes(url.protocol)) throw new Error("MESSAGE_MQTT_URL must use mqtt or mqtts");
     this.now = dependencies.now ?? Date.now;
@@ -160,7 +164,7 @@ export class AgentMessagePublisher {
         : detail && typeof detail === "object" && "message" in detail ? String(detail.message) : "";
       this.enqueue({ eventId: `ab:${item.eventId}`, type: `agent.${event.type}`,
         key: `agent:${session.id}:turn:${event.turnId ?? item.eventId}`, state: "message",
-        level: completed ? "notice" : "alert", title: `${completed ? "任务完成" : "任务失败"} · ${this.title(session.id)}`,
+        level: completed ? this.quiet(session.id, "notice") : "alert", title: `${completed ? "任务完成" : "任务失败"} · ${this.title(session.id)}`,
         body: summary, url: `/control/sessions/${encodeURIComponent(session.id)}`, createdAt: event.timestamp,
         expiresAt: event.timestamp + (completed ? 600_000 : 1_800_000),
         data: { sessionId: session.id, machineId: session.machineId, agent: session.agentType,
@@ -188,11 +192,16 @@ export class AgentMessagePublisher {
     const createdAt = active ? pending.requestedAt : pending.resolvedAt ?? this.now();
     this.enqueue({ eventId: `ab:${eventId}`, type: `agent.${approval ? "approval" : "input"}.${active ? "requested" : "resolved"}`,
       key: `agent:${session.id}:${approval ? "approval" : "input"}:${pending.id}`, state: active ? "active" : "resolved",
-      level: "alert", title: `${active ? approval ? "需要审批" : "需要回答" : "已处理"} · ${this.title(session.id)}`,
+      level: this.quiet(session.id, "alert"), title: `${active ? approval ? "需要审批" : "需要回答" : "已处理"} · ${this.title(session.id)}`,
       body: approval ? String(pending.request.summary ?? "") : (questions ?? []).map(q => q.question ?? "").join("\n"),
       url: `/control/sessions/${encodeURIComponent(session.id)}`, createdAt, expiresAt: createdAt + DAY,
       data: { sessionId: session.id, machineId: session.machineId, agent: session.agentType,
         requestId: pending.id, ...(pending.turnId ? { turnId: pending.turnId } : {}) } });
+  }
+
+  // Failures still alert on every channel; they are rare and matter.
+  private quiet(sessionId: string, level: "notice" | "alert"): BusinessMessage["level"] {
+    return this.dependencies.relayed?.(sessionId) ? "silent" : level;
   }
 
   private title(sessionId: string): string {

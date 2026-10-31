@@ -11,10 +11,10 @@ function fixture() {
     projectPath: "/tmp/project", matrixRoomId: "", matrixThreadId: null, nativeSessionId: "native",
     status: "working", createdAt: Date.now(), updatedAt: Date.now() });
   const control = new AgentControlStore(store.db, { actionsMs: 86_400_000, attachmentsMs: 86_400_000 });
-  let now = Date.now(), offline = false;
+  let now = Date.now(), offline = false, relayed = false;
   const deliveries: Array<{ topic: string; payload: string; retain: boolean }> = [];
   const publisher = () => new AgentMessagePublisher(store, control, { url: "mqtt://localhost:1883" }, {
-    now: () => now, publish: async (topic, payload, retain) => {
+    now: () => now, relayed: () => relayed, publish: async (topic, payload, retain) => {
       if (offline) throw new Error("offline");
       deliveries.push({ topic, payload, retain });
     },
@@ -26,7 +26,8 @@ function fixture() {
   const approval = () => control.upsertApproval("hal", { approvalId: "request", sessionId: "session", turnId: "turn",
     kind: "Bash", summary: "请确认操作", choices: ["allow", "deny"], requestedAt: now });
   return { store, control, deliveries, publisher, event, approval,
-    advance: (ms: number) => { now += ms; }, setOffline: (value: boolean) => { offline = value; } };
+    advance: (ms: number) => { now += ms; }, setOffline: (value: boolean) => { offline = value; },
+    setRelayed: (value: boolean) => { relayed = value; } };
 }
 
 test("first activation skips historical turns and reconciles outstanding requests once", async () => {
@@ -64,6 +65,19 @@ test("terminal events are durable, Unicode bounded and distinct per turn; replay
     assert.equal(f.deliveries[0]!.topic, "uctw/messages/agent-bridge/events");
     const restarted = f.publisher(); restarted.capture(); await restarted.flush();
     assert.equal(f.deliveries.length, 2);
+  } finally { f.store.db.close(); }
+});
+
+test("a session a chat room relays reaches the phone quietly, except failures", async () => {
+  const f = fixture();
+  try {
+    const producer = f.publisher(); f.setRelayed(true);
+    f.event("one", "turn-1"); f.event("two", "turn-2", "turn.failed", "失败"); f.approval();
+    producer.capture(); await producer.flush();
+    const levels = f.deliveries.map(d => (JSON.parse(d.payload) as BusinessMessage).level);
+    assert.deepEqual(levels, ["silent", "alert", "silent"]);
+    f.setRelayed(false); f.event("three", "turn-3"); producer.capture(); await producer.flush();
+    assert.equal((JSON.parse(f.deliveries[3]!.payload) as BusinessMessage).level, "notice", "after new the phone alerts again");
   } finally { f.store.db.close(); }
 });
 

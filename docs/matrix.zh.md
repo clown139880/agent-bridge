@@ -34,6 +34,8 @@ Matrix 是 Agent Bridge 的一个聊天前端，以独立进程 `apps/matrix-con
 
 turn 运行时显示“正在输入”，结束后把最后一条助手消息作为回复；失败时回复错误。
 
+房间当前对应的会话由房间提醒：UCTW App 推送对它降为 silent（失败除外），避免两边重复响，见 [MQTT 业务消息 v1](message-events-v1.zh.md)。`!new` 之后的旧会话仍按房间作用域恢复记忆注入（`conversation_sessions` 记录会话来自哪个房间）。
+
 ## 状态与可靠性
 
 连接器本地只有一个状态文件（`MATRIX_CONNECTOR_STATE`，0600）：sync 位置、SSE 游标、设备 token 和尚未回答的提示。首次启动只建立 sync 基线，不处理历史消息。创建会话和发 turn 用 Matrix 事件 ID 派生的幂等键，出站消息用稳定的事务 ID，所以重放不会重复执行或重复发送。崩溃时正在攒的附件会丢失，需要重发。

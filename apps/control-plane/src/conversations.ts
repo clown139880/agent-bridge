@@ -39,6 +39,10 @@ export class Conversations {
       CREATE TABLE IF NOT EXISTS conversation_threads (connector TEXT NOT NULL, room_id TEXT NOT NULL,
         thread_id TEXT NOT NULL, session_id TEXT, updated_at INTEGER NOT NULL, PRIMARY KEY(connector, room_id, thread_id));
       CREATE INDEX IF NOT EXISTS conversation_threads_session ON conversation_threads(session_id);
+      CREATE TABLE IF NOT EXISTS conversation_sessions (session_id TEXT PRIMARY KEY, connector TEXT NOT NULL,
+        room_id TEXT NOT NULL, updated_at INTEGER NOT NULL);
+      INSERT OR IGNORE INTO conversation_sessions SELECT session_id,connector,room_id,updated_at
+        FROM conversation_threads WHERE session_id IS NOT NULL;
     `);
   }
 
@@ -82,6 +86,10 @@ export class Conversations {
         this.store.db.prepare(`INSERT INTO conversation_threads VALUES(?,?,?,?,?)
           ON CONFLICT(connector,room_id,thread_id) DO UPDATE SET session_id=excluded.session_id,updated_at=excluded.updated_at`)
           .run(connector, roomId, threadId, change.sessionId, now);
+        // Remember the room's scope even after `new` detaches the session, for its bootstrap on resume.
+        if (change.sessionId && this.bound(connector, roomId)) this.store.db.prepare(`INSERT INTO conversation_sessions VALUES(?,?,?,?)
+          ON CONFLICT(session_id) DO UPDATE SET connector=excluded.connector,room_id=excluded.room_id,updated_at=excluded.updated_at`)
+          .run(change.sessionId, connector, roomId, now);
         // A setup session in an unbound room does not choose the agent of the room's own sessions.
         const agent = change.sessionId && this.bound(connector, roomId) ? AGENT_TYPES[String(this.store.session(change.sessionId)?.agent)] : undefined;
         if (agent && !change.agent) this.store.db.prepare(`INSERT INTO conversation_rooms VALUES(?,?,?,?)
@@ -106,9 +114,14 @@ export class Conversations {
 
   /** The memory scope a session started from a room belongs to, for its bootstrap on resume. */
   scopeForSession(sessionId: string): string | undefined {
-    const row = this.store.db.prepare("SELECT connector,room_id FROM conversation_threads WHERE session_id=? LIMIT 1")
+    const row = this.store.db.prepare("SELECT connector,room_id FROM conversation_sessions WHERE session_id=?")
       .get(sessionId) as { connector: string; room_id: string } | undefined;
     return row && this.memory ? this.scopeOf(row.connector, row.room_id)?.id : undefined;
+  }
+
+  /** Whether a room still relays this session's replies and requests, so the phone need not also alert. */
+  relays(sessionId: string): boolean {
+    return Boolean(this.store.db.prepare("SELECT 1 FROM conversation_threads WHERE session_id=? LIMIT 1").get(sessionId));
   }
 
   validScope(scopeId: string): boolean {
