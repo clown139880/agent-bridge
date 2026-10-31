@@ -10,6 +10,7 @@
     "@hono/node-server": "^1.19.9",
     "@modelcontextprotocol/server": "^2.3.1",
     "hono": "^4.13.7",
-    "mqtt": "^5.16.1"
+    "mqtt": "^5.16.1",
+    "yaml": "^2.9.0"
   }
 }

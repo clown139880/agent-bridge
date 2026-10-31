@@ -8,6 +8,7 @@ import { controlBrowserApi } from "./web/api.js";
 import { createControlWeb } from "./web/app.js";
 
 const log = pino({ name: "control-http" });
+const HOOK_MAX_BYTES = 1024 * 1024;
 
 export type HttpEnv = { Bindings: HttpBindings };
 type NodeHandler = (request: IncomingMessage, response: ServerResponse) => Promise<unknown> | unknown;
@@ -19,6 +20,8 @@ export interface HttpAppDeps {
   /** SDK MCP endpoints, served at /mcp/<name>. */
   mcp?: Record<string, Handler<HttpEnv>>;
   controlApi: AgentControlApi;
+  /** POST /hooks/<id>: webhook-triggered automations, authenticated by each hook's own signature. */
+  hooks?: (id: string, headers: Record<string, string | string[] | undefined>, body: Buffer) => { status: number; body: Record<string, unknown> };
   /** Whether the public /api/v1 entrance has any credential configured. */
   apiEnabled: boolean;
   browserTokens: { read?: string; write?: string };
@@ -53,6 +56,17 @@ export function createHttpApp(deps: HttpAppDeps) {
   if (deps.memoryBootstrap) app.get("/memory/bootstrap", deps.memoryBootstrap);
   for (const [name, route] of Object.entries(deps.mcp ?? {})) app.all(`/mcp/${name}`, route);
   if (deps.legacyMcp) app.all("/mcp", nodeRoute("Conversation MCP", deps.legacyMcp));
+  if (deps.hooks) {
+    const hooks = deps.hooks;
+    app.post("/hooks/:id", async (c) => {
+      const length = Number(c.req.header("content-length") ?? 0);
+      if (length > HOOK_MAX_BYTES) return c.json({ error: "payload_too_large" }, 413);
+      const body = Buffer.from(await c.req.arrayBuffer());
+      if (body.length > HOOK_MAX_BYTES) return c.json({ error: "payload_too_large" }, 413);
+      const result = hooks(c.req.param("id"), c.env.incoming.headers, body);
+      return c.json(result.body, result.status as 202);
+    });
+  }
   if (deps.apiEnabled) app.all("/api/v1/*", nodeRoute("Control API", (request, response) => deps.controlApi.handle(request, response)));
   app.all("/control/api/v1/*", controlBrowserApi(deps.controlApi, deps.browserTokens, deps.version));
   app.route("/", createControlWeb(deps.webDirectory));

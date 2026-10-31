@@ -124,6 +124,12 @@ export class Conversations {
     return Boolean(this.store.db.prepare("SELECT 1 FROM conversation_threads WHERE session_id=? LIMIT 1").get(sessionId));
   }
 
+  /** Where a scheduled task of the scope runs a new session: its bound location, as a room's new session would. */
+  scopeTarget(scopeId: string, agent: string): Conversation["target"] {
+    const scope = this.memory?.scope(scopeId);
+    return scope ? this.target(scope, agent as ConversationAgent) : null;
+  }
+
   validScope(scopeId: string): boolean {
     return Boolean(this.memory?.scopes().some((scope) => scope.id === scopeId && scope.status !== "archived"));
   }

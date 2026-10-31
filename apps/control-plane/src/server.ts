@@ -28,6 +28,7 @@ import { AgentControlApi } from "./api/router.js";
 import { BridgeRegistry } from "./bridge-registry.js";
 import { WebhookNotifier, type WebhookOptions } from "./webhook.js";
 import { OperatorNotices, type NoticeTarget, type OperatorEvent } from "./notices.js";
+import { Automations, type AutomationOptions } from "./automations.js";
 import { NtfyNotifier, type NtfyOptions, type SessionNotificationKind } from "./ntfy.js";
 import { AgentMessagePublisher, type MessageMqttOptions } from "./message-publisher.js";
 import { AgentMemory, AgentSkills, type Writer } from "@agent-bridge/agent-memory";
@@ -60,6 +61,7 @@ export class ControlPlane {
   private readonly webhook: WebhookNotifier;
   /** Lifecycle events as notices in the operator's chat room (CONTROL_NOTICE_TARGET). */
   private operatorNotices?: OperatorNotices;
+  private readonly automations?: Automations;
   private readonly ntfy: NtfyNotifier;
   private readonly messages?: AgentMessagePublisher;
   private readonly memory: ConversationMemoryStore;
@@ -104,6 +106,8 @@ export class ControlPlane {
       webhook?: WebhookOptions;
       /** The operator's room for lifecycle notices, e.g. `matrix:!room:server`. */
       noticeTarget?: NoticeTarget;
+      /** Schedules and webhooks; failures and proposals go to `noticeTarget`, else the App. */
+      automations?: Omit<AutomationOptions, "operatorTarget">;
       ntfy?: NtfyOptions;
       messages?: MessageMqttOptions;
     },
@@ -147,9 +151,16 @@ export class ControlPlane {
     this.conversations = new Conversations(this.controlStore, this.registry, agentMemory, options.conversationSetup);
     if (options.messages) this.messages = new AgentMessagePublisher(store, this.controlStore, options.messages,
       { relayed: (sessionId) => this.conversations.relays(sessionId) });
+    if (options.automations) this.automations = new Automations({ ...options.automations,
+      operatorTarget: options.noticeTarget ?? { connector: "app", roomId: "operator", threadId: "" } }, {
+      store: this.controlStore, registry: this.registry,
+      dispatch: (action, message) => this.controlApi.actionsForBridge().dispatch(this.controlStore.action(action.actionId)!, message),
+      scopeTarget: (scope, agent) => this.conversations.scopeTarget(scope, agent),
+      validScope: (scope) => this.conversations.validScope(scope),
+    });
     this.controlApi = new AgentControlApi(store, this.controlStore, this.registry, {
       readToken: options.controlApiReadToken, writeToken: options.controlApiWriteToken, bridgeToken: options.bridgeToken,
-      agents, memoryReviews: this.memoryReviews, conversations: this.conversations,
+      agents, memoryReviews: this.memoryReviews, conversations: this.conversations, automations: this.automations,
       sseKeepaliveMs: options.sse?.keepaliveMs ?? 15_000,
       ssePollMs: options.sse?.pollMs ?? 2_000, sseMaxBackpressure: options.sse?.maxBackpressure ?? 3,
       actionTimeoutMs: options.sse?.actionTimeoutMs ?? 30_000,
@@ -179,6 +190,7 @@ export class ControlPlane {
       },
       legacyMcp: this.memoryMcp && ((request, response) => this.memoryMcp!.handle(request, response)),
       controlApi: this.controlApi,
+      hooks: this.automations && ((id, headers, body) => this.automations!.hook(id, headers, body)),
       apiEnabled,
       browserTokens: { read: options.controlApiReadToken, write: options.controlApiWriteToken },
       version: options.version,
@@ -195,6 +207,7 @@ export class ControlPlane {
     this.controlStore.resetTransientSessionActivity();
     await new Promise<void>((resolve) => this.http.listen(this.options.port, this.options.host, resolve));
     this.messages?.start();
+    this.automations?.start();
     setInterval(() => this.store.markStaleMachinesOffline(Date.now() - 45_000), 15_000).unref();
     this.controlStore.cleanup();
     this.memoryReviews?.resume();
@@ -221,6 +234,7 @@ export class ControlPlane {
 
   async stop(): Promise<void> {
     clearInterval(this.cleanupTimer);
+    this.automations?.stop();
     await this.messages?.stop();
     for (const bridge of this.bridges.values()) bridge.socket.close(1001, "server shutdown");
     await new Promise<void>((resolve) => this.http.close(() => resolve()));

@@ -142,8 +142,8 @@ test("/mcp/bridge scopes its tools to the caller's Control token and acts as tha
     assert.equal((await f.mcp("bridge-registration", "tools/list")).status, 401, "the Bridge registration token is not a driver");
     assert.equal((await f.mcp("nope", "tools/list")).status, 401);
     const names = async (token: string) => (await f.mcp(token, "tools/list")).body.result.tools.map((tool: any) => tool.name).sort();
-    assert.deepEqual(await names("read"), ["pending", "session", "sessions", "wait", "workers"]);
-    assert.deepEqual(await names("write"), ["answer", "approve", "create", "interrupt", "pending", "session", "sessions", "turn", "wait", "workers"]);
+    assert.deepEqual(await names("read"), ["automation_list", "automation_runs", "pending", "session", "sessions", "wait", "workers"]);
+    assert.deepEqual(await names("write"), ["answer", "approve", "automation_list", "automation_pause", "automation_propose", "automation_run", "automation_runs", "create", "interrupt", "pending", "session", "sessions", "turn", "wait", "workers"]);
 
     const listed = await f.mcp("read", "tools/call", { name: "sessions", arguments: { limit: 5 } });
     assert.deepEqual(listed.body.result.structuredContent.sessions.map((s: any) => s.sessionId).sort(), ["thread-1", "thread-2"]);
@@ -172,7 +172,7 @@ test("an agent token drives sessions through /mcp/bridge and every action names 
   const f = await fixture();
   try {
     const names = (await f.mcp("agent-claude-hal", "tools/list")).body.result.tools.map((tool: any) => tool.name).sort();
-    assert.deepEqual(names, ["answer", "approve", "create", "interrupt", "pending", "session", "sessions", "turn", "wait", "workers"]);
+    assert.deepEqual(names, ["answer", "approve", "automation_list", "automation_pause", "automation_propose", "automation_run", "automation_runs", "create", "interrupt", "pending", "session", "sessions", "turn", "wait", "workers"]);
     const creating = f.mcp("agent-claude-hal", "tools/call", { name: "create",
       arguments: { worker_id: "codex@dev", workspace: "repo", input: "from another agent" } });
     const action = await f.ack("action.create_session", { sessionId: "thread-new", turnId: "turn-new" });

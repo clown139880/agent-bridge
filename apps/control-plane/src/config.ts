@@ -75,6 +75,16 @@ export const config = {
     source: bridgeUpdateSource,
     publishedAt: bridgeUpdatePublishedAt,
   } : undefined,
+  // Schedules and webhooks (docs/automations-design.zh.md); off unless AUTOMATIONS_DIR is set.
+  automations: process.env.AUTOMATIONS_DIR ? {
+    dir: process.env.AUTOMATIONS_DIR,
+    scriptRoots: (process.env.AUTOMATION_SCRIPT_ROOTS ?? "").split(":").filter(Boolean),
+    secretsFile: process.env.AUTOMATION_SECRETS_FILE,
+    defaultAgent: process.env.AUTOMATION_DEFAULT_AGENT ?? "pi",
+    defaultModel: process.env.AUTOMATION_DEFAULT_MODEL || undefined,
+    lockPath: process.env.AGENT_SKILLS_LOCK,
+    push: process.env.AUTOMATION_PUSH !== "false",
+  } : undefined,
   // The operator's chat room for lifecycle notices, e.g. matrix:!room:server; a chat connector posts them.
   noticeTarget: noticeTarget(process.env.CONTROL_NOTICE_TARGET),
   // Dorothy bridge-events webhook. Both must be set to enable delivery.

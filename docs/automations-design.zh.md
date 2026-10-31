@@ -1,6 +1,6 @@
 # 定时任务与 Webhook 设计稿
 
-状态：第 1 期（notice 出站箱）已实现于 0.7.42，其余为方案（2026-10-31）。目标是替代 Hermes 的 cron 和 webhook，让 Agent Bridge 自己承担“无人发起”的工作。
+状态：已实现（2026-10-31）：notice 出站箱 0.7.42，推送到 App 0.7.43，定时任务、webhook、提案与确认 0.7.44。目标是替代 Hermes 的 cron 和 webhook，让 Agent Bridge 自己承担“无人发起”的工作。
 
 本仓库是公开项目，这里只写通用机制。具体的任务定义、私人脚本和 Hermes 迁移清单放在私有的 agent-skills 仓库 `automations/` 下（见第 4 节）。
 
@@ -52,7 +52,7 @@
 
 - **位置**：Control Plane 读取 `AUTOMATIONS_DIR`，部署时指向 agent-skills checkout 的 `automations/`。目录结构 `<scope>/<id>/automation.yaml`，同目录放这个任务自己的脚本。`automations/` 与 `scopes/` 并列，技能扫描器不会把它当技能。
 - **职责划分**：SQLite 只存运行时状态（下次运行、执行历史、待确认提案），定义本身以 Git 为准。
-- **写入**：与技能库共用一个写入方和同一把锁。经 Control Plane 写入：`flock` → 校验 → 凭据扫描 → 一次提交 → 异步推送。人工改动按 agent-skills README 加锁提交，Control Plane 在自己提交后和文件变化时重新加载。
+- **写入**：与技能库共用同一把锁（`AGENT_SKILLS_LOCK`）。确认后的提案由 Control Plane 写入 `automation.yaml`，加锁提交、异步推送（`AUTOMATION_PUSH=false` 关闭推送）。人工改动按 agent-skills README 加锁提交。Control Plane 每 15 秒检查文件是否变化，有变化就重新加载。
 
 ```yaml
 # automations/<scope>/<id>/automation.yaml
@@ -60,15 +60,21 @@ title: 经营日报
 trigger:                       # 二选一
   schedule: { cron: "20 9 * * *", tz: Asia/Shanghai, catchUp: once }   # 或 everyMinutes: 30
   # webhook: { secretRef: hook_report, template: "{emoji} {title}\n{detail}" }
-script: { path: report.sh, cwd: /path/to/project, timeoutSec: 600 }    # 可选；相对路径相对本目录
+script: { path: report.sh, cwd: /path/to/project, timeoutSec: 600, envFile: /path/outside/repo.env }  # 可选；相对路径相对本目录
 agent:                         # 可选；省略 agent/model 时用部署默认值
   prompt: |
     ...
   target: pi@hal:/path         # 省略时按 scope 的 locations
   timeoutMin: 30
-deliver: [matrix:!room:server] # 省略时为 scope 绑定的房间；[] 表示不投递
+template: "{emoji} {title}"    # notify：用 webhook 请求体或脚本 JSON 输出填占位符
+deliver: [app, matrix:!room:server] # 省略时为 app（推到手机）；[] 表示不投递
+level: notice                  # 推到 App 时的提醒级别：silent | notice | alert
 enabled: true
 ```
+
+- 输出拼法：脚本 stdout 是 JSON 对象时，它的字段和 webhook 请求体一起填进 `template` 和 `agent.prompt` 的 `{占位符}`；否则 stdout 原样放在 prompt 顶部（`[脚本输出]`），没有 template 和 agent 时直接作为消息。
+- `.py` 用 `python3`、`.sh` 用 `bash` 运行，其余直接执行；环境只有 `PATH/HOME/LANG/TZ`、`AUTOMATION_ID/AUTOMATION_RUN_ID` 和 `envFile` 的内容。
+- 投递到房间时，agent 任务的 notice 带会话 id，线程回复接着那次会话；推到 App 的点开进会话。
 
 - 部署默认值：`AUTOMATION_DEFAULT_AGENT=pi`，`AUTOMATION_DEFAULT_MODEL` 由部署填写（HAL 上为 deepseek-v4-flash）。代码里不写死某个模型。
 - 执行历史 `automation_runs`：`id, automation, trigger_at, started_at, finished_at, status (ok|silent|failed|skipped|missed), session_id?, output (≤64 KiB), error`。
@@ -102,7 +108,7 @@ enabled: true
 - 路由：`POST /hooks/<id>`，挂在 Control Plane 现有的 Hono 入口上。暴露范围与 Control Plane 相同。
 - 鉴权：每个 hook 一个 HMAC secret，由 `secretRef` 从部署的 secret 文件读取，不进仓库、不进库、不进日志。
   - 接受 GitHub 风格的 `X-Hub-Signature-256: sha256=<hex>`，与 Control Plane 现有的 `webhook.ts` 相同。
-  - Hermes 通用 HMAC（带时间戳的 V2）也兼容，前提是调用方确实在用它。迁移前逐个调用方确认请求头，只实现用到的方案。
+  - 也接受 GitLab 风格的 `X-Gitlab-Token: <secret>`（ComfyUI 机器的回调用它），以及 Hermes 通用 HMAC：`X-Webhook-Signature`（只签请求体）和 `X-Webhook-Signature-V2` + `X-Webhook-Timestamp`（签 `<ts>.<body>`，±5 分钟）。
 - 先校验长度上限（1 MB）和签名，再读请求体。立即返回 `202 {runId}`，运行异步进行。
 - 去重：有投递 ID 头时按它去重，否则按 body 哈希，10 分钟窗口。
 - 模板：`{a.b}` 取 JSON 路径，缺失的字段渲染为空。也可以不用模板，改用 `script` 转换，stdout 即消息。
@@ -114,17 +120,18 @@ enabled: true
 “做什么”指触发、脚本、prompt、目标和投递。暂停、恢复和手动运行一个已确认的任务不需要确认。删除也要确认，与全局规则一致。
 
 - **提案**：agent 经 `/mcp/bridge` 的 `automation_propose`（新建、修改或删除）只生成一条提案，存在 SQLite 的 `automation_proposals`。此时不写文件，也不调度。
-  - Control Plane 发一条 notice 到 scope 的房间（没有就发到通知房间），内容是任务的完整定义（修改时给出差异），并提示 ✅/❌。
-  - Control Center 也列出待确认的提案。
+  - Control Plane 推一条 alert 级 notice 到运维目标（`CONTROL_NOTICE_TARGET`，默认 App），提示去控制中心首页确认。
+  - 控制中心首页列出待确认的提案（完整定义和当前定义），以及所有任务的下次运行、上次结果，可手动运行和暂停。
   - 提案 7 天未确认就过期。
-- **确认**：只有人能确认。具体有两条路：
-  - Control Center 登录用户；
-  - 连接器转发 `MATRIX_ALLOWED_USERS` 里的人对提案消息的 ✅ 反应。
-  
+- **确认**：只有人能确认：`POST /api/v1/automations/proposals/:id/decision` 只接受 `control:*` 身份（控制中心、人的 Control API token）。Matrix 不再承担确认（通知改走 App）。
+
   确认接口不在 `/mcp/bridge` 上，agent token 调用会被拒绝。所以 agent（包括驱动别人会话的 agent）没法替人确认，这和普通工具审批不同。确认后 Control Plane 才写入 `automation.yaml`、提交并开始调度。
 - **只读与免确认操作**：`automation_list`、`automation_runs` 只读，在 HAL 上放行；`automation_pause`、`automation_run` 照常走工具审批。
 - **人直接改**：在 Control Center 新建或修改，或者人工加锁提交到仓库，本身就是人的操作，不再二次确认。
-- **REST**：`/api/v1/automations`（列表、读取、暂停/恢复）、`POST …/:id/run`、`GET …/:id/runs`、`/api/v1/automations/proposals`。
+- **REST**：`GET /api/v1/automations`、`GET …/:id`（定义和最近运行）、`GET …/:id/runs`、`POST …/:id/run|pause|resume`、`GET|POST /api/v1/automations/proposals`、`POST …/proposals/:id/decision`。
+- **MCP**（`/mcp/bridge`）：`automation_list`、`automation_runs`、`automation_propose`、`automation_run`、`automation_pause`。
+
+**部署配置**（Control Plane 环境）：`AUTOMATIONS_DIR`（未设置则整个模块关闭）、`AUTOMATION_SCRIPT_ROOTS`（冒号分隔）、`AUTOMATION_SECRETS_FILE`（`secretRef=值`，0600，仓库外）、`AUTOMATION_DEFAULT_AGENT`（默认 pi）、`AUTOMATION_DEFAULT_MODEL`（不设则用 agent 自己的默认模型）、`AUTOMATION_PUSH`。
 
 ## 8. 从 Hermes 迁移
 

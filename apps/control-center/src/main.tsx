@@ -167,6 +167,65 @@ function MemoryReviewPanel({ writable }: { writable: boolean }) {
   </aside>;
 }
 
+interface AutomationProposal { id: string; action: "create" | "update" | "delete"; automationId: string; scope: string;
+  definition: Record<string, unknown> | null; previous: Record<string, unknown> | null; reason: string | null; proposedBy: string; createdAt: number }
+interface AutomationRow { id: string; scope: string; title: string; kind: string | null; trigger: string | null; error: string | null;
+  enabled: boolean; paused: boolean; nextAt: number | null; deliver: string[]; lastRun: { status: string; triggerAt: number; error: string | null } | null }
+const VERBS = { create: "新建", update: "修改", delete: "删除" } as const;
+const RUN_LABELS: Record<string, string> = { ok: "已投递", silent: "无输出", failed: "失败", skipped: "跳过", missed: "错过", running: "运行中" };
+/** Scheduled and webhook tasks, and the changes agents proposed (docs/automations-design.zh.md): only you confirm them. */
+function AutomationPanel({ writable }: { writable: boolean }) {
+  const [proposals, setProposals] = useState<AutomationProposal[]>([]), [tasks, setTasks] = useState<AutomationRow[]>([]);
+  const [busy, setBusy] = useState(""), [error, setError] = useState("");
+  const client = useRef<ControlClient>();
+  const load = async () => {
+    try {
+      const [p, t] = await Promise.all([client.current!.request<{ data: AutomationProposal[] }>("/automations/proposals?status=pending"),
+        client.current!.request<{ data: AutomationRow[] }>("/automations")]);
+      setProposals(p.data); setTasks(t.data); setError("");
+    } catch (e) { const text = explain(e); if (!/not.found|404/i.test(text)) setError(text); }
+  };
+  useEffect(() => {
+    client.current = new ControlClient("", () => {}, "/control/api/v1"); void load();
+    const timer = setInterval(() => { if (document.visibilityState === "visible") void load(); }, 60_000);
+    return () => { clearInterval(timer); client.current?.dispose(); };
+  }, []);
+  const act = async (key: string, path: string, body: unknown) => {
+    setBusy(key);
+    try { await client.current!.request(path, { body }); await load(); }
+    catch (e) { setError(explain(e)); } finally { setBusy(""); }
+  };
+  if (!proposals.length && !tasks.length && !error) return null;
+  return <>
+    {(proposals.length > 0 || error) && <aside className="pending-panel"><strong>待你确认的定时任务</strong>
+      {error && <p className="error">{error}</p>}
+      {proposals.map(p => <div key={p.id} className="pending-item">
+        <div className="pending-kind">{VERBS[p.action]} {p.scope}/{p.automationId} · {p.proposedBy} · {time(p.createdAt)}</div>
+        {p.reason && <p className="hint">{p.reason}</p>}
+        {p.definition && <pre className="pending-summary">{JSON.stringify(p.definition, null, 2)}</pre>}
+        {p.previous && <details><summary>当前定义</summary><pre className="pending-summary">{JSON.stringify(p.previous, null, 2)}</pre></details>}
+        {writable && <div className="row-actions">
+          <button type="button" className="primary" disabled={busy === p.id} onClick={() => void act(p.id, `/automations/proposals/${segment(p.id)}/decision`, { choice: "allow" })}>确认生效</button>
+          <button type="button" className="danger" disabled={busy === p.id} onClick={() => void act(p.id, `/automations/proposals/${segment(p.id)}/decision`, { choice: "deny" })}>拒绝</button></div>}
+      </div>)}
+    </aside>}
+    {tasks.length > 0 && <details className="pending-panel"><summary><strong>定时任务</strong> · {tasks.length} 个
+      {tasks.some(t => t.error || t.lastRun?.status === "failed") && <span className="error"> · 有失败</span>}</summary>
+      {tasks.map(t => <div key={t.id} className="pending-item">
+        <div className="pending-kind">{t.title} · {t.scope}/{t.id} · {t.kind}{t.paused ? " · 已暂停" : !t.enabled ? " · 未启用" : ""}</div>
+        {t.error ? <p className="error">{t.error}</p> : <p className="hint">
+          {t.nextAt ? `下次 ${time(t.nextAt)}` : t.trigger === "webhook" ? "webhook 触发" : ""}
+          {t.lastRun && ` · 上次 ${time(t.lastRun.triggerAt)} ${RUN_LABELS[t.lastRun.status] ?? t.lastRun.status}`}
+          {t.deliver.length > 0 && ` · 发往 ${t.deliver.join("、")}`}</p>}
+        {t.lastRun?.error && <p className="hint">{t.lastRun.error}</p>}
+        {writable && !t.error && <div className="row-actions">
+          <button type="button" disabled={busy === t.id} onClick={() => void act(t.id, `/automations/${segment(t.id)}/run`, {})}>立即运行</button>
+          <button type="button" className="quiet" disabled={busy === t.id} onClick={() => void act(t.id, `/automations/${segment(t.id)}/${t.paused ? "resume" : "pause"}`, {})}>{t.paused ? "恢复" : "暂停"}</button></div>}
+      </div>)}
+    </details>}
+  </>;
+}
+
 function App() {
   const [path, setPath] = useState(location.pathname);
   const [control, setControl] = useState<ControlState>();
@@ -327,6 +386,7 @@ function Sessions({ control, state }: { control: ControlState; state: ViewState 
   useLayoutEffect(() => { const saved = scrollMemory.get("sessions"); if (saved) window.scrollTo({ top: saved.y }); }, []);
   return <section>
     <MemoryReviewPanel writable={state.writable} />
+    <AutomationPanel writable={state.writable} />
     <div className="page-heading"><div><div className="eyebrow">YOUR CONVERSATIONS</div><h1>最近会话</h1></div>
       {state.writable && <Link className="button primary" to="/control/new">＋ 新对话</Link>}</div>
     <form className="filters" onSubmit={e => { e.preventDefault(); void control.refresh(); }}>

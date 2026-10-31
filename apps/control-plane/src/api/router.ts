@@ -6,6 +6,7 @@ import { BridgeRegistry } from "../bridge-registry.js";
 import type { MemoryReviewRoutes } from "../memory-review.js";
 import { CONVERSATION_AGENTS, type ConversationAgent, type Conversations } from "../conversations.js";
 import { parseNoticeTarget } from "../notices.js";
+import { AutomationError, type Automations } from "../automations.js";
 import { AgentControlSse, SseCursorError } from "./sse.js";
 import { ActionServiceError, SessionActionService } from "./session-actions.js";
 import { ApiProblem, integerParam as integer, jsonBody, stringField as string, attachmentsField, uploadRequest } from "./validation.js";
@@ -35,6 +36,8 @@ interface ApiOptions {
   /** AGENT_TOKENS: each agent drives sessions as `agent:<name>`, recorded on every action it starts. */
   agents?: Array<{ name: string; token: string; role?: "agent" | "project" }>;
   memoryReviews?: MemoryReviewRoutes;
+  /** Schedules, webhooks and their proposals (/api/v1/automations). */
+  automations?: Automations;
   /** Chat connectors' room/thread → session bindings (/api/v1/conversations). */
   conversations?: Conversations;
   sseKeepaliveMs: number; ssePollMs: number; sseMaxBackpressure: number; actionTimeoutMs: number; }
@@ -143,6 +146,8 @@ export class AgentControlApi {
       if(review&&this.options.memoryReviews){await this.memoryReviewRoute(request,response,url,principal,review[1]&&decodeURIComponent(review[1]),review[2]);return true;}
       const conversation=url.pathname.match(/^\/api\/v1\/conversations(?:\/([a-z][a-z0-9_-]*)(?:\/([^/]+)(?:\/(bind))?)?)?$/);
       if(conversation&&this.options.conversations){await this.conversationRoute(request,response,url,principal,conversation[1],conversation[2]&&decodeURIComponent(conversation[2]),conversation[3]);return true;}
+      const automation=url.pathname.match(/^\/api\/v1\/automations(?:\/([^/]+)(?:\/([^/]+)(?:\/(decision))?)?)?$/);
+      if(automation&&this.options.automations){await this.automationRoute(request,response,url,principal,automation[1]&&decodeURIComponent(automation[1]),automation[2]&&decodeURIComponent(automation[2]),automation[3]);return true;}
       const notice=url.pathname.match(/^\/api\/v1\/notices(?:\/([^/]+))?$/);
       if(notice){await this.noticeRoute(request,response,url,principal,notice[1]&&decodeURIComponent(notice[1]));return true;}
       const input=url.pathname.match(/^\/api\/v1\/user-input\/([^/]+)(?:\/(response))?$/);
@@ -215,6 +220,40 @@ export class AgentControlApi {
       if(!row)throw new ApiProblem(404,"notice_not_found","notice not found");
       this.ok(response,row);return;}
     throw new ApiProblem(404,"not_found","endpoint not found");
+  }
+
+  /**
+   * Automations. GET lists tasks, GET …/:id is one with its recent runs, GET …/:id/runs its history;
+   * POST …/:id/run, …/pause, …/resume act on a confirmed task. Changes are proposals: anyone may
+   * POST /automations/proposals {action, id, scope?, definition?, reason?}; only the human decides
+   * POST /automations/proposals/:pid/decision {choice: allow|deny}.
+   */
+  private async automationRoute(request:IncomingMessage,response:ServerResponse,url:URL,principal:Principal,id:string|undefined,sub:string|undefined,decision:string|undefined):Promise<void>{
+    const automations=this.options.automations!;
+    try{
+      if(id==="proposals"){
+        if(request.method==="GET"&&!sub){this.ok(response,{data:automations.proposals(url.searchParams.get("status")??undefined)});return;}
+        if(request.method==="GET"&&sub&&!decision){const row=automations.proposal(sub);if(!row)throw new ApiProblem(404,"proposal_not_found","proposal not found");this.ok(response,row);return;}
+        const body=await jsonBody(request) as Record<string,unknown>;
+        if(request.method==="POST"&&!sub){
+          if(body.action!=="create"&&body.action!=="update"&&body.action!=="delete")throw new ApiProblem(400,"invalid_action","action must be create, update or delete");
+          this.ok(response,automations.propose({action:body.action,id:string(body.id,"id",true)!,scope:string(body.scope,"scope"),
+            definition:body.definition,reason:string(body.reason,"reason")},principal.id),201);return;}
+        if(request.method==="POST"&&sub&&decision){
+          if(!principal.id.startsWith("control:"))throw new ApiProblem(403,"forbidden","only the human confirms an automation change");
+          if(body.choice!=="allow"&&body.choice!=="deny")throw new ApiProblem(400,"invalid_choice","choice must be allow or deny");
+          this.ok(response,automations.decide(sub,body.choice,principal.id));return;}
+        throw new ApiProblem(404,"not_found","endpoint not found");
+      }
+      if(request.method==="GET"&&!id){this.ok(response,{data:automations.list()});return;}
+      if(!id||decision)throw new ApiProblem(404,"not_found","endpoint not found");
+      if(request.method==="GET"&&!sub){const row=automations.get(id);if(!row)throw new ApiProblem(404,"automation_not_found","automation not found");this.ok(response,row);return;}
+      if(request.method==="GET"&&sub==="runs"){this.ok(response,{data:automations.runs(id,integer(url.searchParams.get("limit"),"limit",50,1,200))});return;}
+      if(request.method==="POST"&&sub==="run"){const body=await jsonBody(request) as Record<string,unknown>;
+        this.ok(response,{runId:automations.runNow(id,body.payload&&typeof body.payload==="object"?body.payload as Record<string,unknown>:{})},202);return;}
+      if(request.method==="POST"&&(sub==="pause"||sub==="resume")){await jsonBody(request);this.ok(response,automations.setPaused(id,sub==="pause"));return;}
+      throw new ApiProblem(404,"not_found","endpoint not found");
+    }catch(error){if(error instanceof AutomationError)throw new ApiProblem(error.status,error.code,error.message);throw error;}
   }
 
   /** Memory reviews: anyone may read them; only the human decides one the reviewer handed over. */

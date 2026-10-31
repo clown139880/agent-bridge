@@ -23,6 +23,7 @@ export const BRIDGE_INSTRUCTIONS = "Drive Agent Bridge worker sessions: sessions
 export function bridgeTools(apiBase: () => string): Array<McpTool<BridgePrincipal>> {
   const ops = (principal: BridgePrincipal) =>
     new BridgeOps(new ControlClient({ url: apiBase(), token: principal.authorization.slice(7) }));
+  const client = (principal: BridgePrincipal) => new ControlClient({ url: apiBase(), token: principal.authorization.slice(7) });
   const read = () => true;
   const write = (principal: BridgePrincipal) => principal.write;
   const need = (args: Record<string, any>, key: string): string => {
@@ -119,6 +120,41 @@ export function bridgeTools(apiBase: () => string): Array<McpTool<BridgePrincipa
       }, ["request_id"]),
       run: async (args: Record<string, any>, principal) => ({ ...await ops(principal).answer(need(args, "request_id"),
         typeof args.answer === "string" ? args.answer : args.answers ?? {}) }),
+    },
+    {
+      name: "automation_list", allowed: read,
+      description: "Scheduled and webhook tasks: id, title, trigger, next run, last run status.",
+      inputSchema: object({}),
+      run: async (_args, principal) => ({ automations: (await client(principal).get("/automations")).data }),
+    },
+    {
+      name: "automation_runs", allowed: read,
+      description: "One task: its definition and recent runs (status, output, error, session).",
+      inputSchema: object({ id: { type: "string" } }, ["id"]),
+      run: async (args: Record<string, any>, principal) => ({ ...await client(principal).get(`/automations/${encodeURIComponent(need(args, "id"))}`) }),
+    },
+    {
+      name: "automation_propose", allowed: write,
+      description: "Propose creating, changing or deleting a scheduled/webhook task. Nothing runs until the human confirms it in the Control Center; tell the user that. definition: {title, trigger: {schedule: {cron | everyMinutes, tz?}} | {webhook: {secretRef, template?}}, script?: {path, cwd?} (an existing script only), agent?: {prompt, agent?, model?, target?}, template?, deliver?: [\"app\" | \"matrix:!room:server\"], level?}. Output starting with [SILENT] is not delivered.",
+      inputSchema: object({
+        action: { type: "string", enum: ["create", "update", "delete"] }, id: { type: "string", description: "lowercase slug" },
+        scope: { type: "string", description: "memory scope (new tasks)" }, definition: { type: "object" }, reason: { type: "string" },
+      }, ["action", "id"]),
+      run: async (args: Record<string, any>, principal) => ({ ...await client(principal).post("/automations/proposals",
+        { action: args.action, id: args.id, scope: args.scope, definition: args.definition, reason: args.reason }) }),
+    },
+    {
+      name: "automation_run", allowed: write,
+      description: "Run a confirmed task now, whatever its schedule.",
+      inputSchema: object({ id: { type: "string" } }, ["id"]),
+      run: async (args: Record<string, any>, principal) => ({ ...await client(principal).post(`/automations/${encodeURIComponent(need(args, "id"))}/run`, {}) }),
+    },
+    {
+      name: "automation_pause", allowed: write,
+      description: "Pause (paused=true) or resume a confirmed task.",
+      inputSchema: object({ id: { type: "string" }, paused: { type: "boolean" } }, ["id", "paused"]),
+      run: async (args: Record<string, any>, principal) => ({ ...await client(principal).post(
+        `/automations/${encodeURIComponent(need(args, "id"))}/${args.paused === false ? "resume" : "pause"}`, {}) }),
     },
     {
       name: "interrupt", legacy: "ab_interrupt", allowed: write,
