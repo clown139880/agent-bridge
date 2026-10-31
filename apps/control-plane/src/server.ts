@@ -741,7 +741,7 @@ export class ControlPlane {
   }
 
   /** Answer an approval for the reviewer, as the human would through /api/v1, and say so quietly. */
-  private resolveByReview(machineId: string, message: ApprovalRequestMessage, choice: "allow" | "deny", reason: string): boolean {
+  private resolveByReview(machineId: string, message: ApprovalRequestMessage, choice: "allow" | "deny", reason: string, quiet = false): boolean {
     try {
       const created = this.controlStore.createAction({ principal: "system:review", key: `review:${message.approvalId}`, method: "POST",
         path: `/api/v1/approvals/${message.approvalId}/decision`, body: { choice }, kind: "resolve_approval", machineId, sessionId: message.sessionId });
@@ -749,6 +749,8 @@ export class ControlPlane {
         sessionId: message.sessionId, approvalId: message.approvalId, choice });
     } catch (error) { log.warn({ error, approvalId: message.approvalId }, "Reviewed approval could not be sent; asking the human"); return false; }
     log.info({ approvalId: message.approvalId, choice, reason, summary: message.summary.slice(0, 200) }, "Approval decided by the reviewer");
+    // Rule-based pass-throughs (the library's and memory's own tools) stay in the log; only the reviewer's judgments notify.
+    if (quiet) return true;
     const operator = this.options.noticeTarget ?? { connector: "app", roomId: "operator", threadId: "" };
     this.controlStore.createNotice({ id: `review:${message.approvalId}`, ...operator, level: "silent", source: "review", sessionId: message.sessionId,
       text: `${choice === "allow" ? "🤖 已自动放行" : "🤖 已自动拒绝"}：${message.summary.slice(0, 120)}\n${reason}` });
@@ -770,7 +772,7 @@ export class ControlPlane {
     // A first request outside the hard boundary is reviewed before anyone is asked: allowed or denied, it never reaches the human.
     if (first && !reviewed && this.toolReviewer && message.choices.includes("allow")) {
       const tool = toolOf(message.kind, message.summary);
-      if (alreadyGated(tool) && this.resolveByReview(machineId, message, "allow", "中央工具库和记忆的调用由 Control Plane 自己按档位把关，不再重复确认")) return;
+      if (alreadyGated(tool) && this.resolveByReview(machineId, message, "allow", "中央工具库和记忆的调用由 Control Plane 自己按档位把关，不再重复确认", true)) return;
       // Answering another session's approval is judged by what that approval asks.
       let target: { summary: string; hard: boolean } | undefined;
       if (/^mcp__bridge__(approve|answer)$/.test(tool)) {
@@ -779,7 +781,7 @@ export class ControlPlane {
         const summary = pending ? String(pending.request.summary ?? "") : "";
         const targetTool = toolOf(pending?.request.kind, summary);
         target = { summary, hard: !pending || (!alreadyGated(targetTool) && mustAskHuman({ tool: targetTool, summary, choices: (pending.request.choices as string[] | undefined) ?? ["allow"] })) };
-        if (!target.hard && alreadyGated(targetTool) && this.resolveByReview(machineId, message, "allow", "被答复的是中央工具库/记忆的调用，本来就免确认")) return;
+        if (!target.hard && alreadyGated(targetTool) && this.resolveByReview(machineId, message, "allow", "被答复的是中央工具库/记忆的调用，本来就免确认", true)) return;
       }
       if (!target?.hard && !mustAskHuman({ tool, summary: message.summary, choices: message.choices })) {
         // Off the Bridge's message chain: its other events keep flowing while the reviewer thinks.

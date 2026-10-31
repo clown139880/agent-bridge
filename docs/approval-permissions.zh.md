@@ -116,3 +116,5 @@ Bridge 报上来的审批（Claude 的 Bash、MCP 工具等），在通知任何
 1. 硬边界（`apps/control-plane/src/approval-review.ts`）：删除、`git push`/`reset --hard`、改服务和进程、装包、`curl | sh`、读写密钥位置（`/etc/agent-bridge`、`.env`、OpenBao、`/proc/*/environ`、`env`）、部署脚本、`sudo`/`chown`、跨机 ssh/Windows，以及没有 `allow` 选项的请求，直接交给人。
 2. 其余交给工具审核员（DeepSeek，`TOOL_REVIEW=off` 关闭）：`allow` 或 `deny` 由 Control Plane 以 `system:review` 身份答复 Bridge，这条审批不进 pending 列表，不推 Matrix 和手机，只发一条 silent notice（“🤖 已自动放行/拒绝”）；`human`、超时或出错照常交给人。
 3. 审核在 Bridge 的消息链之外进行，不阻塞该 Bridge 的其他事件。
+
+0.7.53 起，中央工具库和记忆自己的工具（`mcp__tools__*`、`mcp__memory__*`）由规则直接放行，只记日志、不发通知；只有审核员的放行或拒绝才发 silent notice。
