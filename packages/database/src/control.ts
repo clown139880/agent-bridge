@@ -168,6 +168,9 @@ function legacyStatus(activity: SessionActivityStatus, lastTurn?: TurnStatus): s
 }
 
 export class AgentControlStore {
+  /** Set by the Control Plane: the chat room (if any) that relays a session's replies. */
+  relayRoom?: (sessionId: string) => { connector: string; roomId: string; name: string } | undefined;
+
   constructor(readonly db: DatabaseSync, readonly retention: RetentionOptions) {}
 
   transaction<T>(fn: () => T): T {
@@ -947,6 +950,9 @@ export class AgentControlStore {
       lastResponseAt:row.last_response_at==null?null:Number(row.last_response_at),
       lastPromptAt:row.last_prompt_at==null?null:Number(row.last_prompt_at),messageCount:Number(row.message_count??0),viewRevision:Number(row.view_revision??0),orderingEpoch:Number(row.ordering_epoch??0),source:String(row.source??"app-server"),
       historyCompleteness:String(row.history_completeness??"loaded-only")};
+    // A chat room that relays this session answers it there; the list marks it instead of counting unread replies.
+    const relay=this.relayRoom?.(String(row.id));
+    if(relay)Object.assign(result,{room:relay});
     if(detail){const runs=this.db.prepare("SELECT * FROM worker_runs WHERE session_id=? ORDER BY created_at DESC,id DESC LIMIT 20")
       .all(String(row.id)) as Record<string,unknown>[];
       const contextRow=this.db.prepare("SELECT body FROM events WHERE session_id=? AND type='context.updated' ORDER BY id DESC LIMIT 1")

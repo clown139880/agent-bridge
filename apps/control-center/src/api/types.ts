@@ -13,6 +13,8 @@ export interface Session {
   /** Moves with every change of the conversation view; above the held revision means fetch changes. */
   viewRevision?: number;
   pendingApprovalCount: number; pendingUserInputCount: number;
+  /** The chat room that relays this session; its replies are read there, so the list shows no unread count. */
+  room?: { connector: string; roomId: string; name: string };
   capabilities?: string[]; historyCompleteness?: string; source?: string;
   error?: { error: { message: string } } | null;
 }

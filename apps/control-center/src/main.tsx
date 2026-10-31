@@ -432,9 +432,10 @@ function Sessions({ control, state }: { control: ControlState; state: ViewState 
     </form>
     <div className="list-meta"><span>{state.loading ? "正在读取…" : `${state.sessions.length} 个会话`}</span>
       <button className="quiet" disabled={state.loading} onClick={() => void control.refresh()}>↻ 刷新</button></div>
-    <div className="session-list">{state.sessions.map(s => { const unread = unreadCount(state, s); return <Link key={s.sessionId} to={`/control/sessions/${segment(s.sessionId)}`} className="session-row">
+    <div className="session-list">{state.sessions.map(s => { const unread = s.room ? 0 : unreadCount(state, s); return <Link key={s.sessionId} to={`/control/sessions/${segment(s.sessionId)}`} className="session-row">
       <span className="machine-stripe" style={machineStyle(s.machineId)} aria-hidden="true" />
       <div className="session-row-top"><Status status={s.status} /><span className="row-end">
+        {s.room && <span className="room-badge" title={`回复发在 ${s.room.connector === "matrix" ? "Matrix" : s.room.connector} 房间「${s.room.name}」`}>#{s.room.name}</span>}
         {unread > 0 && <span className="unread-badge" aria-label={`${unread} 条未读回复`}>{unread > 99 ? "99+" : unread}</span>}
         <time title="最后一条消息">{time(promptTime(s))}</time></span></div>
       <h2>{title(s)}</h2><p><Origin agent={s.agent} workerId={s.workerId} machineId={s.machineId}>{s.projectName}</Origin></p>

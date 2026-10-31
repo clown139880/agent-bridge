@@ -160,6 +160,7 @@ export class ControlPlane {
     });
     if (options.noticeTarget) this.operatorNotices = new OperatorNotices(this.controlStore, options.noticeTarget);
     this.conversations = new Conversations(this.controlStore, this.registry, agentMemory, options.conversationSetup);
+    this.controlStore.relayRoom = (sessionId) => this.conversations.relayRoom(sessionId);
     if (options.messages) this.messages = new AgentMessagePublisher(store, this.controlStore, options.messages,
       { relayed: (sessionId) => this.conversations.relays(sessionId) });
     const secrets = this.secrets = options.secrets && new SecretStore(options.secrets);

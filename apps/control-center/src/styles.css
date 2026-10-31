@@ -46,6 +46,7 @@
 .session-row time { font-size: .69rem; color: var(--muted); }
 .row-end { display: inline-flex; align-items: center; gap: 8px; }
 .unread-badge { min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: #d93a2b; color: #fff; font-size: .66rem; font-weight: 700; line-height: 18px; text-align: center; font-variant-numeric: tabular-nums; }
+.room-badge { max-width: 9em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 1px 6px; border-radius: 9px; border: 1px solid currentColor; color: #5a6b7d; font-size: .66rem; line-height: 16px; opacity: .85; }
 .row-arrow { position: absolute; right: 0; top: 55px; color: var(--muted); }
 .status { display: inline-flex; align-items: center; gap: 7px; font-size: .74rem; color: var(--muted); }
 .dot { width: 7px; height: 7px; background: currentColor; border-radius: 50%; }

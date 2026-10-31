@@ -119,6 +119,15 @@ export class Conversations {
     return row && this.memory ? this.scopeOf(row.connector, row.room_id)?.id : undefined;
   }
 
+  /** The room relaying a session, named by its scope's title, for the session list. */
+  relayRoom(sessionId: string): { connector: string; roomId: string; name: string } | undefined {
+    const row = this.store.db.prepare("SELECT connector,room_id FROM conversation_threads WHERE session_id=? LIMIT 1")
+      .get(sessionId) as { connector: string; room_id: string } | undefined;
+    if (!row) return undefined;
+    const scope = this.memory ? this.scopeOf(row.connector, row.room_id) : undefined;
+    return { connector: row.connector, roomId: row.room_id, name: scope?.title ?? row.room_id };
+  }
+
   /** Whether a room still relays this session's replies and requests, so the phone need not also alert. */
   relays(sessionId: string): boolean {
     return Boolean(this.store.db.prepare("SELECT 1 FROM conversation_threads WHERE session_id=? LIMIT 1").get(sessionId));
