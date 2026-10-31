@@ -16,7 +16,7 @@ export function signalStream(): void {
   setImmediate(() => { signalQueued = false; streamSignal.emit("change"); });
 }
 
-export type StreamKind = "session" | "worker" | "run" | "approval" | "user_input" | "action";
+export type StreamKind = "session" | "worker" | "run" | "approval" | "user_input" | "action" | "notice";
 
 /**
  * Record that a resource's current state changed. The change log is compacted by

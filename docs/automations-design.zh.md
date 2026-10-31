@@ -1,6 +1,6 @@
 # 定时任务与 Webhook 设计稿
 
-状态：方案，未实现（2026-10-31）。目标是替代 Hermes 的 cron 和 webhook，让 Agent Bridge 自己承担“无人发起”的工作。
+状态：第 1 期（notice 出站箱）已实现于 0.7.42，其余为方案（2026-10-31）。目标是替代 Hermes 的 cron 和 webhook，让 Agent Bridge 自己承担“无人发起”的工作。
 
 本仓库是公开项目，这里只写通用机制。具体的任务定义、私人脚本和 Hermes 迁移清单放在私有的 agent-skills 仓库 `automations/` 下（见第 4 节）。
 

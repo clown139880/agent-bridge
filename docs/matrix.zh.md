@@ -36,6 +36,15 @@ turn 运行时显示“正在输入”，结束后把最后一条助手消息作
 
 房间当前对应的会话由房间提醒：UCTW App 推送对它降为 silent（失败除外），避免两边重复响，见 [MQTT 业务消息 v1](message-events-v1.zh.md)。`!new` 之后的旧会话仍按房间作用域恢复记忆注入（`conversation_sessions` 记录会话来自哪个房间）。
 
+## 主动消息（notice）
+
+不是回复 turn 的消息，比如 Control Plane 的上线和更新通知、以后的定时任务和 webhook，都先排进 Control Plane 的 notice 出站箱（`/api/v1/notices`），再由连接器发到房间。
+
+- 连接器从事件流收到 `notice.upserted` 就发，发完回报消息 id；启动时补发还没发出的。Matrix 事务 ID 由 notice id 派生，重试不会重复发。机器人要先是目标房间的成员。
+- notice 若代表某个会话（`sessionId`），以这条消息为根的线程绑定到该会话：在线程里回复，就接着那个会话继续。
+- 在房间（或线程）里发消息时，这个位置自上一条消息以来（最多 12 小时、5 条）收到的 notice 会附在用户消息前面，标明“不是用户写的”。这样直接回一句“要”，会话也知道指的是哪条通知。代表当前会话自己的 notice 不附。
+- Control Plane 设 `CONTROL_NOTICE_TARGET=matrix:!room:server` 后，生命周期通知发到这个房间：每 60 秒窗口内只立即发第一条，其余合并到下一条里；部署和更新结果（`🟢 控制面已启动 · 版本 …`、`🔄 更新完成：…`）、记忆审核结果从不合并。
+
 ## 状态与可靠性
 
 连接器本地只有一个状态文件（`MATRIX_CONNECTOR_STATE`，0600）：sync 位置、SSE 游标、设备 token 和尚未回答的提示。首次启动只建立 sync 基线，不处理历史消息。创建会话和发 turn 用 Matrix 事件 ID 派生的幂等键，出站消息用稳定的事务 ID，所以重放不会重复执行或重复发送。崩溃时正在攒的附件会丢失，需要重发。

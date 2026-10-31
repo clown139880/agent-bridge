@@ -7,6 +7,8 @@ import { NUMBER_KEYS, command, mentions, message, plainBody, split, threadOf, wi
 
 const CONNECTOR = "matrix";
 const MAX_ATTACHMENTS = 8, MAX_BYTES = 15_000_000;
+/** Notices the room got since its conversation's last message go with the next one, within this window. */
+const NOTICE_CONTEXT_MS = 12 * 3_600_000, NOTICE_CONTEXT_COUNT = 5, NOTICE_CONTEXT_CHARS = 600;
 const ATTACHMENT_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf", "text/plain", "text/markdown", "text/csv"];
 const pause = (ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms).unref(); });
 const hash = (value: string) => createHash("sha256").update(value).digest("hex").slice(0, 32);
@@ -14,9 +16,13 @@ const log = (level: "info" | "warn" | "error", msg: string, extra: Json = {}) =>
   process.stdout.write(`${JSON.stringify({ level, msg, ...extra, time: new Date().toISOString() })}\n`);
 
 interface Prompt { eventId: string; roomId: string; threadId: string; kind: "approval" | "user_input"; id: string; choices?: string[]; questions?: Json[] }
-interface State { since?: string; cursor?: string; accessToken?: string; deviceId?: string; prompts?: Prompt[] }
+interface State { since?: string; cursor?: string; accessToken?: string; deviceId?: string; prompts?: Prompt[];
+  /** place key → when its last message went to the conversation; later notices are its context. */
+  heard?: Record<string, number> }
 interface Place { roomId: string; threadId: string }
 interface Attachment { id: string; filename: string; mimeType: string; size: number }
+interface Notice { id: string; connector: string; roomId: string; threadId: string; text: string; sessionId: string | null;
+  createdAt: number; deliveredAt: number | null }
 
 /**
  * Matrix rooms as Agent Bridge conversations. A room's project is its central memory scope and the
@@ -34,6 +40,7 @@ export class MatrixConnector {
   private readonly typing = new Map<string, NodeJS.Timeout>(); // sessionId → typing refresh
   private readonly queues = new Map<string, Promise<void>>();
   private readonly drafts = new Map<string, Array<Promise<Attachment | undefined>>>();
+  private readonly posting = new Set<string>();                // notice ids being posted
   private outbox: Promise<void> = Promise.resolve();
   private displayName?: string;
   private saveTimer?: NodeJS.Timeout;
@@ -48,6 +55,7 @@ export class MatrixConnector {
     for (const row of (await this.control.call("GET", `/conversations/${CONNECTOR}`)).data as Array<Json>)
       this.places.set(row.sessionId, { roomId: row.roomId, threadId: row.threadId });
     void this.streamLoop();
+    void this.postPending();
     await this.syncLoop();
   }
 
@@ -87,8 +95,11 @@ export class MatrixConnector {
   private async ingest(sync: SyncResponse, baseline = false): Promise<void> {
     for (const [roomId, invite] of Object.entries(sync.rooms?.invite ?? {})) {
       const member = invite.invite_state?.events?.find((event) => event.type === "m.room.member" && event.state_key === this.config.userId);
-      if (member && this.config.allowedUsers.includes(member.sender))
-        await this.matrix.join(roomId).catch((error) => log("warn", "Unable to join room", { roomId, error: describe(error) }));
+      if (member && this.config.allowedUsers.includes(member.sender)) {
+        const joined = await this.matrix.join(roomId).then(() => true, (error) => { log("warn", "Unable to join room", { roomId, error: describe(error) }); return false; });
+        // Notices queued for a room the connector was not in yet go out now; a repeat reuses its transaction id.
+        if (joined) { this.posting.clear(); void this.postPending(); }
+      }
     }
     if (baseline) return;
     for (const [roomId, joined] of Object.entries(sync.rooms?.join ?? {})) {
@@ -170,6 +181,7 @@ export class MatrixConnector {
     this.drafts.delete(key(place));
     const attachments = (await Promise.all(pending)).filter((item): item is Attachment => Boolean(item)).slice(0, MAX_ATTACHMENTS);
     const extra = attachments.length ? { attachments } : {};
+    text = await this.withNotices(place, text, conversation.sessionId ?? undefined);
     if (conversation.sessionId) {
       const sessionId = String(conversation.sessionId);
       for (let attempt = 0; ; attempt++) {
@@ -272,6 +284,7 @@ export class MatrixConnector {
   }
 
   private project(item: StreamItem): void {
+    if (item.type === "notice.upserted") { this.postNotice(item.data as Notice); return; }
     const sessionId = item.sessionId;
     if (!sessionId) return;
     if (item.type === "session.deleted") { this.places.delete(sessionId); return; }
@@ -302,6 +315,52 @@ export class MatrixConnector {
         this.say(place, `执行失败：${typeof error === "string" ? error : JSON.stringify(error)}${text && text !== error ? `\n\n${text}` : ""}`, `failed:${id}`);
       }
     }
+  }
+
+  /** Notices queued while this process was away: the stream only replays from its saved cursor. */
+  private async postPending(): Promise<void> {
+    try {
+      const rows = (await this.control.call("GET", `/notices?connector=${CONNECTOR}&undelivered=1&limit=200`)).data as Notice[];
+      for (const row of rows) this.postNotice(row);
+    } catch (error) { log("warn", "Unable to list pending notices; the next restart retries", { error: describe(error) }); }
+  }
+
+  /**
+   * Post a notice once and report where it went. A notice that speaks for a session starts a
+   * thread bound to that session, so replying there continues it.
+   */
+  private postNotice(notice: Notice): void {
+    if (notice.connector !== CONNECTOR || notice.deliveredAt || this.posting.has(notice.id)) return;
+    this.posting.add(notice.id);
+    const place = { roomId: notice.roomId, threadId: notice.threadId };
+    this.say(place, notice.text, `notice:${notice.id}`, (eventId) => void (async () => {
+      await this.control.call("PUT", `/notices/${enc(notice.id)}`, { eventId });
+      const sessionId = notice.sessionId;
+      if (sessionId && !place.threadId && !this.places.has(sessionId)) {
+        const thread = { roomId: place.roomId, threadId: eventId };
+        await this.control.call("PUT", `/conversations/${CONNECTOR}/${enc(place.roomId)}`, { threadId: eventId, sessionId });
+        this.bindPlace(sessionId, thread);
+      }
+    })().catch((error) => log("warn", "Notice posted but not recorded", { noticeId: notice.id, error: describe(error) })));
+  }
+
+  /** Put the room's recent notices before the user's words, so a bare "yes" has something to answer. */
+  private async withNotices(place: Place, text: string, sessionId?: string): Promise<string> {
+    const now = Date.now(), heard = this.state.heard ??= {};
+    const after = Math.max(heard[key(place)] ?? 0, now - NOTICE_CONTEXT_MS);
+    delete heard[key(place)]; heard[key(place)] = now;
+    for (const stale of Object.keys(heard).slice(0, Math.max(0, Object.keys(heard).length - 500))) delete heard[stale];
+    this.scheduleSave();
+    let rows: Notice[];
+    try {
+      rows = ((await this.control.call("GET", `/notices?connector=${CONNECTOR}&roomId=${enc(place.roomId)}&threadId=${enc(place.threadId)}`
+        + `&after=${after}&limit=${NOTICE_CONTEXT_COUNT}`)).data as Notice[]).filter((row) => row.deliveredAt && row.sessionId !== sessionId);
+    } catch (error) { log("warn", "Unable to read the room's notices", { error: describe(error) }); return text; }
+    if (!rows.length) return text;
+    const time = (ms: number) => new Date(ms).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false });
+    const clip = (value: string) => Array.from(value).length > NOTICE_CONTEXT_CHARS ? `${Array.from(value).slice(0, NOTICE_CONTEXT_CHARS).join("")}…` : value;
+    return ["[房间里新近的通知] 你上一轮之后，这里发过这些通知（不是用户写的），供理解用户这条消息：",
+      ...rows.map((row) => `- ${time(row.createdAt)} ${clip(row.text).replace(/\n/g, "\n  ")}`), "", "用户消息：", text].join("\n");
   }
 
   private bindPlace(sessionId: string, place: Place): void {

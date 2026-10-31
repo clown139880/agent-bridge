@@ -2,6 +2,7 @@ import "dotenv/config";
 import { dirname, join } from "node:path";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { parseNoticeTarget, type NoticeTarget } from "./notices.js";
 
 // The fleet version lives in the repo-root package.json (same value BRIDGE_LATEST_VERSION
 // tracks). Report it in lifecycle webhooks so the operator sees which control-plane is live.
@@ -74,6 +75,8 @@ export const config = {
     source: bridgeUpdateSource,
     publishedAt: bridgeUpdatePublishedAt,
   } : undefined,
+  // The operator's chat room for lifecycle notices, e.g. matrix:!room:server; a chat connector posts them.
+  noticeTarget: noticeTarget(process.env.CONTROL_NOTICE_TARGET),
   // Dorothy bridge-events webhook. Both must be set to enable delivery.
   webhook: process.env.DOROTHY_WEBHOOK_URL && process.env.DOROTHY_WEBHOOK_SECRET ? {
     url: process.env.DOROTHY_WEBHOOK_URL,
@@ -153,4 +156,11 @@ function conversationSetupConfig(): { workerId: string; workspace: string } | un
   const at = value.indexOf(":");
   if (at < 1 || !value.slice(0, at).includes("@") || !value.slice(at + 1)) throw new Error("CONVERSATION_SETUP_TARGET must be <agent>@<machine>:<path>");
   return { workerId: value.slice(0, at), workspace: value.slice(at + 1) };
+}
+
+function noticeTarget(value: string | undefined): NoticeTarget | undefined {
+  if (!value) return undefined;
+  const target = parseNoticeTarget(value);
+  if (!target) throw new Error("CONTROL_NOTICE_TARGET must be <connector>:<room>[#<thread>]");
+  return target;
 }

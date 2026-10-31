@@ -5,9 +5,13 @@ import { parseWorkerId, workerId as buildWorkerId, type AgentType, type ActionKi
 import { BridgeRegistry } from "../bridge-registry.js";
 import type { MemoryReviewRoutes } from "../memory-review.js";
 import { CONVERSATION_AGENTS, type ConversationAgent, type Conversations } from "../conversations.js";
+import { parseNoticeTarget } from "../notices.js";
 import { AgentControlSse, SseCursorError } from "./sse.js";
 import { ActionServiceError, SessionActionService } from "./session-actions.js";
 import { ApiProblem, integerParam as integer, jsonBody, stringField as string, attachmentsField, uploadRequest } from "./validation.js";
+
+/** Longer notices are split by the connector; this only bounds what one request may queue. */
+const NOTICE_MAX_CHARS = 20_000;
 
 /** Map a worker-id prefix to an agent type, or undefined for an unknown prefix. */
 function agentTypeForWorkerPrefix(prefix: string): AgentType | undefined {
@@ -139,6 +143,8 @@ export class AgentControlApi {
       if(review&&this.options.memoryReviews){await this.memoryReviewRoute(request,response,url,principal,review[1]&&decodeURIComponent(review[1]),review[2]);return true;}
       const conversation=url.pathname.match(/^\/api\/v1\/conversations(?:\/([a-z][a-z0-9_-]*)(?:\/([^/]+)(?:\/(bind))?)?)?$/);
       if(conversation&&this.options.conversations){await this.conversationRoute(request,response,url,principal,conversation[1],conversation[2]&&decodeURIComponent(conversation[2]),conversation[3]);return true;}
+      const notice=url.pathname.match(/^\/api\/v1\/notices(?:\/([^/]+))?$/);
+      if(notice){await this.noticeRoute(request,response,url,principal,notice[1]&&decodeURIComponent(notice[1]));return true;}
       const input=url.pathname.match(/^\/api\/v1\/user-input\/([^/]+)(?:\/(response))?$/);
       if(input){await this.pendingRoute("user_input",request,response,principal,decodeURIComponent(input[1]!),input[2]);return true;}
       throw new ApiProblem(404,"not_found","endpoint not found");
@@ -172,6 +178,40 @@ export class AgentControlApi {
       catch(error){const message=error instanceof Error?error.message:String(error);
         throw new ApiProblem(message.startsWith("unknown_scope")||message.startsWith("invalid_scope")?404:409,message.split(":")[0]!,message);}
       return;}
+    throw new ApiProblem(404,"not_found","endpoint not found");
+  }
+
+  /**
+   * Notices: messages for a chat room that no turn asked for. POST queues one ({target, text, sessionId?};
+   * an Idempotency-Key makes it safe to retry); GET lists a connector's (?connector=&roomId=&threadId=&undelivered=1&after=);
+   * PUT …/:id {eventId} is the connector reporting it posted the notice.
+   */
+  private async noticeRoute(request:IncomingMessage,response:ServerResponse,url:URL,principal:Principal,id:string|undefined):Promise<void>{
+    if(request.method==="GET"&&!id){
+      const connector=url.searchParams.get("connector");
+      if(!connector)throw new ApiProblem(400,"invalid_parameter","connector is required");
+      const after=url.searchParams.get("after");
+      this.ok(response,{data:this.store.notices({connector,roomId:url.searchParams.get("roomId")??undefined,
+        threadId:url.searchParams.get("threadId")??undefined,undelivered:url.searchParams.get("undelivered")==="1",
+        after:after===null?undefined:integer(after,"after",0,0,Number.MAX_SAFE_INTEGER),limit:integer(url.searchParams.get("limit"),"limit",50,1,200)})});
+      return;}
+    if(request.method==="GET"&&id){const row=this.store.notice(id);if(!row)throw new ApiProblem(404,"notice_not_found","notice not found");this.ok(response,row);return;}
+    const body=await jsonBody(request) as Record<string,unknown>;
+    if(request.method==="POST"&&!id){
+      const target=parseNoticeTarget(string(body.target,"target",true)!);
+      if(!target)throw new ApiProblem(400,"invalid_target","target must be <connector>:<room>[#<thread>]");
+      const text=string(body.text,"text",true)!;
+      if(!text.trim()||text.length>NOTICE_MAX_CHARS)throw new ApiProblem(400,"invalid_text",`text must be 1..${NOTICE_MAX_CHARS} characters`);
+      const sessionId=string(body.sessionId,"sessionId");
+      if(sessionId&&!this.store.session(sessionId))throw new ApiProblem(404,"session_not_found","session not found");
+      const key=request.headers["idempotency-key"];
+      const noticeId=typeof key==="string"&&key?`n-${createHash("sha256").update(`${principal.id}\n${key}`).digest("hex").slice(0,32)}`:undefined;
+      this.ok(response,this.store.createNotice({id:noticeId,...target,text,source:principal.id,sessionId}),201);return;}
+    if(request.method==="PUT"&&id){
+      const eventId=string(body.eventId,"eventId",true)!;
+      const row=this.store.deliverNotice(id,eventId);
+      if(!row)throw new ApiProblem(404,"notice_not_found","notice not found");
+      this.ok(response,row);return;}
     throw new ApiProblem(404,"not_found","endpoint not found");
   }
 

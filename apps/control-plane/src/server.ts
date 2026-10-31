@@ -27,6 +27,7 @@ import {
 import { AgentControlApi } from "./api/router.js";
 import { BridgeRegistry } from "./bridge-registry.js";
 import { WebhookNotifier, type WebhookOptions } from "./webhook.js";
+import { OperatorNotices, type NoticeTarget, type OperatorEvent } from "./notices.js";
 import { NtfyNotifier, type NtfyOptions, type SessionNotificationKind } from "./ntfy.js";
 import { AgentMessagePublisher, type MessageMqttOptions } from "./message-publisher.js";
 import { AgentMemory, AgentSkills, type Writer } from "@agent-bridge/agent-memory";
@@ -57,6 +58,8 @@ export class ControlPlane {
   private readonly controlStore: AgentControlStore;
   private readonly controlApi: AgentControlApi;
   private readonly webhook: WebhookNotifier;
+  /** Lifecycle events as notices in the operator's chat room (CONTROL_NOTICE_TARGET). */
+  private operatorNotices?: OperatorNotices;
   private readonly ntfy: NtfyNotifier;
   private readonly messages?: AgentMessagePublisher;
   private readonly memory: ConversationMemoryStore;
@@ -99,6 +102,8 @@ export class ControlPlane {
         publishedAt?: number;
       };
       webhook?: WebhookOptions;
+      /** The operator's room for lifecycle notices, e.g. `matrix:!room:server`. */
+      noticeTarget?: NoticeTarget;
       ntfy?: NtfyOptions;
       messages?: MessageMqttOptions;
     },
@@ -131,13 +136,14 @@ export class ControlPlane {
         apply: (tool, args, writer) => runMemoryTool(this.memory, memoryOptions, tool, args, writer),
         context: (tool, args) => reviewContext(memoryOptions, tool, args),
         reviewer: reviewer && claudeReviewer(reviewer),
-        notify: (event) => this.webhook.notify(event),
+        notify: (event) => this.notifyOperator(event),
       });
     }
     if (memoryOptions) this.memoryMcp = new ConversationMcpServer(this.memory, memoryOptions);
     this.controlStore = new AgentControlStore(store.db, options.retention ?? {
       actionsMs: 86_400_000, attachmentsMs: 7 * 86_400_000,
     });
+    if (options.noticeTarget) this.operatorNotices = new OperatorNotices(this.controlStore, options.noticeTarget);
     this.conversations = new Conversations(this.controlStore, this.registry, agentMemory, options.conversationSetup);
     if (options.messages) this.messages = new AgentMessagePublisher(store, this.controlStore, options.messages,
       { relayed: (sessionId) => this.conversations.relays(sessionId) });
@@ -197,13 +203,20 @@ export class ControlPlane {
     log.info({ host: this.options.host, port: this.options.port }, "Control plane listening");
     // Announce the control-plane restart and the version it is advertising to the fleet.
     // This is the operator's "control-plane upgraded / broadcasting version" signal.
-    this.webhook.notify({
+    this.notifyOperator({
       type: "control_plane.up",
       version: this.options.version ?? "unknown",
       latest_bridge_version: this.options.bridgeUpdate?.latestVersion ?? null,
       update_source: this.options.bridgeUpdate?.source ?? null,
       update_published_at: this.options.bridgeUpdate?.publishedAt ?? null,
     });
+  }
+
+  /** Report a lifecycle event to the operator: the legacy webhook and/or the operator's room. */
+  private notifyOperator(event: OperatorEvent): void {
+    this.webhook.notify(event);
+    try { this.operatorNotices?.notify(event); }
+    catch (error) { log.warn({ error, event: event.type }, "Unable to queue an operator notice"); }
   }
 
   async stop(): Promise<void> {
@@ -304,12 +317,12 @@ export class ControlPlane {
         // its first registration on a new version is the only sign it was updated.
         if (previousVersion && message.bridgeVersion && previousVersion !== message.bridgeVersion) {
           this.announcedBridgeVersions.set(registeredId, message.bridgeVersion);
-          this.webhook.notify({ type: "bridge_update.status", machine_id: registeredId, phase: "completed",
+          this.notifyOperator({ type: "bridge_update.status", machine_id: registeredId, phase: "completed",
             current_version: previousVersion, latest_version: message.bridgeVersion, updatable: true });
         }
         // Operator-facing counterpart to bridge.offline: a bridge (re)connected. `needs_update`
         // and `latest_bridge_version` let Dorothy show whether this bridge will self-update.
-        this.webhook.notify({
+        this.notifyOperator({
           type: "bridge.online",
           machine_id: registeredId,
           name: message.name || registeredId,
@@ -335,7 +348,7 @@ export class ControlPlane {
       if (machineId && this.registry.remove(machineId, socket)) {
         try { this.controlStore.markMachineOffline(machineId); }
         catch (error) { log.debug({ error, machineId }, "Unable to persist bridge disconnect during shutdown"); }
-        this.webhook.notify({ type: "bridge.offline", machine_id: machineId });
+        this.notifyOperator({ type: "bridge.offline", machine_id: machineId });
       }
     });
     socket.on("error", (error) => log.warn({ error, machineId }, "Bridge socket error"));
@@ -630,7 +643,7 @@ export class ControlPlane {
     // Relay operator-relevant update phases to Dorothy's bridge-events webhook.
     const announced = message.phase === "completed" && this.announcedBridgeVersions.get(machineId) === message.currentVersion;
     if (["discovered", "completed", "failed", "rolled_back"].includes(message.phase) && !announced) {
-      this.webhook.notify({
+      this.notifyOperator({
         type: "bridge_update.status", machine_id: machineId, phase: message.phase,
         current_version: message.currentVersion, latest_version: message.latestVersion,
         updatable: message.updatable, reason: message.reason,

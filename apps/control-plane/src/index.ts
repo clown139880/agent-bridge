@@ -21,6 +21,7 @@ const control = new ControlPlane(store, {
   sse: config.sse,
   bridgeUpdate: config.bridgeUpdate,
   webhook: config.webhook,
+  noticeTarget: config.noticeTarget,
   ntfy: config.ntfy,
   messages: config.messages,
 });

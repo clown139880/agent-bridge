@@ -89,6 +89,9 @@ SSE 直接派发到现有 node:http handler，不经过 Hono Response 或 fetch 
 | 0.7.34 | `GET` | `/conversations/{connector}` | 聊天连接器已绑定会话的房间/线程 |
 | 0.7.34 | `GET`/`PUT` | `/conversations/{connector}/{roomId}` | 读取/修改房间或线程的会话绑定与新会话 agent |
 | 0.7.34 | `POST` | `/conversations/{connector}/{roomId}/bind` | 把房间（和目录）绑定到记忆作用域 |
+| 0.7.42 | `POST` | `/notices` | 排队一条主动消息，由聊天连接器发到房间 |
+| 0.7.42 | `GET` | `/notices` | 连接器待发的通知，或某房间近期的通知 |
+| 0.7.42 | `GET`/`PUT` | `/notices/{noticeId}` | 读取一条通知；连接器回报已发出（`eventId`） |
 
 `/health` 继续在 origin 根下且无需纳入此 UI 契约。Bridge 自身使用的 `/bridge` WebSocket 是内部协议，不对
 UI 开放。
@@ -744,6 +747,27 @@ interface Conversation {
 - `POST /conversations/{connector}/{roomId}/bind`，body `{ scopeId, location?: "machine:/path" }` → `Conversation`。
   写入中央记忆并提交；房间或目录已绑定到别的作用域时 `409 binding_conflict`。
 
+### 6.8 Notices（0.7.42，主动消息）
+
+不由 turn 产生的消息（Control Plane 生命周期通知，以后的定时任务和 webhook）都先进这里，再由聊天连接器发出。设计见 `docs/automations-design.zh.md`。
+
+```ts
+interface Notice {
+  id: string; connector: string; roomId: string;
+  threadId: string;            // "" 为主时间线
+  text: string;                // Markdown
+  source: string;              // "control-plane" 或发送方 principal（如 "agent:cron"）
+  sessionId: string | null;    // 通知代表的会话：连接器发出后把以它为根的线程绑定到该会话
+  eventId: string | null;      // 连接器发出后的消息 id
+  createdAt: EpochMs; deliveredAt: EpochMs | null;
+}
+```
+
+- `POST /notices`，body `{ target: "<connector>:<roomId>[#<threadId>]", text, sessionId? }` → `201 Notice`。带 `Idempotency-Key` 时同一调用方重试返回同一条。
+- `GET /notices?connector=&roomId=&threadId=&undelivered=1&after=<ms>&limit=` → `{ data: Notice[] }`，旧的在前。
+- `PUT /notices/{noticeId}`，body `{ eventId }` → `Notice`。重复回报保留第一次的 `eventId`。
+- SSE：`notice.upserted`（`resource.kind: "notice"`），新建和发出时各推送一次当前状态。通知保留 30 天。
+
 ## 7. SSE 实时协议
 
 ### 7.1 首版选择
@@ -789,13 +813,13 @@ export type StreamEventType =
   | "worker.upserted" | "worker.offline"
   | "session.updated" | "session.deleted" | "session.event.appended"
   | "run.upserted" | "approval.upserted" | "user_input.upserted"
-  | "action.updated" | (string & {});
+  | "action.updated" | "notice.upserted" | (string & {});
 export interface StreamEnvelope<T = unknown> {
   cursor: Cursor;
   eventId: string;
   type: StreamEventType;
   timestamp: EpochMs;
-  resource: { kind: "worker"|"session"|"run"|"approval"|"user_input"|"action"; id: string };
+  resource: { kind: "worker"|"session"|"run"|"approval"|"user_input"|"action"|"notice"; id: string };
   sessionId: string | null;
   data: T; // upsert 事件为完整 resource；updated 可为字段 patch
 }

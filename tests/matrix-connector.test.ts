@@ -13,6 +13,7 @@ function harness() {
   const calls: Array<{ method: string; path: string; body?: any; key?: string }> = [];
   const sessions = new Map<string, { activeTurnId: string | null }>();
   const bindings = new Map<string, string | null>();
+  const notices: any[] = [];
   let created = 0, eventIds = 0;
   const matrix = { async send(roomId: string, type: string, content: any) { const eventId = `$out${++eventIds}`; sent.push({ roomId, type, content, eventId }); return eventId; },
     async typing() {}, async download() { return Buffer.from("png"); } };
@@ -35,6 +36,7 @@ function harness() {
         sessions.get(session[1]!)!.activeTurnId = "t2"; return { status: "succeeded" };
       }
       if (path === "/attachments") return { id: "att1", size: 3 };
+      if (path.startsWith("/notices?")) return { data: notices.filter((row) => path.includes("undelivered=1") ? !row.deliveredAt : row.deliveredAt) };
       return { status: "succeeded" };
     },
     async settle(action: any) { return action; },
@@ -42,7 +44,7 @@ function harness() {
   const connector = new MatrixConnector(config, matrix as any, control as any) as any;
   const text = (body: string, extra: any = {}, sender = "@me:example.org") =>
     connector.receive("!room:example.org", { event_id: `$in${++eventIds}`, sender, type: "m.room.message", content: { msgtype: "m.text", body, ...extra } });
-  return { connector, sent, calls, sessions, bindings, text };
+  return { connector, sent, calls, sessions, bindings, notices, text };
 }
 
 test("commands and mention text parse like the client sends them", () => {
@@ -129,4 +131,38 @@ test("invites from allowed people are accepted even on the baseline sync; a join
     { event_id: "$after", sender: "@me:example.org", type: "m.room.message", content: { msgtype: "m.text", body: "加入后" } }] } } } } });
   await tick();
   assert.deepEqual(h.calls.filter((call) => call.path === "/sessions").map((call) => call.body.input), ["加入后"]);
+});
+
+test("a notice is posted once and reported; one that speaks for a session opens a thread bound to it", async () => {
+  const h = harness();
+  const notice = (id: string, extra: any = {}) => ({ id, connector: "matrix", roomId: "!room:example.org", threadId: "", text: `通知 ${id}`,
+    sessionId: null, createdAt: Date.now(), deliveredAt: null, ...extra });
+  h.connector.project({ cursor: "c1", type: "notice.upserted", sessionId: null, data: notice("n1") });
+  h.connector.project({ cursor: "c2", type: "notice.upserted", sessionId: null, data: notice("n1") });
+  h.connector.project({ cursor: "c3", type: "notice.upserted", sessionId: null, data: notice("n0", { deliveredAt: 1 }) });
+  h.connector.project({ cursor: "c4", type: "notice.upserted", sessionId: null, data: notice("w", { connector: "wechat" }) });
+  await tick();
+  assert.deepEqual(h.sent.map((item) => item.content.body), ["通知 n1"]);
+  assert.deepEqual(h.calls.find((call) => call.path === "/notices/n1")?.body, { eventId: h.sent[0]!.eventId });
+
+  h.connector.project({ cursor: "c5", type: "notice.upserted", sessionId: "run1", data: notice("n2", { sessionId: "run1" }) });
+  await tick();
+  const root = h.sent.at(-1)!.eventId;
+  assert.equal(h.bindings.get(root), "run1");
+  h.connector.project({ cursor: "c6", type: "session.event.appended", sessionId: "run1", data: { type: "message.completed", turnId: "t", payload: { role: "assistant", text: "接着处理" } } });
+  h.connector.project({ cursor: "c7", type: "session.event.appended", sessionId: "run1", data: { type: "turn.completed", turnId: "t", payload: {} } });
+  await tick();
+  assert.equal(h.sent.at(-1)!.content["m.relates_to"].event_id, root, "the run's later answers stay in its thread");
+});
+
+test("notices the room got since the last message go with the next one", async () => {
+  const h = harness();
+  h.notices.push({ id: "n1", connector: "matrix", roomId: "!room:example.org", threadId: "", text: "🧺 洗衣机快洗完了，要不要开烘干机？",
+    sessionId: null, createdAt: Date.now(), deliveredAt: Date.now() });
+  h.text("要"); await tick();
+  const input = h.calls.find((call) => call.path === "/sessions")!.body.input as string;
+  assert.match(input, /^\[房间里新近的通知\]/);
+  assert.match(input, /洗衣机快洗完了/);
+  assert.match(input, /用户消息：\n要$/);
+  assert.ok(h.calls.some((call) => call.path.startsWith("/notices?") && call.path.includes("threadId=&")));
 });

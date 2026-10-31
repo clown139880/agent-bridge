@@ -410,6 +410,24 @@ export function migrateDatabase(db: DatabaseSync): void {
       db.exec("COMMIT");
     } catch (error) { try { db.exec("ROLLBACK"); } catch {} throw error; }
   }
+
+  // Notices: messages nobody asked for (lifecycle, schedules, webhooks), waiting for a chat connector to post them.
+  if (!db.prepare("SELECT 1 FROM schema_migrations WHERE version=15").get()) {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      db.exec(`
+        CREATE TABLE notices (
+          id TEXT PRIMARY KEY, connector TEXT NOT NULL, room_id TEXT NOT NULL, thread_id TEXT NOT NULL DEFAULT '',
+          text TEXT NOT NULL, source TEXT NOT NULL, session_id TEXT, event_id TEXT,
+          created_at INTEGER NOT NULL, delivered_at INTEGER
+        );
+        CREATE INDEX notices_room_idx ON notices(connector, room_id, created_at);
+        CREATE INDEX notices_undelivered_idx ON notices(connector, created_at) WHERE delivered_at IS NULL;
+      `);
+      db.prepare("INSERT INTO schema_migrations(version,applied_at) VALUES (15,?)").run(Date.now());
+      db.exec("COMMIT");
+    } catch (error) { try { db.exec("ROLLBACK"); } catch {} throw error; }
+  }
 }
 
 /**

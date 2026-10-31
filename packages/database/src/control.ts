@@ -94,6 +94,33 @@ export interface SessionGroupListQuery {
   cursor?: string;
 }
 
+/** A notice waiting for, or already posted by, a chat connector. */
+export interface NoticeRow {
+  id: string;
+  connector: string;
+  roomId: string;
+  /** "" is the room's main timeline. */
+  threadId: string;
+  text: string;
+  /** Who queued it: `control-plane`, or the principal that posted it. */
+  source: string;
+  /** The session the notice speaks for; a reply in its thread continues that session. */
+  sessionId: string | null;
+  /** The connector's message id once posted. */
+  eventId: string | null;
+  createdAt: number;
+  deliveredAt: number | null;
+}
+
+const NOTICE_RETENTION_MS = 30 * 86_400_000;
+
+function noticeWire(row: Record<string, unknown>): NoticeRow {
+  return { id: String(row.id), connector: String(row.connector), roomId: String(row.room_id), threadId: String(row.thread_id),
+    text: String(row.text), source: String(row.source), sessionId: row.session_id == null ? null : String(row.session_id),
+    eventId: row.event_id == null ? null : String(row.event_id), createdAt: Number(row.created_at),
+    deliveredAt: row.delivered_at == null ? null : Number(row.delivered_at) };
+}
+
 function parseJson<T>(value: unknown, fallback: T): T {
   try { return value == null ? fallback : JSON.parse(String(value)) as T; } catch { return fallback; }
 }
@@ -222,6 +249,10 @@ export class AgentControlStore {
     if (kind === "action") {
       const action = this.action(id);
       return action ? { type: "action.updated", sessionId: action.sessionId, payload: this.actionWire(action) } : undefined;
+    }
+    if (kind === "notice") {
+      const notice = this.notice(id);
+      return notice ? { type: "notice.upserted", sessionId: notice.sessionId, payload: notice } : undefined;
     }
     const pending = this.pending(id);
     return pending ? { type: `${pending.kind}.upserted`, sessionId: pending.sessionId, payload: this.pendingWire(pending) } : undefined;
@@ -804,6 +835,51 @@ export class AgentControlStore {
       this.db.prepare("DELETE FROM idempotency_keys WHERE expires_at<?").run(now);
       this.db.prepare("DELETE FROM actions WHERE expires_at<?").run(now);
       this.db.prepare("DELETE FROM attachments WHERE created_at<?").run(now-this.retention.attachmentsMs);
+      this.db.prepare("DELETE FROM notices WHERE created_at<?").run(now-NOTICE_RETENTION_MS);
+    });
+  }
+
+  /**
+   * Queue a notice for a chat connector. `id` makes the write idempotent: the same id returns
+   * the notice already queued. The connector posts it and reports back with `deliverNotice`.
+   */
+  createNotice(input: { id?: string; connector: string; roomId: string; threadId?: string; text: string;
+    source: string; sessionId?: string }): NoticeRow {
+    const id = input.id ?? randomUUID();
+    return this.transaction(() => {
+      const existing = this.notice(id);
+      if (existing) return existing;
+      this.db.prepare(`INSERT INTO notices(id,connector,room_id,thread_id,text,source,session_id,created_at)
+        VALUES (?,?,?,?,?,?,?,?)`).run(id, input.connector, input.roomId, input.threadId ?? "", input.text, input.source,
+        input.sessionId ?? null, Date.now());
+      markChanged(this.db, "notice", id);
+      return this.notice(id)!;
+    });
+  }
+
+  notice(id: string): NoticeRow | undefined {
+    const row = this.db.prepare("SELECT * FROM notices WHERE id=?").get(id) as Record<string, unknown> | undefined;
+    return row && noticeWire(row);
+  }
+
+  /** A connector's notices, oldest first: those still to post, or a room's recent ones. */
+  notices(query: { connector: string; roomId?: string; threadId?: string; undelivered?: boolean; after?: number; limit: number }): NoticeRow[] {
+    const where = ["connector=?"], params: Array<string | number> = [query.connector];
+    if (query.roomId !== undefined) { where.push("room_id=?"); params.push(query.roomId); }
+    if (query.threadId !== undefined) { where.push("thread_id=?"); params.push(query.threadId); }
+    if (query.undelivered) where.push("delivered_at IS NULL");
+    if (query.after !== undefined) { where.push("created_at>?"); params.push(query.after); }
+    return (this.db.prepare(`SELECT * FROM notices WHERE ${where.join(" AND ")} ORDER BY created_at DESC,id DESC LIMIT ?`)
+      .all(...params, query.limit) as Array<Record<string, unknown>>).map(noticeWire).reverse();
+  }
+
+  /** Record where a connector posted a notice; a repeated report keeps the first event id. */
+  deliverNotice(id: string, eventId: string): NoticeRow | undefined {
+    return this.transaction(() => {
+      const changed = this.db.prepare("UPDATE notices SET event_id=?,delivered_at=? WHERE id=? AND delivered_at IS NULL")
+        .run(eventId, Date.now(), id).changes;
+      if (changed) markChanged(this.db, "notice", id);
+      return this.notice(id);
     });
   }
 
