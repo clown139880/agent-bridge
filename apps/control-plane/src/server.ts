@@ -30,7 +30,8 @@ import { WebhookNotifier, type WebhookOptions } from "./webhook.js";
 import { OperatorNotices, type NoticeTarget, type OperatorEvent } from "./notices.js";
 import { Automations, type AutomationOptions } from "./automations.js";
 import { SecretStore, type SecretStoreOptions } from "./secrets.js";
-import { deepseekReviewer, ToolHub } from "./tools.js";
+import { deepseekReviewer, ToolHub, type ToolReviewer } from "./tools.js";
+import { mustAskHuman, toolOf } from "./approval-review.js";
 import { toolsEndpoint } from "./mcp/tools.js";
 import { NtfyNotifier, type NtfyOptions, type SessionNotificationKind } from "./ntfy.js";
 import { AgentMessagePublisher, type MessageMqttOptions } from "./message-publisher.js";
@@ -67,6 +68,7 @@ export class ControlPlane {
   private readonly automations?: Automations;
   private readonly toolHub?: ToolHub;
   private readonly secrets?: SecretStore;
+  private readonly toolReviewer?: ToolReviewer;
   private readonly ntfy: NtfyNotifier;
   private readonly messages?: AgentMessagePublisher;
   private readonly memory: ConversationMemoryStore;
@@ -165,7 +167,7 @@ export class ControlPlane {
       { relayed: (sessionId) => this.conversations.relays(sessionId) });
     const secrets = this.secrets = options.secrets && new SecretStore(options.secrets);
     const operator = options.noticeTarget ?? { connector: "app", roomId: "operator", threadId: "" };
-    const toolReviewer = secrets && process.env.TOOL_REVIEW !== "off"
+    const toolReviewer = this.toolReviewer = secrets && process.env.TOOL_REVIEW !== "off"
       ? deepseekReviewer({ secrets, model: process.env.TOOL_REVIEW_MODEL ?? "deepseek-flash", timeoutMs: Number(process.env.TOOL_REVIEW_TIMEOUT_MS ?? 15_000) }) : undefined;
     if (options.toolsRegistry) this.toolHub = new ToolHub(store.db, { registry: options.toolsRegistry, secrets, reviewer: toolReviewer,
       notify: (text, level) => this.controlStore.createNotice({ ...operator, text, level, source: "control-plane" }) });
@@ -738,7 +740,22 @@ export class ControlPlane {
     }
   }
 
-  private async handleApprovalRequest(machineId: string, message: ApprovalRequestMessage): Promise<void> {
+  /** Answer an approval for the reviewer, as the human would through /api/v1, and say so quietly. */
+  private resolveByReview(machineId: string, message: ApprovalRequestMessage, choice: "allow" | "deny", reason: string): boolean {
+    try {
+      const created = this.controlStore.createAction({ principal: "system:review", key: `review:${message.approvalId}`, method: "POST",
+        path: `/api/v1/approvals/${message.approvalId}/decision`, body: { choice }, kind: "resolve_approval", machineId, sessionId: message.sessionId });
+      if (!created.existing) this.controlApi.actionsForBridge().dispatch(created.action, { type: "action.resolve_approval", actionId: created.action.actionId,
+        sessionId: message.sessionId, approvalId: message.approvalId, choice });
+    } catch (error) { log.warn({ error, approvalId: message.approvalId }, "Reviewed approval could not be sent; asking the human"); return false; }
+    log.info({ approvalId: message.approvalId, choice, reason, summary: message.summary.slice(0, 200) }, "Approval decided by the reviewer");
+    const operator = this.options.noticeTarget ?? { connector: "app", roomId: "operator", threadId: "" };
+    this.controlStore.createNotice({ id: `review:${message.approvalId}`, ...operator, level: "silent", source: "review", sessionId: message.sessionId,
+      text: `${choice === "allow" ? "🤖 已自动放行" : "🤖 已自动拒绝"}：${message.summary.slice(0, 120)}\n${reason}` });
+    return true;
+  }
+
+  private async handleApprovalRequest(machineId: string, message: ApprovalRequestMessage, reviewed = false): Promise<void> {
     const session = this.store.getSession(message.sessionId);
     if (!session) return;
     if (this.approvalsById.has(message.approvalId)) {
@@ -750,6 +767,22 @@ export class ControlPlane {
     // that case: there is no pending approval for the API caller to resolve.
     if (this.resolvedApprovalIds.delete(message.approvalId)) return;
     const first = !this.controlStore.pending(message.approvalId);
+    // A first request outside the hard boundary is reviewed before anyone is asked: allowed or denied, it never reaches the human.
+    if (first && !reviewed && this.toolReviewer && message.choices.includes("allow")) {
+      const tool = toolOf(message.kind, message.summary);
+      if (!mustAskHuman({ tool, summary: message.summary, choices: message.choices })) {
+        // Off the Bridge's message chain: its other events keep flowing while the reviewer thinks.
+        this.approvalsById.set(message.approvalId, { approvalId: message.approvalId, sessionId: message.sessionId });
+        void this.toolReviewer({ tool, title: `${session.agentType} 工具调用`, description: `${message.kind}`, args: { summary: message.summary },
+          caller: `${session.agentType}@${machineId}:${session.projectPath}` }).catch((error: unknown) => ({ decision: "human" as const, reason: String(error) }))
+          .then((verdict) => {
+            if (verdict.decision !== "human" && this.resolveByReview(machineId, message, verdict.decision, verdict.reason)) return;
+            this.approvalsById.delete(message.approvalId);
+            return this.handleApprovalRequest(machineId, message, true);
+          }).catch((error) => log.error({ error, approvalId: message.approvalId }, "Approval review failed"));
+        return;
+      }
+    }
     this.controlStore.upsertApproval(machineId, message);
     if (first) this.notifySession("approval", message.sessionId, message.summary);
     this.store.updateSessionStatus(message.sessionId, "blocked");

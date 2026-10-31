@@ -16,7 +16,8 @@ function harness() {
   const notices: any[] = [];
   let created = 0, eventIds = 0;
   const matrix = { async send(roomId: string, type: string, content: any) { const eventId = `$out${++eventIds}`; sent.push({ roomId, type, content, eventId }); return eventId; },
-    async typing() {}, async download() { return Buffer.from("png"); } };
+    async typing() {}, async download() { return Buffer.from("png"); },
+    async redact(roomId: string, eventId: string) { sent.push({ roomId, type: "redaction", content: { redacts: eventId }, eventId: `$red${++eventIds}` }); } };
   const control = {
     async call(method: string, path: string, body?: any, key?: string) {
       calls.push({ method, path, body, key });
@@ -178,4 +179,24 @@ test("a reply carries a footer naming the agent, where it ran and how long it to
   const reply = h.sent.filter((item) => item.type === "m.room.message").at(-1)!;
   assert.match(reply.content.body, /^好了\n\n— pi · hal:~\/app · \d+s$/);
   assert.match(reply.content.formatted_body, /<sub>pi · hal:~\/app · \d+s<\/sub>/);
+});
+
+test("an approval comes with its choices as reactions; they are taken back once resolved, and a late answer is told so", async () => {
+  const h = harness();
+  h.text("开始"); await tick();
+  h.connector.project({ cursor: "c", type: "approval.upserted", sessionId: "s1", data: { id: "ap2", status: "pending", summary: "Run ls", choices: ["allow", "deny"] } });
+  await tick();
+  const prompt = h.sent.find((item) => item.content.body?.includes("Run ls"))!;
+  const offered = h.sent.filter((item) => item.type === "m.reaction" && item.content["m.relates_to"].event_id === prompt.eventId);
+  assert.deepEqual(offered.map((item) => item.content["m.relates_to"].key), ["1️⃣", "2️⃣"]);
+  // The approval expired (the agent restarted) before anyone answered.
+  h.connector.project({ cursor: "c", type: "approval.upserted", sessionId: "s1", data: { id: "ap2", status: "expired" } });
+  await tick();
+  assert.deepEqual(h.sent.filter((item) => item.type === "redaction").map((item) => item.content.redacts).sort(), offered.map((item) => item.eventId).sort());
+  assert.match(h.sent.filter((item) => item.type === "m.room.message").at(-1)!.content.body, /已失效/);
+  h.connector.receive("!room:example.org", { event_id: "$late", sender: "@me:example.org", type: "m.reaction",
+    content: { "m.relates_to": { rel_type: "m.annotation", event_id: prompt.eventId, key: "1\u20e3" } } });
+  await tick();
+  assert.equal(h.calls.filter((call) => call.path === "/approvals/ap2/decision").length, 0);
+  assert.match(h.sent.filter((item) => item.type === "m.room.message").at(-1)!.content.body, /已经失效/);
 });

@@ -49,6 +49,11 @@ export class MatrixClient {
     return result.event_id;
   }
 
+  /** Redact (remove) an event this account sent, such as its own reaction. */
+  async redact(roomId: string, eventId: string, txnId: string): Promise<void> {
+    await this.request("PUT", `/_matrix/client/v3/rooms/${enc(roomId)}/redact/${enc(eventId)}/${enc(txnId)}`, { body: {} });
+  }
+
   async typing(roomId: string, userId: string, typing: boolean): Promise<void> {
     await this.request("PUT", `/_matrix/client/v3/rooms/${enc(roomId)}/typing/${enc(userId)}`,
       { body: typing ? { typing: true, timeout: 30_000 } : { typing: false } });

@@ -108,3 +108,11 @@ claude 进程还会读取所在机器的 `~/.claude/settings.json`（Bridge 没�
 ## 中央工具库（0.7.45）
 
 `/mcp/tools` 的 `tool_search`、`tool_call` 在 HAL 的 Claude `permissions.allow` 里整体放行（`mcp__tools`）。是否要人确认由 Control Plane 按登记表的档位判断：`auto` 直接执行，`review`/`human` 阻塞等人在控制中心首页决定（[tool-hub-design.zh.md](tool-hub-design.zh.md) §4.5）。这一层与 Bridge 的工具审批互不重复。
+
+## 自动审核（0.7.51）
+
+Bridge 报上来的审批（Claude 的 Bash、MCP 工具等），在通知任何人之前先过一道：
+
+1. 硬边界（`apps/control-plane/src/approval-review.ts`）：删除、`git push`/`reset --hard`、改服务和进程、装包、`curl | sh`、读写密钥位置（`/etc/agent-bridge`、`.env`、OpenBao、`/proc/*/environ`、`env`）、部署脚本、`sudo`/`chown`、跨机 ssh/Windows，以及没有 `allow` 选项的请求，直接交给人。
+2. 其余交给工具审核员（DeepSeek，`TOOL_REVIEW=off` 关闭）：`allow` 或 `deny` 由 Control Plane 以 `system:review` 身份答复 Bridge，这条审批不进 pending 列表，不推 Matrix 和手机，只发一条 silent notice（“🤖 已自动放行/拒绝”）；`human`、超时或出错照常交给人。
+3. 审核在 Bridge 的消息链之外进行，不阻塞该 Bridge 的其他事件。

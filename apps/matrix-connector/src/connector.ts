@@ -15,7 +15,11 @@ const hash = (value: string) => createHash("sha256").update(value).digest("hex")
 const log = (level: "info" | "warn" | "error", msg: string, extra: Json = {}) =>
   process.stdout.write(`${JSON.stringify({ level, msg, ...extra, time: new Date().toISOString() })}\n`);
 
-interface Prompt { eventId: string; roomId: string; threadId: string; kind: "approval" | "user_input"; id: string; choices?: string[]; questions?: Json[] }
+interface Prompt { eventId: string; roomId: string; threadId: string; kind: "approval" | "user_input"; id: string; choices?: string[]; questions?: Json[];
+  /** The reactions this account put under the prompt, as one-tap choices; removed once it is resolved. */
+  offered?: string[];
+  /** Set once resolved; kept a while so a late answer is told so instead of ignored. */
+  resolved?: string }
 interface State { since?: string; cursor?: string; accessToken?: string; deviceId?: string; prompts?: Prompt[];
   /** place key → when its last message went to the conversation; later notices are its context. */
   heard?: Record<string, number> }
@@ -42,6 +46,7 @@ export class MatrixConnector {
   private readonly queues = new Map<string, Promise<void>>();
   private readonly drafts = new Map<string, Array<Promise<Attachment | undefined>>>();
   private readonly posting = new Set<string>();                // notice ids being posted
+  private readonly answering = new Set<string>();              // prompt ids this connector is answering
   private outbox: Promise<void> = Promise.resolve();
   private displayName?: string;
   private saveTimer?: NodeJS.Timeout;
@@ -386,7 +391,16 @@ export class MatrixConnector {
     const row = item.data, id = String(row.id);
     const prompts = this.state.prompts ??= [];
     if (row.status !== "pending") {
-      this.state.prompts = prompts.filter((prompt) => prompt.id !== id); this.scheduleSave(); return;
+      const prompt = prompts.find((item) => item.id === id);
+      if (prompt && !prompt.resolved) {
+        prompt.resolved = String(row.status);
+        this.withdraw(prompt);
+        // Answered here, the ✔️ already says so; anything else (expired with a restart, answered elsewhere) is said in words.
+        if (!this.answering.delete(id)) this.say(prompt, row.status === "expired" ? "⌛ 这条请求已失效（agent 重启或超时），需要的话让它重新来一次。"
+          : `这条请求已在别处处理（${row.status === "denied" ? "拒绝" : "已处理"}）。`, `resolved:${id}`);
+        this.scheduleSave();
+      }
+      return;
     }
     if (prompts.some((prompt) => prompt.id === id)) return;
     let text: string;
@@ -406,7 +420,22 @@ export class MatrixConnector {
       ...(kind === "approval" ? { choices: row.choices } : { questions: row.questions }) };
     prompts.push(prompt);
     this.state.prompts = prompts.slice(-200);
-    this.say(place, text, `pending:${id}`, (eventId) => { prompt.eventId = eventId; this.scheduleSave(); });
+    const offer = kind === "approval" ? ((row.choices ?? []) as string[]).map((_, i) => NUMBER_KEYS[i]).filter((key): key is string => Boolean(key))
+      : ((row.questions ?? []) as Json[]).length === 1 && !(row.questions as Json[])[0]!.isSecret
+        ? (((row.questions as Json[])[0]!.options ?? []) as Json[]).map((_, i) => NUMBER_KEYS[i]).filter((key): key is string => Boolean(key)) : [];
+    this.say(place, text, `pending:${id}`, (eventId) => {
+      prompt.eventId = eventId; prompt.offered = [];
+      // One-tap answers, like Hermes: the choices are already there as reactions; they go away once answered.
+      for (const key of offer) this.send(place.roomId, "m.reaction", { "m.relates_to": { rel_type: "m.annotation", event_id: eventId, key } },
+        `offer:${id}:${key}`, (reaction) => { prompt.offered!.push(reaction); this.scheduleSave(); });
+      this.scheduleSave();
+    });
+  }
+
+  /** Take back the offered reactions of a resolved prompt. */
+  private withdraw(prompt: Prompt): void {
+    for (const reaction of prompt.offered ?? []) void this.matrix.redact(prompt.roomId, reaction, `withdraw-${hash(reaction)}`).catch(() => undefined);
+    prompt.offered = [];
   }
 
   private prompt(eventId: unknown): Prompt | undefined {
@@ -414,7 +443,9 @@ export class MatrixConnector {
   }
 
   private async answer(prompt: Prompt, reply: string, event: MatrixEvent): Promise<void> {
-    const value = reply.trim();
+    // Keycap emoji arrive with or without the U+FE0F variation selector.
+    const value = reply.trim().replace(/\uFE0F/g, "").replace(/^(\d)\u20E3$/, (_, digit: string) => NUMBER_KEYS[Number(digit) - 1] ?? digit);
+    if (prompt.resolved) { this.say(prompt, prompt.resolved === "expired" ? "这条请求已经失效了。" : "这条请求已经处理过了。"); return; }
     const number = NUMBER_KEYS.indexOf(value) >= 0 ? NUMBER_KEYS.indexOf(value) : /^\d+$/.test(value) ? Number(value) - 1 : -1;
     const answerKey = `matrix:answer:${hash(event.event_id)}`;
     try {
@@ -423,6 +454,7 @@ export class MatrixConnector {
         const choices = prompt.choices ?? [];
         const choice = number >= 0 ? choices[number] : aliases[value] ?? value;
         if (!choice || !choices.includes(choice)) { this.say(prompt, "请用这条审批提供的选项回答。"); return; }
+        this.answering.add(prompt.id);
         await this.control.call("POST", `/approvals/${enc(prompt.id)}/decision`, { choice }, answerKey);
       } else {
         const questions = prompt.questions ?? [];
@@ -439,6 +471,7 @@ export class MatrixConnector {
           };
           answers[String(question.id)] = { answers: options.length && /^\d+(\s*[,，]\s*\d+)+$/.test(raw) ? raw.split(/[,，]/).map((part) => pick(part.trim())) : [pick(raw)] };
         }
+        this.answering.add(prompt.id);
         await this.control.call("POST", `/user-input/${enc(prompt.id)}/response`, { answers }, answerKey);
       }
       void this.react(prompt.roomId, event.event_id, "✔️");
