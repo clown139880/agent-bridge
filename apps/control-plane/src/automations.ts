@@ -10,6 +10,7 @@ import { parseWorkerId, type AgentType, type ControlToBridgeMessage } from "@age
 import type { BridgeRegistry } from "./bridge-registry.js";
 import { nextCron, parseCron, type Cron } from "./cron.js";
 import { parseNoticeTarget, type NoticeTarget } from "./notices.js";
+import type { SecretStore } from "./secrets.js";
 
 const log = pino({ name: "automations" });
 const SLUG = /^[a-z0-9][a-z0-9._-]{0,63}$/;
@@ -61,6 +62,8 @@ export interface AutomationOptions {
   /** flock path shared with the skill library, which lives in the same repository. */
   lockPath?: string;
   push: boolean;
+  /** OpenBao: a webhook's `secretRef` is looked up at `shared/webhooks` before the secrets file. */
+  secrets?: SecretStore;
 }
 
 export interface AutomationDeps {
@@ -276,10 +279,10 @@ export class Automations {
    * POST /hooks/<id>: verify the signature (GitHub `X-Hub-Signature-256`, GitLab `X-Gitlab-Token`,
    * Hermes `X-Webhook-Signature[-V2]`), drop a redelivery, and start the run.
    */
-  hook(id: string, headers: Record<string, string | string[] | undefined>, body: Buffer): { status: number; body: Record<string, unknown> } {
+  async hook(id: string, headers: Record<string, string | string[] | undefined>, body: Buffer): Promise<{ status: number; body: Record<string, unknown> }> {
     const task = this.tasks.get(id), webhook = task?.definition?.trigger.webhook;
     if (!task || !webhook || task.error) return { status: 404, body: { error: "not_found" } };
-    const secret = this.secret(webhook.secretRef);
+    const secret = await this.options.secrets?.value(webhook.secretRef, ["shared/webhooks"]).catch(() => undefined) ?? this.secret(webhook.secretRef);
     if (!secret || !verifySignature(headers, body, secret, this.now())) return { status: 401, body: { error: "invalid_signature" } };
     if (task.definition!.enabled === false || this.state(id)?.paused) return { status: 202, body: { skipped: "paused" } };
     let payload: Record<string, unknown> = {};
@@ -377,6 +380,8 @@ export class Automations {
       timeout.unref();
       child.on("error", (error) => { clearTimeout(timeout); done({ code: -1, stdout, stderr: error.message }); });
       child.on("close", (code, signal) => { clearTimeout(timeout); done({ code: code ?? (signal ? 128 : -1), stdout: clip(stdout), stderr: signal ? `${stderr}\n(${signal})` : stderr }); });
+      // A script that exits without reading its input closes the pipe first; that is not an error.
+      child.stdin.on("error", () => undefined);
       child.stdin.end(JSON.stringify(payload));
     });
   }

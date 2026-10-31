@@ -104,11 +104,11 @@ test("a signed webhook renders its template once; a redelivery and a bad signatu
     { secrets: "HOOK_GEN=tok-1\n" });
   try {
     const body = Buffer.from(JSON.stringify({ message: "第 3 镜完成" }));
-    assert.equal(f.automations.hook("gen-done", { "x-gitlab-token": "wrong" }, body).status, 401);
-    assert.equal(f.automations.hook("nope", { "x-gitlab-token": "tok-1" }, body).status, 404);
-    const first = f.automations.hook("gen-done", { "x-gitlab-token": "tok-1" }, body);
+    assert.equal((await f.automations.hook("gen-done", { "x-gitlab-token": "wrong" }, body)).status, 401);
+    assert.equal((await f.automations.hook("nope", { "x-gitlab-token": "tok-1" }, body)).status, 404);
+    const first = await f.automations.hook("gen-done", { "x-gitlab-token": "tok-1" }, body);
     assert.equal(first.status, 202); assert.ok(first.body.runId);
-    assert.equal(f.automations.hook("gen-done", { "x-gitlab-token": "tok-1" }, body).body.duplicate, true);
+    assert.equal((await f.automations.hook("gen-done", { "x-gitlab-token": "tok-1" }, body)).body.duplicate, true);
     await settle(() => f.automations.runs("gen-done")[0]?.status === "ok");
     assert.deepEqual(f.notices().map((row) => [row.roomId, row.text]), [["!velvet:x", "✅ 第 3 镜完成"]]);
   } finally { f.close(); }
@@ -191,4 +191,14 @@ test("over HTTP: hooks are served at /hooks/<id>; an agent may propose but only 
     const list = await call("agent", "GET", "/api/v1/automations");
     assert.deepEqual(list.body.data.map((row: any) => row.id).sort(), ["remind", "washer"]);
   } finally { await control.stop(); store.db.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a script that exits before reading its input does not take the process down", async () => {
+  const big = "x".repeat(4 * 1024 * 1024);
+  const f = fixture({ "home/quick/automation.yaml": "title: 快\ntrigger:\n  webhook: { secretRef: HOOK_Q }\nscript: { path: quick.sh }\n",
+    "home/quick/quick.sh": "#!/bin/sh\necho done\n" }, { secrets: "HOOK_Q=q\n" });
+  try {
+    for (let i = 0; i < 5; i++) f.automations.runNow("quick", { big });
+    await settle(() => f.automations.runs("quick").some((run) => run.status === "ok"));
+  } finally { f.close(); }
 });

@@ -23,6 +23,8 @@ const control = new ControlPlane(store, {
   webhook: config.webhook,
   noticeTarget: config.noticeTarget,
   automations: config.automations,
+  secrets: config.secrets,
+  toolsRegistry: config.toolsRegistry,
   ntfy: config.ntfy,
   messages: config.messages,
 });

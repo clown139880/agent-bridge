@@ -29,6 +29,9 @@ import { BridgeRegistry } from "./bridge-registry.js";
 import { WebhookNotifier, type WebhookOptions } from "./webhook.js";
 import { OperatorNotices, type NoticeTarget, type OperatorEvent } from "./notices.js";
 import { Automations, type AutomationOptions } from "./automations.js";
+import { SecretStore, type SecretStoreOptions } from "./secrets.js";
+import { ToolHub } from "./tools.js";
+import { toolsEndpoint } from "./mcp/tools.js";
 import { NtfyNotifier, type NtfyOptions, type SessionNotificationKind } from "./ntfy.js";
 import { AgentMessagePublisher, type MessageMqttOptions } from "./message-publisher.js";
 import { AgentMemory, AgentSkills, type Writer } from "@agent-bridge/agent-memory";
@@ -62,6 +65,7 @@ export class ControlPlane {
   /** Lifecycle events as notices in the operator's chat room (CONTROL_NOTICE_TARGET). */
   private operatorNotices?: OperatorNotices;
   private readonly automations?: Automations;
+  private readonly toolHub?: ToolHub;
   private readonly ntfy: NtfyNotifier;
   private readonly messages?: AgentMessagePublisher;
   private readonly memory: ConversationMemoryStore;
@@ -108,6 +112,9 @@ export class ControlPlane {
       noticeTarget?: NoticeTarget;
       /** Schedules and webhooks; failures and proposals go to `noticeTarget`, else the App. */
       automations?: Omit<AutomationOptions, "operatorTarget">;
+      secrets?: SecretStoreOptions;
+      /** The central tool registry (YAML), served at /mcp/tools. */
+      toolsRegistry?: string;
       ntfy?: NtfyOptions;
       messages?: MessageMqttOptions;
     },
@@ -151,7 +158,11 @@ export class ControlPlane {
     this.conversations = new Conversations(this.controlStore, this.registry, agentMemory, options.conversationSetup);
     if (options.messages) this.messages = new AgentMessagePublisher(store, this.controlStore, options.messages,
       { relayed: (sessionId) => this.conversations.relays(sessionId) });
-    if (options.automations) this.automations = new Automations({ ...options.automations,
+    const secrets = options.secrets && new SecretStore(options.secrets);
+    const operator = options.noticeTarget ?? { connector: "app", roomId: "operator", threadId: "" };
+    if (options.toolsRegistry) this.toolHub = new ToolHub(store.db, { registry: options.toolsRegistry, secrets,
+      notify: (text, level) => this.controlStore.createNotice({ ...operator, text, level, source: "control-plane" }) });
+    if (options.automations) this.automations = new Automations({ ...options.automations, secrets,
       operatorTarget: options.noticeTarget ?? { connector: "app", roomId: "operator", threadId: "" } }, {
       store: this.controlStore, registry: this.registry,
       dispatch: (action, message) => this.controlApi.actionsForBridge().dispatch(this.controlStore.action(action.actionId)!, message),
@@ -160,7 +171,7 @@ export class ControlPlane {
     });
     this.controlApi = new AgentControlApi(store, this.controlStore, this.registry, {
       readToken: options.controlApiReadToken, writeToken: options.controlApiWriteToken, bridgeToken: options.bridgeToken,
-      agents, memoryReviews: this.memoryReviews, conversations: this.conversations, automations: this.automations,
+      agents, memoryReviews: this.memoryReviews, conversations: this.conversations, automations: this.automations, toolHub: this.toolHub,
       sseKeepaliveMs: options.sse?.keepaliveMs ?? 15_000,
       ssePollMs: options.sse?.pollMs ?? 2_000, sseMaxBackpressure: options.sse?.maxBackpressure ?? 3,
       actionTimeoutMs: options.sse?.actionTimeoutMs ?? 30_000,
@@ -187,6 +198,7 @@ export class ControlPlane {
       mcp: {
         ...(memoryOptions ? { memory: mcpRoute(memoryEndpoint(this.memory, memoryOptions)) } : {}),
         ...(apiEnabled ? { bridge: mcpRoute(bridgeEndpoint(this.controlApi, () => this.loopbackBase())) } : {}),
+        ...(apiEnabled && this.toolHub ? { tools: mcpRoute(toolsEndpoint(this.controlApi, this.toolHub)) } : {}),
       },
       legacyMcp: this.memoryMcp && ((request, response) => this.memoryMcp!.handle(request, response)),
       controlApi: this.controlApi,
@@ -235,6 +247,7 @@ export class ControlPlane {
   async stop(): Promise<void> {
     clearInterval(this.cleanupTimer);
     this.automations?.stop();
+    this.toolHub?.stop();
     await this.messages?.stop();
     for (const bridge of this.bridges.values()) bridge.socket.close(1001, "server shutdown");
     await new Promise<void>((resolve) => this.http.close(() => resolve()));

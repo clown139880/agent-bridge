@@ -167,6 +167,38 @@ function MemoryReviewPanel({ writable }: { writable: boolean }) {
   </aside>;
 }
 
+interface ToolApproval { id: string; tool: string; args: Record<string, unknown>; caller: string; risk: string; createdAt: number }
+/** Calls into the central tool library waiting for you (docs/tool-hub-design.zh.md); the caller blocks until you decide. */
+function ToolApprovalPanel({ writable }: { writable: boolean }) {
+  const [rows, setRows] = useState<ToolApproval[]>([]), [busy, setBusy] = useState(""), [error, setError] = useState("");
+  const client = useRef<ControlClient>();
+  const load = async () => {
+    try { setRows((await client.current!.request<{ data: ToolApproval[] }>("/tool-approvals?status=pending")).data); setError(""); }
+    catch (e) { const text = explain(e); if (!/not.found|404/i.test(text)) setError(text); }
+  };
+  useEffect(() => {
+    client.current = new ControlClient("", () => {}, "/control/api/v1"); void load();
+    const timer = setInterval(() => { if (document.visibilityState === "visible") void load(); }, 10_000);
+    return () => { clearInterval(timer); client.current?.dispose(); };
+  }, []);
+  const decide = async (id: string, choice: "allow" | "deny") => {
+    setBusy(id);
+    try { await client.current!.request(`/tool-approvals/${segment(id)}/decision`, { body: { choice } }); await load(); }
+    catch (e) { setError(explain(e)); } finally { setBusy(""); }
+  };
+  if (!rows.length && !error) return null;
+  return <aside className="pending-panel"><strong>待你确认的工具调用</strong>
+    {error && <p className="error">{error}</p>}
+    {rows.map(r => <div key={r.id} className="pending-item">
+      <div className="pending-kind">{r.tool} · {r.caller} · {time(r.createdAt)}</div>
+      <pre className="pending-summary">{JSON.stringify(r.args, null, 2)}</pre>
+      {writable && <div className="row-actions">
+        <button type="button" className="primary" disabled={busy === r.id} onClick={() => void decide(r.id, "allow")}>允许</button>
+        <button type="button" className="danger" disabled={busy === r.id} onClick={() => void decide(r.id, "deny")}>拒绝</button></div>}
+    </div>)}
+  </aside>;
+}
+
 interface AutomationProposal { id: string; action: "create" | "update" | "delete"; automationId: string; scope: string;
   definition: Record<string, unknown> | null; previous: Record<string, unknown> | null; reason: string | null; proposedBy: string; createdAt: number }
 interface AutomationRow { id: string; scope: string; title: string; kind: string | null; trigger: string | null; error: string | null;
@@ -386,6 +418,7 @@ function Sessions({ control, state }: { control: ControlState; state: ViewState 
   useLayoutEffect(() => { const saved = scrollMemory.get("sessions"); if (saved) window.scrollTo({ top: saved.y }); }, []);
   return <section>
     <MemoryReviewPanel writable={state.writable} />
+    <ToolApprovalPanel writable={state.writable} />
     <AutomationPanel writable={state.writable} />
     <div className="page-heading"><div><div className="eyebrow">YOUR CONVERSATIONS</div><h1>最近会话</h1></div>
       {state.writable && <Link className="button primary" to="/control/new">＋ 新对话</Link>}</div>

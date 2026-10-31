@@ -1,6 +1,6 @@
 # 设计：中央工具库、按作用域置顶与自动审批
 
-状态：设计稿，未实现（2026-10-31）。本仓库只写机制；具体有哪些工具、怎么分配，放在私有 agent-skills 仓库的 `tools/registry.yaml`。
+状态：第 1 期已实现（0.7.45，2026-10-31）：`/mcp/tools`、登记表、`auto` 直接放行，其余档位暂时都等人在控制中心确认。第 2–4 期为方案。本仓库只写机制；具体有哪些工具、怎么分配，放在私有 agent-skills 仓库的 `tools/registry.yaml`。
 
 相关文档：[agent-skills-design.zh.md](agent-skills-design.zh.md)（技能的置顶与搜索，本设计照搬）、[approval-permissions.zh.md](approval-permissions.zh.md)（审批链路现状）、[jev-approval-triage-design.zh.md](jev-approval-triage-design.zh.md)（硬边界清单，本设计沿用）、[agent-dispatch-and-review.zh.md](agent-dispatch-and-review.zh.md) §4（审核员模型）。
 
@@ -107,6 +107,13 @@ servers:
 
 - 返回统一为 `{title, url, snippet, publishedAt?, source}`；DeepSeek 这类“搜索并回答”的后端另带 `answer` 和引用。
 - 同一查询短期缓存；每个后端记录用时、失败率和费用，路由按可用性降级。
+
+## 4.5 第 1 期的实现
+
+- Control Plane 读 `TOOLS_REGISTRY`（私有仓库 `tools/registry.yaml`），文件变化即重新加载；`transport.builtin` 的条目（memory、bridge、web）只登记置顶和档位，不经代理。
+- 上游连接按需建立，空闲 10 分钟关闭；工具清单缓存 10 分钟。`${KEY}` 由 `secrets` 列出的 OpenBao 路径填充（[secrets-design.zh.md](secrets-design.zh.md)）。
+- `tool_call` 遇到非 `auto` 的工具：写一条 `tool_approvals`，推一条 alert 到 App，调用阻塞到人在控制中心首页允许或拒绝（最多 10 分钟，超时按过期失败）。决定接口 `POST /api/v1/tool-approvals/:id/decision` 只接受 `control:*`。
+- HAL 上 Claude、Codex 的 MCP 配置加了 `tools`，Claude 的 `permissions.allow` 放行 `mcp__tools`：档位由 Control Plane 判断，不再让 Claude 自己的审批问第二遍。pi 由 Bridge 加载的扩展注册 `tools_tool_search`、`tools_tool_call`。
 
 ## 5. 分期
 

@@ -75,6 +75,12 @@ export const config = {
     source: bridgeUpdateSource,
     publishedAt: bridgeUpdatePublishedAt,
   } : undefined,
+  // Secrets in OpenBao (docs/secrets-design.zh.md); off unless both are set.
+  secrets: process.env.OPENBAO_ADDR && process.env.OPENBAO_TOKEN_FILE ? {
+    address: process.env.OPENBAO_ADDR, tokenFile: process.env.OPENBAO_TOKEN_FILE, mount: process.env.OPENBAO_KV_MOUNT,
+  } : undefined,
+  // Central tool library (docs/tool-hub-design.zh.md); off unless TOOLS_REGISTRY is set.
+  toolsRegistry: process.env.TOOLS_REGISTRY || undefined,
   // Schedules and webhooks (docs/automations-design.zh.md); off unless AUTOMATIONS_DIR is set.
   automations: process.env.AUTOMATIONS_DIR ? {
     dir: process.env.AUTOMATIONS_DIR,

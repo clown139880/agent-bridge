@@ -1,10 +1,10 @@
 /**
  * pi has no MCP client. The Bridge loads this extension (`pi -e`) so pi gets the same central
  * memory/skills and session tools as Codex and Claude: the tools of the Control Plane's /mcp/memory
- * and /mcp/bridge, registered as `memory_<tool>` / `bridge_<tool>`, authenticated with the agent's
+ * /mcp/bridge and /mcp/tools, registered as `memory_<tool>` / `bridge_<tool>` / `tools_<tool>`, authenticated with the agent's
  * own AGENT_TOKEN. Loaded by pi through jiti; it uses only Node built-ins.
  */
-const SERVERS = ["memory", "bridge"] as const;
+const SERVERS = ["memory", "bridge", "tools"] as const;
 
 type Json = Record<string, any>;
 

@@ -104,3 +104,7 @@ claude 进程还会读取所在机器的 `~/.claude/settings.json`（Bridge 没�
 4. 观察一段和基准差不多的会话，数 `/api/v1/approvals` 里的审批次数，再和 27 比。
 
 回滚：恢复原来的 `CLAUDE_PERMISSION_ALLOW`，删掉 `CLAUDE_PERMISSION_DENY`，再重启同一个 unit。
+
+## 中央工具库（0.7.45）
+
+`/mcp/tools` 的 `tool_search`、`tool_call` 在 HAL 的 Claude `permissions.allow` 里整体放行（`mcp__tools`）。是否要人确认由 Control Plane 按登记表的档位判断：`auto` 直接执行，`review`/`human` 阻塞等人在控制中心首页决定（[tool-hub-design.zh.md](tool-hub-design.zh.md) §4.5）。这一层与 Bridge 的工具审批互不重复。

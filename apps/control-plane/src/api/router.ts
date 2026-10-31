@@ -7,6 +7,7 @@ import type { MemoryReviewRoutes } from "../memory-review.js";
 import { CONVERSATION_AGENTS, type ConversationAgent, type Conversations } from "../conversations.js";
 import { parseNoticeTarget } from "../notices.js";
 import { AutomationError, type Automations } from "../automations.js";
+import type { ToolHub } from "../tools.js";
 import { AgentControlSse, SseCursorError } from "./sse.js";
 import { ActionServiceError, SessionActionService } from "./session-actions.js";
 import { ApiProblem, integerParam as integer, jsonBody, stringField as string, attachmentsField, uploadRequest } from "./validation.js";
@@ -36,6 +37,8 @@ interface ApiOptions {
   /** AGENT_TOKENS: each agent drives sessions as `agent:<name>`, recorded on every action it starts. */
   agents?: Array<{ name: string; token: string; role?: "agent" | "project" }>;
   memoryReviews?: MemoryReviewRoutes;
+  /** The central tool library's pending approvals (/api/v1/tool-approvals). */
+  toolHub?: ToolHub;
   /** Schedules, webhooks and their proposals (/api/v1/automations). */
   automations?: Automations;
   /** Chat connectors' room/thread → session bindings (/api/v1/conversations). */
@@ -148,6 +151,20 @@ export class AgentControlApi {
       if(conversation&&this.options.conversations){await this.conversationRoute(request,response,url,principal,conversation[1],conversation[2]&&decodeURIComponent(conversation[2]),conversation[3]);return true;}
       const automation=url.pathname.match(/^\/api\/v1\/automations(?:\/([^/]+)(?:\/([^/]+)(?:\/(decision))?)?)?$/);
       if(automation&&this.options.automations){await this.automationRoute(request,response,url,principal,automation[1]&&decodeURIComponent(automation[1]),automation[2]&&decodeURIComponent(automation[2]),automation[3]);return true;}
+      const toolApproval=url.pathname.match(/^\/api\/v1\/tool-approvals(?:\/([^/]+)(?:\/(decision))?)?$/);
+      if(toolApproval&&this.options.toolHub){
+        const hub=this.options.toolHub,id=toolApproval[1]&&decodeURIComponent(toolApproval[1]);
+        if(request.method==="GET"&&!id){this.ok(response,{data:hub.approvals(url.searchParams.get("status")??undefined)});return true;}
+        if(request.method==="GET"&&id&&!toolApproval[2]){const row=hub.approvalRow(id);if(!row)throw new ApiProblem(404,"approval_not_found","approval not found");this.ok(response,row);return true;}
+        if(request.method==="POST"&&id&&toolApproval[2]){
+          if(!principal.id.startsWith("control:"))throw new ApiProblem(403,"forbidden","only the human decides a tool call for now");
+          const body=await jsonBody(request) as Record<string,unknown>;
+          if(body.choice!=="allow"&&body.choice!=="deny")throw new ApiProblem(400,"invalid_choice","choice must be allow or deny");
+          try{this.ok(response,hub.decide(id,body.choice,principal.id,string(body.reason,"reason")));}
+          catch(error){const e=error as {status?:number;code?:string;message?:string};throw new ApiProblem(e.status??500,e.code??"error",e.message??String(error));}
+          return true;}
+        throw new ApiProblem(404,"not_found","endpoint not found");
+      }
       const notice=url.pathname.match(/^\/api\/v1\/notices(?:\/([^/]+))?$/);
       if(notice){await this.noticeRoute(request,response,url,principal,notice[1]&&decodeURIComponent(notice[1]));return true;}
       const input=url.pathname.match(/^\/api\/v1\/user-input\/([^/]+)(?:\/(response))?$/);

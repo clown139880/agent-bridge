@@ -91,6 +91,9 @@ importers:
       '@hono/node-server':
         specifier: ^1.19.9
         version: 1.19.17(hono@4.13.7)
+      '@modelcontextprotocol/sdk':
+        specifier: 1.30.0
+        version: 1.30.0(zod@4.5.4)
       '@modelcontextprotocol/server':
         specifier: ^2.3.1
         version: 2.3.1
@@ -2630,12 +2633,6 @@ packages:
   '@hono/node-server@1.19.17':
     resolution: {integrity: sha512-dSneS5qhiauZWGDCeK4o695Xd9nUNjviSZCMQrj10eetr8Uln1ucn6bbphOM6UynAMMtNIzZNSpL9vnASJwrPQ==}
     engines: {node: '>=18.14.1'}
-    peerDependencies:
-      hono: ^4
-
-  '@hono/node-server@2.1.1':
-    resolution: {integrity: sha512-ELuehkj5VCBdgEw9zs+ivkKwyzzUCSQuE96YmiPvn1ECBoZCczbFXJLeEGMTYjphP6gydh4pHMqEYPVMYUVgQg==}
-    engines: {node: '>=20'}
     peerDependencies:
       hono: ^4
 
@@ -8615,10 +8612,6 @@ snapshots:
     dependencies:
       hono: 4.13.7
 
-  '@hono/node-server@2.1.1(hono@4.13.7)':
-    dependencies:
-      hono: 4.13.7
-
   '@img/colour@1.1.0': {}
 
   '@img/sharp-darwin-arm64@0.35.4':
@@ -8902,7 +8895,7 @@ snapshots:
 
   '@modelcontextprotocol/sdk@1.30.0(zod@4.5.4)':
     dependencies:
-      '@hono/node-server': 2.1.1(hono@4.13.7)
+      '@hono/node-server': 1.19.17(hono@4.13.7)
       ajv: 8.20.0
       ajv-formats: 3.0.1(ajv@8.20.0)
       content-type: 1.0.5

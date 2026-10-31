@@ -21,7 +21,7 @@ export interface HttpAppDeps {
   mcp?: Record<string, Handler<HttpEnv>>;
   controlApi: AgentControlApi;
   /** POST /hooks/<id>: webhook-triggered automations, authenticated by each hook's own signature. */
-  hooks?: (id: string, headers: Record<string, string | string[] | undefined>, body: Buffer) => { status: number; body: Record<string, unknown> };
+  hooks?: (id: string, headers: Record<string, string | string[] | undefined>, body: Buffer) => Promise<{ status: number; body: Record<string, unknown> }>;
   /** Whether the public /api/v1 entrance has any credential configured. */
   apiEnabled: boolean;
   browserTokens: { read?: string; write?: string };
@@ -64,7 +64,7 @@ export function createHttpApp(deps: HttpAppDeps) {
       if (length > HOOK_MAX_BYTES) return c.json({ error: "payload_too_large" }, 413);
       const body = Buffer.from(await c.req.arrayBuffer());
       if (body.length > HOOK_MAX_BYTES) return c.json({ error: "payload_too_large" }, 413);
-      const result = hooks(c.req.param("id") ?? "", c.env.incoming.headers, body);
+      const result = await hooks(c.req.param("id") ?? "", c.env.incoming.headers, body);
       return c.json(result.body, result.status as 202);
     };
     app.post("/hooks/:id", route);
