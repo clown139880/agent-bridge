@@ -3,7 +3,7 @@ import { readFile, rename, writeFile } from "node:fs/promises";
 import type { ConnectorConfig } from "./config.js";
 import { ControlError, type ControlClient, type Json, type StreamItem } from "./control.js";
 import { MatrixError, type Content, type MatrixClient, type MatrixEvent, type SyncResponse } from "./matrix.js";
-import { NUMBER_KEYS, command, mentions, message, plainBody, split, threadOf, withoutMention, type Command } from "./render.js";
+import { NUMBER_KEYS, command, footer, mentions, message, plainBody, split, threadOf, withoutMention, type Command } from "./render.js";
 
 const CONNECTOR = "matrix";
 const MAX_ATTACHMENTS = 8, MAX_BYTES = 15_000_000;
@@ -37,6 +37,7 @@ export class MatrixConnector {
   private readonly places = new Map<string, Place>();          // sessionId → where it reports
   private readonly orphans = new Map<string, StreamItem[]>();  // events of sessions not bound yet
   private readonly lastText = new Map<string, string>();       // sessionId → last assistant message
+  private readonly turnStarted = new Map<string, number>();    // sessionId → when its running turn started
   private readonly typing = new Map<string, NodeJS.Timeout>(); // sessionId → typing refresh
   private readonly queues = new Map<string, Promise<void>>();
   private readonly drafts = new Map<string, Array<Promise<Attachment | undefined>>>();
@@ -301,7 +302,7 @@ export class MatrixConnector {
     if (item.type === "approval.upserted" || item.type === "user_input.upserted") { this.pending(place, item); return; }
     if (item.type !== "session.event.appended") return;
     const event = item.data as { type: string; turnId?: string; payload: Json };
-    if (event.type === "turn.started") this.setTyping(sessionId, place, true);
+    if (event.type === "turn.started") { this.setTyping(sessionId, place, true); this.turnStarted.set(sessionId, Date.now()); }
     else if (event.type === "message.completed" && event.payload.role === "assistant" && typeof event.payload.text === "string")
       this.lastText.set(sessionId, event.payload.text);
     else if (event.type === "turn.completed" || event.type === "turn.failed" || event.type === "turn.interrupted") {
@@ -309,7 +310,9 @@ export class MatrixConnector {
       const text = this.lastText.get(sessionId) ?? (typeof event.payload.summary === "string" ? event.payload.summary : "");
       this.lastText.delete(sessionId);
       const id = `${sessionId}:${event.turnId ?? item.cursor}`;
-      if (event.type === "turn.completed" && text) this.say(place, text, `answer:${id}`);
+      const started = this.turnStarted.get(sessionId);
+      this.turnStarted.delete(sessionId);
+      if (event.type === "turn.completed" && text) void this.signed(sessionId, started).then((note) => this.say(place, text, `answer:${id}`, undefined, note));
       if (event.type === "turn.failed") {
         const error = event.payload.error?.message ?? event.payload.error ?? event.payload.summary ?? "未知错误";
         this.say(place, `执行失败：${typeof error === "string" ? error : JSON.stringify(error)}${text && text !== error ? `\n\n${text}` : ""}`, `failed:${id}`);
@@ -448,10 +451,15 @@ export class MatrixConnector {
 
   // ---- output ---------------------------------------------------------------
 
-  /** Send in order; `id` makes the Matrix transaction stable, so a retried send is not duplicated. */
-  private say(place: Place, text: string, id?: string, sent?: (eventId: string) => void): void {
-    const base = id ?? `${Date.now()}:${Math.random()}`;
-    split(text).forEach((part, index) => this.send(place.roomId, "m.room.message", message(part, place.threadId),
+  /** The footer for a session's reply; a failed lookup only drops the footer, never the reply. */
+  private async signed(sessionId: string, started?: number): Promise<string | undefined> {
+    try { return footer(await this.control.call("GET", `/sessions/${enc(sessionId)}`), started); } catch { return undefined; }
+  }
+
+  /** Send in order; `id` makes the Matrix transaction stable, so a retried send is not duplicated. The footer goes on the last piece. */
+  private say(place: Place, text: string, id?: string, sent?: (eventId: string) => void, note?: string): void {
+    const base = id ?? `${Date.now()}:${Math.random()}`, parts = split(text);
+    parts.forEach((part, index) => this.send(place.roomId, "m.room.message", message(part, place.threadId, "m.text", index === parts.length - 1 ? note : undefined),
       `${base}:${index}`, index === 0 ? sent : undefined));
   }
 

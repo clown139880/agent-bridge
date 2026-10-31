@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { MatrixConnector } from "../apps/matrix-connector/src/connector.js";
 import { ControlError } from "../apps/matrix-connector/src/control.js";
-import { command, withoutMention } from "../apps/matrix-connector/src/render.js";
+import { command, footer, withoutMention } from "../apps/matrix-connector/src/render.js";
 
 const config = { homeserver: "https://m.example", userId: "@bot:example.org", allowedUsers: ["@me:example.org"],
   controlUrl: "http://cp", controlToken: "t", stateFile: "/dev/null" };
@@ -29,7 +29,7 @@ function harness() {
       if (conversation && method === "PUT") { bindings.set(body.threadId, body.sessionId); return { agent: body.agent ?? "pi" }; }
       if (path === "/sessions") { const id = `s${++created}`; sessions.set(id, { activeTurnId: "t1" }); return { status: "succeeded", sessionId: id }; }
       const session = /^\/sessions\/([^/]+)(?:\/(turns|interrupt))?$/.exec(path);
-      if (session && !session[2]) return { ...sessions.get(session[1]!) };
+      if (session && !session[2]) return { agent: "pi", machineId: "hal", workspace: "/root/app", ...sessions.get(session[1]!) };
       if (session?.[2] === "interrupt") { sessions.get(session[1]!)!.activeTurnId = null; return { status: "succeeded" }; }
       if (session?.[2] === "turns") {
         if (sessions.get(session[1]!)!.activeTurnId) throw new ControlError(409, "turn_already_active", "busy");
@@ -86,7 +86,7 @@ test("@ in the main timeline opens a parallel session answered in a thread; outp
   await tick();
   const replies = h.sent.filter((item) => item.type === "m.room.message");
   assert.equal(replies.length, 1);
-  assert.equal(replies[0]!.content.body, "线程里的答复");
+  assert.match(replies[0]!.content.body, /^线程里的答复\n\n— pi/);
   assert.equal(replies[0]!.content["m.relates_to"].event_id, threadId);
 });
 
@@ -165,4 +165,17 @@ test("notices the room got since the last message go with the next one", async (
   assert.match(input, /洗衣机快洗完了/);
   assert.match(input, /用户消息：\n要$/);
   assert.ok(h.calls.some((call) => call.path.startsWith("/notices?") && call.path.includes("threadId=&")));
+});
+
+test("a reply carries a footer naming the agent, where it ran and how long it took", async () => {
+  assert.equal(footer({ agent: "claude-code", machineId: "hal", workspace: "/root/agent-bridge" }, 0, 83_000), "Claude · hal:~/agent-bridge · 1m23s");
+  assert.equal(footer({ agent: "pi", machineId: "hal", workspace: "/srv/x", model: "deepseek-v4-flash" }), "pi · deepseek-v4-flash · hal:/srv/x");
+  const h = harness();
+  h.text("开始"); await tick();
+  const event = (type: string, payload: any) => h.connector.project({ cursor: "c", type: "session.event.appended", sessionId: "s1", data: { type, turnId: "t", payload } });
+  event("turn.started", {}); event("message.completed", { role: "assistant", text: "好了" }); event("turn.completed", {});
+  await tick(); await tick();
+  const reply = h.sent.filter((item) => item.type === "m.room.message").at(-1)!;
+  assert.match(reply.content.body, /^好了\n\n— pi · hal:~\/app · \d+s$/);
+  assert.match(reply.content.formatted_body, /<sub>pi · hal:~\/app · \d+s<\/sub>/);
 });
