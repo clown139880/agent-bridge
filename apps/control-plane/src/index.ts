@@ -15,6 +15,7 @@ const control = new ControlPlane(store, {
   controlApiWriteToken: config.controlApiWriteToken,
   agents: config.agents,
   agentMemory: config.agentMemory,
+  conversationSetup: config.conversationSetup,
   memoryReview: config.memoryReview,
   retention: config.retention,
   sse: config.sse,

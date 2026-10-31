@@ -165,7 +165,7 @@ export class MatrixConnector {
 
   private async submit(place: Place, text: string, event: MatrixEvent): Promise<void> {
     const conversation = await this.conversation(place);
-    if (conversation.problem) { this.say(place, problemText(conversation)); return; }
+    if (conversation.problem && !conversation.setup) { this.say(place, problemText(conversation)); return; }
     const pending = this.drafts.get(key(place)) ?? [];
     this.drafts.delete(key(place));
     const attachments = (await Promise.all(pending)).filter((item): item is Attachment => Boolean(item)).slice(0, MAX_ATTACHMENTS);
@@ -185,8 +185,10 @@ export class MatrixConnector {
       }
     }
     if (!conversation.target) { this.say(place, problemText(conversation)); return; }
+    if (conversation.setup) this.say(place, `这个房间还没绑定项目，先由 ${conversation.target.workerId}（${conversation.target.workspace}）帮你建作用域；绑定后下一条消息开新会话。`);
     const created = await this.control.settle(await this.control.call("POST", "/sessions", {
-      workerId: conversation.target.workerId, workspace: conversation.target.workspace, input: text,
+      workerId: conversation.target.workerId, workspace: conversation.target.workspace,
+      input: conversation.setup ? setupInput(place.roomId, text) : text,
       memoryScope: conversation.scope?.id, ...extra }, `matrix:create:${hash(event.event_id)}`), 180_000);
     const sessionId = String(created.sessionId);
     await this.control.call("PUT", `/conversations/${CONNECTOR}/${enc(place.roomId)}`, { threadId: place.threadId, sessionId });
@@ -244,7 +246,10 @@ export class MatrixConnector {
       const [scopeId, location] = cmd.args;
       if (!scopeId) { this.say(place, "用法：`!bind <scope> [机器:/路径]`"); return; }
       const conversation = await this.control.call("POST", `${room}/bind`, { scopeId, ...(location ? { location } : {}) });
-      this.say(place, `已绑定到 ${conversation.scope?.title ?? scopeId}（${scopeId}）。${conversation.problem ? problemText(conversation) : ""}`);
+      // Binding an unbound room ends its setup sessions; they no longer report here.
+      if (!conversation.sessionId) for (const [sessionId, bound] of this.places) if (bound.roomId === place.roomId) this.places.delete(sessionId);
+      this.say(place, `已绑定到 ${conversation.scope?.title ?? scopeId}（${scopeId}）。${conversation.problem ? problemText(conversation)
+        : conversation.sessionId ? "" : `下一条消息用 ${conversation.agent} 在 ${conversation.target?.workspace} 开新会话。`}`);
     }
   }
 
@@ -432,7 +437,19 @@ function describe(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/** The first message of a setup session: what the room needs, then the user's words. */
+function setupInput(roomId: string, text: string): string {
+  return [
+    `[Matrix 房间设置] 这条消息来自一个还没绑定记忆作用域的 Matrix 房间（${roomId}）。`,
+    "按用户的描述帮这个房间准备作用域和工作目录：已有合适的作用域就用它；没有就用中央记忆的 scope 工具（machine_id + cwd，create=true）为工作目录建一个，目录不存在先建好。",
+    "房间由用户在房间里发 `!bind <scope> [机器:/路径]` 绑定；绑定后这次会话结束，下一条消息在该作用域开新会话。最后把要发的那条 `!bind` 命令告诉用户。",
+    "", "用户消息：", text,
+  ].join("\n");
+}
+
 function problemText(conversation: Json): string {
+  if (conversation.problem === "room_unbound" && conversation.setup)
+    return `这个房间还没绑定项目，消息会先交给 ${conversation.target?.workerId}（${conversation.target?.workspace}）帮你建作用域；用 \`!bind <scope> [机器:/路径]\` 绑定。`;
   if (conversation.problem === "room_unbound") return "这个房间还没绑定项目。用 `!bind <scope>` 把它绑定到一个记忆作用域。";
   if (conversation.problem === "scope_has_no_workspace")
     return `作用域 ${conversation.scope?.id} 没有可用的工作目录。用 \`!bind ${conversation.scope?.id} <机器>:/路径\` 绑定一个。`;

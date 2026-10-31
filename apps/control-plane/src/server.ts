@@ -87,6 +87,8 @@ export class ControlPlane {
       agents?: Array<Writer & { token: string }>;
       agentMemory?: { vault: string; root?: string; lockPath?: string; cacheDir?: string;
         skills?: { repo: string; lockPath?: string; archiveDir: string; push: boolean } };
+      /** Where an unbound chat room's messages go, so an agent can help set the room up. */
+      conversationSetup?: { workerId: string; workspace: string };
       /** Without a reviewer every held memory write waits for the human. */
       memoryReview?: { reviewer?: { command: string; model: string; timeoutMs: number } };
       retention?: { actionsMs: number; attachmentsMs: number };
@@ -137,7 +139,7 @@ export class ControlPlane {
       actionsMs: 86_400_000, attachmentsMs: 7 * 86_400_000,
     });
     if (options.messages) this.messages = new AgentMessagePublisher(store, this.controlStore, options.messages);
-    this.conversations = new Conversations(this.controlStore, this.registry, agentMemory);
+    this.conversations = new Conversations(this.controlStore, this.registry, agentMemory, options.conversationSetup);
     this.controlApi = new AgentControlApi(store, this.controlStore, this.registry, {
       readToken: options.controlApiReadToken, writeToken: options.controlApiWriteToken, bridgeToken: options.bridgeToken,
       agents, memoryReviews: this.memoryReviews, conversations: this.conversations,

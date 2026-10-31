@@ -27,13 +27,13 @@ function vault(): string {
   return dir;
 }
 
-async function fixture() {
+async function fixture(options: { conversationSetup?: { workerId: string; workspace: string } } = {}) {
   const path = join(tmpdir(), `conversations-${randomUUID()}.sqlite`), store = new Store(path), memory = vault();
   store.upsertMachine({ id: "hal", name: "HAL", platform: "linux", hostname: "hal", capabilities: ["pi", "codex-cli"] });
   const sent: ControlToBridgeMessage[] = [];
   const socket = { readyState: WebSocket.OPEN, OPEN: WebSocket.OPEN, send(value: string) { sent.push(JSON.parse(value)); }, close() {} } as unknown as WebSocket;
   const control = new ControlPlane(store, { host: "127.0.0.1", port: 0, version: "9.9.9", controlApiWriteToken: "write",
-    agentMemory: { vault: memory }, sse: { keepaliveMs: 50, pollMs: 5, maxBackpressure: 3 } });
+    agentMemory: { vault: memory }, ...options, sse: { keepaliveMs: 50, pollMs: 5, maxBackpressure: 3 } });
   const internals = control as unknown as Internals;
   internals.bridges.set("hal", { machineId: "hal", name: "HAL", capabilities: ["pi", "codex-cli"], features: ["session-actions", "session-events"], bridgeVersion: "9.9.9", socket });
   await control.start();
@@ -107,5 +107,25 @@ test("bind adds the room and a location to central memory and refuses another sc
     await f.call("POST", `/conversations/matrix/${encodeURIComponent("!app:example.org")}/bind`, { scopeId: "repo-app", location: "hal:/root/app" });
     const app = readFileSync(join(f.memory, "agent-memory", "scopes", "repo-app", "scope.md"), "utf8");
     assert.doesNotMatch(app, /matrix_rooms/); assert.match(app, /matrix:!app:example\.org/);
+  } finally { await f.close(); }
+});
+
+test("an unbound room talks to the setup agent until bound; binding starts the room's own session", async () => {
+  const f = await fixture({ conversationSetup: { workerId: "claude@hal", workspace: "/root/agent-bridge" } });
+  try {
+    const room = `/conversations/matrix/${encodeURIComponent("!new:example.org")}`;
+    let conversation = (await f.call("GET", room)).body;
+    assert.equal(conversation.problem, "room_unbound"); assert.equal(conversation.setup, true);
+    assert.deepEqual(conversation.target, { workerId: "claude@hal", workspace: "/root/agent-bridge" });
+    // The setup session does not become the room's agent.
+    conversation = (await f.call("PUT", room, { threadId: "", sessionId: "older" })).body;
+    assert.equal(conversation.sessionId, "older"); assert.equal(conversation.agent, "pi");
+    conversation = (await f.call("POST", `${room}/bind`, { scopeId: "travel", location: "hal:/root/projects/travel" })).body;
+    assert.equal(conversation.setup, undefined); assert.equal(conversation.sessionId, null, "binding ends the setup session");
+    assert.deepEqual(conversation.target, { workerId: "pi@hal", workspace: "/root/projects/travel" });
+    // Rebinding a bound room (adding a location) keeps its session.
+    await f.call("PUT", room, { threadId: "", sessionId: "older" });
+    conversation = (await f.call("POST", `${room}/bind`, { scopeId: "travel", location: "hal:/root/projects/travel-2" })).body;
+    assert.equal(conversation.sessionId, "older");
   } finally { await f.close(); }
 });

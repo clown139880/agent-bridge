@@ -21,6 +21,8 @@ export interface Conversation {
   /** Where a new session runs, from the scope's bound locations or its repository's sessions. */
   target: { workerId: string; workspace: string } | null;
   problem?: "room_unbound" | "scope_has_no_workspace" | "memory_unavailable";
+  /** The room is unbound and its messages go to the setup target, which helps bind it. */
+  setup?: boolean;
 }
 
 /**
@@ -30,7 +32,7 @@ export interface Conversation {
  */
 export class Conversations {
   constructor(private readonly store: AgentControlStore, private readonly registry: BridgeRegistry,
-    private readonly memory?: AgentMemory) {
+    private readonly memory?: AgentMemory, private readonly setup?: { workerId: string; workspace: string }) {
     store.db.exec(`
       CREATE TABLE IF NOT EXISTS conversation_rooms (connector TEXT NOT NULL, room_id TEXT NOT NULL,
         agent TEXT NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY(connector, room_id));
@@ -58,7 +60,12 @@ export class Conversations {
     const base = { connector, roomId, threadId, sessionId, agent };
     if (!this.memory) return { ...base, scope: null, target: null, problem: "memory_unavailable" };
     const scope = this.scopeOf(connector, roomId);
-    if (!scope) return { ...base, scope: null, target: null, problem: "room_unbound" };
+    if (!scope) {
+      // Until the room is bound, its messages go to the setup agent, which helps create and bind a scope.
+      if (!this.setup) return { ...base, scope: null, target: null, problem: "room_unbound" };
+      const target = session ? { workerId: String(session.workerId), workspace: String(session.workspace) } : this.setup;
+      return { ...base, scope: null, target, problem: "room_unbound", setup: true };
+    }
     const target = session ? { workerId: String(session.workerId), workspace: String(session.workspace) } : this.target(scope, agent);
     return { ...base, scope: { id: scope.id, title: scope.title }, target, ...(target ? {} : { problem: "scope_has_no_workspace" as const }) };
   }
@@ -75,7 +82,8 @@ export class Conversations {
         this.store.db.prepare(`INSERT INTO conversation_threads VALUES(?,?,?,?,?)
           ON CONFLICT(connector,room_id,thread_id) DO UPDATE SET session_id=excluded.session_id,updated_at=excluded.updated_at`)
           .run(connector, roomId, threadId, change.sessionId, now);
-        const agent = change.sessionId ? AGENT_TYPES[String(this.store.session(change.sessionId)?.agent)] : undefined;
+        // A setup session in an unbound room does not choose the agent of the room's own sessions.
+        const agent = change.sessionId && this.bound(connector, roomId) ? AGENT_TYPES[String(this.store.session(change.sessionId)?.agent)] : undefined;
         if (agent && !change.agent) this.store.db.prepare(`INSERT INTO conversation_rooms VALUES(?,?,?,?)
           ON CONFLICT(connector,room_id) DO UPDATE SET agent=excluded.agent,updated_at=excluded.updated_at`).run(connector, roomId, agent, now);
       }
@@ -83,10 +91,16 @@ export class Conversations {
     return this.get(connector, roomId, threadId);
   }
 
-  /** Bind the room (and optionally a machine path) to a scope in central memory. */
+  /**
+   * Bind the room (and optionally a machine path) to a scope in central memory. Binding a room
+   * that was unbound ends its setup sessions: the next message starts one in the scope.
+   */
   bind(writer: Writer, connector: string, roomId: string, scopeId: string, location?: { machine: string; path: string }): Conversation {
     if (!this.memory) throw new Error("memory_unavailable");
+    const wasBound = this.bound(connector, roomId);
     this.memory.bind(writer, scopeId, { room: `${connector}:${roomId}`, location });
+    if (!wasBound) this.store.db.prepare("UPDATE conversation_threads SET session_id=NULL,updated_at=? WHERE connector=? AND room_id=?")
+      .run(Date.now(), connector, roomId);
     return this.get(connector, roomId);
   }
 
@@ -99,6 +113,10 @@ export class Conversations {
 
   validScope(scopeId: string): boolean {
     return Boolean(this.memory?.scopes().some((scope) => scope.id === scopeId && scope.status !== "archived"));
+  }
+
+  private bound(connector: string, roomId: string): boolean {
+    return Boolean(this.memory && this.scopeOf(connector, roomId));
   }
 
   private scopeOf(connector: string, roomId: string): ScopeInfo | undefined {

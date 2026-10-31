@@ -56,6 +56,7 @@ export const config = {
   controlApiWriteToken,
   agents: agentTokens(),
   agentMemory: agentMemoryConfig(),
+  conversationSetup: conversationSetupConfig(),
   memoryReview: memoryReviewConfig(),
   retention: {
     actionsMs: duration("CONTROL_ACTION_RETENTION_MS", 86_400_000),
@@ -143,4 +144,13 @@ function agentSkillsConfig() {
     archiveDir: process.env.AGENT_SKILLS_ARCHIVE_DIR ?? join(dirname(databasePath), "skills-archive"),
     push: process.env.AGENT_SKILLS_PUSH !== "false",
   };
+}
+
+/** CONVERSATION_SETUP_TARGET=<worker>:<path>: where an unbound room's messages go to set the room up. */
+function conversationSetupConfig(): { workerId: string; workspace: string } | undefined {
+  const value = process.env.CONVERSATION_SETUP_TARGET?.trim();
+  if (!value) return undefined;
+  const at = value.indexOf(":");
+  if (at < 1 || !value.slice(0, at).includes("@") || !value.slice(at + 1)) throw new Error("CONVERSATION_SETUP_TARGET must be <agent>@<machine>:<path>");
+  return { workerId: value.slice(0, at), workspace: value.slice(at + 1) };
 }

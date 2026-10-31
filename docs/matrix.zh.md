@@ -16,6 +16,7 @@ Matrix 是 Agent Bridge 的一个聊天前端，以独立进程 `apps/matrix-con
 - 主时间线对应一个会话，一直延续，直到 `!new`。`!new` 后旧会话不再往这个房间发消息，即使在别处继续它。
 - 在主时间线 @ 机器人：新开一个会话，在以那条消息为根的线程里回复。线程里的消息只发给该线程的会话，不必再 @。线程和主时间线同一作用域、同一目录，可以并发。
 - 新会话按房间作用域开局注入 `_global` 和项目记忆（Codex `developerInstructions`、Claude `appendSystemPrompt`、pi `--append-system-prompt`），Bridge 重启后恢复会话时再按同一作用域注入。之后要什么记忆由 agent 通过 memory MCP 自己取；pi 没有 MCP 客户端，Bridge 启动它时加载 `apps/bridge/pi-extension/agent-bridge-mcp.ts`，把 `/mcp/memory`、`/mcp/bridge` 的工具注册为 `memory_*`、`bridge_*`（需要 Bridge 环境里有 `AGENT_TOKEN`）。ACP（grok）目前不注入。
+- 没绑定的房间：Control Plane 设了 `CONVERSATION_SETUP_TARGET`（如 `claude@hal:/root/agent-bridge`）时，消息交给这个设置会话，它按你的描述建作用域和目录，再告诉你在房间里发哪条 `!bind`。设置会话不改变房间的新会话 agent。`!bind` 把原本没绑定的房间绑定后，设置会话结束、不再往房间发消息，下一条消息在作用域的目录里开新会话。没设这个变量时，房间只回复绑定提示。
 - 只处理 `MATRIX_ALLOWED_USERS` 里的人的消息，邀请也只接受他们的。
 
 ## 聊天
