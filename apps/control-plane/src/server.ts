@@ -31,7 +31,7 @@ import { OperatorNotices, type NoticeTarget, type OperatorEvent } from "./notice
 import { Automations, type AutomationOptions } from "./automations.js";
 import { SecretStore, type SecretStoreOptions } from "./secrets.js";
 import { deepseekReviewer, ToolHub, type ToolReviewer } from "./tools.js";
-import { mustAskHuman, toolOf } from "./approval-review.js";
+import { alreadyGated, mustAskHuman, toolOf } from "./approval-review.js";
 import { toolsEndpoint } from "./mcp/tools.js";
 import { NtfyNotifier, type NtfyOptions, type SessionNotificationKind } from "./ntfy.js";
 import { AgentMessagePublisher, type MessageMqttOptions } from "./message-publisher.js";
@@ -770,13 +770,25 @@ export class ControlPlane {
     // A first request outside the hard boundary is reviewed before anyone is asked: allowed or denied, it never reaches the human.
     if (first && !reviewed && this.toolReviewer && message.choices.includes("allow")) {
       const tool = toolOf(message.kind, message.summary);
-      if (!mustAskHuman({ tool, summary: message.summary, choices: message.choices })) {
+      if (alreadyGated(tool) && this.resolveByReview(machineId, message, "allow", "中央工具库和记忆的调用由 Control Plane 自己按档位把关，不再重复确认")) return;
+      // Answering another session's approval is judged by what that approval asks.
+      let target: { summary: string; hard: boolean } | undefined;
+      if (/^mcp__bridge__(approve|answer)$/.test(tool)) {
+        const id = /"(?:approval_id|request_id)"\s*:\s*"([^"]+)"/.exec(message.summary)?.[1];
+        const pending = id ? this.controlStore.pending(id) : undefined;
+        const summary = pending ? String(pending.request.summary ?? "") : "";
+        const targetTool = toolOf(pending?.request.kind, summary);
+        target = { summary, hard: !pending || (!alreadyGated(targetTool) && mustAskHuman({ tool: targetTool, summary, choices: (pending.request.choices as string[] | undefined) ?? ["allow"] })) };
+        if (!target.hard && alreadyGated(targetTool) && this.resolveByReview(machineId, message, "allow", "被答复的是中央工具库/记忆的调用，本来就免确认")) return;
+      }
+      if (!target?.hard && !mustAskHuman({ tool, summary: message.summary, choices: message.choices })) {
         // Off the Bridge's message chain: its other events keep flowing while the reviewer thinks.
         this.approvalsById.set(message.approvalId, { approvalId: message.approvalId, sessionId: message.sessionId });
-        void this.toolReviewer({ tool, title: `${session.agentType} 工具调用`, description: `${message.kind}`, args: { summary: message.summary },
+        void this.toolReviewer({ tool, title: `${session.agentType} 工具调用`, description: `${message.kind}`, args: { summary: message.summary, ...(target ? { answering: target.summary } : {}) },
           caller: `${session.agentType}@${machineId}:${session.projectPath}` }).catch((error: unknown) => ({ decision: "human" as const, reason: String(error) }))
           .then((verdict) => {
             if (verdict.decision !== "human" && this.resolveByReview(machineId, message, verdict.decision, verdict.reason)) return;
+            log.info({ approvalId: message.approvalId, tool, reason: verdict.reason }, "Reviewer handed an approval to the human");
             this.approvalsById.delete(message.approvalId);
             return this.handleApprovalRequest(machineId, message, true);
           }).catch((error) => log.error({ error, approvalId: message.approvalId }, "Approval review failed"));

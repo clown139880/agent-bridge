@@ -42,3 +42,10 @@ test("a reviewed approval is answered for the agent and never shown; one the rev
     assert.equal(control.controlStore.pending("a3")?.status, "pending", "the hard boundary skips the reviewer");
   } finally { await control.stop(); store.db.close(); rmSync(path, { force: true }); }
 });
+
+test("Codex MCP approvals name their tool; the library's and memory's own tools are already gated", async () => {
+  const { alreadyGated } = await import("../apps/control-plane/src/approval-review.js");
+  const summary = 'MCP approval required\nServer: tools\nAllow the tools MCP server to run tool "tool_call"?';
+  assert.equal(toolOf("permissions", summary), "mcp__tools__tool_call");
+  assert.ok(alreadyGated("mcp__tools__tool_call") && alreadyGated("mcp__memory__write") && !alreadyGated("mcp__bridge__create"));
+});

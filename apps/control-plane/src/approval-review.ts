@@ -26,8 +26,18 @@ export function mustAskHuman(call: ApprovalCall): boolean {
   return HARD.some((pattern) => pattern.test(call.summary));
 }
 
-/** The tool name an approval summary starts with (Claude: `Bash ls -la`, `mcp__bridge__create {…}`). */
+/**
+ * Tools the Control Plane already gates itself: the library's tool_search/tool_call (risk tiers and
+ * their own review) and central memory (clown: always allowed). Asking again would only ask twice.
+ */
+const SELF_GATED = /^mcp__(tools|memory)__/;
+
+export function alreadyGated(tool: string): boolean { return SELF_GATED.test(tool); }
+
+/** The tool name an approval summary starts with (Claude: `Bash ls -la`, `mcp__bridge__create {…}`; Codex: `Server: tools … tool "tool_call"`). */
 export function toolOf(kind: unknown, summary: string): string {
+  const codex = /Server:\s*([\w-]+)[\s\S]*?tool\s+"([\w-]+)"/.exec(summary);
+  if (codex) return `mcp__${codex[1]}__${codex[2]}`;
   const head = summary.trim().split(/\s/, 1)[0] ?? "";
   return /^[A-Za-z][\w-]*$/.test(head) ? head : String(kind ?? "");
 }
