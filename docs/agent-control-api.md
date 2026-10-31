@@ -69,6 +69,7 @@ SSE 直接派发到现有 node:http handler，不经过 Hono Response 或 fetch 
 | 新增 | `GET` | `/sessions/{sessionId}/runs` | session 关联的历史 Worker runs（只读） |
 | 新增 | `GET` | `/sessions/{sessionId}/events` | session 全量结构化事件/对话 |
 | 新增 | `GET` | `/sessions/{sessionId}/events/{eventId}` | 按 eventId 读取一条完整事件（0.7.25） |
+| 新增 | `GET` | `/sessions/{sessionId}/detail` | 详情页一次读取：session、待办与对话视图（0.7.41） |
 | 新增 | `GET` | `/sessions/{sessionId}/view` | 对话视图快照与旧页（0.7.25） |
 | 新增 | `GET` | `/sessions/{sessionId}/view/changes` | 某视图修订号之后的变化（0.7.25） |
 | 新增 | `GET` | `/sessions/{sessionId}/view/entries/{key}` | 超大轮次的更早条目（0.7.25） |
@@ -593,6 +594,11 @@ action receipt 和 idempotency key 按正常保留期保留，因此删除成功
   `raw:{after,through,count}` 是 `rawAfter` 之后新增的原始事件数，供“↓ N 条新内容”使用。
   `orderingEpoch` 与客户端不同时应重新读取快照。`since` 超过当前修订号返回 `400 invalid_cursor`。
 - `GET /sessions/{id}/view/entries/{key}?before=<seq>`：一条超大轮次在 `itemsBefore` 之前的条目。
+- `GET /sessions/{id}/detail?limit=20[&since=<viewRevision>&rawAfter=<rawHigh>]`（0.7.41）：详情页的单次读取，
+  同一读事务内返回 `session`（含 `capabilities`）、该 session 全部 pending 的 `approvals` 与 `userInput`、
+  `workers`、`streamCursor`，以及对话：带 `since` 时为 `changes`（同 `view/changes`），不带或 `since` 不属于
+  本服务器（超过当前修订号）时为最新页 `view`（同 `view`）。控制中心打开会话、回到前台都只等这一个请求；
+  没有在跑的实时流时，从它的 `streamCursor` 开始订阅。
 - `GET /sessions/{id}/events/{eventId}`：视图里标 `truncated` 的条目，按 eventId 读取完整内容。
 
 唤醒：每个事件写入或原地修订都会推进 session 的 `viewRevision` 并发出 `session.updated`；客户端看到

@@ -106,15 +106,18 @@ function fixture(t: test.TestContext, options: { live?: boolean; store?: DetailS
     }
     if (init.method === "POST") return options.write ? options.write(init) : json({ actionId: "a", kind: "submit_turn", status: "succeeded", sessionId: "s", turnId: "new-turn" });
     if (path.includes("/snapshot")) return json({ ...snapshot, sessions: [current] });
-    if (path === "/api/v1/sessions/s") return options.detail ? options.detail() : json(current);
-    if (path.includes("/view/changes")) {
-      const query = new URL(path, "http://x").searchParams, since = Number(query.get("since")), after = Number(query.get("rawAfter"));
-      return json({ projectionVersion: 1, fromRevision: since, toRevision: view.rev, hasMore: false, orderingEpoch: view.epoch,
-        entries: view.entries.filter(e => e.rev > since), removed: [], raw: { after, through: view.raw, count: view.raw - after }, streamCursor: "c:0:0" });
+    const query = new URL(path, "http://x").searchParams, since = Number(query.get("since")), after = Number(query.get("rawAfter"));
+    const changes = () => ({ projectionVersion: 1, fromRevision: since, toRevision: view.rev, hasMore: false, orderingEpoch: view.epoch,
+      entries: view.entries.filter(e => e.rev > since), removed: [], raw: { after, through: view.raw, count: view.raw - after }, streamCursor: "c:0:0" });
+    const page = () => options.history?.() ?? { projectionVersion: 1, viewRevision: view.rev, orderingEpoch: view.epoch, rawHigh: view.raw,
+      entries: view.entries, entriesBefore: null, streamCursor: "c:0:0" };
+    if (path.startsWith("/api/v1/sessions/s/detail?")) {
+      const read = options.detail ? await (await options.detail()).json() : current;
+      return json({ session: read, approvals: [], userInput: [], workers: snapshot.workers, streamCursor: "c:5:0",
+        ...(query.has("since") ? { changes: changes() } : { view: page() }) });
     }
-    if (path.includes("/view") && options.history) return json(options.history());
-    if (path.includes("/view")) return json({ projectionVersion: 1, viewRevision: view.rev, orderingEpoch: view.epoch, rawHigh: view.raw,
-      entries: view.entries, entriesBefore: null, streamCursor: "c:0:0" });
+    if (path.includes("/view/changes")) return json(changes());
+    if (path.includes("/view")) return json(page());
     if (path.startsWith("/api/v1/sessions?")) return json({ data: [current], hasMore: false, nextCursor: null });
     if (path === "/api/v1/workers") return json({ workers: snapshot.workers });
     if (path.startsWith("/api/v1/actions/")) return options.action ? options.action() : json({ actionId: "a", kind: "submit_turn", status: "accepted", sessionId: "s" });
@@ -160,7 +163,7 @@ test("returning to a loaded detail (navigation or foreground) shows it at once a
   assert.deepEqual(view.entries.map(e => e.key), ["t:history", "t:1"]);
   await back; view = f.state.snapshot();
   assert.equal(view.syncing, false); assert.deepEqual(view.entries.map(e => e.key), ["t:history", "t:1"]);
-  assert.equal(f.requests.filter(r => /\/view\?/.test(r.path)).length, 1, "a held conversation catches up through changes");
+  assert.equal(f.requests.filter(r => /\/detail\?limit=/.test(r.path)).length, 1, "a held conversation catches up through changes");
   f.state.setVisible(false); f.state.setVisible(true);
   view = f.state.snapshot();
   assert.equal(view.loading, false); assert.equal(view.syncing, true); assert.equal(view.entries.length, 2);
@@ -254,10 +257,31 @@ test("UCTW v2 shares: parsed defensively, filled into a sendable detail (never s
   assert.equal(view.share, undefined); assert.equal(view.drafts.new, "第一段\n\n第二段"); assert.deepEqual(view.uploads.new.map(u => u.ref?.id), ["x"]);
 });
 
+test("opening, returning to and following a detail each wait on one request", async t => {
+  const f = fixture(t, { live: true });
+  await f.state.open({ page: "detail", id: "s" }); await flush();
+  const paths = () => f.requests.map(r => r.path.replace(/\?.*/, ""));
+  assert.deepEqual(paths(), ["/api/v1/sessions/s/detail", "/api/v1/stream"], "one read, then the stream from its cursor");
+  assert.equal(new Headers(f.requests[1].init.headers).get("last-event-id"), "c:5:0");
+  assert.deepEqual(f.state.snapshot().entries.map(e => e.key), ["t:history"]);
+  f.requests.length = 0; f.write("1"); await flush();
+  assert.deepEqual(paths(), ["/api/v1/sessions/s/view/changes"]);
+  assert.deepEqual(f.state.snapshot().entries.map(e => e.key), ["t:history", "t:1"]);
+  f.state.setVisible(false); f.requests.length = 0;
+  f.view.rev++; f.view.raw++; f.view.entries.push(viewEntry("2", f.view.raw, f.view.rev)); f.setSession({ viewRevision: f.view.rev });
+  f.state.setVisible(true); await flush();
+  assert.deepEqual(paths().sort(), ["/api/v1/sessions/s/detail", "/api/v1/stream"], "back in front: the stream resumes beside one read");
+  assert.match(f.requests.find(r => r.path.includes("/detail"))!.path, /since=2&rawAfter=2/);
+  assert.deepEqual(f.state.snapshot().entries.map(e => e.key), ["t:history", "t:1", "t:2"]);
+  assert.equal(f.state.snapshot().rawAdded, 1);
+});
+
 test("GET baseline never overwrites newer SSE status or loses pending fetched before a concurrent session update", async t => {
-  let complete!: (r: Response) => void;
-  const f = fixture(t, { detail: () => new Promise(resolve => { complete = resolve; }) });
-  const opening = f.state.open({ page: "detail", id: "s" }); await flush();
+  let complete!: (r: Response) => void, hold = false;
+  const f = fixture(t, { detail: () => hold ? new Promise(resolve => { complete = resolve; }) : Promise.resolve(json(session)) });
+  await f.state.open({ page: "detail", id: "s" }); await flush();
+  hold = true;
+  const opening = f.state.refresh(); await flush();
   f.emit(event("1", "session.updated", { ...session, status: "active", activeTurnId: "t1" }));
   f.emit(event("2", "approval.upserted", { id: "p", sessionId: "s", status: "pending" })); await flush();
   complete(json(session)); await opening;
@@ -449,7 +473,8 @@ test("unread badges count Agent replies since this device last showed the sessio
   const store: DetailStore = { entries: [], save() {}, reads: { s: 3 }, saveReads: r => saved.push(r) };
   const listed = { ...session, messageCount: 5 }, other = { ...session, sessionId: "never", messageCount: 9 };
   t.mock.method(globalThis, "fetch", async (path: string) => {
-    if (path === "/api/v1/sessions/s") return json({ ...listed, messageCount: 6 });
+    if (path.startsWith("/api/v1/sessions/s/detail?")) return json({ session: { ...listed, messageCount: 6 }, approvals: [], userInput: [],
+      workers: snapshot.workers, streamCursor: "c:0:0", view: emptyView });
     if (path.includes("/snapshot")) return json({ ...snapshot, sessions: [listed, other] });
     if (path.startsWith("/api/v1/workers")) return json({ workers: snapshot.workers });
     if (path.includes("/view")) return json(emptyView);

@@ -1,3 +1,5 @@
+import type { ViewChanges, ViewPage } from "@agent-bridge/transcript";
+
 export interface Worker {
   id: string; name: string; status: string; capabilities: string[];
   recentWorkspaces?: { name: string; path: string }[]; workspaces: string[];
@@ -40,6 +42,11 @@ export interface Page<T> { data: T[]; nextCursor: string | null; hasMore: boolea
 export interface Snapshot {
   sessions: Session[]; workers: Worker[]; approvals: Pending[]; userInput: Pending[];
   streamCursor: string; truncated: { sessions: boolean };
+}
+/** GET /sessions/{id}/detail: `changes` after the revision sent as `since`, otherwise the latest `view` page. */
+export interface SessionDetail {
+  session: Session; approvals: Pending[]; userInput: Pending[]; workers: Worker[]; streamCursor: string;
+  view?: Omit<ViewPage, "streamCursor">; changes?: Omit<ViewChanges, "streamCursor">;
 }
 export interface Envelope {
   cursor: string; eventId: string; type: string; sessionId: string | null;

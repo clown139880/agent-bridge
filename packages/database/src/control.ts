@@ -7,7 +7,7 @@ import {
 } from "@agent-bridge/protocol";
 import { decodeEventBody, encodeEventBody, EVENT_COLUMNS, eventWire, indexEvent, type EventRow } from "./events.js";
 import { markChanged, signalStream, type StreamKind } from "./stream.js";
-import { eventById, recordAppendedEvent, recordRevisedEvent, viewChanges, viewEntryItems, viewPage } from "./view.js";
+import { eventById, recordAppendedEvent, recordRevisedEvent, viewChanges, viewEntryItems, viewPage, ViewError } from "./view.js";
 
 /** Settled tool and task work that counts as session activity. Starts and ticks do not, to keep the feed quiet. */
 const TOOL_PROGRESS_TYPES = new Set(["command.completed", "file_change.completed", "tool.completed", "task.started", "task.completed"]);
@@ -753,6 +753,30 @@ export class AgentControlStore {
     return page.page && { ...page.page, streamCursor: page.streamCursor };
   }
   eventById(sessionId: string, eventId: string) { return eventById(this.db, sessionId, eventId); }
+  /**
+   * Everything a client shows for one session in one read: the session, its pending requests and
+   * the conversation, either changes after the revision it holds or, without one (or when that
+   * revision is not this server's), the latest page. One round trip instead of a chain.
+   */
+  sessionDetail(sessionId: string, view: { limit: number; since?: number; rawAfter?: number }) {
+    return this.read(() => {
+      const session = this.session(sessionId);
+      if (!session) throw new ViewError("session_not_found");
+      const pending = (kind: "approval" | "user_input") => {
+        const rows: PendingRow[] = []; let cursor: string | undefined;
+        do { const page = this.listPending(kind, { statuses: ["pending"], sessionId, limit: 200, cursor });
+          rows.push(...page.data); cursor = page.nextCursor ?? undefined; } while (cursor);
+        return rows;
+      };
+      let changes: ReturnType<typeof viewChanges> | undefined;
+      if (view.since !== undefined) {
+        try { changes = viewChanges(this.db, sessionId, view.since, view.rawAfter ?? 0); }
+        catch (error) { if (!(error instanceof ViewError && error.code === "invalid_cursor")) throw error; }
+      }
+      return { session, approvals: pending("approval"), userInput: pending("user_input"),
+        ...(changes ? { changes } : { view: viewPage(this.db, sessionId, view.limit) }) };
+    });
+  }
 
   private read<T>(fn: () => T): T & { streamCursor: string } {
     this.db.exec("BEGIN");

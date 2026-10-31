@@ -127,6 +127,8 @@ export class AgentControlApi {
       const action=url.pathname.match(/^\/api\/v1\/actions\/([^/]+)$/);
       if(request.method==="GET"&&action){const row=this.store.action(decodeURIComponent(action[1]!));
         if(!row)throw new ApiProblem(404,"action_not_found","action not found");this.ok(response,actionJson(row));return true;}
+      const detail=url.pathname.match(/^\/api\/v1\/sessions\/([^/]+)\/detail$/);
+      if(request.method==="GET"&&detail){this.sessionDetail(url,response,decodeURIComponent(detail[1]!));return true;}
       const view=url.pathname.match(/^\/api\/v1\/sessions\/([^/]+)\/(view|view\/changes|view\/entries\/[^/]+|events\/[^/]+)$/);
       if(request.method==="GET"&&view){this.sessionView(url,response,decodeURIComponent(view[1]!),view[2]!);return true;}
       const session=url.pathname.match(/^\/api\/v1\/sessions\/([^/]+)(?:\/(runs|events|turns|interrupt))?$/);
@@ -497,6 +499,21 @@ export class AgentControlApi {
     this.ok(response,actionJson(this.store.action(created.action.actionId)!),202);
   }
 
+  /** A detail page in one request: the session, its pending requests and the conversation (changes after `since`, else the latest page). */
+  private sessionDetail(url:URL,response:ServerResponse,sessionId:string):void{
+    const max=Number.MAX_SAFE_INTEGER,since=url.searchParams.get("since");
+    try{
+      const detail=this.store.sessionDetail(sessionId,{limit:integer(url.searchParams.get("limit"),"limit",20,1,100),
+        since:since===null?undefined:integer(since,"since",0,0,max),rawAfter:integer(url.searchParams.get("rawAfter"),"rawAfter",0,0,max)});
+      const bridge=this.bridges.get(String(detail.session.machineId));
+      this.ok(response,{...detail,session:{...detail.session,capabilities:[...new Set([...(bridge?.capabilities??[]),...(bridge?.features??[])])]},
+        approvals:detail.approvals.map(pendingJson),userInput:detail.userInput.map(pendingJson),
+        workers:this.legacy.listMachines().flatMap(m=>this.machineWorkers(m))});
+    }catch(error){
+      if(error instanceof Error&&error.message==="session_not_found")throw new ApiProblem(404,"session_not_found","session not found");
+      throw error;
+    }
+  }
   /** The conversation view (packages/database/src/view.ts): snapshot pages, changes since a revision, older items, whole events. */
   private sessionView(url:URL,response:ServerResponse,sessionId:string,path:string):void{
     const max=Number.MAX_SAFE_INTEGER;

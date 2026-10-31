@@ -81,7 +81,7 @@ test("browser entrance keeps credentials server-side, preserves Bearer API, bloc
     assert.equal((await fetch(`${browser}/snapshot`, { method: "OPTIONS", headers: { origin: "https://evil.example", "access-control-request-headers": "x-control-center" } })).status, 403);
     assert.equal((await fetch(`${browser}/missing`, { headers })).status, 404);
     // The detail page reads the conversation view through the browser entrance.
-    for (const path of ["/sessions/thread-1/view", "/sessions/thread-1/view/changes?since=0&rawAfter=0",
+    for (const path of ["/sessions/thread-1/detail", "/sessions/thread-1/view", "/sessions/thread-1/view/changes?since=0&rawAfter=0",
       `/sessions/thread-1/view/entries/${encodeURIComponent("t:initial-turn")}`, "/sessions/thread-1/events/initial-reply"])
       assert.equal((await fetch(`${browser}${path}`, { headers })).status, 200, path);
     assert.equal((await fetch(`${browser}/workers/codex%40dev`, { method: "DELETE", headers })).status, 404);
@@ -636,6 +636,16 @@ test("conversation view: snapshot, changes woken by session.updated, entry windo
     assert.equal((await get(`/sessions/thread-1/view/entries/${encodeURIComponent("t:initial-turn")}?before=1`)).status, 200);
     assert.equal((await get(`/sessions/thread-1/view/entries/${encodeURIComponent("t:none")}`)).status, 404);
     assert.equal((await get(`/sessions/thread-1/view/changes?since=999999`)).body.error.code, "invalid_cursor");
+    // The detail page's single read: session, pending requests, and changes after the held revision or the latest page.
+    const detail = await get(`/sessions/thread-1/detail?since=${snap.body.viewRevision}&rawAfter=${snap.body.rawHigh}`);
+    assert.equal(detail.body.session.sessionId, "thread-1"); assert.ok(Array.isArray(detail.body.session.capabilities));
+    assert.deepEqual(detail.body.approvals, []); assert.deepEqual(detail.body.userInput, []); assert.ok(detail.body.workers.length);
+    assert.equal(detail.body.changes.raw.count, 1); assert.equal(detail.body.view, undefined); assert.match(detail.body.streamCursor, /^c:/);
+    assert.equal(detail.body.changes.toRevision, detail.body.session.viewRevision);
+    const unknown = await get(`/sessions/thread-1/detail?since=999999&rawAfter=0&limit=5`);
+    assert.equal(unknown.body.changes, undefined, "a revision from another server reloads the page");
+    assert.deepEqual(unknown.body.view.entries.map((e: any) => e.key), ["t:initial-turn"]);
+    assert.equal((await get(`/sessions/missing/detail`)).status, 404);
     assert.equal((await get(`/sessions/missing/view`)).status, 404);
     assert.equal((await get(`/sessions/thread-1/view?before=v:9:1`)).status, 410);
   } finally { await f.close(); }

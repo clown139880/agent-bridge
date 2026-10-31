@@ -242,8 +242,11 @@ function Center({ control, path, serverVersion }: { control: ControlState; path:
     const running = runningEntry(); if (!running) return;
     const check = () => { if (document.visibilityState === "visible") void newerBuild(running).then(newer => { if (newer) setStale(true); }); };
     const timer = setInterval(check, 5 * 60_000);
-    document.addEventListener("visibilitychange", check);
-    return () => { clearInterval(timer); document.removeEventListener("visibilitychange", check); };
+    // On return the conversation's requests go first: over a slow link the page check would compete with them.
+    let later: ReturnType<typeof setTimeout> | undefined;
+    const returned = () => { clearTimeout(later); if (document.visibilityState === "visible") later = setTimeout(check, 5_000); };
+    document.addEventListener("visibilitychange", returned);
+    return () => { clearInterval(timer); clearTimeout(later); document.removeEventListener("visibilitychange", returned); };
   }, []);
   return <div className="shell">
     <header className="topbar"><Link to="/control/sessions" className="brand"><span className="brand-mark">ab</span><span>控制中心</span></Link>

@@ -3,7 +3,7 @@ import { consumeStream, delay, StreamLimitError } from "./api/stream";
 import { nativeNotify, type Share } from "./native/uctw";
 import { ConversationModel, type ConversationSnapshot, type EntryView, type ViewChanges, type ViewPage } from "@agent-bridge/transcript";
 import { isLive, pendingId, segment, type Action, type AttachmentRef, type Envelope, type ModelInfo, type Page, type Pending,
-  type Session, type SessionEvent, type Snapshot, type Worker } from "./api/types";
+  type Session, type SessionDetail, type SessionEvent, type Snapshot, type Worker } from "./api/types";
 
 export type Route = { page: "sessions" | "new" | "detail"; id?: string };
 export interface Intent {
@@ -82,6 +82,10 @@ export class ControlState {
   private streamAbort?: AbortController;
   private streamTask?: Promise<void>;
   private cursor: string;
+  /** Opening a detail without a stream: the stream starts from the cursor the detail read returns. */
+  private awaitingCursor = false;
+  /** That cursor is as new as the conversation just read, so connecting needs no catch-up request. */
+  private freshCursor = false;
   private listCursor: string | null = null;
   private listQueryKey = "";
   /** The open conversation; its revision is what the next changes request resumes from. */
@@ -238,7 +242,7 @@ export class ControlState {
       this.patch({ connection: this.visible ? "按需更新" : "后台已暂停" });
       return;
     }
-    if (this.streamTask) return;
+    if (this.streamTask || this.awaitingCursor) return;
     const abort = new AbortController(); this.streamAbort = abort;
     this.streamTask = this.runStream(abort.signal).finally(() => {
       this.streamTask = undefined;
@@ -255,7 +259,7 @@ export class ControlState {
         const response = await this.api.stream(this.cursor, signal);
         openedAt = Date.now(); this.patch({ connection: "实时已连接" });
         // A wake-up may have been missed while disconnected; the view resumes from its own revision.
-        void this.pull();
+        if (this.freshCursor) this.freshCursor = false; else void this.pull();
         await consumeStream(response, signal, e => {
           if (this.seen.has(e.eventId)) return;
           this.apply(e); this.cursor = e.cursor;
@@ -371,7 +375,7 @@ export class ControlState {
     this.scope.abort(); this.scope = new AbortController();
     const generation = ++this.generation;
     this.deleted = false; this.approvalUpdates.clear(); this.inputUpdates.clear();
-    this.streamStopped = false; this.bootstrap = route.page === "detail";
+    this.streamStopped = false; this.bootstrap = route.page === "detail"; this.awaitingCursor = this.freshCursor = false;
     const cached = route.page === "detail" ? this.details.get(route.id!) : undefined;
     const model = ConversationModel.restore(cached?.view);
     this.model = model; this.pullAgain = false; this.listCursor = null;
@@ -381,14 +385,13 @@ export class ControlState {
     if (!this.visible) { this.bootstrap = false; this.patch({ loading: false, syncing: false }); this.syncStream(); return; }
     try {
       if (route.page === "detail") {
-        if (freshStream && !this.streamTask && !this.state.intent?.uncertain && !this.state.intent?.submitting && this.state.intent?.receipt?.status !== "accepted" && !this.projectionHold) {
-          const snap = await this.api.request<Snapshot>("/snapshot?sessionLimit=50", { signal: this.scope.signal });
-          if (generation !== this.generation) return;
-          this.cursor = snap.streamCursor; this.seen.clear(); this.patch({ workers: snap.workers });
-        }
-        this.syncStream();
-        await this.loadDetail(route.id!, generation, !cached);
-        if (generation === this.generation) this.remember();
+        // Without a running stream, the detail read's cursor starts one; a running stream keeps its own.
+        const fresh = freshStream && !this.streamTask && !this.state.intent?.uncertain && !this.state.intent?.submitting && this.state.intent?.receipt?.status !== "accepted" && !this.projectionHold;
+        this.awaitingCursor = fresh; this.syncStream();
+        const detail = await this.loadDetail(route.id!, generation, !cached);
+        if (generation !== this.generation) return;
+        if (fresh && detail) { this.cursor = detail.streamCursor; this.freshCursor = true; this.seen.clear(); this.patch({ workers: detail.workers }); }
+        this.remember();
       } else if (route.page === "new") {
         const result = await this.api.request<{ workers: Worker[] }>("/workers", { signal: this.scope.signal });
         if (generation === this.generation) this.patch({ workers: result.workers });
@@ -400,52 +403,47 @@ export class ControlState {
       if (route.page === "detail" && e instanceof ApiError && e.status === 404) this.forget(route.id!);
     } finally {
       if (generation === this.generation) {
-        this.bootstrap = false; this.patch({ loading: false, syncing: false });
+        this.bootstrap = false; this.awaitingCursor = false; this.patch({ loading: false, syncing: false });
         this.syncStream();
-        // Changes that arrived while the detail loaded.
-        if (route.page === "detail") void this.pull();
+        // Changes announced while the detail loaded.
+        if (route.page === "detail") this.catchUp();
       }
     }
   }
-  private async allPending(path: string, signal: AbortSignal) {
-    const items: Pending[] = []; let cursor: string | null = null;
-    const seen = new Set<string>();
-    do {
-      const page: Page<Pending> = await this.api.request(`${path}${cursor ? `&cursor=${segment(cursor)}` : ""}`, { signal });
-      items.push(...page.data);
-      if (!page.hasMore) break;
-      if (!page.nextCursor || seen.has(page.nextCursor)) throw new Error("待办分页没有推进，请刷新");
-      cursor = page.nextCursor; seen.add(cursor);
-    } while (!signal.aborted);
-    return items;
+  /** Pull when the session announces a view revision past the conversation held. */
+  private catchUp() {
+    if (this.model && (this.state.session?.viewRevision ?? 0) > this.model.viewRevision) void this.pull();
   }
   /**
-   * The session, its pending requests and its conversation. A conversation already held
-   * (from this tab or the cache) catches up through changes; `reset` reloads its latest page.
+   * The session, its pending requests and its conversation, in one request. A conversation already
+   * held (from this tab or the cache) catches up through changes; `reset` reloads its latest page.
    */
-  private async loadDetail(id: string, generation: number, reset: boolean) {
-    const revision = this.revision, signal = this.scope.signal, path = `/sessions/${segment(id)}`;
-    const fresh = reset || !this.model;
-    const [session, page, approvals, inputs] = await Promise.all([
-      this.api.request<Session>(path, { signal }),
-      fresh ? this.api.request<ViewPage>(`${path}/view?limit=20`, { signal }) : Promise.resolve(undefined),
-      this.allPending(`/approvals?sessionId=${segment(id)}&status=pending&limit=200`, signal),
-      this.allPending(`/user-input?sessionId=${segment(id)}&status=pending&limit=200`, signal),
-    ]);
+  private async loadDetail(id: string, generation: number, reset: boolean): Promise<SessionDetail | undefined> {
+    const revision = this.revision, signal = this.scope.signal, held = reset ? undefined : this.model;
+    const query = held ? `since=${held.viewRevision}&rawAfter=${held.rawHigh}` : "limit=20";
+    const detail = await this.api.request<SessionDetail>(`/sessions/${segment(id)}/detail?${query}`, { signal });
     if (generation !== this.generation || signal.aborted || this.deleted) return;
     const mergePending = (base: Pending[], updates: Map<string, Pending>) => {
       const rows = new Map(base.map(p => [pendingId(p), p]));
       updates.forEach((p, id) => rows.set(id, p));
       return [...rows.values()].filter(p => p.status === "pending");
     };
-    if (page) this.model = ConversationModel.fromPage(page);
-    // SSE received while GETs were pending wins for mutable resources.
+    if (detail.view) this.model = ConversationModel.fromPage(detail.view);
+    else if (detail.changes && held && this.model === held) {
+      // "stale": a concurrent pull moved the model on; catchUp below covers what is left.
+      const result = held.applyChanges(detail.changes);
+      if (result.kind === "reset") return this.loadDetail(id, generation, true);
+      if (result.kind === "applied" && result.newRawEvents) this.patch({ rawAdded: this.state.rawAdded + result.newRawEvents });
+    }
+    const { session } = detail;
+    // SSE received while the GET was pending wins for mutable resources.
     this.patch({ session: revision === this.revision ? session : { ...session, ...this.state.session, capabilities: session.capabilities },
-      approvals: mergePending(approvals, this.approvalUpdates),
-      inputs: mergePending(inputs, this.inputUpdates), updatedAt: Date.now() });
+      approvals: mergePending(detail.approvals, this.approvalUpdates),
+      inputs: mergePending(detail.userInput, this.inputUpdates), updatedAt: Date.now() });
     this.showModel();
-    if (!page) void this.pull();
+    this.catchUp();
     this.releaseProjection();
+    return detail;
   }
   async moreHistory() {
     const model = this.model, before = model?.entriesBefore;
