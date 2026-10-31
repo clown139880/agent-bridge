@@ -202,3 +202,11 @@ test("a script that exits before reading its input does not take the process dow
     await settle(() => f.automations.runs("quick").some((run) => run.status === "ok"));
   } finally { f.close(); }
 });
+
+test("a webhook without secretRef is open", async () => {
+  const f = fixture({ "home/open/automation.yaml": "title: 开放\ntrigger:\n  webhook: { template: \"{text}\" }\n" });
+  try {
+    assert.equal((await f.automations.hook("open", {}, Buffer.from('{"text":"hi"}'))).status, 202);
+    await settle(() => f.automations.runs("open")[0]?.status === "ok");
+  } finally { f.close(); }
+});

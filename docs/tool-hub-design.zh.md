@@ -117,7 +117,7 @@ servers:
 
 ## 4.6 0.7.46 的实现
 
-- **自动审核**：`review` 档的调用先交审核员：DeepSeek（Anthropic 兼容端点，`deepseek-flash`，关闭思考，不带任何工具），密钥从 OpenBao `shared/deepseek` 取。只返回 `allow` 或 `human`；`allow` 直接执行并记一条 `decided_by=review` 的记录、推一条 silent 通知到 App；其他结果、超时（15 秒）或出错都交给人。`human` 档不经审核员。实测约 0.6–1 秒，门锁类和带注入文字的参数会交给人。`TOOL_REVIEW=off` 关闭，`TOOL_REVIEW_MODEL` 换模型。
+- **自动审核**：`review` 档的调用先交审核员：DeepSeek（Anthropic 兼容端点，`deepseek-flash`，关闭思考，不带任何工具），密钥从 OpenBao `shared/deepseek` 取。返回 `allow`、`deny` 或 `human`（0.7.47 起可以拒绝：注入、秘密外发、明显不符的参数直接拒，不打扰人）；`allow` 直接执行并记一条 `decided_by=review` 的记录、推一条 silent 通知到 App；其他结果、超时（15 秒）或出错都交给人。`human` 档不经审核员。实测约 0.6–1 秒，门锁类和带注入文字的参数会交给人。`TOOL_REVIEW=off` 关闭，`TOOL_REVIEW_MODEL` 换模型。
 - **网页搜索**：登记表里 `transport.builtin: web` 的条目由 Control Plane 自己实现 `web.web_search`、`web.web_fetch`。免费后端是 Hermes 用的 keyless 端点：Exa MCP、Parallel MCP、Keenable，轮换起点；实时短事实走 DeepSeek 原生搜索；新闻走 OpenRouter exa；X 走 grok-4.3 + `x_search`（约 45 秒）。抓取先用 Keenable 公共抓取，失败再直接请求。浏览器兜底未做。
 - **置顶**：会话开局的记忆注入（`/memory/bootstrap`）后面附上本作用域置顶服务的工具名和是否需确认。所有 agent 都经同一个 `/mcp/tools` 调用，所以置顶只影响开局列不列，不另挂 MCP 服务，Bridge 不用改。
 - **脱敏**：Control Plane 启动时和每小时读取 OpenBao `kv/shared/*` 的全部值，写入会话事件和 notice 之前把出现的值（12 个字符以上）替换成 `‹secret:路径#名字›`。流式增量和记忆写入不经过这一层。

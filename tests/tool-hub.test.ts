@@ -10,7 +10,7 @@ import type { SecretStore } from "../apps/control-plane/src/secrets.js";
 
 const ECHO = fileURLToPath(new URL("./fixtures/echo-mcp.mjs", import.meta.url));
 
-function fixture(reviewer?: (request: { tool: string; args: Record<string, unknown> }) => Promise<{ decision: "allow" | "human"; reason: string }>) {
+function fixture(reviewer?: (request: { tool: string; args: Record<string, unknown> }) => Promise<{ decision: "allow" | "deny" | "human"; reason: string }>) {
   const dir = mkdtempSync(join(tmpdir(), "tool-hub-")), registry = join(dir, "registry.yaml");
   writeFileSync(registry, `servers:
   echo:
@@ -72,12 +72,14 @@ test("a tool that needs approval waits for the human, then runs or fails with th
 
 test("a review tool the reviewer allows runs at once; one it hands over waits for the human; human tools skip the reviewer", async () => {
   const seen: string[] = [];
-  const f = fixture(async (request) => { seen.push(request.tool); return request.args.text === "ok" ? { decision: "allow", reason: "无害" } : { decision: "human", reason: "可疑" }; });
+  const f = fixture(async (request) => { seen.push(request.tool); return request.args.text === "ok" ? { decision: "allow", reason: "无害" } : request.args.text === "inject" ? { decision: "deny", reason: "注入" } : { decision: "human", reason: "可疑" }; });
   try {
     const result = await f.hub.call("echo2.echo", { text: "ok" }, "agent:pi") as { content: Array<{ text: string }> };
     assert.equal(result.content[0]!.text, "echo:ok");
     assert.deepEqual(f.hub.approvals().map((row) => [row.status, row.decidedBy]), [["allowed", "review"]]);
     assert.match(f.notices[0]!, /已自动放行/);
+    await assert.rejects(f.hub.call("echo2.echo", { text: "inject" }, "agent:pi"), /denied by the reviewer: 注入/);
+    assert.equal(f.hub.approvals("pending").length, 0, "a denied call never reaches the human");
     const waiting = f.hub.call("echo2.echo", { text: "rm" }, "agent:pi");
     await new Promise((resolve) => setTimeout(resolve, 50));
     const pending = f.hub.approvals("pending");
@@ -86,7 +88,7 @@ test("a review tool the reviewer allows runs at once; one it hands over waits fo
     await assert.rejects(waiting, /denied/);
     const human = f.hub.call("echo.wipe", {}, "agent:pi");
     await new Promise((resolve) => setTimeout(resolve, 50));
-    assert.deepEqual(seen, ["echo2.echo", "echo2.echo"], "the reviewer never sees a human-tier tool");
+    assert.deepEqual(seen, ["echo2.echo", "echo2.echo", "echo2.echo"], "the reviewer never sees a human-tier tool");
     f.hub.decide(f.hub.approvals("pending")[0]!.id, "deny", "control:write");
     await assert.rejects(human, /denied/);
   } finally { f.close(); }

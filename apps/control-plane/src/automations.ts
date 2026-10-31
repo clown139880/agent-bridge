@@ -26,7 +26,7 @@ const AGENT_TYPES: Record<string, AgentType> = { pi: "pi", codex: "codex-cli", c
 export interface AutomationDefinition {
   title: string;
   trigger: { schedule?: { cron?: string; everyMinutes?: number; tz?: string; catchUp?: "once" | "skip" };
-    webhook?: { secretRef: string; template?: string } };
+    webhook?: { secretRef?: string; template?: string } };
   script?: { path: string; cwd?: string; timeoutSec?: number; envFile?: string };
   agent?: { prompt: string; agent?: string; model?: string; target?: string; timeoutMin?: number };
   /** Notify only: the message, with `{a.b}` placeholders filled from the webhook body or the script's JSON. */
@@ -110,7 +110,7 @@ export function validateDefinition(raw: unknown): AutomationDefinition {
     if (schedule.tz) try { new Intl.DateTimeFormat("en-US", { timeZone: schedule.tz }); } catch { fail(`unknown time zone ${schedule.tz}`); }
     if (schedule.catchUp && !["once", "skip"].includes(schedule.catchUp)) fail("catchUp must be once or skip");
   }
-  if (webhook && (typeof webhook.secretRef !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(webhook.secretRef))) fail("webhook.secretRef must name a secret");
+  if (webhook?.secretRef !== undefined && (typeof webhook.secretRef !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(webhook.secretRef))) fail("webhook.secretRef must name a secret");
   if (value.script && (typeof value.script.path !== "string" || !value.script.path)) fail("script.path is required");
   if (value.agent && (typeof value.agent.prompt !== "string" || !value.agent.prompt.trim())) fail("agent.prompt is required");
   if (value.agent?.agent && !AGENT_TYPES[value.agent.agent]) fail(`agent must be one of ${Object.keys(AGENT_TYPES).join(", ")}`);
@@ -282,8 +282,11 @@ export class Automations {
   async hook(id: string, headers: Record<string, string | string[] | undefined>, body: Buffer): Promise<{ status: number; body: Record<string, unknown> }> {
     const task = this.tasks.get(id), webhook = task?.definition?.trigger.webhook;
     if (!task || !webhook || task.error) return { status: 404, body: { error: "not_found" } };
-    const secret = await this.options.secrets?.value(webhook.secretRef, ["shared/webhooks"]).catch(() => undefined) ?? this.secret(webhook.secretRef);
-    if (!secret || !verifySignature(headers, body, secret, this.now())) return { status: 401, body: { error: "invalid_signature" } };
+    // A hook without secretRef is open: it can only start the run its definition describes.
+    if (webhook.secretRef) {
+      const secret = await this.options.secrets?.value(webhook.secretRef, ["shared/webhooks"]).catch(() => undefined) ?? this.secret(webhook.secretRef);
+      if (!secret || !verifySignature(headers, body, secret, this.now())) return { status: 401, body: { error: "invalid_signature" } };
+    }
     if (task.definition!.enabled === false || this.state(id)?.paused) return { status: 202, body: { skipped: "paused" } };
     let payload: Record<string, unknown> = {};
     if (body.length) {

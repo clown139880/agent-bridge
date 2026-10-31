@@ -106,7 +106,8 @@ enabled: true
 ## 6. Webhook 入口
 
 - 路由：`POST /hooks/<id>`，挂在 Control Plane 现有的 Hono 入口上，暴露范围与 Control Plane 相同。`POST /webhooks/<id>` 是同一入口的别名，和 Hermes 的路径一致，迁移来的调用方只需改主机和端口。
-- 鉴权：每个 hook 一个 HMAC secret，由 `secretRef` 从部署的 secret 文件读取，不进仓库、不进库、不进日志。
+- 鉴权（可选）：定义里写了 `secretRef` 才校验签名；不写就是开放的 hook，任何能访问 Control Plane 的请求都能触发它定义的那次运行（clown 2026-10-31：本机和局域网回调不需要密钥）。写了 `secretRef` 时，密钥先从 OpenBao `shared/webhooks` 找，再找 `AUTOMATION_SECRETS_FILE`。
+- 原来的说明：每个 hook 一个 HMAC secret，由 `secretRef` 从部署的 secret 文件读取，不进仓库、不进库、不进日志。
   - 接受 GitHub 风格的 `X-Hub-Signature-256: sha256=<hex>`，与 Control Plane 现有的 `webhook.ts` 相同。
   - 也接受 GitLab 风格的 `X-Gitlab-Token: <secret>`（ComfyUI 机器的回调用它），以及 Hermes 通用 HMAC：`X-Webhook-Signature`（只签请求体）和 `X-Webhook-Signature-V2` + `X-Webhook-Timestamp`（签 `<ts>.<body>`，±5 分钟）。
 - 先校验长度上限（1 MB）和签名，再读请求体。立即返回 `202 {runId}`，运行异步进行。
