@@ -34,10 +34,13 @@ export class SecretStore {
   async value(ref: string, paths: string[] = []): Promise<string | undefined> {
     const at = ref.indexOf("#");
     if (at > 0) return (await this.read(ref.slice(0, at)))[ref.slice(at + 1)];
+    let failure: unknown;
     for (const path of paths) {
-      const value = (await this.read(path).catch(() => ({} as Record<string, string>)))[ref];
-      if (value !== undefined) return value;
+      // One retry: right after a restart the first reads have been seen to miss.
+      const data = await this.read(path).catch(() => this.read(path)).catch((error) => { failure = error; return {} as Record<string, string>; });
+      if (data[ref] !== undefined) return data[ref];
     }
+    if (failure) throw failure;
     return undefined;
   }
 
