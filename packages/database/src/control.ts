@@ -445,9 +445,12 @@ export class AgentControlStore {
   }
 
   upsertApproval(machineId: string, input: { approvalId: string; sessionId: string; turnId?: string;
-    kind: string; summary: string; choices: ApprovalChoice[]; requestedAt?: number }): void {
+    kind: string; summary: string; choices: ApprovalChoice[]; requestedAt?: number;
+    /** The reviewer's explanation, and whether “allow similar” is offered (it teaches the reviewer). */
+    analysis?: { what: string; risk: string; reason: string }; similar?: boolean }): void {
     this.upsertPending(machineId, "approval", input.approvalId, input.sessionId, input.turnId, {
       approvalId: input.approvalId, kind: input.kind, summary: input.summary, choices: input.choices,
+      ...(input.analysis ? { analysis: input.analysis } : {}), ...(input.similar ? { similar: true } : {}),
     }, input.requestedAt ?? Date.now());
   }
 

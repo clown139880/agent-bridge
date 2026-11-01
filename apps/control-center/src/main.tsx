@@ -90,17 +90,20 @@ const submitWithKeyboard = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
 
 // Never a real option label: the API rejects empty/control-only answers.
 const OTHER = "\0other";
-const choiceLabels: Record<string, string> = { allow: "允许", deny: "拒绝", "allow-session": "本会话始终允许", "allow-always": "永久允许" };
+const choiceLabels: Record<string, string> = { allow: "允许", deny: "拒绝", "allow-session": "本会话始终允许", "allow-always": "永久允许", "allow-similar": "允许类似的操作" };
+const riskLabels: Record<string, string> = { low: "低风险", medium: "中风险", high: "高风险" };
 function ApprovalCard({ control, pending, disabled }: { control: ControlState; pending: Pending; disabled: boolean }) {
   const id = pendingId(pending), choices = pending.choices?.length ? pending.choices : ["allow", "deny"];
   return <div className="pending-item"><div className="pending-kind">审批{pending.kind ? ` · ${pending.kind}` : ""}</div>
     <pre className="pending-summary">{pending.summary ?? "（无摘要）"}</pre>
+    {pending.analysis && <p className="hint">🤖 审核员：{pending.analysis.what}（{riskLabels[pending.analysis.risk] ?? pending.analysis.risk}）{pending.analysis.reason}</p>}
     <div className="row-actions">{choices.map(choice => <button key={choice} type="button" disabled={disabled}
       className={choice === "allow" ? "primary" : choice === "deny" ? "danger" : ""}
       onClick={() => {
         haptic("tick");
         void control.submit(`/approvals/${segment(id)}/decision`, { choice });
       }}>{choiceLabels[choice] ?? choice}</button>)}</div>
+    {choices.includes("allow-similar") && <small className="hint">“允许类似的操作”放行这一条，并让审核员记住这类操作，以后自动放行。</small>}
     {choices.includes("allow-session") && <small className="hint">“本会话始终允许”放行这个工具在本会话的后续调用；{choices.includes("allow-always") ? "“永久允许”对这台机器之后的所有会话都放行（写入 Claude 的 settings.json）。" : "不只当前这一条。"}</small>}
   </div>;
 }

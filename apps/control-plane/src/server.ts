@@ -3,11 +3,11 @@ import { timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server as HttpServer } from "node:http";
 import type { Context } from "hono";
 import { getRequestListener } from "@hono/node-server";
-import { basename } from "node:path";
+import { basename, join } from "node:path";
 import type { Duplex } from "node:stream";
 import pino from "pino";
 import { WebSocket, WebSocketServer } from "ws";
-import { AgentControlStore, ConversationMemoryStore, setRedactedSecrets, Store } from "@agent-bridge/database";
+import { AgentControlStore, ConversationMemoryStore, setRedactedSecrets, Store, type PendingRow } from "@agent-bridge/database";
 import {
   parseMessage,
   statusForEvent,
@@ -30,8 +30,8 @@ import { WebhookNotifier, type WebhookOptions } from "./webhook.js";
 import { OperatorNotices, type NoticeTarget, type OperatorEvent } from "./notices.js";
 import { Automations, type AutomationOptions } from "./automations.js";
 import { SecretStore, type SecretStoreOptions } from "./secrets.js";
-import { deepseekReviewer, ToolHub, type ToolReviewer } from "./tools.js";
-import { alreadyGated, mustAskHuman, toolOf } from "./approval-review.js";
+import { deepseekApprovalReviewer, deepseekReviewer, learnRule, ToolHub, type ApprovalReviewer, type ToolReviewer } from "./tools.js";
+import { alreadyGated, ApprovalLessons, boundary, toolOf, type ApprovalAnalysis } from "./approval-review.js";
 import { toolsEndpoint } from "./mcp/tools.js";
 import { NtfyNotifier, type NtfyOptions, type SessionNotificationKind } from "./ntfy.js";
 import { AgentMessagePublisher, type MessageMqttOptions } from "./message-publisher.js";
@@ -69,6 +69,11 @@ export class ControlPlane {
   private readonly toolHub?: ToolHub;
   private readonly secrets?: SecretStore;
   private readonly toolReviewer?: ToolReviewer;
+  private approvalReviewer?: ApprovalReviewer;
+  private learnRule?: (summary: string, what: string) => Promise<string>;
+  private approvalLessons?: ApprovalLessons;
+  /** The reviewer's explanation of approvals it handed to the human, kept across Bridge replays. */
+  private readonly approvalAnalyses = new Map<string, ApprovalAnalysis>();
   private readonly ntfy: NtfyNotifier;
   private readonly messages?: AgentMessagePublisher;
   private readonly memory: ConversationMemoryStore;
@@ -167,8 +172,19 @@ export class ControlPlane {
       { relayed: (sessionId) => this.conversations.relays(sessionId) });
     const secrets = this.secrets = options.secrets && new SecretStore(options.secrets);
     const operator = options.noticeTarget ?? { connector: "app", roomId: "operator", threadId: "" };
+    const reviewModel = process.env.TOOL_REVIEW_MODEL ?? "deepseek-flash", reviewTimeout = Number(process.env.TOOL_REVIEW_TIMEOUT_MS ?? 15_000);
     const toolReviewer = this.toolReviewer = secrets && process.env.TOOL_REVIEW !== "off"
-      ? deepseekReviewer({ secrets, model: process.env.TOOL_REVIEW_MODEL ?? "deepseek-flash", timeoutMs: Number(process.env.TOOL_REVIEW_TIMEOUT_MS ?? 15_000) }) : undefined;
+      ? deepseekReviewer({ secrets, model: reviewModel, timeoutMs: reviewTimeout }) : undefined;
+    if (toolReviewer && secrets) {
+      this.approvalReviewer = deepseekApprovalReviewer({ secrets, model: reviewModel, timeoutMs: reviewTimeout });
+      this.learnRule = (summary, what) => learnRule({ secrets, model: reviewModel }, summary, what);
+      if (agentSkills && options.agentMemory?.skills) {
+        const skills = agentSkills, repo = options.agentMemory.skills.repo;
+        this.approvalLessons = new ApprovalLessons({ file: join(repo, "scopes/_global/agent-bridge/approval-review/references/learned.md"),
+          save: (content) => { skills.write({ name: "control-plane", role: "agent" }, { scope: "_global", name: "approval-review", category: "agent-bridge",
+            file: "references/learned.md", content }); } });
+      }
+    }
     if (options.toolsRegistry) this.toolHub = new ToolHub(store.db, { registry: options.toolsRegistry, secrets, reviewer: toolReviewer,
       notify: (text, level) => this.controlStore.createNotice({ ...operator, text, level, source: "control-plane" }) });
     if (options.automations) this.automations = new Automations({ ...options.automations, secrets,
@@ -181,6 +197,7 @@ export class ControlPlane {
     this.controlApi = new AgentControlApi(store, this.controlStore, this.registry, {
       readToken: options.controlApiReadToken, writeToken: options.controlApiWriteToken, bridgeToken: options.bridgeToken,
       agents, memoryReviews: this.memoryReviews, conversations: this.conversations, automations: this.automations, toolHub: this.toolHub,
+      onAllowSimilar: (pending) => this.learnFrom(pending),
       sseKeepaliveMs: options.sse?.keepaliveMs ?? 15_000,
       ssePollMs: options.sse?.pollMs ?? 2_000, sseMaxBackpressure: options.sse?.maxBackpressure ?? 3,
       actionTimeoutMs: options.sse?.actionTimeoutMs ?? 30_000,
@@ -740,6 +757,21 @@ export class ControlPlane {
     }
   }
 
+  /** “允许类似的操作”: turn the allowed call into a rule the reviewer applies from now on. Absolute-boundary calls never become rules. */
+  private learnFrom(pending: PendingRow): void {
+    const summary = String(pending.request.summary ?? ""), what = String((pending.request.analysis as { what?: string } | undefined)?.what ?? "");
+    const tool = toolOf(pending.request.kind, summary);
+    if (!this.learnRule || !this.approvalLessons || boundary({ tool, summary, choices: ["allow"] }) === "absolute") return;
+    const lessons = this.approvalLessons;
+    void this.learnRule(summary, what).then((rule) => {
+      lessons.add(rule, summary);
+      log.info({ rule, approvalId: pending.id }, "Reviewer learned a rule from the human");
+      const operator = this.options.noticeTarget ?? { connector: "app", roomId: "operator", threadId: "" };
+      this.controlStore.createNotice({ id: `learn:${pending.id}`, ...operator, level: "silent", source: "review", sessionId: pending.sessionId,
+        text: `📚 审核员记住了一条规则\n${rule}` });
+    }).catch((error) => log.warn({ error: String(error), approvalId: pending.id }, "Could not learn a rule from this approval"));
+  }
+
   /** Answer an approval for the reviewer, as the human would through /api/v1, and say so quietly. */
   private resolveByReview(machineId: string, message: ApprovalRequestMessage, choice: "allow" | "deny", reason: string, quiet = false): boolean {
     try {
@@ -769,34 +801,38 @@ export class ControlPlane {
     // that case: there is no pending approval for the API caller to resolve.
     if (this.resolvedApprovalIds.delete(message.approvalId)) return;
     const first = !this.controlStore.pending(message.approvalId);
-    // A first request outside the hard boundary is reviewed before anyone is asked: allowed or denied, it never reaches the human.
-    if (first && !reviewed && this.toolReviewer && message.choices.includes("allow")) {
+    // Every first request is reviewed before anyone is asked. Allowed or denied, it never reaches the human;
+    // otherwise the human sees it with the reviewer's analysis and may let similar ones through from now on.
+    if (first && !reviewed && this.approvalReviewer && message.choices.includes("allow")) {
       const tool = toolOf(message.kind, message.summary);
       if (alreadyGated(tool) && this.resolveByReview(machineId, message, "allow", "中央工具库和记忆的调用由 Control Plane 自己按档位把关，不再重复确认", true)) return;
       // Answering another session's approval is judged by what that approval asks.
-      let target: { summary: string; hard: boolean } | undefined;
+      let answering: string | undefined, level = boundary({ tool, summary: message.summary, choices: message.choices });
       if (/^mcp__bridge__(approve|answer)$/.test(tool)) {
         const id = /"(?:approval_id|request_id)"\s*:\s*"([^"]+)"/.exec(message.summary)?.[1];
         const pending = id ? this.controlStore.pending(id) : undefined;
-        const summary = pending ? String(pending.request.summary ?? "") : "";
-        const targetTool = toolOf(pending?.request.kind, summary);
-        target = { summary, hard: !pending || (!alreadyGated(targetTool) && mustAskHuman({ tool: targetTool, summary, choices: (pending.request.choices as string[] | undefined) ?? ["allow"] })) };
-        if (!target.hard && alreadyGated(targetTool) && this.resolveByReview(machineId, message, "allow", "被答复的是中央工具库/记忆的调用，本来就免确认", true)) return;
+        answering = pending ? String(pending.request.summary ?? "") : "";
+        const targetTool = toolOf(pending?.request.kind, answering);
+        if (pending && alreadyGated(targetTool) && this.resolveByReview(machineId, message, "allow", "被答复的是中央工具库/记忆的调用，本来就免确认", true)) return;
+        const targetLevel = pending ? boundary({ tool: targetTool, summary: answering, choices: (pending.request.choices as string[] | undefined) ?? ["allow"] }) : "absolute";
+        if (targetLevel === "absolute" || (targetLevel === "hard" && level !== "absolute")) level = targetLevel;
       }
-      if (!target?.hard && !mustAskHuman({ tool, summary: message.summary, choices: message.choices })) {
-        // Off the Bridge's message chain: its other events keep flowing while the reviewer thinks.
-        this.approvalsById.set(message.approvalId, { approvalId: message.approvalId, sessionId: message.sessionId });
-        void this.toolReviewer({ tool, title: `${session.agentType} 工具调用`, description: `${message.kind}`, args: { summary: message.summary, ...(target ? { answering: target.summary } : {}) },
-          caller: `${session.agentType}@${machineId}:${session.projectPath}` }).catch((error: unknown) => ({ decision: "human" as const, reason: String(error) }))
-          .then((verdict) => {
-            if (verdict.decision !== "human" && this.resolveByReview(machineId, message, verdict.decision, verdict.reason)) return;
-            log.info({ approvalId: message.approvalId, tool, reason: verdict.reason }, "Reviewer handed an approval to the human");
-            this.approvalsById.delete(message.approvalId);
-            return this.handleApprovalRequest(machineId, message, true);
-          }).catch((error) => log.error({ error, approvalId: message.approvalId }, "Approval review failed"));
-        return;
-      }
+      // Off the Bridge's message chain: its other events keep flowing while the reviewer thinks.
+      this.approvalsById.set(message.approvalId, { approvalId: message.approvalId, sessionId: message.sessionId });
+      void this.approvalReviewer({ summary: message.summary, tool, boundary: level, learned: this.approvalLessons?.text() ?? "", answering,
+        caller: `${session.agentType}@${machineId}:${session.projectPath}` })
+        .catch((error: unknown) => ({ decision: "human" as const, what: "", risk: "medium" as const, reason: `审核失败：${error instanceof Error ? error.message : String(error)}` }))
+        .then((verdict) => {
+          if (verdict.decision !== "human" && this.resolveByReview(machineId, message, verdict.decision, verdict.reason)) return;
+          log.info({ approvalId: message.approvalId, tool, boundary: level, reason: verdict.reason }, "Reviewer handed an approval to the human");
+          if (verdict.what) this.approvalAnalyses.set(message.approvalId, { what: verdict.what, risk: verdict.risk, reason: verdict.reason });
+          this.approvalsById.delete(message.approvalId);
+          return this.handleApprovalRequest(machineId, message, true);
+        }).catch((error) => log.error({ error, approvalId: message.approvalId }, "Approval review failed"));
+      return;
     }
+    const analysis = this.approvalAnalyses.get(message.approvalId);
+    if (analysis || this.approvalLessons) message = { ...message, ...(analysis ? { analysis } : {}), ...(this.approvalLessons && message.choices.includes("allow") ? { similar: true } : {}) } as typeof message;
     this.controlStore.upsertApproval(machineId, message);
     if (first) this.notifySession("approval", message.sessionId, message.summary);
     this.store.updateSessionStatus(message.sessionId, "blocked");

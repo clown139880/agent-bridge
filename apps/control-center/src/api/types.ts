@@ -29,6 +29,8 @@ export interface Question {
 export interface Pending {
   id?: string; approvalId?: string; requestId?: string; sessionId: string; status: string;
   summary?: string; kind?: string; choices?: string[]; questions?: Question[];
+  /** Why the reviewer handed this to you: what it does and how risky it is. */
+  analysis?: { what: string; risk: string; reason: string };
 }
 export interface ModelInfo {
   id: string; model: string; displayName: string; isDefault?: boolean; defaultReasoningEffort?: string;

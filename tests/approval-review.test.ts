@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mustAskHuman, toolOf } from "../apps/control-plane/src/approval-review.js";
+import { boundary, mustAskHuman, toolOf } from "../apps/control-plane/src/approval-review.js";
 
 test("the hard boundary keeps irreversible and secret-touching calls for the human", () => {
   const ask = (summary: string, choices = ["allow", "deny"]) => mustAskHuman({ tool: toolOf("command", summary), summary, choices });
@@ -28,7 +28,10 @@ test("a reviewed approval is answered for the agent and never shown; one the rev
   const socket = { readyState: WebSocket.OPEN, OPEN: WebSocket.OPEN, send(value: string) { sent.push(JSON.parse(value)); }, close() {} };
   const control = new ControlPlane(store, { host: "127.0.0.1", port: 0, controlApiWriteToken: "w", sse: { keepaliveMs: 50, pollMs: 5, maxBackpressure: 3 } }) as any;
   control.bridges.set("hal", { machineId: "hal", name: "HAL", capabilities: ["claude-code"], features: ["session-actions"], bridgeVersion: "9", socket });
-  control.toolReviewer = async (request: any) => request.args.summary.includes("ls") ? { decision: "allow", reason: "只读" } : { decision: "human", reason: "拿不准" };
+  const seen: any[] = [];
+  control.approvalReviewer = async (request: any) => { seen.push(request);
+    return request.summary.includes("ls") ? { decision: "allow", what: "列目录", risk: "low", reason: "只读" } : { decision: "human", what: "跑构建", risk: "medium", reason: "拿不准" }; };
+  control.approvalLessons = { text: () => "- 规则 A", add() {} };
   await control.start();
   try {
     await control.handleBridgeMessage("hal", { type: "approval_request", sessionId: "s", approvalId: "a1", kind: "command", summary: "Bash ls -la", choices: ["allow", "deny"] });
@@ -38,8 +41,13 @@ test("a reviewed approval is answered for the agent and never shown; one the rev
     await control.handleBridgeMessage("hal", { type: "approval_request", sessionId: "s", approvalId: "a2", kind: "command", summary: "Bash make thing", choices: ["allow", "deny"] });
     await new Promise((resolve) => setTimeout(resolve, 50));
     assert.equal(control.controlStore.pending("a2")?.status, "pending");
+    assert.deepEqual(control.controlStore.pending("a2")?.request.analysis, { what: "跑构建", risk: "medium", reason: "拿不准" }, "the human sees the reviewer's analysis");
+    assert.equal(control.controlStore.pending("a2")?.request.similar, true);
     await control.handleBridgeMessage("hal", { type: "approval_request", sessionId: "s", approvalId: "a3", kind: "command", summary: "Bash git push", choices: ["allow", "deny"] });
-    assert.equal(control.controlStore.pending("a3")?.status, "pending", "the hard boundary skips the reviewer");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(control.controlStore.pending("a3")?.status, "pending", "an absolute-boundary call is only analysed");
+    assert.equal(seen.find((r) => r.summary === "Bash git push")?.boundary, "absolute");
+    assert.equal(seen.find((r) => r.summary === "Bash make thing")?.learned, "- 规则 A", "learned rules reach the reviewer");
   } finally { await control.stop(); store.db.close(); rmSync(path, { force: true }); }
 });
 
@@ -48,4 +56,13 @@ test("Codex MCP approvals name their tool; the library's and memory's own tools 
   const summary = 'MCP approval required\nServer: tools\nAllow the tools MCP server to run tool "tool_call"?';
   assert.equal(toolOf("permissions", summary), "mcp__tools__tool_call");
   assert.ok(alreadyGated("mcp__tools__tool_call") && alreadyGated("mcp__memory__write") && !alreadyGated("mcp__bridge__create"));
+});
+
+test("pushes, deploys and secrets stay absolute; process and temp-dir cleanup can be learned", () => {
+  const b = (summary: string) => boundary({ tool: toolOf("command", summary), summary, choices: ["allow", "deny"] });
+  assert.equal(b("Bash git push origin main"), "absolute");
+  assert.equal(b("Bash deploy/hal/deploy.sh"), "absolute");
+  assert.equal(b("Bash cat /etc/agent-bridge/bridge.env"), "absolute");
+  assert.equal(b('$ pkill -f "GO_HIKARU_PORT=8797"; rm -rf "$(cat /tmp/hw/tmpws)"'), "hard");
+  assert.equal(b("Bash ls"), false);
 });

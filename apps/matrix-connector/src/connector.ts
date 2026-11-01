@@ -406,9 +406,13 @@ export class MatrixConnector {
     let text: string;
     const kind = item.type === "approval.upserted" ? "approval" : "user_input";
     if (kind === "approval") {
-      const names: Record<string, string> = { allow: "允许", deny: "拒绝", "allow-session": "本会话允许整个工具", "allow-always": "永久允许整个工具" };
+      const names: Record<string, string> = { allow: "允许", deny: "拒绝", "allow-session": "本会话允许整个工具", "allow-always": "永久允许整个工具",
+        "allow-similar": "允许类似的操作（以后自动放行）" };
       const choices = (row.choices ?? []) as string[];
-      text = `**需要审批**：${String(row.summary ?? "")}\n\n${choices.map((choice, i) => `${NUMBER_KEYS[i] ?? i + 1} ${names[choice] ?? choice}`).join("\n")}\n\n回复数字，或添加对应反应（✅ 允许 / ❌ 拒绝）。`;
+      const risk: Record<string, string> = { low: "🟢 低", medium: "🟡 中", high: "🔴 高" };
+      const analysis = row.analysis as Json | undefined;
+      const explained = analysis ? `\n\n🤖 **审核员**：${String(analysis.what ?? "")}\n风险：${risk[String(analysis.risk)] ?? String(analysis.risk)}　${String(analysis.reason ?? "")}` : "";
+      text = `**需要审批**：${String(row.summary ?? "")}${explained}\n\n${choices.map((choice, i) => `${NUMBER_KEYS[i] ?? i + 1} ${names[choice] ?? choice}`).join("\n")}\n\n回复数字，或添加对应反应（✅ 允许 / ❌ 拒绝）。`;
     } else {
       const questions = (row.questions ?? []) as Json[];
       if (questions.some((question) => question.isSecret)) text = "agent 在等一个秘密输入，请到本地客户端回答。";

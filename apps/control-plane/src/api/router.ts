@@ -39,6 +39,8 @@ interface ApiOptions {
   memoryReviews?: MemoryReviewRoutes;
   /** The central tool library's pending approvals (/api/v1/tool-approvals). */
   toolHub?: ToolHub;
+  /** A human answered “allow similar”: learn the class of call so the reviewer allows it next time. */
+  onAllowSimilar?: (pending: PendingRow) => void;
   /** Schedules, webhooks and their proposals (/api/v1/automations). */
   automations?: Automations;
   /** Chat connectors' room/thread → session bindings (/api/v1/conversations). */
@@ -59,8 +61,10 @@ function pendingJson(row: PendingRow): Record<string,unknown> {
   const common={id:row.id,sessionId:row.sessionId,runId:row.runId,turnId:row.turnId,
     workerId:buildWorkerId((row.agentType??"codex-cli") as AgentType,row.machineId),
     status:row.status,requestedAt:row.requestedAt,resolvedAt:row.resolvedAt};
+  // “allow-similar” is answered as allow and teaches the reviewer the class of call it belongs to.
   if(row.kind==="approval")return {approvalId:row.id,...common,kind:row.request.kind,summary:row.request.summary,
-    choices:row.request.choices,decision:row.decision?.choice??null};
+    choices:row.request.similar&&Array.isArray(row.request.choices)?[...row.request.choices,"allow-similar"]:row.request.choices,
+    ...(row.request.analysis?{analysis:row.request.analysis}:{}),decision:row.decision?.choice??null};
   return {requestId:row.id,...common,questions:row.request.questions,blocking:row.request.blocking!==false,answers:row.decision?.answers??null};
 }
 // Resume hint for a turn: lets the bridge revive a session it no longer holds
@@ -565,7 +569,8 @@ export class AgentControlApi {
     if(pending.status!=="pending")throw new ApiProblem(409,kind==="approval"?"approval_already_resolved":"user_input_already_resolved","request was already resolved",false,{status:pending.status,resolvedAt:pending.resolvedAt});
     this.requireActionBridge(pending.machineId);
     if(kind==="approval"){
-      const choice=string(body.choice,"choice",true)!;const choices=pending.request.choices;
+      let choice=string(body.choice,"choice",true)!;const choices=pending.request.choices;
+      if(choice==="allow-similar"&&pending.request.similar){this.options.onAllowSimilar?.(pending);choice="allow";}
       if(!Array.isArray(choices)||!choices.includes(choice))throw new ApiProblem(400,"invalid_choice","choice is not offered",false,{choices});
       const created=this.createAction(principal,key,path,body,"resolve_approval",pending.machineId,pending.sessionId);
       if(!this.store.reservePending(id,created.action.actionId)){
