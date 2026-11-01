@@ -145,7 +145,7 @@ function agentMemoryConfig() {
  */
 function reviewConfig() {
   return {
-    model: process.env.REVIEW_MODEL ?? process.env.TOOL_REVIEW_MODEL ?? "deepseek-flash",
+    model: process.env.REVIEW_MODEL ?? "deepseek-v4-flash",
     fallback: process.env.REVIEW_FALLBACK_MODEL ?? "qwen3.8-flash-next",
     timeoutMs: duration("REVIEW_TIMEOUT_MS", Number(process.env.TOOL_REVIEW_TIMEOUT_MS ?? 15_000)),
     memory: process.env.MEMORY_REVIEW !== "off",

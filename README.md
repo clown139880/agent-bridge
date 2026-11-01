@@ -84,7 +84,7 @@ Control Plane 主要变量：
 | `BRIDGE_TOKEN` | Bridge 注册密钥，跨机器部署时必须使用长随机值 |
 | `CONTROL_API_READ_TOKEN` / `CONTROL_API_WRITE_TOKEN` | 人的只读/读写 token（Control Center、DSH）；浏览器不得持有。只有它能裁决交给人的记忆审核 |
 | `AGENT_TOKENS` | 每个 agent 一枚：`名字:token[:agent|project]`，逗号分隔（旧名 `AGENT_MEMORY_TOKENS` 仍可用）。同一枚 token 用于 `/mcp/memory`、`/mcp/bridge` 和 `/api/v1`，以 `agent:<名字>` 记在它发起的 action 上。`project`（默认）写 `_` 开头的作用域或共享技能时先经审核，见 [`docs/agent-dispatch-and-review.zh.md`](docs/agent-dispatch-and-review.zh.md) |
-| `REVIEW_MODEL` / `REVIEW_FALLBACK_MODEL` / `REVIEW_TIMEOUT_MS` / `MEMORY_REVIEW` / `TOOL_REVIEW` | 审核员（记忆写入、工具库、工具审批共用）：DeepSeek `deepseek-flash`，失败时 TokensAPI `qwen3.8-flash-next`，每个 15 秒；只能放行或交给人。`MEMORY_REVIEW=off` / `TOOL_REVIEW=off` 时对应的一类一律交给人 |
+| `REVIEW_MODEL` / `REVIEW_FALLBACK_MODEL` / `REVIEW_TIMEOUT_MS` / `MEMORY_REVIEW` / `TOOL_REVIEW` | 审核员（记忆写入、工具库、工具审批共用）：经 TokensAPI，`deepseek-v4-flash`，失败时 `qwen3.8-flash-next`，每个 15 秒，密钥 OpenBao `shared/tokensapi`；只能放行或交给人。`MEMORY_REVIEW=off` / `TOOL_REVIEW=off` 时对应的一类一律交给人 |
 | `AGENT_MEMORY_VAULT` | 跨 agent 记忆所在的 Git 笔记库（如 `/root/deathnote`）；不设则关闭记忆。见 [`docs/agent-memory-operations.zh.md`](docs/agent-memory-operations.zh.md) |
 | `AGENT_MEMORY_ROOT` / `AGENT_MEMORY_LOCK` / `AGENT_MEMORY_CACHE_DIR` | 笔记库内的记忆目录（默认 `agent-memory`）、与笔记库自动提交共用的 flock 文件、bootstrap 缓存目录（默认数据库旁的 `memory-cache`） |
 | `AGENT_SKILLS_REPO` | 共享技能库的 Git checkout（如 `/root/agent-skills`）；需要先启用 agent 记忆，不设则关闭。见 [`docs/agent-skills-design.zh.md`](docs/agent-skills-design.zh.md) |

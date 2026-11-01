@@ -70,9 +70,10 @@ export class ApprovalLessons {
 
 /**
  * Tools the Control Plane already gates itself: the library's tool_search/tool_call (risk tiers and
- * their own review) and central memory (clown: always allowed). Asking again would only ask twice.
+ * their own review), central memory (clown: always allowed) and bridge's reply, whose reply key is its
+ * permission (mcp/contacts.ts). Asking again would only ask twice.
  */
-const SELF_GATED = /^mcp__(tools|memory)__/;
+const SELF_GATED = /^mcp__(tools|memory)__|^mcp__bridge__reply$/;
 
 export function alreadyGated(tool: string): boolean { return SELF_GATED.test(tool); }
 

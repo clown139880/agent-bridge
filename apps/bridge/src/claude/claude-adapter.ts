@@ -19,7 +19,7 @@ import type {
 import { DEFAULT_EFFORT } from "@agent-bridge/protocol";
 import type { AgentAdapter, AdapterEmit, ResumeTarget } from "../agent-adapter.js";
 import type { AttachmentFetcher, FetchedAttachment } from "../attachments.js";
-import type { MemoryBootstrapFetcher } from "../memory-bootstrap.js";
+import { withSessionId, type MemoryBootstrapFetcher } from "../memory-bootstrap.js";
 import { resolveProjectPath, summarizePrompt } from "../app-server.js";
 import { deriveProjectIdentity } from "../path-utils.js";
 import { SUBAGENT_TOOLS, taskKind, taskStatus, toolSummary } from "./activity.js";
@@ -419,7 +419,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
         resume: resumeNativeId,
         model,
         effort,
-        appendSystemPrompt: memory,
+        appendSystemPrompt: withSessionId(memory, sessionId),
         // Lets a tool the agent runs name its own Bridge session (deploy/hal/deploy.sh).
         env: { AGENT_BRIDGE_SESSION_ID: sessionId },
         abort: session.abort.signal,

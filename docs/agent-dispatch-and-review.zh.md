@@ -47,11 +47,23 @@ project agent 写 _global / _assistants / _agent-* 或这些作用域里的技�
   - deny：放错作用域（项目细节、一次性状态、进度、仓库里已有的代码事实）、重复、价值低或格式不对，并说明该怎么做。0.7.57 起这只是建议：写入照样交给你（`waiting_human`，理由前缀“建议拒绝：”），只有人能拒绝（clown 2026-11-01：agent 不作恶，只会犯错）。
   - human：改变授权或审批方式、削弱安全规则、涉及凭据或删除策略、无证据地断言你的偏好或身份、加入外发数据或删除东西的命令、撤回或归档你可能依赖的内容，以及任何拿不准的情况。
 - 为什么不用 Bridge session 当审核员：HAL 的 Bridge 放行全部 Bash，被注入的提议可能借审核员执行命令。审核员是 Control Plane 直接发起的一次模型调用，不带任何工具，注入最多影响一次判断，执行不了任何东西。
-- 0.7.57 起记忆、工具库、工具审批共用一个审核员（`apps/control-plane/src/review-model.ts`）：先问 DeepSeek（`deepseek-flash`，关闭思考，密钥 OpenBao `shared/deepseek`），出错、超时或没给出结论时问 TokensAPI 的 `qwen3.8-flash-next`（密钥 `shared/tokensapi#TOKENSAPI_API_KEY`）；两个都不行就交给人。模型只能放行或交给人，它的“拒绝”作为建议附在交给人的请求上。
+- 0.7.57 起记忆、工具库、工具审批共用一个审核员（`apps/control-plane/src/review-model.ts`）。0.7.58 起都经 TokensAPI（clown：AI 调用默认走 TokensAPI，只有需要供应商自身能力时才直连，比如 DeepSeek 的原生搜索）：先问 `deepseek-v4-flash`，出错、超时或没给出结论时问 `qwen3.8-flash-next`，密钥 OpenBao `shared/tokensapi#TOKENSAPI_API_KEY`；两个都不行就交给人。实测各约 1–2 秒（含思考）。模型只能放行或交给人，它的“拒绝”作为建议附在交给人的请求上。
 - 每次结论都发 webhook `memory_review.status`（applied / denied / waiting_human / failed），在通知房间可见。
 - 审核一次一个排队；Control Plane 重启时，审到一半的会重新审。
-- 配置：`REVIEW_MODEL`（默认 `deepseek-flash`，旧名 `TOOL_REVIEW_MODEL`）、`REVIEW_FALLBACK_MODEL`（默认 `qwen3.8-flash-next`，空值关闭兜底）、`REVIEW_TIMEOUT_MS`（每个模型 15 秒）；`MEMORY_REVIEW=off` / `TOOL_REVIEW=off` 时对应的一类一律交给人。`MEMORY_REVIEW_MODEL` / `MEMORY_REVIEW_COMMAND` 已不用。
+- 配置：`REVIEW_MODEL`（默认 `deepseek-v4-flash`）、`REVIEW_FALLBACK_MODEL`（默认 `qwen3.8-flash-next`，空值关闭兜底）、`REVIEW_TIMEOUT_MS`（每个模型 15 秒）；`MEMORY_REVIEW=off` / `TOOL_REVIEW=off` 时对应的一类一律交给人。`MEMORY_REVIEW_MODEL` / `MEMORY_REVIEW_COMMAND` 已不用。
 - 接口：MCP `review`（agent 查结果）；`GET /api/v1/memory-reviews[?status=]`、`GET /api/v1/memory-reviews/{id}`；`POST /api/v1/memory-reviews/{id}/decision`（`{"choice":"allow"|"deny"}`，只接受人的 token，Control Center 用的就是它）。
+
+## 5. 会话之间对话：reply（0.7.58）
+
+一个作用域的会话找另一个作用域的会话对接事情，对方要能回话，而且回话不能因为审批卡住，也不能把你拉进一段你不需要看的对话（clown 2026-11-01）。
+
+- **发起**：A 用 `create` 或 `turn` 找 B 时带上 `from_session_id`（A 自己的 session id）。Claude 和 pi 的会话开局系统提示里写着自己的 id（Bridge 0.7.40 起，进程环境里也有 `AGENT_BRIDGE_SESSION_ID`）；Codex 开局拿不到自己的 id，只能在被别人找过之后回话。
+- **消息开头**：Control Plane 在 A 的消息前加一行 `[Agent Bridge 会话消息] 来自另一个会话 <A>（worker · 目录 · 标题）`，附一个回复 key（`rk_…`）。这一行只是提示，不授予任何权限。
+- **回复**：B 调 `reply(reply_key, input)`。消息送进 A：A 在跑就补充进当前 turn，空闲就开新 turn，开头写明来自 B，并附一个新的 key，A 可以接着回。每个 key 只能用一次，24 小时内有效。
+- **不审批**：key 本身就是许可（只有收到消息的会话拿得到它），`mcp__bridge__reply` 在 Control Plane 的自带把关名单里（`alreadyGated`），Claude 弹出的审批直接放行、不通知。回复只是文字，A 读到后要做的事仍然过 A 自己的审批。主动找一个会话（`create`/`turn`）照旧过审核员。
+- **上限**：同一对会话一天内双向最多 20 条消息（`PAIR_MESSAGES_PER_DAY`），超过时 `reply`/`turn` 返回 `pair_limit`，并给你发一条通知。这是唯一会叫你的情况。
+- **失败**：A 正在等审批或回答时消息送不进去，`reply` 返回错误，B 稍后再试；key 没用掉，仍然有效。
+- 实现：`apps/control-plane/src/mcp/contacts.ts`（表 `session_contacts`）、`mcp/bridge.ts`。
 
 ## 4. 以后：工具审批
 

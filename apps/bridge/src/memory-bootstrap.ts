@@ -34,3 +34,12 @@ export function makeMemoryBootstrapFetcher(wsUrl: string, token: string | undefi
     }
   };
 }
+
+/**
+ * The session's own id, for its instructions: an agent passes it as `from_session_id` when it contacts
+ * another session through /mcp/bridge, so that session can answer with `reply`.
+ */
+export function withSessionId(instructions: string | undefined, sessionId: string): string {
+  const line = `本会话的 Agent Bridge session id 是 ${sessionId}。用 bridge 的 create/turn 找别的会话时把它作为 from_session_id 传入，对方才能用 reply 回复你。`;
+  return instructions ? `${instructions}\n\n${line}` : line;
+}

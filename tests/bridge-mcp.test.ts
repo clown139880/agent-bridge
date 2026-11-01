@@ -143,7 +143,7 @@ test("/mcp/bridge scopes its tools to the caller's Control token and acts as tha
     assert.equal((await f.mcp("nope", "tools/list")).status, 401);
     const names = async (token: string) => (await f.mcp(token, "tools/list")).body.result.tools.map((tool: any) => tool.name).sort();
     assert.deepEqual(await names("read"), ["automation_list", "automation_runs", "pending", "session", "sessions", "wait", "workers"]);
-    assert.deepEqual(await names("write"), ["answer", "approve", "automation_list", "automation_pause", "automation_propose", "automation_run", "automation_runs", "create", "interrupt", "pending", "session", "sessions", "turn", "wait", "workers"]);
+    assert.deepEqual(await names("write"), ["answer", "approve", "automation_list", "automation_pause", "automation_propose", "automation_run", "automation_runs", "create", "interrupt", "pending", "reply", "session", "sessions", "turn", "wait", "workers"]);
 
     const listed = await f.mcp("read", "tools/call", { name: "sessions", arguments: { limit: 5 } });
     assert.deepEqual(listed.body.result.structuredContent.sessions.map((s: any) => s.sessionId).sort(), ["thread-1", "thread-2"]);
@@ -172,7 +172,7 @@ test("an agent token drives sessions through /mcp/bridge and every action names 
   const f = await fixture();
   try {
     const names = (await f.mcp("agent-claude-hal", "tools/list")).body.result.tools.map((tool: any) => tool.name).sort();
-    assert.deepEqual(names, ["answer", "approve", "automation_list", "automation_pause", "automation_propose", "automation_run", "automation_runs", "create", "interrupt", "pending", "session", "sessions", "turn", "wait", "workers"]);
+    assert.deepEqual(names, ["answer", "approve", "automation_list", "automation_pause", "automation_propose", "automation_run", "automation_runs", "create", "interrupt", "pending", "reply", "session", "sessions", "turn", "wait", "workers"]);
     const creating = f.mcp("agent-claude-hal", "tools/call", { name: "create",
       arguments: { worker_id: "codex@dev", workspace: "repo", input: "from another agent" } });
     const action = await f.ack("action.create_session", { sessionId: "thread-new", turnId: "turn-new" });
@@ -180,5 +180,42 @@ test("an agent token drives sessions through /mcp/bridge and every action names 
     assert.equal((await creating).body.result.structuredContent.sessionId, "thread-new");
     const row = f.store.db.prepare("SELECT principal FROM actions WHERE id=?").get(action.actionId) as { principal: string };
     assert.equal(row.principal, "agent:claude@hal");
+  } finally { await f.close(); }
+});
+
+test("a session that names itself can be answered with reply, back and forth, without approval and within a daily limit", async () => {
+  const f = await fixture();
+  const call = (name: string, args: Record<string, unknown>) => f.mcp("agent-claude-hal", "tools/call", { name, arguments: args });
+  try {
+    // thread-1 asks thread-2; the message names the sender and carries a reply key.
+    const asking = call("turn", { session_id: "thread-2", input: "接口字段叫什么？", from_session_id: "thread-1" });
+    const asked = await f.ack("action.submit_turn", { sessionId: "thread-2", turnId: "turn-a", resolvedAction: "start_turn" });
+    await asking;
+    assert.match(asked.input, /^\[Agent Bridge 会话消息\] 来自另一个会话 thread-1（codex@dev · \/work\/repo/);
+    assert.match(asked.input, /接口字段叫什么？$/);
+    const key = /reply_key: (rk_[\w-]+)/.exec(asked.input)![1]!;
+
+    // thread-2 answers with the key: it lands in thread-1 with a fresh key for the next answer.
+    const replying = call("reply", { reply_key: key, input: "叫 user_id" });
+    const answered = await f.ack("action.submit_turn", { sessionId: "thread-1", turnId: "turn-b", resolvedAction: "start_turn" });
+    assert.deepEqual((await replying).body.result.structuredContent.sessionId, "thread-1");
+    assert.match(answered.input, /^\[Agent Bridge 会话回复\] 会话 thread-2（codex@dev · \/work\/other/);
+    assert.match(answered.input, /叫 user_id$/);
+    const next = /reply_key: (rk_[\w-]+)/.exec(answered.input)![1]!;
+    assert.notEqual(next, key);
+
+    const again = (await call("reply", { reply_key: key, input: "再说一次" })).body.result;
+    assert.equal(again.isError, true);
+    assert.match(again.content[0].text, /^reply_key_used: /, "a key answers once");
+    assert.match((await call("reply", { reply_key: "rk_forged", input: "x" })).body.result.content[0].text, /^reply_key_unknown: /);
+    assert.match((await call("turn", { session_id: "thread-1", input: "x", from_session_id: "thread-1" })).body.result.content[0].text, /^invalid_parameter: /);
+
+    // Over the pair's daily limit the conversation stops and the person is told.
+    f.store.db.prepare("UPDATE session_contacts SET created_at=? WHERE 1").run(Date.now());
+    for (let i = 0; i < 18; i++) f.store.db.prepare("INSERT INTO session_contacts(key,from_session,to_session,created_at) VALUES(?,?,?,?)").run(`rk_fill${i}`, "thread-1", "thread-2", Date.now());
+    const limited = (await call("reply", { reply_key: next, input: "还有一个问题" })).body.result;
+    assert.match(limited.content[0].text, /^pair_limit: /);
+    const notice = f.store.db.prepare("SELECT text FROM notices WHERE source='bridge'").get() as { text: string };
+    assert.match(notice.text, /已暂停它们之间的对话/);
   } finally { await f.close(); }
 });

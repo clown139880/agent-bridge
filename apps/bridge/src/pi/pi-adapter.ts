@@ -15,7 +15,7 @@ import type {
 } from "@agent-bridge/protocol";
 import type { AgentAdapter, AdapterEmit, ResumeTarget } from "../agent-adapter.js";
 import type { AttachmentFetcher, FetchedAttachment } from "../attachments.js";
-import type { MemoryBootstrapFetcher } from "../memory-bootstrap.js";
+import { withSessionId, type MemoryBootstrapFetcher } from "../memory-bootstrap.js";
 import { resolveProjectPath, summarizePrompt } from "../app-server.js";
 import { deriveProjectIdentity } from "../path-utils.js";
 
@@ -187,7 +187,7 @@ export class PiAdapter implements AgentAdapter {
     if (resumeNativeId) { args.push("--session", resumeNativeId); }
     // pi keeps no system prompt in its session file, so every launch appends core memory again.
     const memory = await this.options.memoryBootstrap?.(cwd, memoryScope);
-    if (memory) args.push("--append-system-prompt", memory);
+    args.push("--append-system-prompt", withSessionId(memory, sessionId));
     const mcp = Boolean(this.options.controlUrl && process.env.AGENT_TOKEN && existsSync(MCP_EXTENSION));
     if (mcp) args.push("--extension", MCP_EXTENSION);
     if (prompt) {

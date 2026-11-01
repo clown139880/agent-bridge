@@ -56,6 +56,7 @@ test("Codex MCP approvals name their tool; the library's and memory's own tools 
   const summary = 'MCP approval required\nServer: tools\nAllow the tools MCP server to run tool "tool_call"?';
   assert.equal(toolOf("permissions", summary), "mcp__tools__tool_call");
   assert.ok(alreadyGated("mcp__tools__tool_call") && alreadyGated("mcp__memory__write") && !alreadyGated("mcp__bridge__create"));
+  assert.ok(alreadyGated("mcp__bridge__reply") && !alreadyGated("mcp__bridge__turn") && !alreadyGated("mcp__bridge__reply_x"), "reply carries its own permission");
 });
 
 test("pushes, deploys and secrets stay absolute; process and temp-dir cleanup can be learned", () => {

@@ -1,6 +1,7 @@
 import type { AgentControlApi } from "../api/router.js";
 import { ControlClient } from "./bridge-client.js";
 import { BridgeOps } from "./bridge-ops.js";
+import { PAIR_MESSAGES_PER_DAY, type SessionContacts } from "./contacts.js";
 import type { McpEndpoint, McpTool } from "./route.js";
 
 /**
@@ -18,9 +19,17 @@ const MAX_WAIT_SECONDS = 600;
 const object = (properties: Record<string, unknown>, required: string[] = []) =>
   ({ type: "object", ...(required.length ? { required } : {}), additionalProperties: false, properties });
 
-export const BRIDGE_INSTRUCTIONS = "Drive Agent Bridge worker sessions: sessions/session to find and read one, create or turn to give it work, then wait until it finishes or needs an approval/answer (approve/answer), and wait again. Irreversible or high-risk approvals belong to the human.";
+export const BRIDGE_INSTRUCTIONS = "Drive Agent Bridge worker sessions: sessions/session to find and read one, create or turn to give it work, then wait until it finishes or needs an approval/answer (approve/answer), and wait again. Irreversible or high-risk approvals belong to the human. Pass your own session id as from_session_id so the other session can answer you with reply.";
 
-export function bridgeTools(apiBase: () => string): Array<McpTool<BridgePrincipal>> {
+const FROM_SESSION = { type: "string", description: "Your own Agent Bridge session id (in your system prompt, or AGENT_BRIDGE_SESSION_ID). With it the other session can answer you with reply; its answer arrives as a new message in your session." };
+
+/** Where a session runs, for the line that introduces its message. */
+async function introduce(client: ControlClient, sessionId: string): Promise<string> {
+  const session = await client.get(`/sessions/${encodeURIComponent(sessionId)}`);
+  return `${sessionId}（${session.workerId ?? "?"} · ${session.workspace ?? "?"}${session.title ? ` · ${String(session.title).slice(0, 40)}` : ""}）`;
+}
+
+export function bridgeTools(apiBase: () => string, contacts?: SessionContacts, notify?: (text: string) => void): Array<McpTool<BridgePrincipal>> {
   const ops = (principal: BridgePrincipal) =>
     new BridgeOps(new ControlClient({ url: apiBase(), token: principal.authorization.slice(7) }));
   const client = (principal: BridgePrincipal) => new ControlClient({ url: apiBase(), token: principal.authorization.slice(7) });
@@ -29,6 +38,21 @@ export function bridgeTools(apiBase: () => string): Array<McpTool<BridgePrincipa
   const need = (args: Record<string, any>, key: string): string => {
     if (typeof args[key] !== "string" || !args[key]) throw new Error(`${key} is required`);
     return args[key];
+  };
+  /** A message between sessions may not exceed the pair's daily limit; the one over it goes to the human. */
+  const withinLimit = (a: string, b: string) => {
+    if (contacts!.exchanged(a, b) < PAIR_MESSAGES_PER_DAY) return;
+    notify?.(`🔁 两个会话今天已来回 ${PAIR_MESSAGES_PER_DAY} 条消息，已暂停它们之间的对话：${a} ↔ ${b}`);
+    throw Object.assign(new Error(`these two sessions exchanged ${PAIR_MESSAGES_PER_DAY} messages today; the person was told, stop and report instead`), { code: "pair_limit" });
+  };
+  /** The line a message from another session starts with: who sent it and how to answer. */
+  const contactInput = async (principal: BridgePrincipal, from: string, to: string | undefined, input: string) => {
+    if (!contacts) return { input, key: undefined };
+    if (from === to) throw Object.assign(new Error("from_session_id is the session you are sending to"), { code: "invalid_parameter" });
+    if (to) withinLimit(from, to);
+    const sender = await introduce(client(principal), from);
+    const key = contacts.open(from, to);
+    return { key, input: `[Agent Bridge 会话消息] 来自另一个会话 ${sender}。需要回复时调用 bridge 的 reply 工具（reply_key: ${key}），不必回复就不回。以下是它的消息：\n\n${input}` };
   };
   return [
     {
@@ -86,10 +110,15 @@ export function bridgeTools(apiBase: () => string): Array<McpTool<BridgePrincipa
       description: "Start a new session on a worker. workspace is an absolute path or the name of one of the worker's recent workspaces. With input, the first turn starts at once; follow with wait using the returned turn_id and cursor.",
       inputSchema: object({
         worker_id: { type: "string", description: "<codex|claude|pi>@<machine>" }, workspace: { type: "string" },
-        input: { type: "string" }, model: { type: "string" },
+        input: { type: "string" }, model: { type: "string" }, from_session_id: FROM_SESSION,
       }, ["worker_id", "workspace"]),
-      run: async (args: Record<string, any>, principal) => ({ ...await ops(principal).create({ workerId: need(args, "worker_id"),
-        workspace: need(args, "workspace"), input: args.input, model: args.model }) }),
+      run: async (args: Record<string, any>, principal) => {
+        const contact = typeof args.from_session_id === "string" && args.from_session_id && typeof args.input === "string" && args.input
+          ? await contactInput(principal, args.from_session_id, undefined, args.input) : { input: args.input, key: undefined };
+        const created = await ops(principal).create({ workerId: need(args, "worker_id"), workspace: need(args, "workspace"), input: contact.input, model: args.model });
+        if (contact.key) contacts!.bind(contact.key, created.sessionId);
+        return { ...created };
+      },
     },
     {
       name: "turn", legacy: "ab_send", allowed: write,
@@ -97,11 +126,29 @@ export function bridgeTools(apiBase: () => string): Array<McpTool<BridgePrincipa
       inputSchema: object({
         session_id: SESSION_ID, input: { type: "string" },
         delivery: { type: "string", enum: ["auto", "steer", "start_turn"] },
-        model: { type: "string" }, reasoning_effort: { type: "string" },
+        model: { type: "string" }, reasoning_effort: { type: "string" }, from_session_id: FROM_SESSION,
       }, ["session_id", "input"]),
-      run: async (args: Record<string, any>, principal) => ({ ...await ops(principal).send(need(args, "session_id"), need(args, "input"),
-        { delivery: args.delivery, model: args.model, reasoningEffort: args.reasoning_effort }) }),
+      run: async (args: Record<string, any>, principal) => {
+        const to = need(args, "session_id");
+        const contact = typeof args.from_session_id === "string" && args.from_session_id
+          ? await contactInput(principal, args.from_session_id, to, need(args, "input")) : { input: need(args, "input"), key: undefined };
+        return { ...await ops(principal).send(to, contact.input, { delivery: args.delivery, model: args.model, reasoningEffort: args.reasoning_effort }) };
+      },
     },
+    ...(contacts ? [{
+      name: "reply", allowed: write,
+      description: "Answer a message another session sent you: pass the reply_key its first line names. Your answer arrives in that session as a new message (joining its running turn, or starting one), with a new key it can answer in turn. Needs no approval. Fails while that session waits on an approval or a question; try again later.",
+      inputSchema: object({ reply_key: { type: "string" }, input: { type: "string" } }, ["reply_key", "input"]),
+      run: async (args: Record<string, any>, principal: BridgePrincipal) => {
+        const contact = contacts.answer(need(args, "reply_key"));
+        withinLimit(contact.to, contact.from);
+        const sender = await introduce(client(principal), contact.to);
+        const key = contacts.open(contact.to, contact.from);
+        const sent = await ops(principal).send(contact.from, `[Agent Bridge 会话回复] 会话 ${sender} 回复了你发给它的消息。需要再回复时调用 bridge 的 reply 工具（reply_key: ${key}），不必回复就不回。以下是它的回复：\n\n${need(args, "input")}`);
+        contacts.replied(contact.key);
+        return { delivered: true, sessionId: contact.from, turnId: sent.turnId, delivery: sent.delivery };
+      },
+    } satisfies McpTool<BridgePrincipal>] : []),
     {
       name: "approve", legacy: "ab_decide", allowed: write,
       description: "Resolve an approval. allow-session allows the whole tool for the rest of the session (every Bash command for Bash), not just this call.",
@@ -166,11 +213,11 @@ export function bridgeTools(apiBase: () => string): Array<McpTool<BridgePrincipa
 }
 
 /** Any Control API token except the Bridge registration token; a read token sees only the read tools. */
-export function bridgeEndpoint(api: AgentControlApi, apiBase: () => string): McpEndpoint<BridgePrincipal> {
+export function bridgeEndpoint(api: AgentControlApi, apiBase: () => string, contacts?: SessionContacts, notify?: (text: string) => void): McpEndpoint<BridgePrincipal> {
   return { name: "agent-bridge", version: "0.7.0", instructions: BRIDGE_INSTRUCTIONS,
     authenticate: (authorization) => {
       const principal = api.principalFor(authorization);
       return principal && principal.id !== "bridge" && principal.read ? { write: principal.write, authorization: authorization! } : undefined;
     },
-    tools: bridgeTools(apiBase) };
+    tools: bridgeTools(apiBase, contacts, notify) };
 }

@@ -42,6 +42,7 @@ import { memoryEndpoint, reviewContext, runMemoryTool, type AgentMemoryMcpOption
 import { memoryReviewer, MemoryReviews } from "./memory-review.js";
 import { mcpRoute } from "./mcp/route.js";
 import { bridgeEndpoint } from "./mcp/bridge.js";
+import { SessionContacts } from "./mcp/contacts.js";
 import { compareBridgeVersions } from "./bridge-version.js";
 import { PostDeployResumer } from "./post-deploy.js";
 import { createHttpApp, type HttpEnv } from "./http.js";
@@ -222,7 +223,8 @@ export class ControlPlane {
       memoryBootstrap: (c) => this.handleMemoryBootstrap(c),
       mcp: {
         ...(memoryOptions ? { memory: mcpRoute(memoryEndpoint(this.memory, memoryOptions)) } : {}),
-        ...(apiEnabled ? { bridge: mcpRoute(bridgeEndpoint(this.controlApi, () => this.loopbackBase())) } : {}),
+        ...(apiEnabled ? { bridge: mcpRoute(bridgeEndpoint(this.controlApi, () => this.loopbackBase(), new SessionContacts(store.db),
+          (text) => this.controlStore.createNotice({ ...(this.options.noticeTarget ?? { connector: "app", roomId: "operator", threadId: "" }), text, level: "notice", source: "bridge" }))) } : {}),
         ...(apiEnabled && this.toolHub ? { tools: mcpRoute(toolsEndpoint(this.controlApi, this.toolHub)) } : {}),
       },
       legacyMcp: this.memoryMcp && ((request, response) => this.memoryMcp!.handle(request, response)),
