@@ -82,6 +82,19 @@ test("mobile browser on non-secure HTTP: no-login entry, paging, history/SSE, se
       const filtered = q ? sessions.filter(s => s.title.includes(q)) : sessions;
       return send({ data: filtered.slice(start, start + 50), hasMore: start === 0 && filtered.length > 50, nextCursor: start === 0 ? "page-two" : null });
     }
+    const detail = url.pathname.match(/^\/api\/v1\/sessions\/([^/]+)\/detail$/);
+    if (detail) {
+      // Like the Control Plane: the latest view page, or the changes since a held revision.
+      const id = detail[1], all = id === "s-active" ? viewEntries() : id === "created" ? created : [];
+      const revision = id === "s-active" ? events.length : id === "created" ? 1 : 0;
+      const since = url.searchParams.get("since"), after = Number(url.searchParams.get("rawAfter") ?? 0);
+      const body = since === null ? { view: { projectionVersion: 1, viewRevision: revision, orderingEpoch: 0, rawHigh: revision,
+        entries: all.slice(-20), entriesBefore: all.length > 20 ? `v:0:${all.at(-20).anchor}` : null } }
+        : { changes: { projectionVersion: 1, fromRevision: Number(since), toRevision: revision, hasMore: false, orderingEpoch: 0,
+          entries: all.filter(e => e.rev > Number(since)), removed: [], raw: { after, through: revision, count: revision - after } } };
+      setTimeout(() => send({ session: summary(id), approvals: [], userInput: [], workers: [worker], streamCursor: `c:${streamId}:0`, ...body }), slowDetailMs);
+      return;
+    }
     const view = url.pathname.match(/^\/api\/v1\/sessions\/([^/]+)\/view(\/changes)?$/);
     if (view) {
       const all = view[1] === "s-active" ? viewEntries() : view[1] === "created" ? created : [];

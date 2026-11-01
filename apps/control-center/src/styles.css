@@ -70,16 +70,34 @@ footer { display: flex; justify-content: center; gap: 10px; padding: 32px 0 max(
 .break-all { overflow-wrap: anywhere; }
 .detail-tools { display: flex; justify-content: space-between; align-items: center; }
 .detail-tools small { font-size: .69rem; }
-.pending-panel { padding: 16px; margin: 12px 0; border: 1px solid var(--line); border-radius: 12px; background: var(--soft); font-size: .85rem; }
+.pending-panel { padding: 10px; margin: 12px 0; border: 1px solid var(--line); border-radius: 16px; background: var(--soft); font-size: .88rem; }
 .pending-panel p { margin-top: 8px; overflow-wrap: anywhere; }
-.pending-item { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 8px; }
-.pending-kind { font-size: .7rem; font-weight: 650; letter-spacing: .08em; color: var(--warning); }
-.pending-summary { margin: 0; max-height: 40dvh; overflow: auto; padding: 10px; border-radius: 10px; background: var(--surface); font-size: .78rem; }
+.pending-item { margin-top: 10px; padding: 12px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); display: flex; flex-direction: column; gap: 10px; }
+.pending-kind { display: flex; align-items: center; gap: 8px; font-size: .72rem; font-weight: 650; letter-spacing: .08em; color: var(--warning); }
+/* Whole commands: no scrolling box; long ones fold behind a fade and open in place. */
+.pending-summary { margin: 0; padding: 12px; border-radius: 10px; background: var(--soft); font-size: .8rem; line-height: 1.55; font-family: ui-monospace, monospace; }
+.long-text { position: relative; }
+.long-text.clamped pre { max-height: 17em; overflow: hidden; -webkit-mask-image: linear-gradient(#000 70%, transparent); mask-image: linear-gradient(#000 70%, transparent); }
+.long-text .expand { min-height: 40px; width: 100%; color: var(--accent); font-size: .8rem; }
+.risk-pill { margin-left: auto; padding: 1px 8px; border-radius: 999px; font-size: .68rem; letter-spacing: 0; color: var(--warning); background: color-mix(in srgb, var(--warning) 14%, transparent); }
+.risk-pill.risk-high { color: var(--danger); background: color-mix(in srgb, var(--danger) 14%, transparent); }
+.risk-pill.risk-low { color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.analysis { border-left: 3px solid var(--warning); padding: 2px 0 2px 12px; }
+.analysis.risk-high { border-color: var(--danger); } .analysis.risk-low { border-color: var(--accent); }
+.analysis-head { font-size: .7rem; color: var(--muted); font-weight: 600; }
+.pending-panel .analysis p { margin: 2px 0 0; }
+.analysis-what { font-size: .95rem; font-weight: 600; line-height: 1.5; }
+.analysis-reason { font-size: .82rem; color: var(--muted); line-height: 1.6; }
+.decision-main { display: grid; grid-template-columns: repeat(auto-fit, minmax(0, 1fr)); gap: 10px; }
+.decision-main button { min-height: 52px; font-size: 1rem; }
+.decision-wide { min-height: 52px; flex-direction: column; align-items: flex-start; gap: 0; text-align: left; padding: .6rem 1rem; }
+.decision-wide small { font-weight: 500; font-size: .72rem; line-height: 1.4; }
+.decision-wide.suggested { border-color: var(--accent); color: var(--accent); }
 .pending-item .row-actions { flex-wrap: wrap; margin-top: 0; }
 .danger { color: var(--danger); border-color: var(--danger); background: transparent; }
 .question { border: 0; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 6px; }
-.question legend { font-size: .85rem; margin-bottom: 4px; overflow-wrap: anywhere; }
-.option { display: flex; gap: 10px; align-items: flex-start; font-weight: 500; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+.question legend { font-size: .95rem; line-height: 1.5; margin-bottom: 4px; overflow-wrap: anywhere; }
+.option { display: flex; gap: 10px; align-items: flex-start; min-height: 48px; font-weight: 500; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
 .option input { width: 20px; height: 20px; min-height: auto; margin-top: 2px; accent-color: var(--accent); flex: none; }
 .option small { display: block; }
 .attachments { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
@@ -211,3 +229,4 @@ footer { display: flex; justify-content: center; gap: 10px; padding: 32px 0 max(
 .needs-attention .turn-summary strong { color: #b24927; }
 .transcript-mode { display: flex; align-items: center; gap: 8px; font-size: .8rem; color: var(--muted); }
 .transcript-mode select { width: auto; padding: 6px 10px; }
+.pending-item > button.primary { min-height: 52px; font-size: 1rem; }

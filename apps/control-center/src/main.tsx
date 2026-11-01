@@ -91,20 +91,38 @@ const submitWithKeyboard = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
 // Never a real option label: the API rejects empty/control-only answers.
 const OTHER = "\0other";
 const choiceLabels: Record<string, string> = { allow: "允许", deny: "拒绝", "allow-session": "本会话始终允许", "allow-always": "永久允许", "allow-similar": "允许类似的操作" };
+/** What a wider choice lets through besides this one call; shown inside its button. */
+const choiceNotes: Record<string, string> = {
+  "allow-similar": "放行这一条，并让审核员记住这类操作，以后自动放行",
+  "allow-session": "放行这个工具在本会话的所有后续调用，不只这一条",
+  "allow-always": "这台机器之后的所有会话都放行（写入 Claude 的 settings.json）",
+};
 const riskLabels: Record<string, string> = { low: "低风险", medium: "中风险", high: "高风险" };
+const LONG_LINES = 12, LONG_CHARS = 700;
+/** Long text shown whole on demand, never in a small scrolling box. */
+function LongText({ text, className = "" }: { text: string; className?: string }) {
+  const lines = text.split("\n").length, long = lines > LONG_LINES || text.length > LONG_CHARS;
+  const [open, setOpen] = useState(false);
+  return <div className={`long-text ${long && !open ? "clamped" : ""}`}>
+    <pre className={className}>{text}</pre>
+    {long && <button type="button" className="quiet expand" aria-expanded={open} onClick={() => setOpen(!open)}>
+      {open ? "收起" : `展开全部（${lines} 行）`}</button>}
+  </div>;
+}
 function ApprovalCard({ control, pending, disabled }: { control: ControlState; pending: Pending; disabled: boolean }) {
   const id = pendingId(pending), choices = pending.choices?.length ? pending.choices : ["allow", "deny"];
-  return <div className="pending-item"><div className="pending-kind">审批{pending.kind ? ` · ${pending.kind}` : ""}</div>
-    <pre className="pending-summary">{pending.summary ?? "（无摘要）"}</pre>
-    {pending.analysis && <p className="hint">🤖 审核员：{pending.analysis.what}（{riskLabels[pending.analysis.risk] ?? pending.analysis.risk}）{pending.analysis.reason}</p>}
-    <div className="row-actions">{choices.map(choice => <button key={choice} type="button" disabled={disabled}
-      className={choice === "allow" ? "primary" : choice === "deny" ? "danger" : ""}
-      onClick={() => {
-        haptic("tick");
-        void control.submit(`/approvals/${segment(id)}/decision`, { choice });
-      }}>{choiceLabels[choice] ?? choice}</button>)}</div>
-    {choices.includes("allow-similar") && <small className="hint">“允许类似的操作”放行这一条，并让审核员记住这类操作，以后自动放行。</small>}
-    {choices.includes("allow-session") && <small className="hint">“本会话始终允许”放行这个工具在本会话的后续调用；{choices.includes("allow-always") ? "“永久允许”对这台机器之后的所有会话都放行（写入 Claude 的 settings.json）。" : "不只当前这一条。"}</small>}
+  const main = choices.filter(c => c === "allow" || c === "deny"), wider = choices.filter(c => c !== "allow" && c !== "deny");
+  const decide = (choice: string) => { haptic("tick"); void control.submit(`/approvals/${segment(id)}/decision`, { choice }); };
+  const a = pending.analysis;
+  return <div className="pending-item approval"><div className="pending-kind">审批{pending.kind ? ` · ${pending.kind}` : ""}
+    {a && <span className={`risk-pill risk-${a.risk}`}>{riskLabels[a.risk] ?? a.risk}</span>}</div>
+    {a && <div className={`analysis risk-${a.risk}`}><div className="analysis-head">审核员的判断</div>
+      <p className="analysis-what">{a.what}</p>{a.reason && <p className="analysis-reason">{a.reason}</p>}</div>}
+    <LongText className="pending-summary" text={pending.summary ?? "（无摘要）"} />
+    <div className="decision-main">{main.map(choice => <button key={choice} type="button" disabled={disabled}
+      className={choice === "allow" ? "primary" : "danger"} onClick={() => decide(choice)}>{choiceLabels[choice]}</button>)}</div>
+    {wider.map(choice => <button key={choice} type="button" disabled={disabled} className={`decision-wide ${choice === "allow-similar" ? "suggested" : ""}`}
+      onClick={() => decide(choice)}><span>{choiceLabels[choice] ?? choice}</span>{choiceNotes[choice] && <small>{choiceNotes[choice]}</small>}</button>)}
   </div>;
 }
 
@@ -160,7 +178,7 @@ function MemoryReviewPanel({ writable }: { writable: boolean }) {
     {error && <p className="error">{error}</p>}
     {reviews.map(r => <div key={r.id} className="pending-item">
       <div className="pending-kind">{r.writer} · {time(r.createdAt)}</div>
-      <pre className="pending-summary">{r.summary}</pre>
+      <LongText className="pending-summary" text={r.summary} />
       {r.reason && <p className="hint">审核：{r.reason}</p>}
       <details><summary>完整内容</summary><pre className="pending-summary">{JSON.stringify(r.args, null, 2)}</pre></details>
       {writable && <div className="row-actions">
@@ -194,7 +212,7 @@ function ToolApprovalPanel({ writable }: { writable: boolean }) {
     {error && <p className="error">{error}</p>}
     {rows.map(r => <div key={r.id} className="pending-item">
       <div className="pending-kind">{r.tool} · {r.caller} · {time(r.createdAt)}</div>
-      <pre className="pending-summary">{JSON.stringify(r.args, null, 2)}</pre>
+      <LongText className="pending-summary" text={JSON.stringify(r.args, null, 2)} />
       {writable && <div className="row-actions">
         <button type="button" className="primary" disabled={busy === r.id} onClick={() => void decide(r.id, "allow")}>允许</button>
         <button type="button" className="danger" disabled={busy === r.id} onClick={() => void decide(r.id, "deny")}>拒绝</button></div>}
@@ -237,7 +255,7 @@ function AutomationPanel({ writable }: { writable: boolean }) {
       {proposals.map(p => <div key={p.id} className="pending-item">
         <div className="pending-kind">{VERBS[p.action]} {p.scope}/{p.automationId} · {p.proposedBy} · {time(p.createdAt)}</div>
         {p.reason && <p className="hint">{p.reason}</p>}
-        {p.definition && <pre className="pending-summary">{JSON.stringify(p.definition, null, 2)}</pre>}
+        {p.definition && <LongText className="pending-summary" text={JSON.stringify(p.definition, null, 2)} />}
         {p.previous && <details><summary>当前定义</summary><pre className="pending-summary">{JSON.stringify(p.previous, null, 2)}</pre></details>}
         {writable && <div className="row-actions">
           <button type="button" className="primary" disabled={busy === p.id} onClick={() => void act(p.id, `/automations/proposals/${segment(p.id)}/decision`, { choice: "allow" })}>确认生效</button>
