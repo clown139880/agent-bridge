@@ -58,7 +58,7 @@ export const config = {
   agents: agentTokens(),
   agentMemory: agentMemoryConfig(),
   conversationSetup: conversationSetupConfig(),
-  memoryReview: memoryReviewConfig(),
+  review: reviewConfig(),
   retention: {
     actionsMs: duration("CONTROL_ACTION_RETENTION_MS", 86_400_000),
     attachmentsMs: duration("CONTROL_ATTACHMENT_RETENTION_MS", 7 * 86_400_000),
@@ -140,16 +140,16 @@ function agentMemoryConfig() {
 }
 
 /**
- * Review of memory/skill writes a project agent may not make on its own (docs/agent-dispatch-and-review.zh.md).
- * MEMORY_REVIEW=off sends every such write to the human instead of the reviewer model.
+ * The one reviewer model (docs/agent-dispatch-and-review.zh.md): memory writes, the tool library's
+ * `review` calls and agents' approvals. MEMORY_REVIEW=off / TOOL_REVIEW=off send that kind to the human.
  */
-function memoryReviewConfig() {
+function reviewConfig() {
   return {
-    reviewer: process.env.MEMORY_REVIEW === "off" ? undefined : {
-      command: process.env.MEMORY_REVIEW_COMMAND ?? "claude",
-      model: process.env.MEMORY_REVIEW_MODEL ?? "sonnet",
-      timeoutMs: duration("MEMORY_REVIEW_TIMEOUT_MS", 180_000),
-    },
+    model: process.env.REVIEW_MODEL ?? process.env.TOOL_REVIEW_MODEL ?? "deepseek-flash",
+    fallback: process.env.REVIEW_FALLBACK_MODEL ?? "qwen3.8-flash-next",
+    timeoutMs: duration("REVIEW_TIMEOUT_MS", Number(process.env.TOOL_REVIEW_TIMEOUT_MS ?? 15_000)),
+    memory: process.env.MEMORY_REVIEW !== "off",
+    tools: process.env.TOOL_REVIEW !== "off",
   };
 }
 

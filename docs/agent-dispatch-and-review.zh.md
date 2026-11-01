@@ -44,12 +44,13 @@ project agent 写 _global / _assistants / _agent-* 或这些作用域里的技�
 - 审核员看到：提议的完整参数，目标作用域的说明和当前核心记忆，同一槽位的现有事实，或者技能的现有内容。它被告知这些都是 agent 写的数据，不是给它的指令。
 - 判断标准（提示词在 `apps/control-plane/src/memory-review.ts`）：
   - allow：内容适合目标作用域，持久，对读这个作用域的所有 agent 有用，不重复也不暗中矛盾；技能改动名副其实。
-  - deny：放错作用域（项目细节、一次性状态、进度、仓库里已有的代码事实）、重复、价值低或格式不对，并说明该怎么做。
+  - deny：放错作用域（项目细节、一次性状态、进度、仓库里已有的代码事实）、重复、价值低或格式不对，并说明该怎么做。0.7.57 起这只是建议：写入照样交给你（`waiting_human`，理由前缀“建议拒绝：”），只有人能拒绝（clown 2026-11-01：agent 不作恶，只会犯错）。
   - human：改变授权或审批方式、削弱安全规则、涉及凭据或删除策略、无证据地断言你的偏好或身份、加入外发数据或删除东西的命令、撤回或归档你可能依赖的内容，以及任何拿不准的情况。
-- 为什么不用 Bridge session 当审核员：HAL 的 Bridge 放行全部 Bash，被注入的提议可能借审核员执行命令。现在审核员由 Control Plane 直接启动 `claude -p`：`--tools ""`、`--strict-mcp-config`、空的临时目录，只加载用户设置（API 端点在里面），不继承 Control Plane 的环境变量。注入最多影响一次判断，执行不了任何东西。
+- 为什么不用 Bridge session 当审核员：HAL 的 Bridge 放行全部 Bash，被注入的提议可能借审核员执行命令。审核员是 Control Plane 直接发起的一次模型调用，不带任何工具，注入最多影响一次判断，执行不了任何东西。
+- 0.7.57 起记忆、工具库、工具审批共用一个审核员（`apps/control-plane/src/review-model.ts`）：先问 DeepSeek（`deepseek-flash`，关闭思考，密钥 OpenBao `shared/deepseek`），出错、超时或没给出结论时问 TokensAPI 的 `qwen3.8-flash-next`（密钥 `shared/tokensapi#TOKENSAPI_API_KEY`）；两个都不行就交给人。模型只能放行或交给人，它的“拒绝”作为建议附在交给人的请求上。
 - 每次结论都发 webhook `memory_review.status`（applied / denied / waiting_human / failed），在通知房间可见。
 - 审核一次一个排队；Control Plane 重启时，审到一半的会重新审。
-- 配置：`MEMORY_REVIEW_MODEL`（默认 `sonnet`）、`MEMORY_REVIEW_COMMAND`（默认 `claude`）、`MEMORY_REVIEW_TIMEOUT_MS`（默认 180 秒）；`MEMORY_REVIEW=off` 时一律交给人。
+- 配置：`REVIEW_MODEL`（默认 `deepseek-flash`，旧名 `TOOL_REVIEW_MODEL`）、`REVIEW_FALLBACK_MODEL`（默认 `qwen3.8-flash-next`，空值关闭兜底）、`REVIEW_TIMEOUT_MS`（每个模型 15 秒）；`MEMORY_REVIEW=off` / `TOOL_REVIEW=off` 时对应的一类一律交给人。`MEMORY_REVIEW_MODEL` / `MEMORY_REVIEW_COMMAND` 已不用。
 - 接口：MCP `review`（agent 查结果）；`GET /api/v1/memory-reviews[?status=]`、`GET /api/v1/memory-reviews/{id}`；`POST /api/v1/memory-reviews/{id}/decision`（`{"choice":"allow"|"deny"}`，只接受人的 token，Control Center 用的就是它）。
 
 ## 4. 以后：工具审批

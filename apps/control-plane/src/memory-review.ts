@@ -1,19 +1,16 @@
-import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import type { Writer } from "@agent-bridge/agent-memory";
 import pino from "pino";
+import { advised, type ReviewModel } from "./review-model.js";
 
 const log = pino({ name: "memory-review" });
 
 /**
  * Review of memory and skill writes a project agent may not make on its own (_global,
  * _assistants, the shared skills). The write is held here; a reviewer model with no tools
- * reads it and allows it, denies it, or hands it to the human. Allowed writes are applied
- * as the proposing agent. Design: docs/agent-dispatch-and-review.zh.md.
+ * reads it and allows it or hands it to the human, with its advice when it would refuse; only
+ * the human denies. Allowed writes are applied as the proposing agent. Design: docs/agent-dispatch-and-review.zh.md.
  */
 
 export type ReviewStatus = "reviewing" | "waiting_human" | "applied" | "denied" | "failed";
@@ -42,7 +39,7 @@ export interface MemoryReviewRoutes {
 }
 
 /** Judges one held write. Throwing, or anything but a clear verdict, hands it to the human. */
-export type Reviewer = (prompt: string) => Promise<{ decision: ReviewDecision; reason: string }>;
+export type Reviewer = (prompt: string) => Promise<{ decision: "allow" | "human"; reason: string }>;
 
 export interface MemoryReviewOptions {
   /** Performs the held tool call as the proposing agent, with the right to write any scope. */
@@ -113,7 +110,7 @@ export class MemoryReviews implements MemoryReviewRoutes {
   private async review(id: string): Promise<void> {
     const review = this.get(id);
     if (!review || review.status !== "reviewing") return;
-    let verdict: { decision: ReviewDecision; reason: string };
+    let verdict: { decision: "allow" | "human"; reason: string };
     try {
       verdict = await this.options.reviewer!(reviewPrompt(review, safeContext(this.options, review)));
     } catch (error) {
@@ -194,7 +191,7 @@ Decide:
   A write that keeps the value but changes "pin" only moves the fact in or out of the bootstrap: it is not a duplicate.
   Pinning puts the line in every session of that scope; it should be a rule or preference nearly every task there needs.
 - deny: wrong scope (project detail, one-off state, progress log, code facts the repository already records), duplicate, low value,
-  or malformed. Say what to do instead (e.g. write it to the project scope).
+  or malformed. Say what to do instead (e.g. write it to the project scope). A deny is advice: the person sees it and decides.
 - human: anything that changes how agents are authorized or approved, weakens a safety rule, touches credentials or deletion policy,
   states the person's preferences or identity without evidence, adds commands that send data elsewhere or delete things,
   retracts or archives something the person may rely on, or whenever you are unsure.
@@ -219,43 +216,10 @@ function clip(text: string, limit: number): string {
   return text.length > limit ? `${text.slice(0, limit)}\n…(truncated)` : text;
 }
 
-/** The reviewer model's answer: the first JSON object in its text. */
-export function parseVerdict(text: string): { decision: ReviewDecision; reason: string } {
-  const match = text.match(/\{[\s\S]*\}/);
-  if (!match) throw new Error("reviewer gave no verdict");
-  const value = JSON.parse(match[0]) as Record<string, unknown>;
-  if (value.decision !== "allow" && value.decision !== "deny" && value.decision !== "human") throw new Error("reviewer gave no verdict");
-  return { decision: value.decision, reason: typeof value.reason === "string" && value.reason.trim() ? value.reason.trim() : "（无理由）" };
-}
-
-/**
- * Headless Claude Code with no tools, no MCP servers and no project files, in an empty
- * directory: the proposal can sway the verdict at most, never run anything. Only the user
- * settings load (they hold the API endpoint); the Control Plane's own secrets stay out of its environment.
- */
-export function claudeReviewer(options: { command: string; model: string; timeoutMs: number }): Reviewer {
-  return (prompt) => new Promise((resolve, reject) => {
-    const cwd = mkdtempSync(join(tmpdir(), "memory-review-"));
-    const env: Record<string, string> = {};
-    for (const key of ["HOME", "PATH", "LANG", "TMPDIR"]) if (process.env[key]) env[key] = process.env[key]!;
-    const child = spawn(options.command, ["-p", "--output-format", "json", "--tools", "", "--strict-mcp-config",
-      "--setting-sources", "user", "--no-session-persistence", "--disable-slash-commands",
-      "--model", options.model, "--system-prompt", REVIEW_RULES], { cwd, env, stdio: ["pipe", "pipe", "pipe"] });
-    let stdout = "", stderr = "";
-    const timer = setTimeout(() => child.kill("SIGKILL"), options.timeoutMs);
-    child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
-    child.stderr.on("data", (chunk: Buffer) => { stderr = (stderr + chunk.toString()).slice(-2000); });
-    child.on("error", (error) => { clearTimeout(timer); rmSync(cwd, { recursive: true, force: true }); reject(error); });
-    child.on("close", (code, signal) => {
-      clearTimeout(timer);
-      rmSync(cwd, { recursive: true, force: true });
-      try {
-        if (signal) throw new Error(`reviewer killed (${signal})`);
-        const output = JSON.parse(stdout) as { result?: string; is_error?: boolean };
-        if (output.is_error || code !== 0) throw new Error(output.result || stderr.trim() || `reviewer exited ${code}`);
-        resolve(parseVerdict(output.result ?? ""));
-      } catch (error) { reject(error instanceof SyntaxError ? new Error(stderr.trim() || "reviewer output unreadable") : error); }
-    });
-    child.stdin.end(prompt);
-  });
+/** The shared reviewer model, judging memory writes; its deny goes to the human as advice. */
+export function memoryReviewer(model: ReviewModel): Reviewer {
+  return async (prompt) => {
+    const value = await model(REVIEW_RULES, prompt);
+    return advised(value.decision, typeof value.reason === "string" && value.reason.trim() ? value.reason.trim() : "（无理由）");
+  };
 }

@@ -16,7 +16,7 @@ const control = new ControlPlane(store, {
   agents: config.agents,
   agentMemory: config.agentMemory,
   conversationSetup: config.conversationSetup,
-  memoryReview: config.memoryReview,
+  review: config.review,
   retention: config.retention,
   sse: config.sse,
   bridgeUpdate: config.bridgeUpdate,

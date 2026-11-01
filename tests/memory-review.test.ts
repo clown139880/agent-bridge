@@ -10,7 +10,8 @@ import { ConversationMemoryStore, Store } from "../packages/database/src/index.j
 import { ControlPlane } from "../apps/control-plane/src/server.js";
 import { ConversationMcpServer } from "../apps/control-plane/src/memory-mcp.js";
 import { reviewContext, runMemoryTool, type AgentMemoryMcpOptions } from "../apps/control-plane/src/mcp/memory.js";
-import { MemoryReviews, parseVerdict, type Reviewer } from "../apps/control-plane/src/memory-review.js";
+import { memoryReviewer, MemoryReviews, type Reviewer } from "../apps/control-plane/src/memory-review.js";
+import { advised, verdictOf } from "../apps/control-plane/src/review-model.js";
 
 function vault(): string {
   const dir = mkdtempSync(join(tmpdir(), "memory-review-"));
@@ -77,12 +78,13 @@ test("a project agent's _global write is held, reviewed and applied as that agen
   } finally { f.store.db.close(); }
 });
 
-test("a denied write is dropped, and a failed review waits for the human", async () => {
-  const denying = fixture(async () => ({ decision: "deny", reason: "是项目细节，写到项目作用域" }));
+test("the reviewer's deny waits for the human as advice, and a failed review waits too", async () => {
+  const denying = fixture(memoryReviewer(async () => ({ decision: "deny", reason: "是项目细节，写到项目作用域" })));
   try {
     const held = (await denying.call("codex-token-0123456789", "write", RULE)).result.structuredContent;
     await denying.reviews.idle();
-    assert.equal(denying.reviews.get(held.review.id)!.status, "denied");
+    const waiting = denying.reviews.get(held.review.id)!;
+    assert.deepEqual([waiting.status, waiting.reason], ["waiting_human", "建议拒绝：是项目细节，写到项目作用域"]);
     assert.equal(denying.memory.get("_global", "deploy-window", "rule").length, 0);
   } finally { denying.store.db.close(); }
 
@@ -97,17 +99,20 @@ test("a denied write is dropped, and a failed review waits for the human", async
   } finally { broken.store.db.close(); }
 });
 
-test("the reviewer's verdict must be a clear JSON decision", () => {
-  assert.deepEqual(parseVerdict('好的。\n{"decision":"deny","reason":"重复"}'), { decision: "deny", reason: "重复" });
-  assert.throws(() => parseVerdict('{"decision":"maybe"}'), /no verdict/);
-  assert.throws(() => parseVerdict("allow"), /no verdict/);
+test("the reviewer's verdict must be a JSON decision, and only the human denies", () => {
+  assert.deepEqual(verdictOf('好的。\n{"decision":"deny","reason":"重复"}'), { decision: "deny", reason: "重复" });
+  assert.throws(() => verdictOf('{"reason":"x"}'), /no verdict/);
+  assert.throws(() => verdictOf("allow"), /no verdict/);
+  assert.deepEqual(advised("allow", "好"), { decision: "allow", reason: "好" });
+  assert.deepEqual(advised("deny", "重复"), { decision: "human", reason: "建议拒绝：重复" });
+  assert.deepEqual(advised("maybe", "拿不准"), { decision: "human", reason: "拿不准" });
 });
 
 test("only the human decides a review over /api/v1, and it applies once", async () => {
   const dir = vault();
   const path = join(tmpdir(), `memory-review-${randomUUID()}.sqlite`), store = new Store(path);
   const control = new ControlPlane(store, { host: "127.0.0.1", port: 0, controlApiWriteToken: "human-write",
-    agents: WRITERS, agentMemory: { vault: dir }, memoryReview: {} });
+    agents: WRITERS, agentMemory: { vault: dir } });
   await control.start();
   try {
     const address = (control as unknown as { http: HttpServer }).http.address();

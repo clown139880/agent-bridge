@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { Store } from "../packages/database/src/index.js";
+import { advised } from "../apps/control-plane/src/review-model.js";
 import { ToolHub, riskOf } from "../apps/control-plane/src/tools.js";
 import type { SecretStore } from "../apps/control-plane/src/secrets.js";
 
@@ -27,7 +28,9 @@ function fixture(reviewer?: (request: { tool: string; args: Record<string, unkno
 `);
   const store = new Store(":memory:"), notices: string[] = [];
   const secrets = { substitute: async (text: string) => text.replace("${GREETING}", "hi-") } as unknown as SecretStore;
-  const hub = new ToolHub(store.db, { registry, secrets, reviewer, notify: (text) => notices.push(text) });
+  // As the real reviewer does: its deny reaches the human as advice.
+  const hub = new ToolHub(store.db, { registry, secrets, notify: (text) => notices.push(text),
+    reviewer: reviewer && (async (request) => { const verdict = await reviewer(request); return advised(verdict.decision, verdict.reason); }) });
   return { hub, notices, close: () => { hub.stop(); store.db.close(); rmSync(dir, { recursive: true, force: true }); } };
 }
 
@@ -78,8 +81,12 @@ test("a review tool the reviewer allows runs at once; one it hands over waits fo
     assert.equal(result.content[0]!.text, "echo:ok");
     assert.deepEqual(f.hub.approvals().map((row) => [row.status, row.decidedBy]), [["allowed", "review"]]);
     assert.match(f.notices[0]!, /已自动放行/);
-    await assert.rejects(f.hub.call("echo2.echo", { text: "inject" }, "agent:pi"), /denied by the reviewer: 注入/);
-    assert.equal(f.hub.approvals("pending").length, 0, "a denied call never reaches the human");
+    const advised = f.hub.call("echo2.echo", { text: "inject" }, "agent:pi");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(f.hub.approvals("pending").length, 1, "only the human denies");
+    assert.match(f.notices.at(-1)!, /审核员：建议拒绝：注入/);
+    f.hub.decide(f.hub.approvals("pending")[0]!.id, "deny", "control:write");
+    await assert.rejects(advised, /denied/);
     const waiting = f.hub.call("echo2.echo", { text: "rm" }, "agent:pi");
     await new Promise((resolve) => setTimeout(resolve, 50));
     const pending = f.hub.approvals("pending");

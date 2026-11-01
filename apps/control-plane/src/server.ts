@@ -30,7 +30,8 @@ import { WebhookNotifier, type WebhookOptions } from "./webhook.js";
 import { OperatorNotices, type NoticeTarget, type OperatorEvent } from "./notices.js";
 import { Automations, type AutomationOptions } from "./automations.js";
 import { SecretStore, type SecretStoreOptions } from "./secrets.js";
-import { deepseekApprovalReviewer, deepseekReviewer, learnRule, ToolHub, type ApprovalReviewer, type ToolReviewer } from "./tools.js";
+import { approvalReviewer, learnRule, ToolHub, toolReviewer, type ApprovalReviewer, type ToolReviewer } from "./tools.js";
+import { reviewModel } from "./review-model.js";
 import { alreadyGated, ApprovalLessons, boundary, toolOf, type ApprovalAnalysis } from "./approval-review.js";
 import { toolsEndpoint } from "./mcp/tools.js";
 import { NtfyNotifier, type NtfyOptions, type SessionNotificationKind } from "./ntfy.js";
@@ -38,7 +39,7 @@ import { AgentMessagePublisher, type MessageMqttOptions } from "./message-publis
 import { AgentMemory, AgentSkills, type Writer } from "@agent-bridge/agent-memory";
 import { ConversationMcpServer } from "./memory-mcp.js";
 import { memoryEndpoint, reviewContext, runMemoryTool, type AgentMemoryMcpOptions } from "./mcp/memory.js";
-import { claudeReviewer, MemoryReviews } from "./memory-review.js";
+import { memoryReviewer, MemoryReviews } from "./memory-review.js";
 import { mcpRoute } from "./mcp/route.js";
 import { bridgeEndpoint } from "./mcp/bridge.js";
 import { compareBridgeVersions } from "./bridge-version.js";
@@ -106,8 +107,8 @@ export class ControlPlane {
         skills?: { repo: string; lockPath?: string; archiveDir: string; push: boolean } };
       /** Where an unbound chat room's messages go, so an agent can help set the room up. */
       conversationSetup?: { workerId: string; workspace: string };
-      /** Without a reviewer every held memory write waits for the human. */
-      memoryReview?: { reviewer?: { command: string; model: string; timeoutMs: number } };
+      /** The one reviewer model; `off` for a kind sends all of that kind to the human. Needs `secrets`. */
+      review?: { model: string; fallback?: string; timeoutMs: number; memory: boolean; tools: boolean };
       retention?: { actionsMs: number; attachmentsMs: number };
       sse?: { keepaliveMs: number; pollMs: number; maxBackpressure: number; actionTimeoutMs?: number };
       bridgeUpdate?: {
@@ -129,6 +130,8 @@ export class ControlPlane {
   ) {
     this.webhook = new WebhookNotifier(options.webhook);
     this.ntfy = new NtfyNotifier(options.ntfy);
+    const secrets = this.secrets = options.secrets && new SecretStore(options.secrets);
+    const model = secrets && options.review ? reviewModel({ secrets, ...options.review }) : undefined;
     this.memory = new ConversationMemoryStore(store.db);
     let agentMemory: AgentMemory | undefined;
     if (options.agentMemory) {
@@ -150,11 +153,10 @@ export class ControlPlane {
     const memoryOptions: AgentMemoryMcpOptions | undefined = agents.length
       ? { store: agentMemory, skills: agentSkills, writers: agents } : undefined;
     if (memoryOptions && agentMemory) {
-      const reviewer = options.memoryReview?.reviewer;
       memoryOptions.review = this.memoryReviews = new MemoryReviews(store.db, {
         apply: (tool, args, writer) => runMemoryTool(this.memory, memoryOptions, tool, args, writer),
         context: (tool, args) => reviewContext(memoryOptions, tool, args),
-        reviewer: reviewer && claudeReviewer(reviewer),
+        reviewer: model && options.review?.memory ? memoryReviewer(model) : undefined,
         notify: (event) => this.notifyOperator(event),
       });
     }
@@ -170,14 +172,11 @@ export class ControlPlane {
     this.controlStore.relayRoom = (sessionId) => this.conversations.relayRoom(sessionId);
     if (options.messages) this.messages = new AgentMessagePublisher(store, this.controlStore, options.messages,
       { relayed: (sessionId) => this.conversations.relays(sessionId) });
-    const secrets = this.secrets = options.secrets && new SecretStore(options.secrets);
     const operator = options.noticeTarget ?? { connector: "app", roomId: "operator", threadId: "" };
-    const reviewModel = process.env.TOOL_REVIEW_MODEL ?? "deepseek-flash", reviewTimeout = Number(process.env.TOOL_REVIEW_TIMEOUT_MS ?? 15_000);
-    const toolReviewer = this.toolReviewer = secrets && process.env.TOOL_REVIEW !== "off"
-      ? deepseekReviewer({ secrets, model: reviewModel, timeoutMs: reviewTimeout }) : undefined;
-    if (toolReviewer && secrets) {
-      this.approvalReviewer = deepseekApprovalReviewer({ secrets, model: reviewModel, timeoutMs: reviewTimeout });
-      this.learnRule = (summary, what) => learnRule({ secrets, model: reviewModel }, summary, what);
+    const tools = this.toolReviewer = model && options.review?.tools ? toolReviewer(model) : undefined;
+    if (tools && model) {
+      this.approvalReviewer = approvalReviewer(model);
+      this.learnRule = (summary, what) => learnRule(model, summary, what);
       if (agentSkills && options.agentMemory?.skills) {
         const skills = agentSkills, repo = options.agentMemory.skills.repo;
         this.approvalLessons = new ApprovalLessons({ file: join(repo, "scopes/_global/agent-bridge/approval-review/references/learned.md"),
@@ -185,7 +184,7 @@ export class ControlPlane {
             file: "references/learned.md", content }); } });
       }
     }
-    if (options.toolsRegistry) this.toolHub = new ToolHub(store.db, { registry: options.toolsRegistry, secrets, reviewer: toolReviewer,
+    if (options.toolsRegistry) this.toolHub = new ToolHub(store.db, { registry: options.toolsRegistry, secrets, reviewer: tools,
       notify: (text, level) => this.controlStore.createNotice({ ...operator, text, level, source: "control-plane" }) });
     if (options.automations) this.automations = new Automations({ ...options.automations, secrets,
       operatorTarget: options.noticeTarget ?? { connector: "app", roomId: "operator", threadId: "" } }, {

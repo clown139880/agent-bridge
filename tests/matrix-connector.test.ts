@@ -33,8 +33,9 @@ function harness() {
       if (session && !session[2]) return { agent: "pi", machineId: "hal", workspace: "/root/app", ...sessions.get(session[1]!) };
       if (session?.[2] === "interrupt") { sessions.get(session[1]!)!.activeTurnId = null; return { status: "succeeded" }; }
       if (session?.[2] === "turns") {
-        if (sessions.get(session[1]!)!.activeTurnId) throw new ControlError(409, "turn_already_active", "busy");
-        sessions.get(session[1]!)!.activeTurnId = "t2"; return { status: "succeeded" };
+        if (sessions.get(session[1]!)!.activeTurnId && body.delivery === "start_turn") throw new ControlError(409, "turn_already_active", "busy");
+        if (sessions.get(session[1]!)!.activeTurnId) return { status: "succeeded", resolvedAction: "steer" };
+        sessions.get(session[1]!)!.activeTurnId = "t2"; return { status: "succeeded", resolvedAction: "start_turn" };
       }
       if (path === "/attachments") return { id: "att1", size: 3 };
       if (path.startsWith("/notices?")) return { data: notices.filter((row) => path.includes("undelivered=1") ? !row.deliveredAt : row.deliveredAt) };
@@ -55,20 +56,37 @@ test("commands and mention text parse like the client sends them", () => {
   assert.equal(withoutMention("Megumi: 看一下", "@bot:example.org", "Megumi"), "看一下");
 });
 
-test("a room keeps one session; a new message stops its running turn first; others are ignored", async () => {
+test("a room keeps one session; a message joins its running turn; ⏹ under the user's messages stops it; others are ignored", async () => {
   const h = harness();
   h.text("第一条"); await tick();
   const create = h.calls.find((call) => call.path === "/sessions")!;
   assert.deepEqual(create.body, { workerId: "pi@hal", workspace: "/root/app", input: "第一条", memoryScope: "repo-app" });
   assert.equal(h.bindings.get(""), "s1");
+  h.connector.project({ cursor: "c", type: "session.event.appended", sessionId: "s1", data: { type: "turn.started", turnId: "t1", payload: {} } });
+  await tick();
+  const offers = () => h.sent.filter((item) => item.type === "m.reaction" && item.content["m.relates_to"].key === "⏹️");
+  assert.deepEqual(offers().map((item) => item.content["m.relates_to"].event_id), ["$in1"], "the turn's ⏹ sits under the message that started it");
 
-  h.text("写错了，改成这个"); await tick();
+  h.text("再补一句"); await tick();
   const order = h.calls.filter((call) => call.method === "POST").map((call) => call.path);
-  assert.deepEqual(order, ["/sessions", "/sessions/s1/interrupt", "/sessions/s1/turns"]);
-  assert.equal(h.calls.find((call) => call.path === "/sessions/s1/turns")!.body.input, "写错了，改成这个");
+  assert.deepEqual(order, ["/sessions", "/sessions/s1/turns"], "no interrupt: the message joins the running turn");
+  assert.equal(h.calls.find((call) => call.path === "/sessions/s1/turns")!.body.delivery, "auto");
+  assert.equal(offers().length, 2, "a message that joins the turn gets its own ⏹");
+
+  const target = offers()[1]!.content["m.relates_to"].event_id;
+  h.connector.receive("!room:example.org", { event_id: "$tap", sender: "@me:example.org", type: "m.reaction",
+    content: { "m.relates_to": { rel_type: "m.annotation", event_id: target, key: "⏹" } } });
+  await tick();
+  assert.ok(h.calls.some((call) => call.path === "/sessions/s1/interrupt"), "tapping ⏹ (with or without U+FE0F) stops the turn");
+  assert.ok(h.sent.some((item) => item.content.body === "已停止。"));
+
+  h.connector.project({ cursor: "c", type: "session.event.appended", sessionId: "s1", data: { type: "turn.interrupted", turnId: "t1", payload: {} } });
+  await tick();
+  const withdrawn = h.sent.filter((item) => item.type === "redaction").map((item) => item.content.redacts);
+  assert.deepEqual(withdrawn.sort(), offers().map((item) => item.eventId).sort(), "the ended turn's ⏹ are taken back");
 
   h.text("别人的消息", {}, "@stranger:example.org"); await tick();
-  assert.equal(h.calls.filter((call) => call.method === "POST").length, 3);
+  assert.equal(h.calls.filter((call) => call.method === "POST" && call.path.endsWith("/turns")).length, 1);
 });
 
 test("@ in the main timeline opens a parallel session answered in a thread; output goes only to the bound place", async () => {
