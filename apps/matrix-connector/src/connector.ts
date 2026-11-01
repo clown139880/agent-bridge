@@ -7,6 +7,7 @@ import { NUMBER_KEYS, command, footer, mentions, message, plainBody, split, thre
 
 const CONNECTOR = "matrix";
 const MAX_ATTACHMENTS = 8, MAX_BYTES = 15_000_000;
+const STOP_KEY = "⏹️";
 /** Notices the room got since its conversation's last message go with the next one, within this window. */
 const NOTICE_CONTEXT_MS = 12 * 3_600_000, NOTICE_CONTEXT_COUNT = 5, NOTICE_CONTEXT_CHARS = 600;
 const ATTACHMENT_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf", "text/plain", "text/markdown", "text/csv"];
@@ -20,9 +21,13 @@ interface Prompt { eventId: string; roomId: string; threadId: string; kind: "app
   offered?: string[];
   /** Set once resolved; kept a while so a late answer is told so instead of ignored. */
   resolved?: string }
+/** The ⏹ under the user's messages of a running turn: tapping one stops it; they go away when the turn ends. */
+interface StopOffer { roomId: string; threadId: string; targets: string[]; reactions: string[] }
 interface State { since?: string; cursor?: string; accessToken?: string; deviceId?: string; prompts?: Prompt[];
   /** place key → when its last message went to the conversation; later notices are its context. */
-  heard?: Record<string, number> }
+  heard?: Record<string, number>;
+  /** sessionId → the stop button of its running turn. */
+  stops?: Record<string, StopOffer> }
 interface Place { roomId: string; threadId: string }
 interface Attachment { id: string; filename: string; mimeType: string; size: number }
 interface Notice { id: string; connector: string; roomId: string; threadId: string; text: string; sessionId: string | null;
@@ -31,8 +36,9 @@ interface Notice { id: string; connector: string; roomId: string; threadId: stri
 /**
  * Matrix rooms as Agent Bridge conversations. A room's project is its central memory scope and the
  * session each room/thread continues lives in the Control Plane; this process keeps only its sync
- * position, stream cursor and open prompts. Each conversation handles its messages in order; a new
- * message stops the running turn first, since Matrix has no stop button.
+ * position, stream cursor and open prompts. Each conversation handles its messages in order; a message
+ * sent while a turn runs joins that turn. Matrix has no stop button, so the user's message carries a ⏹
+ * reaction while its turn runs: tapping it stops the turn.
  */
 export class MatrixConnector {
   private state: State = {};
@@ -47,6 +53,7 @@ export class MatrixConnector {
   private readonly drafts = new Map<string, Array<Promise<Attachment | undefined>>>();
   private readonly posting = new Set<string>();                // notice ids being posted
   private readonly answering = new Set<string>();              // prompt ids this connector is answering
+  private readonly awaiting = new Map<string, string>();       // place key → the user's message whose turn has not started yet
   private outbox: Promise<void> = Promise.resolve();
   private displayName?: string;
   private saveTimer?: NodeJS.Timeout;
@@ -121,8 +128,10 @@ export class MatrixConnector {
     if (event.sender === this.config.userId || !this.config.allowedUsers.includes(event.sender)) return;
     const content = event.content ?? {}, relation = content["m.relates_to"];
     if (event.type === "m.reaction") {
-      const prompt = this.prompt(relation?.event_id);
-      if (prompt && relation?.rel_type === "m.annotation") this.enqueue(prompt, () => this.answer(prompt, String(relation.key ?? ""), event));
+      if (relation?.rel_type !== "m.annotation") return;
+      const prompt = this.prompt(relation.event_id);
+      if (prompt) { this.enqueue(prompt, () => this.answer(prompt, String(relation.key ?? ""), event)); return; }
+      if (String(relation.key ?? "").replace(/️/g, "") === STOP_KEY.replace(/️/g, "")) this.stopTapped(String(relation.event_id ?? ""), event);
       return;
     }
     if (event.type !== "m.room.message" || relation?.rel_type === "m.replace") return;
@@ -188,19 +197,22 @@ export class MatrixConnector {
     const attachments = (await Promise.all(pending)).filter((item): item is Attachment => Boolean(item)).slice(0, MAX_ATTACHMENTS);
     const extra = attachments.length ? { attachments } : {};
     text = await this.withNotices(place, text, conversation.sessionId ?? undefined);
+    // The turn this message starts puts its ⏹ here; a message that joins a running turn gets one at once.
+    this.awaiting.set(key(place), event.event_id);
     if (conversation.sessionId) {
       const sessionId = String(conversation.sessionId);
-      for (let attempt = 0; ; attempt++) {
-        await this.stopActive(sessionId, `${event.event_id}:${attempt}`);
-        try {
-          await this.control.settle(await this.control.call("POST", `/sessions/${enc(sessionId)}/turns`,
-            { input: text, delivery: "start_turn", ...extra }, `matrix:turn:${hash(event.event_id)}`));
-          return;
-        } catch (error) {
-          // Another client started a turn meanwhile: stop that one too, once.
-          if (!(error instanceof ControlError && error.code === "turn_already_active") || attempt > 0) throw error;
-        }
+      try {
+        await this.control.settle(await this.control.call("POST", `/sessions/${enc(sessionId)}/turns`,
+          { input: text, delivery: "auto", ...extra }, `matrix:turn:${hash(event.event_id)}`));
+      } catch (error) {
+        if (this.awaiting.get(key(place)) === event.event_id) this.awaiting.delete(key(place));
+        throw error;
       }
+      if (this.state.stops?.[sessionId] && this.awaiting.get(key(place)) === event.event_id) {
+        this.awaiting.delete(key(place));
+        this.offerStop(sessionId, place, event.event_id);
+      }
+      return;
     }
     if (!conversation.target) { this.say(place, problemText(conversation)); return; }
     if (conversation.setup) this.say(place, `这个房间还没绑定项目，先由 ${conversation.target.workerId}（${conversation.target.workspace}）帮你建作用域；绑定后下一条消息开新会话。`);
@@ -228,14 +240,48 @@ export class MatrixConnector {
       const current = await this.control.call("GET", `/sessions/${enc(sessionId)}`);
       if (current.activeTurnId !== turnId) return true;
     }
-    throw new Error("停止请求已发送，但旧 turn 尚未结束；这条消息没有发送");
+    throw new Error("停止请求已发送，但 turn 尚未结束");
+  }
+
+  /** Put ⏹ under the user's message; tapping it stops the session's running turn. */
+  private offerStop(sessionId: string, place: Place, eventId: string): void {
+    const stops = this.state.stops ??= {};
+    const offer = stops[sessionId] ??= { roomId: place.roomId, threadId: place.threadId, targets: [], reactions: [] };
+    if (offer.targets.includes(eventId)) return;
+    offer.targets.push(eventId);
+    this.scheduleSave();
+    this.send(place.roomId, "m.reaction", { "m.relates_to": { rel_type: "m.annotation", event_id: eventId, key: STOP_KEY } },
+      `stop-offer:${sessionId}:${eventId}`, (reaction) => {
+        // The turn may have ended while the reaction was on its way.
+        if (this.state.stops?.[sessionId] === offer) { offer.reactions.push(reaction); this.scheduleSave(); }
+        else void this.matrix.redact(place.roomId, reaction, `withdraw-${hash(reaction)}`).catch(() => undefined);
+      });
+  }
+
+  /** The turn ended: take its ⏹ back. */
+  private withdrawStop(sessionId: string): void {
+    const offer = this.state.stops?.[sessionId];
+    if (!offer) return;
+    delete this.state.stops![sessionId];
+    for (const reaction of offer.reactions) void this.matrix.redact(offer.roomId, reaction, `withdraw-${hash(reaction)}`).catch(() => undefined);
+    this.scheduleSave();
+  }
+
+  private stopTapped(eventId: string, event: MatrixEvent): void {
+    const entry = Object.entries(this.state.stops ?? {}).find(([, offer]) => offer.targets.includes(eventId));
+    if (!entry) return;
+    const [sessionId, offer] = entry, place = { roomId: offer.roomId, threadId: offer.threadId };
+    // Not queued behind the conversation's messages: a stop must not wait for them.
+    void this.stopActive(sessionId, `tap:${event.event_id}`)
+      .then((stopped) => { if (stopped) this.say(place, "已停止。", `stopped:${event.event_id}`); })
+      .catch((error) => this.say(place, `停止失败：${describe(error)}`));
   }
 
   private async runCommand(place: Place, cmd: Command, event: MatrixEvent): Promise<void> {
     const room = `/conversations/${CONNECTOR}/${enc(place.roomId)}`;
     if (cmd.name === "help") {
       this.say(place, [
-        "直接发消息就是继续当前会话；新消息会先停止正在运行的 turn。",
+        "直接发消息就是继续当前会话；turn 运行时发的消息会补充进这个 turn。运行中你的消息下有 ⏹，点一下就停止。",
         "`!new [pi|codex|claude|grok]` 下一条消息开新会话（默认沿用上次的 agent）",
         "`!stop` 停止当前 turn　`!status` 查看绑定　`!bind <scope> [机器:/路径]` 把房间绑定到记忆作用域",
         "主时间线里 @我 会开一个并行会话，在线程里回复；线程里的消息只发给该线程的会话。",
@@ -293,7 +339,7 @@ export class MatrixConnector {
     if (item.type === "notice.upserted") { this.postNotice(item.data as Notice); return; }
     const sessionId = item.sessionId;
     if (!sessionId) return;
-    if (item.type === "session.deleted") { this.places.delete(sessionId); return; }
+    if (item.type === "session.deleted") { this.places.delete(sessionId); this.withdrawStop(sessionId); return; }
     const place = this.places.get(sessionId);
     if (!place) {
       if (item.type !== "session.event.appended") return;
@@ -307,11 +353,16 @@ export class MatrixConnector {
     if (item.type === "approval.upserted" || item.type === "user_input.upserted") { this.pending(place, item); return; }
     if (item.type !== "session.event.appended") return;
     const event = item.data as { type: string; turnId?: string; payload: Json };
-    if (event.type === "turn.started") { this.setTyping(sessionId, place, true); this.turnStarted.set(sessionId, Date.now()); }
+    if (event.type === "turn.started") {
+      this.setTyping(sessionId, place, true); this.turnStarted.set(sessionId, Date.now());
+      const target = this.awaiting.get(key(place));
+      if (target) { this.awaiting.delete(key(place)); this.offerStop(sessionId, place, target); }
+    }
     else if (event.type === "message.completed" && event.payload.role === "assistant" && typeof event.payload.text === "string")
       this.lastText.set(sessionId, event.payload.text);
     else if (event.type === "turn.completed" || event.type === "turn.failed" || event.type === "turn.interrupted") {
       this.setTyping(sessionId, place, false);
+      this.withdrawStop(sessionId);
       const text = this.lastText.get(sessionId) ?? (typeof event.payload.summary === "string" ? event.payload.summary : "");
       this.lastText.delete(sessionId);
       const id = `${sessionId}:${event.turnId ?? item.cursor}`;

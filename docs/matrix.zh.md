@@ -24,7 +24,8 @@ Matrix 是 Agent Bridge 的一个聊天前端，以独立进程 `apps/matrix-con
 
 | 输入 | 行为 |
 | --- | --- |
-| 普通文字 | 发给当前会话；有正在运行的 turn 就先停止它、等真正结束再发（Matrix 没有停止按钮） |
+| 普通文字 | 发给当前会话；有正在运行的 turn 就补充进这个 turn（grok 不支持补充，排到下一轮） |
+| 点 ⏹ 反应 | turn 运行时，连接器在你的消息下贴一个 ⏹，点一下就停止这个 turn；turn 结束后 ⏹ 撤掉 |
 | `!new [pi\|codex\|claude\|grok]` | 下一条消息开新会话，默认沿用上次的 agent |
 | `!stop` | 停止当前 turn |
 | `!status` | 作用域、会话、worker、目录、新会话 agent |
