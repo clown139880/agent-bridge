@@ -1,4 +1,4 @@
-import React, { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import React, { useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { createRoot } from "react-dom/client";
 import { ControlClient, explain } from "./api/client";
 import { BUILD_VERSION, newerBuild, runningEntry } from "./build";
@@ -58,17 +58,20 @@ function ModelPicker({ control, state, workerId, value, onChange, disabled }: { 
 }
 const modelBody = (v: ModelChoice) => ({ ...(v.model ? { model: v.model } : {}), ...(v.effort ? { reasoningEffort: v.effort } : {}) });
 
-function Attachments({ control, state, id, disabled }: { control: ControlState; state: ViewState; id: string; disabled?: boolean }) {
-  const input = useRef<HTMLInputElement>(null), rows = state.uploads[id] ?? [];
-  return <div className="attachments">
-    {rows.length > 0 && <ul className="attachment-list">{rows.map(u => <li key={u.localId} className={`attachment ${u.status}`}>
-      {u.preview ? <img src={u.preview} alt="" /> : <span className="attachment-thumb" aria-hidden="true">文件</span>}<span>{u.status === "uploading" ? "上传中…" : u.status === "error" ? u.error : u.name}</span>
-      <button type="button" className="quiet" aria-label={`移除 ${u.name}`} onClick={() => control.removeUpload(id, u.localId)}>×</button></li>)}</ul>}
+function AttachmentList({ control, state, id }: { control: ControlState; state: ViewState; id: string }) {
+  const rows = state.uploads[id] ?? [];
+  return rows.length > 0 ? <ul className="attachment-list">{rows.map(u => <li key={u.localId} className={`attachment ${u.status}`}>
+    {u.preview ? <img src={u.preview} alt="" /> : <span className="attachment-thumb" aria-hidden="true">文件</span>}<span>{u.status === "uploading" ? "上传中…" : u.status === "error" ? u.error : u.name}</span>
+    <button type="button" className="quiet" aria-label={`移除 ${u.name}`} onClick={() => control.removeUpload(id, u.localId)}>×</button></li>)}</ul> : null;
+}
+function AttachButton({ control, id, disabled, compact }: { control: ControlState; id: string; disabled?: boolean; compact?: boolean }) {
+  const input = useRef<HTMLInputElement>(null);
+  return <>
     <input ref={input} type="file" accept="image/*,.pdf,.txt,.md,.csv,.json,.zip,.docx,.xlsx,.pptx" multiple hidden onChange={e => {
       control.addFiles(id, [...(e.target.files ?? [])]); e.target.value = "";
     }} />
-    <button type="button" className="quiet attach" disabled={disabled} onClick={() => input.current?.click()}>＋ 图片 / 文件</button>
-  </div>;
+    <button type="button" className={`quiet attach ${compact ? "icon-button" : ""}`} disabled={disabled} aria-label="添加图片或文件"
+      onClick={() => input.current?.click()}>{compact ? "＋" : "＋ 图片 / 文件"}</button></>;
 }
 const attachmentBody = (state: ViewState, id: string) => {
   const refs = (state.uploads[id] ?? []).flatMap(u => u.status === "ready" && u.ref ? [u.ref] : []);
@@ -360,26 +363,61 @@ function Center({ control, path, serverVersion }: { control: ControlState; path:
     document.addEventListener("visibilitychange", returned);
     return () => { clearInterval(timer); clearTimeout(later); document.removeEventListener("visibilitychange", returned); };
   }, []);
-  return <div className="shell">
-    <header className="topbar"><Link to="/control/sessions" className="brand"><span className="brand-mark">ab</span><span>控制中心</span></Link>
-      <div className="top-actions"><span className="scope">{state.writable ? "操作模式" : "只读模式"}</span></div>
-    </header>
+  // Banners sit between each page's top bar and its content.
+  const banners = <>
+    {stale && <aside className="action-banner stale-banner" role="status"><div><strong>控制中心已更新</strong>
+      <p>这个页面还是旧版本，刷新后才能使用新功能。</p></div>
+      <button className="primary" onClick={() => location.reload()}>刷新</button></aside>}
+    {state.error && <div className="error" role="alert">{state.error}<button className="quiet" onClick={() => void control.refresh()}>刷新</button></div>}
+  </>;
+  return <About.Provider value={{ server: serverVersion, writable: state.writable }}><div className="shell">
     {(state.loading || state.syncing) && <div className="loading-bar" role="progressbar" aria-label="正在加载" />}
-    <main>
-      {stale && <aside className="action-banner" role="status"><strong>控制中心已更新</strong>
-        <p>这个页面还是旧版本，刷新后才能使用新功能（如处理审批）。</p>
-        <div className="row-actions"><button className="primary" onClick={() => location.reload()}>立即刷新</button></div></aside>}
-      {state.error && <div className="error" role="alert">{state.error}<button className="quiet" onClick={() => void control.refresh()}>刷新</button></div>}
-      <ActionView control={control} state={state} />
-      {state.share && <SharePicker control={control} state={state} />}
-      {route.page === "sessions" ? <Sessions control={control} state={state} />
-        : route.page === "new" ? <NewSession control={control} state={state} />
-          : <Detail key={route.id} control={control} state={state} id={route.id!} />}
-    </main>
-    <footer>AGENT BRIDGE <span>·</span> 页面 v{BUILD_VERSION} <span>·</span> 服务 v{serverVersion}
-      {stale && <button className="quiet" onClick={() => location.reload()}>页面不是最新，刷新</button>}</footer>
+    <ActionView control={control} state={state} />
+    {state.share && <SharePicker control={control} state={state} />}
+    {route.page === "sessions" ? <Sessions control={control} state={state} banners={banners} />
+      : route.page === "new" ? <NewSession control={control} state={state} banners={banners} />
+        : <Detail key={route.id} control={control} state={state} id={route.id!} banners={banners} />}
+  </div></About.Provider>;
+}
+
+/** What the menu's last line reports: versions and access, kept off the main screen. */
+const About = React.createContext({ server: "unknown", writable: false });
+/**
+ * Each page's top bar: navigation and title only. Actions live at the bottom, in the thumb's reach;
+ * the rarely used ones (refresh, display, details, versions) open from ⋯ as a bottom sheet.
+ */
+function TopBar({ back, title, sub, menu }: { back?: string; title: React.ReactNode; sub?: React.ReactNode;
+  menu?: (close: () => void) => React.ReactNode }) {
+  const [open, setOpen] = useState(false), about = useContext(About), close = () => setOpen(false);
+  return <>
+    <header className="topbar">
+      {back ? <Link to={back} className="back icon-button" aria-label="返回">‹</Link>
+        : <Link to="/control/sessions" className="brand-mark" aria-label="控制中心">ab</Link>}
+      <div className="topbar-title"><h1>{title}</h1>{sub && <div className="topbar-sub">{sub}</div>}</div>
+      <button type="button" className="quiet icon-button menu-button" aria-label="更多" aria-haspopup="dialog" onClick={() => setOpen(true)}>⋯</button>
+    </header>
+    {open && <Sheet label="更多" onClose={close}>{menu?.(close)}
+      <p className="about">AGENT BRIDGE · 页面 v{BUILD_VERSION} · 服务 v{about.server} · {about.writable ? "操作模式" : "只读模式"}</p></Sheet>}
+  </>;
+}
+function Sheet({ label, onClose, children }: { label: string; onClose: () => void; children: React.ReactNode }) {
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("keydown", key); return () => document.removeEventListener("keydown", key);
+  }, [onClose]);
+  return <div className="sheet-backdrop" onClick={onClose}>
+    <div className="sheet" role="dialog" aria-modal="true" aria-label={label} onClick={e => e.stopPropagation()}>
+      <div className="sheet-grip" aria-hidden="true" />{children}
+      <button type="button" className="sheet-close" onClick={onClose}>关闭</button></div>
   </div>;
 }
+/** The bottom dock's height, so the new-content button, toasts and scroll targets clear it. */
+const dockObserver = typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(([entry]) =>
+  document.documentElement.style.setProperty("--dock-h", `${Math.round((entry.target as HTMLElement).getBoundingClientRect().height)}px`));
+const dockRef = (element: HTMLElement | null) => {
+  dockObserver?.disconnect();
+  if (element) dockObserver?.observe(element); else document.documentElement.style.removeProperty("--dock-h");
+};
 
 /** Where a share from another app should go; it is only filled in, never sent. */
 function SharePicker({ control, state }: { control: ControlState; state: ViewState }) {
@@ -404,11 +442,16 @@ function SharePicker({ control, state }: { control: ControlState; state: ViewSta
 }
 
 function ActionView({ control, state }: { control: ControlState; state: ViewState }) {
-  const i = state.intent; if (!i) return null;
+  const i = state.intent, done = i?.receipt?.status === "succeeded" && !i.error, [hidden, setHidden] = useState<string>();
+  // A settled action shows briefly; failures and uncertain ones stay until handled.
+  useEffect(() => {
+    if (!done) return; const timer = setTimeout(() => setHidden(i!.key), 2500); return () => clearTimeout(timer);
+  }, [done, i?.key]);
+  if (!i || done && hidden === i.key) return null;
   const label = i.submitting ? "正在提交…" : i.uncertain ? "操作结果尚未确认" : i.receipt?.status === "accepted" ? "已接收，等待 Bridge 确认…"
     : i.receipt?.status === "succeeded" ? "操作已被接受" : "操作未完成";
   const retry = !i.submitting && (i.uncertain || !i.receipt || i.receipt.status === "failed" && i.receipt.error?.error.retryable);
-  return <aside className={`action-banner ${i.error ? "action-error" : ""}`} aria-live="polite">
+  return <aside className={`action-banner toast ${i.error ? "action-error" : ""}`} aria-live="polite">
     <div><strong>{label}</strong>{i.error && <p>{i.error}</p>}
       {i.receipt && <small>action · {i.receipt.actionId}</small>}
       {i.receipt?.status === "succeeded" && <p className="hint">RPC 已接受，turn 结果以会话状态为准。</p>}
@@ -434,25 +477,21 @@ function useRememberScroll(key: string, onScroll?: (bottom: boolean) => void) {
   }, [key]);
 }
 
-function Sessions({ control, state }: { control: ControlState; state: ViewState }) {
+function Sessions({ control, state, banners }: { control: ControlState; state: ViewState; banners: React.ReactNode }) {
   useRememberScroll("sessions");
   useLayoutEffect(() => { const saved = scrollMemory.get("sessions"); if (saved) window.scrollTo({ top: saved.y }); }, []);
-  return <section>
+  const worker = state.workers.find(w => w.id === state.workerFilter);
+  return <section className="page">
+    <TopBar title="最近会话" sub={state.loading ? "正在读取…" : `${state.sessions.length} 个会话${worker ? ` · ${worker.name}` : ""}`} menu={close => <>
+      <button type="button" className="sheet-item" disabled={state.loading} onClick={() => { close(); void control.refresh(); }}>↻ 刷新列表</button>
+      <label className="sheet-field" htmlFor="worker-filter">只看这台机器 / Agent<select id="worker-filter" value={state.workerFilter}
+        onChange={e => { control.setFilters(state.query, e.target.value); close(); void control.refresh(); }}><option value="">所有机器与 Agent</option>
+        {state.workers.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}</select></label>
+    </>} />
+    {banners}
     <MemoryReviewPanel writable={state.writable} />
     <ToolApprovalPanel writable={state.writable} />
     <AutomationPanel writable={state.writable} />
-    <div className="page-heading"><div><div className="eyebrow">YOUR CONVERSATIONS</div><h1>最近会话</h1></div>
-      {state.writable && <Link className="button primary" to="/control/new">＋ 新对话</Link>}</div>
-    <form className="filters" onSubmit={e => { e.preventDefault(); void control.refresh(); }}>
-      <label className="sr-only" htmlFor="search">搜索会话</label><input id="search" type="search" placeholder="搜索标题、项目或提示词" value={state.query}
-        onChange={e => control.setFilters(e.target.value, state.workerFilter)} />
-      <label className="sr-only" htmlFor="worker-filter">按 worker 筛选</label><select id="worker-filter" value={state.workerFilter}
-        onChange={e => control.setFilters(state.query, e.target.value)}><option value="">所有机器与 Agent</option>
-        {state.workers.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}</select>
-      <button disabled={state.loading}>搜索</button>
-    </form>
-    <div className="list-meta"><span>{state.loading ? "正在读取…" : `${state.sessions.length} 个会话`}</span>
-      <button className="quiet" disabled={state.loading} onClick={() => void control.refresh()}>↻ 刷新</button></div>
     <div className="session-list">{state.sessions.map(s => { const unread = s.room ? 0 : unreadCount(state, s); return <Link key={s.sessionId} to={`/control/sessions/${segment(s.sessionId)}`} className="session-row">
       <span className="machine-stripe" style={machineStyle(s.machineId)} aria-hidden="true" />
       <div className="session-row-top"><Status status={s.status} /><span className="row-end">
@@ -466,11 +505,16 @@ function Sessions({ control, state }: { control: ControlState; state: ViewState 
     {state.loading && !state.sessions.length && <Skeleton rows={4} kind="session" />}
     {!state.loading && !state.sessions.length && <div className="empty">还没有匹配的会话。<p>换个关键词，或发起一段新对话。</p></div>}
     {state.hasMore && <button className="load-more" disabled={state.moreLoading || state.loading} onClick={() => void control.loadList(true)}>{state.moreLoading ? "加载中…" : "加载更多会话"}</button>}
-    <p className="hint refresh-note">按需刷新 · {time(state.updatedAt)} 更新</p>
+    <p className="hint refresh-note">{time(state.updatedAt)} 更新 · <button type="button" className="quiet inline" disabled={state.loading} onClick={() => void control.refresh()}>刷新</button></p>
+    <form className="dock filters" ref={dockRef} role="search" onSubmit={e => { e.preventDefault(); (document.activeElement as HTMLElement | null)?.blur(); void control.refresh(); }}>
+      <label className="sr-only" htmlFor="search">搜索会话</label><input id="search" type="search" enterKeyHint="search" placeholder="搜索标题、项目或提示词" value={state.query}
+        onChange={e => control.setFilters(e.target.value, state.workerFilter)} />
+      {state.writable && <Link className="button primary new-button" to="/control/new">＋ 新对话</Link>}
+    </form>
   </section>;
 }
 
-function NewSession({ control, state }: { control: ControlState; state: ViewState }) {
+function NewSession({ control, state, banners }: { control: ControlState; state: ViewState; banners: React.ReactNode }) {
   const [workerId, setWorkerId] = useState(""), [workspace, setWorkspace] = useState("");
   const input = state.drafts.new ?? "", [model, setModel] = useState<ModelChoice>({ model: "", effort: "" });
   const choices = state.workers.filter(w => w.status === "online" && w.capabilities.includes("session-actions"));
@@ -478,8 +522,8 @@ function NewSession({ control, state }: { control: ControlState; state: ViewStat
   const spaces = worker?.recentWorkspaces?.length ? worker.recentWorkspaces : (worker?.workspaces ?? []).map(path => ({ name: path, path }));
   const busy = isBusy(state) || uploading(state, "new");
   const absolute = /^(?:\/|[A-Za-z]:[\\/]|\\\\)/.test(workspace);
-  return <section><Link className="back" to="/control/sessions">← 最近会话</Link>
-    <div className="page-heading"><div><div className="eyebrow">START SOMETHING</div><h1>新的对话</h1></div></div>
+  return <section className="page"><TopBar back="/control/sessions" title="新的对话" />
+    {banners}
     <form className="panel new-form" onSubmit={e => {
       e.preventDefault(); if (!worker || !absolute || busy || !state.writable) return;
       haptic("tick");
@@ -496,12 +540,12 @@ function NewSession({ control, state }: { control: ControlState; state: ViewStat
       {worker && spaces.length > 0 && <div className="workspace-choices">{spaces.slice(0, 6).map(s => <button type="button" key={s.path} onClick={() => setWorkspace(s.path)}>{s.name}</button>)}</div>}
       {workspace && !absolute && <p className="hint">请使用目标机器上的绝对路径。</p>}
       <label htmlFor="first-message">第一条消息 <span className="muted">（可选）</span></label><textarea id="first-message" rows={6} value={input} onChange={e => control.setDraft("new", e.target.value)} onPaste={pasteImages(control, "new")} onKeyDown={submitWithKeyboard} aria-keyshortcuts="Control+Enter Meta+Enter" placeholder="想让 Agent 做什么？" />
-      <Attachments control={control} state={state} id="new" disabled={!state.writable} />
+      <AttachmentList control={control} state={state} id="new" />
+      <div><AttachButton control={control} id="new" disabled={!state.writable} /></div>
       {(state.uploads.new?.length ?? 0) > 0 && !input.trim() && <p className="hint">图片需随第一条消息发送。</p>}
       <ModelPicker control={control} state={state} workerId={worker?.id} value={model} onChange={setModel} />
       <p className="hint">未选择时沿用 Agent 默认模型和思考程度。路径由目标 Bridge 校验。</p>
-      <p className="hint">Enter 换行 · Ctrl / ⌘ + Enter 创建对话</p>
-      <button type="submit" className="primary" disabled={!state.writable || !worker || !absolute || busy}>{busy ? "正在创建…" : "创建对话 →"}</button>
+      <div className="dock form-dock" ref={dockRef}><button type="submit" className="primary" disabled={!state.writable || !worker || !absolute || busy}>{busy ? "正在创建…" : "创建对话 →"}</button></div>
     </form></section>;
 }
 
@@ -542,7 +586,7 @@ function Skeleton({ rows, kind }: { rows: number; kind: "session" | "message" })
     <div key={i} className={`skeleton-${kind} ${kind === "message" && i % 2 === 0 ? "user" : ""}`}><span /><span /><span /></div>)}</div>;
 }
 
-function Detail({ control, state, id }: { control: ControlState; state: ViewState; id: string }) {
+function Detail({ control, state, id, banners }: { control: ControlState; state: ViewState; id: string; banners: React.ReactNode }) {
   const session = state.session?.sessionId === id ? state.session : undefined;
   const worker = state.workers.find(w => w.id === session?.workerId);
   const caps = session?.capabilities ?? worker?.capabilities ?? [];
@@ -555,7 +599,13 @@ function Detail({ control, state, id }: { control: ControlState; state: ViewStat
   const interrupt = () => void control.submit(`/sessions/${segment(id)}/interrupt`, { expectedTurnId: session!.activeTurnId });
   const draft = state.drafts[id] ?? "", [model, setModel] = useState<ModelChoice>({ model: "", effort: "" });
   const [optionsOpen, setOptionsOpen] = useState(false), canResolve = state.writable && online && !state.syncing && !busy;
-  const bottom = useRef<HTMLDivElement>(null), transcript = useRef<HTMLDivElement>(null);
+  const bottom = useRef<HTMLDivElement>(null), transcript = useRef<HTMLDivElement>(null), pendingPanel = useRef<HTMLElement>(null);
+  const message = useRef<HTMLTextAreaElement>(null);
+  // The composer grows with its text, up to the stylesheet's max-height, then scrolls.
+  useLayoutEffect(() => {
+    const el = message.current; if (!el) return;
+    el.style.height = "auto"; el.style.height = `${el.scrollHeight + 2}px`;
+  }, [draft, session !== undefined]);
   const restore = useRef(scrollMemory.get(id));
   const follow = useRef(restore.current?.bottom ?? true), [unread, setUnread] = useState(0), previous = useRef(state.rawAdded);
   const anchor = useRef<{ top: number; height: number }>();
@@ -582,19 +632,23 @@ function Detail({ control, state, id }: { control: ControlState; state: ViewStat
     }
     previous.current = state.rawAdded;
   }, [turns, state.rawAdded]);
-  return <section className="detail-page"><Link className="back" to="/control/sessions">← 最近会话</Link>
-    <div className="detail-heading"><div className="eyebrow">CONVERSATION</div><h1>{session ? title(session) : state.loading ? "正在读取会话…" : "会话详情"}</h1></div>
-    {session && <>
-      <div className="detail-status"><div><Status status={session.status} /><small aria-live="polite">{state.syncing ? "正在同步…" : state.connection}</small></div>
-        <button className="interrupt" disabled={!canInterrupt} onClick={interrupt}>■ 打断</button></div>
-      <details className="session-info" style={machineStyle(session.machineId)}><summary><Origin agent={session.agent} workerId={session.workerId} machineId={session.machineId}>{session.projectName}</Origin></summary>
-        <p className="break-all">{session.workspace}</p><small className="break-all">Session · {id}</small>
-        <p className="hint">历史覆盖：{session.historyCompleteness ?? "未知"} · {session.source ?? "未知来源"}</p></details>
-      <div className="detail-tools"><label className="transcript-mode">过程显示 <select aria-label="过程显示" value={detailMode} onChange={e => {
-        const mode = e.target.value as DetailMode; setDetailMode(mode); try { localStorage.setItem('bridge-transcript-mode', mode); } catch { /* optional preference */ }
-      }}>{Object.entries(DETAIL_MODES).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><button className="quiet" disabled={state.loading} onClick={() => void control.refresh()}>↻ 刷新</button></div>
-      {session.error && <p className="error">{session.error.error.message}</p>}
-    </>}
+  const setMode = (mode: DetailMode) => { setDetailMode(mode); try { localStorage.setItem('bridge-transcript-mode', mode); } catch { /* optional preference */ } };
+  const pendingCount = state.approvals.length + state.inputs.length;
+  return <section className="page detail-page">
+    <TopBar back="/control/sessions" title={session ? title(session) : state.loading ? "正在读取会话…" : "会话详情"}
+      sub={session && <><Status status={session.status} /><span aria-live="polite">{state.syncing ? "正在同步…" : state.connection}</span></>}
+      menu={close => session && <>
+        <div className="sheet-info" style={machineStyle(session.machineId)}>
+          <Origin agent={session.agent} workerId={session.workerId} machineId={session.machineId}>{session.projectName}</Origin>
+          <p className="break-all">{session.workspace}</p><small className="break-all">Session · {id}</small>
+          <small>历史覆盖：{session.historyCompleteness ?? "未知"} · {session.source ?? "未知来源"}</small></div>
+        <label className="sheet-field" htmlFor="transcript-mode">过程显示<select id="transcript-mode" value={detailMode}
+          onChange={e => { setMode(e.target.value as DetailMode); close(); }}>
+          {Object.entries(DETAIL_MODES).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+        <button type="button" className="sheet-item" disabled={state.loading} onClick={() => { close(); void control.refresh(); }}>↻ 刷新会话</button>
+      </>} />
+    {banners}
+    {session?.error && <p className="error">{session.error.error.message}</p>}
     <div className="transcript" ref={transcript}>
       {state.historyMore && <button className="load-more" disabled={state.moreLoading} onClick={() => {
         anchor.current = { top: window.scrollY, height: transcript.current?.scrollHeight ?? 0 }; void control.moreHistory();
@@ -608,7 +662,7 @@ function Detail({ control, state, id }: { control: ControlState; state: ViewStat
       {state.syncing ? <p className="sync-note" role="status"><span className="spinner" aria-hidden="true" />正在加载最新消息…</p>
         : session?.status === "active" && <p className="sync-note working" role="status"><AgentIcon agent={session.agent} workerId={session.workerId} size={14} />正在工作<span className="dots" aria-hidden="true"><i /><i /><i /></span></p>}
       {/* At the end of the transcript, beside the composer the page follows, not above the history. */}
-      {session && (state.approvals.length > 0 || state.inputs.length > 0 || blocked) && <aside className="pending-panel"><strong>等待你处理</strong>
+      {session && (pendingCount > 0 || blocked) && <aside className="pending-panel" ref={pendingPanel}><strong>等待你处理</strong>
         {state.approvals.map(p => <ApprovalCard key={pendingId(p)} control={control} pending={p} disabled={!canResolve} />)}
         {state.inputs.map(p => <InputCard key={pendingId(p)} control={control} state={state} pending={p} disabled={!canResolve} />)}
         {!state.approvals.length && !state.inputs.length && <small>正在读取待办…</small>}
@@ -616,7 +670,7 @@ function Detail({ control, state, id }: { control: ControlState; state: ViewStat
       <div ref={bottom} className="transcript-end" />
     </div>
     {unread > 0 && <button className="new-content" onClick={() => { follow.current = true; setUnread(0); bottom.current?.scrollIntoView({ block: "end", behavior: "smooth" }); }}>↓ {unread} 条新内容</button>}
-    {session && <form className="composer" onSubmit={e => {
+    {session && <form className="composer dock" ref={dockRef} onSubmit={e => {
       e.preventDefault(); if (!canOperate || !draft.trim() || blocked) return;
       if (uploading(state, id)) return;
       haptic("tick");
@@ -625,14 +679,20 @@ function Detail({ control, state, id }: { control: ControlState; state: ViewStat
         : running ? { input: draft, delivery: "auto", ...attachmentBody(state, id) }
         : { input: draft, delivery: "start_turn", ...modelBody(model), ...attachmentBody(state, id) };
       void control.submit(`/sessions/${segment(id)}/turns`, body, id);
-    }}><label className="sr-only" htmlFor="message">发送消息</label>
-      <textarea id="message" rows={3} value={draft} onChange={e => control.setDraft(id, e.target.value)} onPaste={pasteImages(control, id)} onKeyDown={submitWithKeyboard} aria-keyshortcuts="Control+Enter Meta+Enter" placeholder={blocked ? "请先处理审批或问题" : running ? "追加指令…" : "继续这段对话…"} />
-      <Attachments control={control} state={state} id={id} disabled={!state.writable} />
-      {!running && <details className="composer-options" onToggle={e => setOptionsOpen(e.currentTarget.open)}><summary>模型 {model.model ? state.models[session.workerId]?.models.find(m => m.model === model.model)?.displayName ?? model.model : "默认"} ·思考 {model.effort ? effortLabels[model.effort] ?? model.effort : "默认"}</summary>
+    }}>
+      {pendingCount > 0 && <button type="button" className="pending-strip" onClick={() => pendingPanel.current?.scrollIntoView({ block: "start", behavior: "smooth" })}>
+        <span className="dot" aria-hidden="true" />{[state.approvals.length && `${state.approvals.length} 项审批`, state.inputs.length && `${state.inputs.length} 个问题`].filter(Boolean).join(" · ")}等你处理<span>查看 ↓</span></button>}
+      <AttachmentList control={control} state={state} id={id} />
+      {!running && <details className="composer-options" onToggle={e => setOptionsOpen(e.currentTarget.open)}><summary>模型 {model.model ? state.models[session.workerId]?.models.find(m => m.model === model.model)?.displayName ?? model.model : "默认"} · 思考 {model.effort ? effortLabels[model.effort] ?? model.effort : "默认"}</summary>
         {optionsOpen && <ModelPicker control={control} state={state} workerId={session.workerId} value={model} onChange={setModel} />}</details>}
-      <div className="composer-actions"><small>{!state.writable ? "只读模式" : blocked ? "等待处理待办" : !online ? "Worker 离线" : uploading(state, id) ? "图片上传中…" : "Enter 换行 · Ctrl / ⌘ + Enter 发送"}</small>
-        <div className="row-actions">{running && <button type="button" className="danger" disabled={!canInterrupt} onClick={interrupt}>■ 中断</button>}
-        <button type="submit" className="primary" disabled={!canOperate || !draft.trim() || blocked || uploading(state, id) || Boolean(running && session.activeTurnId && !caps.includes("turn-steer")) || !["idle", "active"].includes(session.status)}>{running ? "追加指令 ↑" : "发送 ↑"}</button></div></div>
+      <div className="composer-row">
+        <AttachButton control={control} id={id} disabled={!state.writable} compact />
+        <label className="sr-only" htmlFor="message">发送消息</label>
+        <textarea id="message" ref={message} rows={1} value={draft} onChange={e => control.setDraft(id, e.target.value)} onPaste={pasteImages(control, id)} onKeyDown={submitWithKeyboard} aria-keyshortcuts="Control+Enter Meta+Enter" title="Enter 换行 · Ctrl / ⌘ + Enter 发送" placeholder={blocked ? "请先处理审批或问题" : running ? "追加指令…" : "继续这段对话…"} />
+        {running && <button type="button" className="interrupt icon-button" aria-label="中断当前回合" title="中断" disabled={!canInterrupt} onClick={interrupt}>■</button>}
+        <button type="submit" className="primary send" disabled={!canOperate || !draft.trim() || blocked || uploading(state, id) || Boolean(running && session.activeTurnId && !caps.includes("turn-steer")) || !["idle", "active"].includes(session.status)}>{running ? "追加" : "发送"}</button>
+      </div>
+      {Boolean(!state.writable ? "只读模式" : blocked ? (pendingCount ? "" : "等待处理待办") : !online ? "Worker 离线" : uploading(state, id) ? "图片上传中…" : "") && <small className="composer-reason">{!state.writable ? "只读模式" : blocked ? (pendingCount ? "" : "等待处理待办") : !online ? "Worker 离线" : uploading(state, id) ? "图片上传中…" : ""}</small>}
     </form>}
   </section>;
 }
