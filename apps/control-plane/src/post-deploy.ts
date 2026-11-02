@@ -73,6 +73,11 @@ export class PostDeployResumer {
     }
   }
 
+  /** Whether a session still waits for its post-deploy turn: that turn continues it, nothing else should. */
+  waitsFor(sessionId: string): boolean {
+    return this.pending().some((intent) => intent.sessionId === sessionId || this.host.resolveSession(intent)?.id === sessionId);
+  }
+
   private pending(): PostDeployIntent[] {
     if (!this.dir || !existsSync(this.dir)) return [];
     const intents: PostDeployIntent[] = [];

@@ -4,7 +4,7 @@ import { rmSync } from "node:fs";
 import type { Server as HttpServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
+import test, { mock } from "node:test";
 import { WebSocket } from "ws";
 import { Store } from "../packages/database/src/index.js";
 import { ControlPlane } from "../apps/control-plane/src/server.js";
@@ -218,4 +218,32 @@ test("a session that names itself can be answered with reply, back and forth, wi
     const notice = f.store.db.prepare("SELECT text FROM notices WHERE source='bridge'").get() as { text: string };
     assert.match(notice.text, /已暂停它们之间的对话/);
   } finally { await f.close(); }
+});
+
+test("a turn a Bridge restart cut off is continued once, unless someone continued the session first", async () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  const f = await fixture();
+  const resumes = () => f.sent.filter((item: any) => item.type === "action.submit_turn" && /自动续跑/.test(item.input));
+  const restart = (sessions: string[]) => f.bridge({ type: "state.snapshot", generation: `g${Date.now()}${Math.random()}`, complete: true, approvals: [], userInputs: [],
+    sessions: sessions.map((sessionId) => ({ sessionId, nativeSessionId: sessionId, agentType: "codex-cli" as const, projectPath: "/work/other",
+      projectName: "other", title: sessionId, activityStatus: "idle" as const, lastTurnStatus: "completed", createdAt: 1000, updatedAt: 2000,
+      source: "app-server" as const, historyCompleteness: "full" as const })) });
+  const start = (sessionId: string, turnId: string) => f.bridge({ type: "session.event", eventId: `${turnId}-start`, eventType: "turn.started",
+    sessionId, turnId, timestamp: Date.now(), payload: {} });
+  try {
+    await start("thread-1", "turn-cut");
+    await restart(["thread-2"]);
+    mock.timers.tick(25_000);
+    assert.equal(resumes().length, 1, "continued after the pause");
+    assert.equal((resumes()[0] as any).sessionId, "thread-1");
+    await restart(["thread-2"]);
+    mock.timers.tick(25_000);
+    assert.equal(resumes().length, 1, "once per cut turn");
+
+    await start("thread-1", "turn-cut-2");
+    await restart(["thread-2"]);
+    await start("thread-1", "turn-by-user");
+    mock.timers.tick(25_000);
+    assert.equal(resumes().length, 1, "a turn started meanwhile wins");
+  } finally { mock.timers.reset(); await f.close(); }
 });

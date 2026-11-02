@@ -56,6 +56,13 @@ interface PendingApproval {
 }
 
 const ORPHANED_RUN_REASON = "The worker's Bridge restarted and no longer holds this run's session; its turn was interrupted";
+/** A turn a Bridge restart cut off is continued after this, unless someone continued the session first (a post-deploy turn, the user). */
+const RESUME_DELAY_MS = 20_000;
+/** Only turns active this recently are continued: an older "active" turn was more likely stuck than working. */
+const RESUME_RECENT_MS = 30 * 60_000;
+const RESUME_INPUT = "[Agent Bridge 自动续跑] 你上一轮被 Bridge 重启（更新或崩溃）打断了，接着把它做完。"
+  + "重做任何对外操作（提交、推送、发消息、调用会改东西的接口、部署）之前，先查清它是不是已经做过：看 git 状态和历史、工作目录、远端和相关服务的现状。"
+  + "做完照常汇报；如果上一轮其实已经完成，简短说明即可。";
 
 export class ControlPlane {
   private readonly http: HttpServer;
@@ -459,6 +466,7 @@ export class ControlPlane {
           });
           // The worker is online and can still resume the session; only its turn is gone.
           this.controlStore.updateSessionActivity(session.id, "idle", undefined, "interrupted");
+          if (session.active_turn_id) this.resumeInterrupted(session.id, machineId, session.active_turn_id);
         }
         this.reclaimOrphanedRuns(machineId, present);
         const pendingIds = new Set([...message.approvals.map((item) => item.approvalId),
@@ -615,6 +623,35 @@ export class ControlPlane {
   private updateEpoch(): string {
     const update = this.options.bridgeUpdate!;
     return `${update.latestVersion}:${update.publishedAt ?? 0}`;
+  }
+
+  /**
+   * Continue a turn a Bridge restart cut off, once (docs/agent-control-api.md §13): after a pause, and only
+   * if nothing continued the session meanwhile and the turn was working recently. RESUME_INTERRUPTED=off turns it off.
+   */
+  private resumeInterrupted(sessionId: string, machineId: string, turnId: string): void {
+    if (process.env.RESUME_INTERRUPTED === "off") return;
+    const cutAt = Date.now();
+    // The turn's own last sign of work, not the interruption just recorded for it.
+    const lastActive = Number((this.store.db.prepare("SELECT MAX(created_at) AS at FROM events WHERE session_id=? AND type<>'turn.interrupted'")
+      .get(sessionId) as { at: number | null }).at ?? 0);
+    if (cutAt - lastActive > RESUME_RECENT_MS) return;
+    const timer = setTimeout(() => {
+      try {
+        const session = this.store.db.prepare("SELECT active_turn_id FROM sessions WHERE id=?").get(sessionId) as { active_turn_id: string | null } | undefined;
+        if (!session || session.active_turn_id) return;
+        const later = this.store.db.prepare("SELECT 1 FROM events WHERE session_id=? AND type='turn.started' AND created_at>? LIMIT 1").get(sessionId, cutAt);
+        const asking = this.store.db.prepare("SELECT 1 FROM pending_requests WHERE session_id=? AND status='pending' LIMIT 1").get(sessionId);
+        if (later || asking || this.postDeploy.waitsFor(sessionId)) return;
+        const created = this.controlStore.createAction({ principal: "system:resume", key: `resume:${sessionId}:${turnId}`, method: "POST",
+          path: `/api/v1/sessions/${sessionId}/turns`, body: { input: RESUME_INPUT, delivery: "auto" }, kind: "submit_turn", machineId, sessionId });
+        if (created.existing) return;
+        log.info({ sessionId, turnId }, "Continuing a turn a Bridge restart cut off");
+        this.controlApi.actionsForBridge().dispatch(created.action, { type: "action.submit_turn", actionId: created.action.actionId,
+          sessionId, input: RESUME_INPUT, delivery: "auto", resume: this.resumeContext(sessionId) });
+      } catch (error) { log.warn({ error, sessionId }, "Unable to continue an interrupted turn"); }
+    }, RESUME_DELAY_MS);
+    timer.unref();
   }
 
   // Resume hint for submit_turn: lets the bridge revive a session it no longer
