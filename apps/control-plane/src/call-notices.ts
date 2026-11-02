@@ -6,6 +6,8 @@ const log = pino({ name: "call-notices" });
 const STALE_MS = 30 * 60_000;
 const MAX_ATTEMPTS = 3;
 const SPOKEN_CHARS = 300;
+/** Who is calling: the Matrix connector's account (megumi, 惠) rings from its DM, whatever agent call-bridge names. */
+const PREFACE = "你好，我是惠，有一条通知：";
 
 /** What the call service needs: ring `to` and read `message` (call-bridge's call_place, mode notify). */
 export type PlaceCall = (args: Record<string, unknown>) => Promise<unknown>;
@@ -32,7 +34,7 @@ export class CallNotices {
       if (this.now() - notice.createdAt > STALE_MS) { this.store.markNoticeDelivered(notice.id, "call:stale"); continue; }
       this.placing.add(notice.id);
       try {
-        await this.place({ to: notice.roomId, mode: "notify", message: spoken(notice.text), wait: "none", idempotency_key: `notice:${notice.id}` });
+        await this.place({ to: notice.roomId, mode: "notify", preface: PREFACE, message: spoken(notice.text), wait: "none", idempotency_key: `notice:${notice.id}` });
         this.store.markNoticeDelivered(notice.id, `call:${notice.roomId}`);
         this.attempts.delete(notice.id);
       } catch (error) {
