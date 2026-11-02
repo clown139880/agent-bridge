@@ -104,12 +104,12 @@ export class BridgeSelfUpdater {
       await rm(this.staged.releasePath, { recursive: true, force: true }).catch(() => undefined);
       this.staged = undefined;
     }
-    // This synchronous transition is the local admission mutex: once an
-    // update is known, no start_agent can slip in while isBusy() is awaited.
-    this.state = "draining_for_update";
     // The registry source is informational. Only the source configured on this
     // machine is ever passed to git, so a Control Plane cannot redirect pulls.
     const updatable = this.options.enabled && Boolean(this.options.source);
+    // Close admission synchronously only when this machine can apply the update.
+    // Manually deployed bridges must keep accepting work after an announcement.
+    this.state = updatable ? "draining_for_update" : "ready";
     this.options.report({
       type: "bridge_update.status",
       phase: "discovered",

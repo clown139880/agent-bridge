@@ -21,6 +21,44 @@ test("semantic bridge versions are ordered", () => {
   assert.throws(() => compareVersions("latest", "1.0.0"), /Invalid bridge version/);
 });
 
+for (const scenario of [
+  { name: "automatic updates are disabled", enabled: false, source: "/trusted/repo", reason: "automatic updates are disabled locally" },
+  { name: "no local update source is configured", enabled: true, source: undefined, reason: "no local update source is configured" },
+]) {
+  test(`newer release announcements keep admission open when ${scenario.name}`, async () => {
+    const statuses: BridgeUpdateStatusMessage[] = [];
+    const root = mkdtempSync(join(tmpdir(), "agent-bridge-update-unavailable-"));
+    let busy = true;
+    try {
+      const updater = new BridgeSelfUpdater({
+        enabled: scenario.enabled, source: scenario.source,
+        currentVersion: "0.3.0", sourceRef: "main", installRoot: root,
+        currentLink: join(root, "current"), statePath: join(root, "state.json"),
+        packageManager: "pnpm", restartExecutable: "systemctl", restartArgs: [],
+        isBusy: () => busy, report: (message) => statuses.push(message),
+        runCommand: async () => assert.fail("unavailable updates must not run commands"),
+      });
+      const announcement = { type: "bridge_update.available" as const, latestVersion: "0.4.0", source: "/registry/repo" };
+      await updater.consider(announcement);
+      assert.equal(updater.admitStart(), true, "an informational announcement must not block new work");
+      busy = false;
+      await updater.activityChanged();
+      await updater.consider(announcement);
+      assert.equal(updater.admitStart(), true, "idle transitions and repeated announcements must keep admission open");
+      assert.equal(statuses.length, 2);
+      for (const status of statuses) {
+        assert.equal(status.phase, "discovered");
+        assert.equal(status.updatable, false);
+        assert.equal(status.fetched, false);
+        assert.equal(status.reason, scenario.reason);
+      }
+      assert.equal(existsSync(join(root, "releases")), false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
+
 test("a v-prefixed registry version accepts the equivalent package version", async () => {
   const root = mkdtempSync(join(tmpdir(), "agent-bridge-v-prefixed-update-"));
   const oldRelease = join(root, "releases", "0.3.0");
