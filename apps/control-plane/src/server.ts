@@ -646,7 +646,10 @@ export class ControlPlane {
           .get(sessionId, turnId) as { at: number | null }).at ?? cutAt);
         const later = this.store.db.prepare("SELECT 1 FROM events WHERE session_id=? AND type='turn.started' AND turn_id<>? AND created_at>=? LIMIT 1").get(sessionId, turnId, began);
         const asking = this.store.db.prepare("SELECT 1 FROM pending_requests WHERE session_id=? AND status='pending' LIMIT 1").get(sessionId);
-        if (later || asking || this.postDeploy.waitsFor(sessionId)) return;
+        // Its own record of submitted turns is the surer sign: a restarted Bridge's events may lag behind or be lost.
+        const submitted = this.store.db.prepare("SELECT 1 FROM actions WHERE session_id=? AND kind='submit_turn' AND principal<>'system:resume' AND created_at>=? LIMIT 1")
+          .get(sessionId, began);
+        if (later || submitted || asking || this.postDeploy.waitsFor(sessionId)) return;
         const created = this.controlStore.createAction({ principal: "system:resume", key: `resume:${sessionId}:${turnId}`, method: "POST",
           path: `/api/v1/sessions/${sessionId}/turns`, body: { input: RESUME_INPUT, delivery: "auto" }, kind: "submit_turn", machineId, sessionId });
         if (created.existing) return;

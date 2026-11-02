@@ -254,5 +254,13 @@ test("a turn a Bridge restart cut off is continued once, unless someone continue
     await restart(["thread-2"]);
     mock.timers.tick(25_000);
     assert.equal(resumes().length, 1, "a turn begun after the cut one started, even before the cut was seen, wins");
+
+    // As seen on HAL again: the post-deploy turn was submitted, but none of its events had arrived.
+    await start("thread-1", "turn-cut-4");
+    f.store.db.prepare("INSERT INTO actions(id,principal,kind,machine_id,session_id,status,created_at,updated_at,expires_at) VALUES('act-pd','system:post-deploy','submit_turn','dev','thread-1','accepted',?,?,?)")
+      .run(Date.now(), Date.now(), Date.now() + 60_000);
+    await restart(["thread-2"]);
+    mock.timers.tick(25_000);
+    assert.equal(resumes().length, 1, "a turn submitted through the Control Plane wins, whether or not its events arrived");
   } finally { mock.timers.reset(); await f.close(); }
 });
