@@ -104,7 +104,7 @@ Bridge 主要变量：
 | `BRIDGE_TOKEN` | 必须与 Control Plane 一致 |
 | `MACHINE_ID` / `MACHINE_NAME` | 机器标识与显示名 |
 | `BRIDGE_ALLOWED_ROOTS` | Bridge 可访问的项目根目录，使用 `:` 分隔 |
-| `CODEX_APP_SERVER_URL` | 默认 `ws://127.0.0.1:4500`；共享回环端口的 Bridge（Windows 与 WSL）必须配置不同端口，WSL 用 `ws://127.0.0.1:4501`；托管模式下端口 `0` 表示每次启动随机分配 |
+| `CODEX_APP_SERVER_URL` | 默认 `ws://127.0.0.1:4500`；共享回环端口的 Bridge（Windows 与 WSL）必须配置不同端口，WSL 用 `ws://127.0.0.1:4501`；托管模式下端口 `0` 表示每次启动随机分配。固定端口只为 `codex --remote` 的终端客户端；原生 Windows 不用它，配置 `0`，因为 Windows 开机时会把动态端口段里的端口保留掉，固定端口可能绑定失败（`os error 10013`） |
 | `CODEX_APP_SERVER_MANAGED` | 是否由 Bridge 启停 App Server |
 | `BRIDGE_ARCHIVE_OUTBOX_PATH` | 等待中心 ACK 的会话事件持久 outbox；必须位于 Git checkout 外 |
 | `BRIDGE_ARCHIVE_OUTBOX_LIMIT` | outbox 消息上限，默认 10000；溢出会向中心报告采集缺口 |
