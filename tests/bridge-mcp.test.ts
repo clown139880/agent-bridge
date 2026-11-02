@@ -245,5 +245,14 @@ test("a turn a Bridge restart cut off is continued once, unless someone continue
     await start("thread-1", "turn-by-user");
     mock.timers.tick(25_000);
     assert.equal(resumes().length, 1, "a turn started meanwhile wins");
+
+    // A post-deploy turn arrives at registration, before the inventory marks the cut turn: it still wins.
+    // As seen on HAL on 2026-11-02: the session still recorded the cut turn as active when the post-deploy turn began.
+    await start("thread-1", "turn-cut-3");
+    await start("thread-1", "turn-post-deploy");
+    f.store.db.prepare("UPDATE sessions SET active_turn_id='turn-cut-3' WHERE id='thread-1'").run();
+    await restart(["thread-2"]);
+    mock.timers.tick(25_000);
+    assert.equal(resumes().length, 1, "a turn begun after the cut one started, even before the cut was seen, wins");
   } finally { mock.timers.reset(); await f.close(); }
 });

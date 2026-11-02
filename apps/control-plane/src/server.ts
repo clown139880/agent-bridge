@@ -640,7 +640,11 @@ export class ControlPlane {
       try {
         const session = this.store.db.prepare("SELECT active_turn_id FROM sessions WHERE id=?").get(sessionId) as { active_turn_id: string | null } | undefined;
         if (!session || session.active_turn_id) return;
-        const later = this.store.db.prepare("SELECT 1 FROM events WHERE session_id=? AND type='turn.started' AND created_at>? LIMIT 1").get(sessionId, cutAt);
+        // Another turn begun since the cut one started continued the session, even one begun before the restarted
+        // Bridge's inventory marked the cut (a post-deploy turn arrives at registration, ahead of it).
+        const began = Number((this.store.db.prepare("SELECT MIN(created_at) AS at FROM events WHERE session_id=? AND turn_id=? AND type='turn.started'")
+          .get(sessionId, turnId) as { at: number | null }).at ?? cutAt);
+        const later = this.store.db.prepare("SELECT 1 FROM events WHERE session_id=? AND type='turn.started' AND turn_id<>? AND created_at>=? LIMIT 1").get(sessionId, turnId, began);
         const asking = this.store.db.prepare("SELECT 1 FROM pending_requests WHERE session_id=? AND status='pending' LIMIT 1").get(sessionId);
         if (later || asking || this.postDeploy.waitsFor(sessionId)) return;
         const created = this.controlStore.createAction({ principal: "system:resume", key: `resume:${sessionId}:${turnId}`, method: "POST",

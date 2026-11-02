@@ -990,7 +990,7 @@ UI mock 应至少模拟：worker 离线、空列表、100+ session 游标、acti
 
 Bridge 重启（自更新、部署或崩溃）时，正在跑的 turn 会断掉。Bridge 重连后发完整清单，Control Plane 把它不再持有的活动 turn 记为 `turn.interrupted`（`reason: "worker no longer owns this turn"`）。从 0.7.60 起，Control Plane 接着给这个会话续跑一次：
 
-- 等 20 秒。期间如果会话已经被继续（有新的 `turn.started`，比如你发了消息，或部署者的 `[post-deploy]` 回合）、在等审批或回答、或者还有没送出的部署续跑，就不续跑。
+- 等 20 秒。如果被打断的 turn 开始之后会话里又开过别的 turn（你发了消息，或部署者的 `[post-deploy]` 回合，它可能比“被打断”的标记还早到）、在等审批或回答、或者还有没送出的部署续跑，就不续跑。
 - 只续跑最近 30 分钟内还在干活的 turn；更早的“活动” turn 更可能是卡住了。
 - 续跑消息以 `[Agent Bridge 自动续跑]` 开头，要求 agent 先查清上一轮的对外操作（提交、推送、发消息、部署）是否已经做过，再接着做。
 - 每个被打断的 turn 只续跑一次（action 幂等键 `resume:<session>:<turn>`，`principal=system:resume`）。续跑的 turn 和普通 turn 一样，Matrix 房间里照常收到回复。
