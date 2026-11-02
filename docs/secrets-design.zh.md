@@ -34,3 +34,15 @@ OpenBao（HAL，127.0.0.1，文件存储，自动解封）
 2. Control Plane 接入：工具库、定时任务的 `secretRef` 改为从 OpenBao 取；先迁 MiMo、DeepSeek、HA、webhook 密钥。
 3. 各服务逐个迁：服务启动时取密钥到内存，删除对应 `.env` 里的明文，每迁一个验证一次。
 4. 清理：Hermes 两个 `.env` 等剩余明文，最后核对 inventory 与 OpenBao 一致。
+
+## 5. 写入新密钥（2026-11-02）
+
+密钥的值只经过终端或服务器上的文件，不经过任何 LLM 的上下文。
+
+- **人录入自己的密钥**：在 HAL 终端执行 `scripts/secret-put.sh shared/<名字> <KEY>`，隐藏输入，不回显、不进 shell 历史。
+- **agent 录入自己产生的密钥**（例如它为某个服务新建的令牌）：`<生成命令> | scripts/secret-put.sh shared/<名字> <KEY>`，值从管道进入，不打印。
+- **搬运服务器上已有的值**：`scripts/secret-put.sh shared/<名字> <KEY> --from-env-file <文件> <原变量名>`。
+- 不允许把密钥的值贴进对话或打印出来再写入。
+- 脚本用 `secrets-writer` 令牌（`/etc/agent-bridge/openbao-secrets-writer.token`，0600）：只能在 `kv/shared/*` 下新建和更新（patch，不覆盖同路径的其他键），不能读值、不能删除、碰不到 `sys/`。输出只有路径、键名和长度。
+- 写完在 agent-skills `secrets/inventory.yaml` 登记名字、用途和使用方。
+- 根令牌和恢复密钥离线保管，只在建策略、删密钥这类管理操作时用。
