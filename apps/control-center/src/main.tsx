@@ -226,12 +226,28 @@ function ToolApprovalPanel({ writable }: { writable: boolean }) {
 
 interface AutomationProposal { id: string; action: "create" | "update" | "delete"; automationId: string; scope: string;
   definition: Record<string, unknown> | null; previous: Record<string, unknown> | null; reason: string | null; proposedBy: string; createdAt: number }
+interface AutomationRun { id: string; trigger: string; triggerAt: number; startedAt: number | null; finishedAt: number | null;
+  status: string; sessionId: string | null; output: string | null; error: string | null }
 interface AutomationRow { id: string; scope: string; title: string; kind: string | null; trigger: string | null; error: string | null;
-  enabled: boolean; paused: boolean; nextAt: number | null; deliver: string[]; lastRun: { status: string; triggerAt: number; error: string | null } | null }
+  schedule: { cron?: string; everyMinutes?: number; tz?: string } | null;
+  enabled: boolean; paused: boolean; nextAt: number | null; deliver: string[]; lastRun: AutomationRun | null }
+interface AutomationDetail extends AutomationRow { yaml: string | null; runs: AutomationRun[] }
+const KIND_LABELS: Record<string, string> = { notify: "通知", script: "脚本", agent: "agent" };
+const TRIGGER_LABELS: Record<string, string> = { schedule: "定时", webhook: "webhook", manual: "手动" };
+/** Broken, or its last run failed or was missed: these come first, with what went wrong. */
+const needsYou = (t: AutomationRow) => Boolean(t.error) || t.lastRun?.status === "failed" || t.lastRun?.status === "missed";
+const whenText = (t: AutomationRow) => t.trigger === "webhook" ? "webhook 触发"
+  : t.schedule?.cron ? `cron ${t.schedule.cron}${t.schedule.tz ? ` (${t.schedule.tz})` : ""}`
+  : t.schedule?.everyMinutes ? `每 ${t.schedule.everyMinutes} 分钟` : "";
+const tookText = (r: AutomationRun) => r.startedAt && r.finishedAt ? `${Math.max(1, Math.round((r.finishedAt - r.startedAt) / 1000))} 秒` : "";
+function RunPill({ status }: { status: string }) {
+  const tone = status === "failed" || status === "missed" ? "risk-high" : status === "ok" ? "risk-low" : "";
+  return <span className={`risk-pill run-pill ${tone}`}>{RUN_LABELS[status] ?? status}</span>;
+}
 const VERBS = { create: "新建", update: "修改", delete: "删除" } as const;
 const RUN_LABELS: Record<string, string> = { ok: "已投递", silent: "无输出", failed: "失败", skipped: "跳过", missed: "错过", running: "运行中" };
 /** Scheduled and webhook tasks, and the changes agents proposed (docs/automations-design.zh.md): only you confirm them. */
-function AutomationPanel({ writable }: { writable: boolean }) {
+function AutomationPanel({ writable, proposalsOnly }: { writable: boolean; proposalsOnly?: boolean }) {
   const [proposals, setProposals] = useState<AutomationProposal[]>([]), [tasks, setTasks] = useState<AutomationRow[]>([]);
   const [busy, setBusy] = useState(""), [error, setError] = useState("");
   const client = useRef<ControlClient>();
@@ -266,21 +282,103 @@ function AutomationPanel({ writable }: { writable: boolean }) {
           <button type="button" className="danger" disabled={busy === p.id} onClick={() => void act(p.id, `/automations/proposals/${segment(p.id)}/decision`, { choice: "deny" })}>拒绝</button></div>}
       </div>)}
     </aside>}
-    {tasks.length > 0 && <details className="pending-panel"><summary><strong>定时任务</strong> · {tasks.length} 个
-      {tasks.some(t => t.error || t.lastRun?.status === "failed") && <span className="error"> · 有失败</span>}</summary>
-      {tasks.map(t => <div key={t.id} className="pending-item">
-        <div className="pending-kind">{t.title} · {t.scope}/{t.id} · {t.kind}{t.paused ? " · 已暂停" : !t.enabled ? " · 未启用" : ""}</div>
-        {t.error ? <p className="error">{t.error}</p> : <p className="hint">
-          {t.nextAt ? `下次 ${time(t.nextAt)}` : t.trigger === "webhook" ? "webhook 触发" : ""}
-          {t.lastRun && ` · 上次 ${time(t.lastRun.triggerAt)} ${RUN_LABELS[t.lastRun.status] ?? t.lastRun.status}`}
-          {t.deliver.length > 0 && ` · 发往 ${t.deliver.join("、")}`}</p>}
-        {t.lastRun?.error && <p className="hint">{t.lastRun.error}</p>}
-        {writable && !t.error && <div className="row-actions">
-          <button type="button" disabled={busy === t.id} onClick={() => void act(t.id, `/automations/${segment(t.id)}/run`, {})}>立即运行</button>
-          <button type="button" className="quiet" disabled={busy === t.id} onClick={() => void act(t.id, `/automations/${segment(t.id)}/${t.paused ? "resume" : "pause"}`, {})}>{t.paused ? "恢复" : "暂停"}</button></div>}
-      </div>)}
-    </details>}
+    {!proposalsOnly && tasks.length > 0 && <Link to="/control/automations" className="pending-panel automation-link"><strong>定时任务</strong> · {tasks.length} 个
+      {tasks.some(needsYou) ? <span className="attention"> · {tasks.filter(needsYou).length} 个要处理</span> : <span className="hint"> · 都正常</span>}<span className="row-arrow" aria-hidden="true">↗</span></Link>}
   </>;
+}
+
+/**
+ * Every scheduled and webhook task, ordered by what needs you: broken or failed ones first, then what runs
+ * next, then the webhook-triggered ones, and paused or disabled ones last (folded).
+ */
+function Automations({ writable }: { writable: boolean }) {
+  const [tasks, setTasks] = useState<AutomationRow[]>(), [error, setError] = useState("");
+  useEffect(() => {
+    const client = new ControlClient("", () => {}, "/control/api/v1");
+    const load = () => client.request<{ data: AutomationRow[] }>("/automations").then(r => { setTasks(r.data); setError(""); }, e => setError(explain(e)));
+    void load();
+    const timer = setInterval(() => { if (document.visibilityState === "visible") void load(); }, 30_000);
+    return () => { clearInterval(timer); client.dispose(); };
+  }, []);
+  const all = tasks ?? [], broken = all.filter(needsYou), rest = all.filter(t => !needsYou(t));
+  const off = rest.filter(t => t.paused || !t.enabled), on = rest.filter(t => !t.paused && t.enabled);
+  const scheduled = on.filter(t => t.nextAt).sort((a, b) => a.nextAt! - b.nextAt!), hooks = on.filter(t => !t.nextAt);
+  const row = (t: AutomationRow) => <Link key={t.id} to={`/control/automations/${segment(t.id)}`} className="session-row automation-row">
+    <div className="session-row-top"><span className="hint">{t.scope} · {KIND_LABELS[t.kind ?? ""] ?? t.kind ?? "?"}</span>
+      <span className="row-end">{t.lastRun && <RunPill status={t.lastRun.status} />}{t.nextAt && <time title="下次运行">{time(t.nextAt)}</time>}</span></div>
+    <h2>{t.title}</h2>
+    {t.error ? <p className="attention">定义有误：{t.error}</p>
+      : needsYou(t) && t.lastRun ? <p className="attention">{time(t.lastRun.triggerAt)} {RUN_LABELS[t.lastRun.status]}{t.lastRun.error ? `：${t.lastRun.error.slice(0, 160)}` : ""}</p>
+      : <p>{whenText(t)}</p>}
+    <span className="row-arrow" aria-hidden="true">↗</span>
+  </Link>;
+  return <section className="page">
+    <TopBar back="/control/sessions" title="定时任务" sub={tasks ? `${all.length} 个${broken.length ? ` · ${broken.length} 个要处理` : ""}` : "正在读取…"} />
+    {error && <div className="error" role="alert">{error}</div>}
+    <AutomationPanel writable={writable} proposalsOnly />
+    {broken.length > 0 && <><h3 className="list-group">要处理</h3><div className="session-list">{broken.map(row)}</div></>}
+    {scheduled.length > 0 && <><h3 className="list-group">接下来</h3><div className="session-list">{scheduled.map(row)}</div></>}
+    {hooks.length > 0 && <><h3 className="list-group">webhook 触发</h3><div className="session-list">{hooks.map(row)}</div></>}
+    {off.length > 0 && <details><summary className="list-group">已暂停或未启用 · {off.length}</summary><div className="session-list">{off.map(row)}</div></details>}
+    {tasks && !all.length && <div className="empty">还没有定时任务。<p>让 agent 用 automation_propose 提一个，确认后生效。</p></div>}
+  </section>;
+}
+
+/** One task: what it is, its recent runs (a failed one opens on its error and output), and its definition to edit or delete. */
+function AutomationPage({ id, writable }: { id: string; writable: boolean }) {
+  const [task, setTask] = useState<AutomationDetail>(), [error, setError] = useState(""), [busy, setBusy] = useState("");
+  const [draft, setDraft] = useState<string>(), [notice, setNotice] = useState("");
+  const client = useRef<ControlClient>();
+  const load = async () => {
+    try { setTask(await client.current!.request<AutomationDetail>(`/automations/${segment(id)}`)); setError(""); }
+    catch (e) { setError(explain(e)); }
+  };
+  useEffect(() => {
+    client.current = new ControlClient("", () => {}, "/control/api/v1"); void load();
+    const timer = setInterval(() => { if (document.visibilityState === "visible") void load(); }, 15_000);
+    return () => { clearInterval(timer); client.current?.dispose(); };
+  }, [id]);
+  const act = async (key: string, path: string, body: unknown, done?: string) => {
+    setBusy(key); setNotice("");
+    try { await client.current!.request(path, { body }); if (done) setNotice(done); await load(); return true; }
+    catch (e) { setError(explain(e)); return false; } finally { setBusy(""); }
+  };
+  const save = async () => { if (await act("save", `/automations/${segment(id)}/edit`, { yaml: draft }, "已保存并提交到 agent-skills。")) setDraft(undefined); };
+  const remove = async () => {
+    if (!confirm(`删除定时任务「${task?.title ?? id}」？它的定义会从 agent-skills 删除（git 历史里还在）。`)) return;
+    if (await act("delete", `/automations/${segment(id)}/delete`, {})) navigate("/control/automations");
+  };
+  const failed = task?.runs.find(r => r.status === "failed" || r.status === "missed");
+  return <section className="page">
+    <TopBar back="/control/automations" title={task?.title ?? id} sub={task ? `${task.scope}/${task.id} · ${KIND_LABELS[task.kind ?? ""] ?? task.kind ?? "?"}` : "正在读取…"} />
+    {error && <div className="error" role="alert">{error}</div>}
+    {notice && <p className="hint" role="status">{notice}</p>}
+    {task && <>
+      <div className="pending-panel">
+        {task.error && <p className="attention">定义有误：{task.error}</p>}
+        <p>{[whenText(task), task.nextAt ? `下次 ${time(task.nextAt)}` : "", task.paused ? "已暂停" : !task.enabled ? "未启用" : ""].filter(Boolean).join(" · ")}</p>
+        {task.deliver.length > 0 && <p className="hint">发往 {task.deliver.join("、")}</p>}
+        {writable && <div className="row-actions">
+          <button type="button" disabled={Boolean(busy) || Boolean(task.error)} onClick={() => void act("run", `/automations/${segment(id)}/run`, {}, "已开始运行，结果稍后出现在下面。")}>立即运行</button>
+          <button type="button" className="quiet" disabled={Boolean(busy) || Boolean(task.error)} onClick={() => void act("pause", `/automations/${segment(id)}/${task.paused ? "resume" : "pause"}`, {})}>{task.paused ? "恢复" : "暂停"}</button>
+          <button type="button" className="quiet" disabled={Boolean(busy) || !task.yaml} onClick={() => setDraft(draft === undefined ? task.yaml ?? "" : undefined)}>{draft === undefined ? "编辑" : "取消编辑"}</button>
+          <button type="button" className="danger" disabled={Boolean(busy)} onClick={() => void remove()}>删除</button></div>}
+      </div>
+      {draft !== undefined && <div className="pending-panel"><strong>编辑定义（YAML）</strong>
+        <textarea className="yaml-editor" value={draft} spellCheck={false} onChange={e => setDraft(e.target.value)} rows={Math.min(30, Math.max(8, draft.split("\n").length + 1))} />
+        <div className="row-actions"><button type="button" className="primary" disabled={busy === "save" || draft === task.yaml} onClick={() => void save()}>{busy === "save" ? "保存中…" : "保存"}</button></div>
+        <small className="hint">保存前会校验；生效方式和确认 agent 的提案一样，写入 agent-skills 并提交。</small></div>}
+      {draft === undefined && task.yaml && <details className="pending-panel"><summary><strong>定义</strong></summary><pre className="pending-summary">{task.yaml}</pre></details>}
+      <h3 className="list-group">最近运行</h3>
+      {!task.runs.length && <div className="empty">还没有运行过。</div>}
+      <div className="run-list">{task.runs.map(r => <details key={r.id} className={`run-item ${r.status}`} open={r === failed}>
+        <summary><RunPill status={r.status} /><time>{time(r.triggerAt)}</time><span className="hint">{TRIGGER_LABELS[r.trigger] ?? r.trigger}{tookText(r) ? ` · ${tookText(r)}` : ""}</span></summary>
+        {r.error && <LongText className="pending-summary error-text" text={r.error} />}
+        {r.output ? <LongText className="pending-summary" text={r.output} /> : !r.error && <p className="hint">没有输出。</p>}
+        {r.sessionId && <Link to={`/control/sessions/${segment(r.sessionId)}`} className="hint">打开这次运行的会话 ↗</Link>}
+      </details>)}</div>
+    </>}
+  </section>;
 }
 
 function App() {
@@ -309,7 +407,7 @@ function App() {
           setError("连接已失效，请重新连接；外网访问请先完成 Cloudflare Access 验证。");
         }, navigate, "/control/api/v1", store);
         active.current = instance; setServerVersion(access.version ?? "unknown"); setControl(instance);
-        if (!/^\/control\/(sessions(?:\/[^/]+)?|new)\/?$/.test(location.pathname)) navigate("/control/sessions");
+        if (!/^\/control\/(sessions(?:\/[^/]+)?|new|automations(?:\/[^/]+)?)\/?$/.test(location.pathname)) navigate("/control/sessions");
       } catch (e) { if (!cancelled) setError(explain(e)); }
       finally { client.dispose(); }
     })();
@@ -327,9 +425,12 @@ function App() {
 function Center({ control, path, serverVersion }: { control: ControlState; path: string; serverVersion: string }) {
   const state = useSyncExternalStore(control.subscribe, control.snapshot);
   let route: Route;
-  const match = path.match(/^\/control\/sessions\/([^/]+)\/?$/);
-  try { route = match ? { page: "detail", id: decodeURIComponent(match[1]) } : { page: path === "/control/new" ? "new" : "sessions" }; }
-  catch { route = { page: "sessions" }; }
+  const match = path.match(/^\/control\/sessions\/([^/]+)\/?$/), task = path.match(/^\/control\/automations(?:\/([^/]+))?\/?$/);
+  try {
+    route = match ? { page: "detail", id: decodeURIComponent(match[1]) }
+      : task ? { page: "automations", id: task[1] ? decodeURIComponent(task[1]) : undefined }
+      : { page: path === "/control/new" ? "new" : "sessions" };
+  } catch { route = { page: "sessions" }; }
   // Before paint: a cached detail replaces the previous page's state in the first visible frame.
   useLayoutEffect(() => { void control.open(route); }, [control, path]);
   useEffect(() => {
@@ -375,7 +476,8 @@ function Center({ control, path, serverVersion }: { control: ControlState; path:
     {(state.loading || state.syncing) && <div className="loading-bar" role="progressbar" aria-label="正在加载" />}
     <ActionView control={control} state={state} />
     {state.share && <SharePicker control={control} state={state} />}
-    {route.page === "sessions" ? <Sessions control={control} state={state} banners={banners} />
+    {route.page === "automations" ? route.id ? <AutomationPage key={route.id} id={route.id} writable={state.writable} /> : <Automations writable={state.writable} />
+      : route.page === "sessions" ? <Sessions control={control} state={state} banners={banners} />
       : route.page === "new" ? <NewSession control={control} state={state} banners={banners} />
         : <Detail key={route.id} control={control} state={state} id={route.id!} banners={banners} />}
   </div></About.Provider>;

@@ -257,3 +257,20 @@
 .dock :is(input, textarea):focus-visible { outline: 2px solid var(--accent); outline-offset: 0; }
 .new-form { padding-bottom: 0; }
 .form-dock { margin-bottom: 0; }
+/* Scheduled tasks (Automations, AutomationPage). */
+.automation-link { display: flex; align-items: center; gap: 4px; position: relative; padding-right: 28px; }
+.list-group { margin: 18px 4px 6px; font-size: .74rem; font-weight: 600; letter-spacing: .04em; color: var(--muted); cursor: default; }
+details > summary.list-group { cursor: pointer; }
+.automation-row .session-row-top .hint { font-size: .72rem; }
+.run-pill { margin-left: 0; }
+.row-end .run-pill { margin-right: 6px; }
+.run-list { display: grid; gap: 6px; }
+.run-item { border: 1px solid var(--line); border-radius: 12px; padding: 8px 10px; background: var(--soft); }
+.run-item.failed, .run-item.missed { border-color: color-mix(in srgb, var(--danger) 45%, var(--line)); }
+.run-item > summary { display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: .8rem; }
+.run-item > summary time { color: var(--muted); }
+.run-item .error-text { color: var(--danger); }
+.yaml-editor { width: 100%; box-sizing: border-box; margin-top: 8px; font: .78rem/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  border: 1px solid var(--line); border-radius: 10px; padding: 10px; background: var(--surface); color: inherit; resize: vertical; }
+.attention { color: var(--danger); }
+.session-row p.attention { color: var(--danger); }

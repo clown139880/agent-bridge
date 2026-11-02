@@ -223,7 +223,8 @@ export class Automations {
 
   get(id: string): Record<string, unknown> | undefined {
     const task = this.tasks.get(id);
-    return task && { ...this.summary(task), definition: task.definition ?? null, runs: this.runs(id, 20) };
+    return task && { ...this.summary(task), definition: task.definition ?? null, yaml: task.definition ? stringifyYaml(task.definition) : null,
+      runs: this.runs(id, 30) };
   }
 
   private summary(task: Automation): Record<string, unknown> {
@@ -482,7 +483,8 @@ export class Automations {
   // ---- proposals ------------------------------------------------------------
 
   /** An agent's change waits here until the human confirms it; nothing is written or scheduled before. */
-  propose(input: { action: "create" | "update" | "delete"; id: string; scope?: string; definition?: unknown; reason?: string }, proposedBy: string): AutomationProposal {
+  propose(input: { action: "create" | "update" | "delete"; id: string; scope?: string; definition?: unknown; reason?: string }, proposedBy: string,
+    announce = true): AutomationProposal {
     if (!SLUG.test(input.id)) throw new AutomationError(400, "invalid_id", "id must be a lowercase slug");
     const existing = this.tasks.get(input.id);
     if (input.action === "create" && existing) throw new AutomationError(409, "automation_exists", "automation already exists; propose an update");
@@ -503,7 +505,7 @@ export class Automations {
       VALUES(?,?,?,?,?,?,?,?,'pending',?)`).run(id, input.action, input.id, scope, definition ? JSON.stringify(definition) : null,
       existing?.definition ? JSON.stringify(existing.definition) : null, input.reason ?? null, proposedBy, now);
     const verb = { create: "新建", update: "修改", delete: "删除" }[input.action];
-    this.deps.store.createNotice({ id: `proposal:${id}`, ...this.options.operatorTarget, level: "alert", source: proposedBy,
+    if (announce) this.deps.store.createNotice({ id: `proposal:${id}`, ...this.options.operatorTarget, level: "alert", source: proposedBy,
       text: `🗓️ 定时任务提案：${verb} ${definition?.title ?? existing?.definition?.title ?? input.id}\n${proposedBy} 提出${input.reason ? `：${input.reason}` : ""}。在控制中心首页确认后才生效。` });
     return this.proposal(id)!;
   }
@@ -517,6 +519,22 @@ export class Automations {
     this.deps.store.db.prepare("UPDATE automation_proposals SET status='expired' WHERE status='pending' AND created_at<?").run(this.now() - PROPOSAL_TTL_MS);
     return (this.deps.store.db.prepare(`SELECT * FROM automation_proposals ${status ? "WHERE status=?" : ""} ORDER BY created_at DESC LIMIT 100`)
       .all(...(status ? [status] : [])) as Array<Record<string, unknown>>).map(proposalWire);
+  }
+
+  /**
+   * The human changing or deleting a task directly (Control Center): the same checks, write and commit as a
+   * confirmed proposal, in one step. `yaml` is the whole definition as the editor shows it.
+   */
+  change(id: string, action: "update" | "delete", yaml: string | undefined, by: string): AutomationProposal {
+    let definition: unknown;
+    if (action === "update") {
+      try { definition = parseYaml(yaml ?? ""); }
+      catch (error) { throw new AutomationError(400, "invalid_definition", `YAML: ${error instanceof Error ? error.message : String(error)}`); }
+    }
+    const proposal = this.propose({ action, id, definition, reason: "在控制中心直接修改" }, by, false);
+    const decided = this.decide(proposal.id, "allow", by);
+    if (decided.status !== "applied") throw new AutomationError(500, "automation_write_failed", decided.error ?? "write failed");
+    return decided;
   }
 
   /** The human's decision. Allowing writes the definition and commits it; the next reload schedules it. */

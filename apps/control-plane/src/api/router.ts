@@ -264,6 +264,11 @@ export class AgentControlApi {
       if(request.method==="POST"&&sub==="run"){const body=await jsonBody(request) as Record<string,unknown>;
         this.ok(response,{runId:automations.runNow(id,body.payload&&typeof body.payload==="object"?body.payload as Record<string,unknown>:{})},202);return;}
       if(request.method==="POST"&&(sub==="pause"||sub==="resume")){await jsonBody(request);this.ok(response,automations.setPaused(id,sub==="pause"));return;}
+      // The human editing or deleting a task directly; agents still propose (POST /automations/proposals).
+      if(request.method==="POST"&&(sub==="edit"||sub==="delete")){
+        if(!principal.write||!principal.id.startsWith("control:"))throw new ApiProblem(403,"forbidden","only the human edits a task directly; agents propose");
+        const body=await jsonBody(request) as Record<string,unknown>;
+        this.ok(response,automations.change(id,sub==="edit"?"update":"delete",string(body.yaml,"yaml",sub==="edit"),principal.id));return;}
       throw new ApiProblem(404,"not_found","endpoint not found");
     }catch(error){if(error instanceof AutomationError)throw new ApiProblem(error.status,error.code,error.message);throw error;}
   }

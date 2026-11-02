@@ -158,3 +158,16 @@ enabled: true
 - agent 型任务默认 pi + deepseek-v4-flash（部署配置）。
 - 定义和私人脚本放 agent-skills 仓库的 `automations/`。
 - agent 创建或修改任务必须经人确认。
+
+## 控制中心页面（0.7.66）
+
+`/control/automations` 列出所有任务，按要你做什么排序：
+1. 要处理：定义有误，或最近一次运行失败、错过，直接显示原因；
+2. 接下来：按下次运行时间；
+3. webhook 触发；
+4. 已暂停或未启用（折叠）。
+
+首页只留一行入口（“定时任务 · N 个 · M 个要处理”）和待确认的提案。点进任务看详情：最近 30 次运行（失败的默认展开，显示错误、输出和 agent 会话链接），可以立即运行、暂停、编辑、删除。
+
+编辑和删除是人直接改：`POST /api/v1/automations/{id}/edit {yaml}`、`POST /api/v1/automations/{id}/delete`，只接受人的 token。走的是和确认提案同一条路径（校验、写入 agent-skills、加锁提交），只是不再等确认，也不发提案通知。agent 仍然只能用 `automation_propose` 提案。
+

@@ -5,7 +5,7 @@ import { ConversationModel, type ConversationSnapshot, type EntryView, type View
 import { isLive, pendingId, segment, type Action, type AttachmentRef, type Envelope, type ModelInfo, type Page, type Pending,
   type Session, type SessionDetail, type SessionEvent, type Snapshot, type Worker } from "./api/types";
 
-export type Route = { page: "sessions" | "new" | "detail"; id?: string };
+export type Route = { page: "sessions" | "new" | "detail" | "automations"; id?: string };
 export interface Intent {
   path: string; body: Record<string, unknown>; key: string; receipt?: Action;
   submitting: boolean; uncertain: boolean; error?: string; navigateTo?: string; draftId?: string;
@@ -392,6 +392,8 @@ export class ControlState {
         if (generation !== this.generation) return;
         if (fresh && detail) { this.cursor = detail.streamCursor; this.freshCursor = true; this.seen.clear(); this.patch({ workers: detail.workers }); }
         this.remember();
+      } else if (route.page === "automations") {
+        // The automation pages read their own data.
       } else if (route.page === "new") {
         const result = await this.api.request<{ workers: Worker[] }>("/workers", { signal: this.scope.signal });
         if (generation === this.generation) this.patch({ workers: result.workers });

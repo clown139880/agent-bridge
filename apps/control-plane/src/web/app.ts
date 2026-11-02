@@ -24,7 +24,7 @@ export function createControlWeb(directory = DEFAULT_DIR) {
   app.on(["GET", "HEAD"], "/control/", c => c.redirect("/control/sessions", 302));
   app.on(["GET", "HEAD"], "/control/*", async c => {
     const raw = c.req.path.slice("/control/".length);
-    const page = /^(?:login|new|sessions(?:\/[^/]+)?)\/?$/.test(raw);
+    const page = /^(?:login|new|sessions(?:\/[^/]+)?|automations(?:\/[^/]+)?)\/?$/.test(raw);
     let relative: string;
     try { relative = decodeURIComponent(raw); }
     catch { return c.text("Invalid path", 400); }
