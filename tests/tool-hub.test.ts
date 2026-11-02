@@ -81,7 +81,7 @@ test("a review tool the reviewer allows runs at once; one it hands over waits fo
     const result = await f.hub.call("echo2.echo", { text: "ok" }, "agent:pi") as { content: Array<{ text: string }> };
     assert.equal(result.content[0]!.text, "echo:ok");
     assert.deepEqual(f.hub.approvals().map((row) => [row.status, row.decidedBy]), [["allowed", "review"]]);
-    assert.match(f.notices[0]!, /已自动放行/);
+    assert.equal(f.notices.length, 0, "an automatic allow tells nobody");
     const advised = f.hub.call("echo2.echo", { text: "inject" }, "agent:pi");
     await new Promise((resolve) => setTimeout(resolve, 50));
     assert.equal(f.hub.approvals("pending").length, 1, "only the human denies");

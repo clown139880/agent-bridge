@@ -49,6 +49,7 @@ turn 运行时显示“正在输入”，结束后把最后一条助手消息作
 - 在房间（或线程）里发消息时，这个位置自上一条消息以来（最多 12 小时、5 条）收到的 notice 会附在用户消息前面，标明“不是用户写的”。这样直接回一句“要”，会话也知道指的是哪条通知。代表当前会话自己的 notice 不附。
 - 目标为 `app:<名字>` 的 notice 不经 Matrix，由 MQTT 发布器推给 App（`agent.notice`，见 [MQTT 业务消息 v1](message-events-v1.zh.md)）。HAL 上的生命周期通知用 `CONTROL_NOTICE_TARGET=app:operator`。
 - `CONTROL_NOTICE_TARGET` 指向房间（`matrix:!room:server`）时，生命周期通知发到该房间：每 60 秒窗口内只立即发第一条，其余合并到下一条里；部署和更新结果（`🟢 控制面已启动 · 版本 …`、`🔄 更新完成：…`）、记忆审核结果从不合并。
+- `CONTROL_FLEET_NOTICE_TARGET`（0.7.65）设了时，worker 上线、离线和 Bridge 更新（`bridge.*`、`bridge_update.*`）发到这里（比如运维群），其余生命周期通知照旧发 `CONTROL_NOTICE_TARGET`。“🔄 更新完成”也随之在这里。
 
 ## 状态与可靠性
 

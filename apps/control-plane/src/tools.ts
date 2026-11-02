@@ -197,8 +197,6 @@ export class ToolHub {
         .catch((error: unknown) => ({ decision: "human" as const, reason: `审核失败：${error instanceof Error ? error.message : String(error)}` }));
       if (verdict.decision === "allow") {
         this.record(name, args, caller, risk, "allowed", "review", verdict.reason);
-        this.options.notify?.(`🤖 已自动放行：${name}
-${verdict.reason}`, "silent");
         const { client } = await this.connect(server);
         return client.callTool({ name: tool, arguments: args }, undefined, { timeout: CALL_TIMEOUT_MS, signal });
       }

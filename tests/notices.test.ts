@@ -105,3 +105,18 @@ test("known secret values never reach stored notices or events", async () => {
     assert.equal(decodeEventBody(row.body).output, "API_KEY=‹secret:shared/x#API_KEY›");
   } finally { setRedactedSecrets({}); store.db.close(); }
 });
+
+test("with a fleet room, workers coming and going and Bridge updates go there; the rest stays in the operator's room", async () => {
+  const path = join(tmpdir(), `notices-${randomUUID()}.sqlite`), store = new Store(path);
+  const control = new ControlPlane(store, { host: "127.0.0.1", port: 0, version: "9.9.9",
+    noticeTarget: { connector: "app", roomId: "operator", threadId: "" }, fleetNoticeTarget: { connector: "matrix", roomId: "!ops:example.org", threadId: "" } });
+  const internals = control as unknown as Internals & { notifyOperator(event: Record<string, unknown>): void };
+  try {
+    internals.notifyOperator({ type: "bridge_update.status", machine_id: "hal", phase: "completed", current_version: "1", latest_version: "2" });
+    internals.notifyOperator({ type: "bridge.offline", machine_id: "gqx" });
+    internals.notifyOperator({ type: "memory_review.status", status: "applied", writer: "codex" });
+    const rows = store.db.prepare("SELECT room_id, text FROM notices ORDER BY created_at").all() as Array<{ room_id: string; text: string }>;
+    assert.deepEqual(rows.map((row) => [row.room_id, row.text.slice(0, 6)]),
+      [["!ops:example.org", "🔄 更新完"], ["!ops:example.org", "🔴 gqx"], ["operator", "📝 记忆审"]]);
+  } finally { await control.stop(); store.db.close(); rmSync(path, { force: true }); }
+});

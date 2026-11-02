@@ -93,6 +93,8 @@ export const config = {
   } : undefined,
   // The operator's chat room for lifecycle notices, e.g. matrix:!room:server; a chat connector posts them.
   noticeTarget: noticeTarget(process.env.CONTROL_NOTICE_TARGET),
+  /** Workers going online/offline and Bridge updates, when they belong in another room (an ops room). */
+  fleetNoticeTarget: noticeTarget(process.env.CONTROL_FLEET_NOTICE_TARGET),
   // Dorothy bridge-events webhook. Both must be set to enable delivery.
   webhook: process.env.DOROTHY_WEBHOOK_URL && process.env.DOROTHY_WEBHOOK_SECRET ? {
     url: process.env.DOROTHY_WEBHOOK_URL,
@@ -177,6 +179,6 @@ function conversationSetupConfig(): { workerId: string; workspace: string } | un
 function noticeTarget(value: string | undefined): NoticeTarget | undefined {
   if (!value) return undefined;
   const target = parseNoticeTarget(value);
-  if (!target) throw new Error("CONTROL_NOTICE_TARGET must be <connector>:<room>[#<thread>]");
+  if (!target) throw new Error("CONTROL_NOTICE_TARGET / CONTROL_FLEET_NOTICE_TARGET must be <connector>:<room>[#<thread>]");
   return target;
 }

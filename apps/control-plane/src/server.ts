@@ -76,6 +76,8 @@ export class ControlPlane {
   private readonly webhook: WebhookNotifier;
   /** Lifecycle events as notices in the operator's chat room (CONTROL_NOTICE_TARGET). */
   private operatorNotices?: OperatorNotices;
+  /** Bridge lifecycle (online, offline, updates) when it has its own room. */
+  private fleetNotices?: OperatorNotices;
   private readonly automations?: Automations;
   private readonly toolHub?: ToolHub;
   private readonly secrets?: SecretStore;
@@ -129,6 +131,8 @@ export class ControlPlane {
       webhook?: WebhookOptions;
       /** The operator's room for lifecycle notices, e.g. `matrix:!room:server`. */
       noticeTarget?: NoticeTarget;
+      /** Where workers going online/offline and Bridge updates go instead, e.g. an ops room. */
+      fleetNoticeTarget?: NoticeTarget;
       /** Schedules and webhooks; failures and proposals go to `noticeTarget`, else the App. */
       automations?: Omit<AutomationOptions, "operatorTarget">;
       secrets?: SecretStoreOptions;
@@ -178,6 +182,7 @@ export class ControlPlane {
       actionsMs: 86_400_000, attachmentsMs: 7 * 86_400_000,
     });
     if (options.noticeTarget) this.operatorNotices = new OperatorNotices(this.controlStore, options.noticeTarget);
+    if (options.fleetNoticeTarget) this.fleetNotices = new OperatorNotices(this.controlStore, options.fleetNoticeTarget);
     this.conversations = new Conversations(this.controlStore, this.registry, agentMemory, options.conversationSetup);
     this.controlStore.relayRoom = (sessionId) => this.conversations.relayRoom(sessionId);
     if (options.messages) this.messages = new AgentMessagePublisher(store, this.controlStore, options.messages,
@@ -283,7 +288,7 @@ export class ControlPlane {
   /** Report a lifecycle event to the operator: the legacy webhook and/or the operator's room. */
   private notifyOperator(event: OperatorEvent): void {
     this.webhook.notify(event);
-    try { this.operatorNotices?.notify(event); }
+    try { (this.fleetNotices && /^bridge(\.|_update\.)/.test(event.type) ? this.fleetNotices : this.operatorNotices)?.notify(event); }
     catch (error) { log.warn({ error, event: event.type }, "Unable to queue an operator notice"); }
   }
 
@@ -833,7 +838,7 @@ export class ControlPlane {
       .all(sessionId, except) as Array<{ id: string; machine_id: string; request_json: string }>;
     for (const row of rows) {
       const request = JSON.parse(row.request_json) as ApprovalRequestMessage;
-      if (request.choices?.includes("allow")) this.resolveByReview(row.machine_id, { ...request, approvalId: row.id, sessionId }, "allow", "本会话已由你授权全部允许", true);
+      if (request.choices?.includes("allow")) this.resolveByReview(row.machine_id, { ...request, approvalId: row.id, sessionId }, "allow", "本会话已由你授权全部允许");
     }
   }
 
@@ -852,7 +857,8 @@ export class ControlPlane {
   }
 
   /** Answer an approval for the reviewer, as the human would through /api/v1, and say so quietly. */
-  private resolveByReview(machineId: string, message: ApprovalRequestMessage, choice: "allow" | "deny", reason: string, quiet = false): boolean {
+  /** Answer an approval for the agent. Automatic allows are only logged: the human is told about what needs them (clown 2026-11-02). */
+  private resolveByReview(machineId: string, message: ApprovalRequestMessage, choice: "allow" | "deny", reason: string): boolean {
     try {
       const created = this.controlStore.createAction({ principal: "system:review", key: `review:${message.approvalId}`, method: "POST",
         path: `/api/v1/approvals/${message.approvalId}/decision`, body: { choice }, kind: "resolve_approval", machineId, sessionId: message.sessionId });
@@ -860,11 +866,6 @@ export class ControlPlane {
         sessionId: message.sessionId, approvalId: message.approvalId, choice });
     } catch (error) { log.warn({ error, approvalId: message.approvalId }, "Reviewed approval could not be sent; asking the human"); return false; }
     log.info({ approvalId: message.approvalId, choice, reason, summary: message.summary.slice(0, 200) }, "Approval decided by the reviewer");
-    // Rule-based pass-throughs (the library's and memory's own tools) stay in the log; only the reviewer's judgments notify.
-    if (quiet) return true;
-    const operator = this.options.noticeTarget ?? { connector: "app", roomId: "operator", threadId: "" };
-    this.controlStore.createNotice({ id: `review:${message.approvalId}`, ...operator, level: "silent", source: "review", sessionId: message.sessionId,
-      text: `${choice === "allow" ? "🤖 已自动放行" : "🤖 已自动拒绝"}：${message.summary.slice(0, 120)}\n${reason}` });
     return true;
   }
 
@@ -884,10 +885,10 @@ export class ControlPlane {
     // otherwise the human sees it with the reviewer's analysis and may let similar ones through from now on.
     // The human let this session do anything (“本会话全部允许”): nothing it asks reaches anyone.
     if (first && message.choices.includes("allow") && this.controlStore.sessionTrusted(message.sessionId)
-      && this.resolveByReview(machineId, message, "allow", "本会话已由你授权全部允许", true)) return;
+      && this.resolveByReview(machineId, message, "allow", "本会话已由你授权全部允许")) return;
     if (first && !reviewed && this.approvalReviewer && message.choices.includes("allow")) {
       const tool = toolOf(message.kind, message.summary);
-      if (alreadyGated(tool) && this.resolveByReview(machineId, message, "allow", "中央工具库和记忆的调用由 Control Plane 自己按档位把关，不再重复确认", true)) return;
+      if (alreadyGated(tool) && this.resolveByReview(machineId, message, "allow", "中央工具库和记忆的调用由 Control Plane 自己按档位把关，不再重复确认")) return;
       // Answering another session's approval is judged by what that approval asks.
       let answering: string | undefined, level = boundary({ tool, summary: message.summary, choices: message.choices });
       if (/^mcp__bridge__(approve|answer)$/.test(tool)) {
@@ -895,7 +896,7 @@ export class ControlPlane {
         const pending = id ? this.controlStore.pending(id) : undefined;
         answering = pending ? String(pending.request.summary ?? "") : "";
         const targetTool = toolOf(pending?.request.kind, answering);
-        if (pending && alreadyGated(targetTool) && this.resolveByReview(machineId, message, "allow", "被答复的是中央工具库/记忆的调用，本来就免确认", true)) return;
+        if (pending && alreadyGated(targetTool) && this.resolveByReview(machineId, message, "allow", "被答复的是中央工具库/记忆的调用，本来就免确认")) return;
         const targetLevel = pending ? boundary({ tool: targetTool, summary: answering, choices: (pending.request.choices as string[] | undefined) ?? ["allow"] }) : "absolute";
         if (targetLevel === "absolute" || (targetLevel === "hard" && level !== "absolute")) level = targetLevel;
       }
