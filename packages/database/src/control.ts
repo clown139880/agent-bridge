@@ -267,6 +267,18 @@ export class AgentControlStore {
     return pending ? { type: `${pending.kind}.upserted`, sessionId: pending.sessionId, payload: this.pendingWire(pending) } : undefined;
   }
 
+  /** Whether the human let this session do anything without asking. */
+  sessionTrusted(sessionId: string): boolean {
+    return Boolean(this.db.prepare("SELECT 1 FROM session_trust WHERE session_id=?").get(sessionId));
+  }
+
+  /** Let a session do anything (`by` is the human principal), or take that back. */
+  setSessionTrust(sessionId: string, by: string | null): void {
+    if (by) this.db.prepare("INSERT OR IGNORE INTO session_trust(session_id,granted_by,granted_at) VALUES(?,?,?)").run(sessionId, by, Date.now());
+    else this.db.prepare("DELETE FROM session_trust WHERE session_id=?").run(sessionId);
+    markChanged(this.db, "session", sessionId);
+  }
+
   /** The Bridge version a machine last registered with. */
   machineBridgeVersion(machineId: string): string | undefined {
     const row = this.db.prepare("SELECT bridge_version FROM machines WHERE id=?").get(machineId) as { bridge_version: string | null } | undefined;
@@ -947,6 +959,7 @@ export class AgentControlStore {
       title:row.title?String(row.title):null,promptSummary,
       projectName:String(row.project_name),workspace:String(row.project_path),status:String(row.activity_status??"unknown"),
       ...(projectIdentity?{projectIdentity}:{}),
+      ...(this.sessionTrusted(String(row.id))?{trusted:true}:{}),
       activeTurnId:row.active_turn_id?String(row.active_turn_id):null,lastTurnStatus:row.last_turn_status?String(row.last_turn_status):null,
       pendingApprovalCount:count("approval"),pendingUserInputCount:count("user_input"),latestRun:run,
       createdAt:Number(row.created_at),updatedAt:Number(row.updated_at??row.created_at),
@@ -981,16 +994,7 @@ export class AgentControlStore {
       createdAt:action.createdAt,updatedAt:action.updatedAt};
   }
 
-  private pendingWire(row: PendingRow): Record<string,unknown> {
-    // `id` is the generic identity key clients use for pending rows (stream upserts,
-    // list dedup, resolve). Keep approvalId/requestId too for callers that read them.
-    const common={id:row.id,sessionId:row.sessionId,runId:row.runId,turnId:row.turnId,
-      workerId:buildWorkerId((row.agentType??"codex-cli") as AgentType,row.machineId),
-      status:row.status,requestedAt:row.requestedAt,resolvedAt:row.resolvedAt};
-    return row.kind==="approval"?{approvalId:row.id,...common,kind:row.request.kind,summary:row.request.summary,
-      choices:row.request.choices,decision:row.decision?.choice??null}
-      :{requestId:row.id,...common,questions:row.request.questions,answers:row.decision?.answers??null};
-  }
+  private pendingWire(row: PendingRow): Record<string,unknown> { return pendingWire(row); }
 
   private workerWire(row:Record<string,unknown>,agentType:AgentType,label:string):Record<string,unknown>{
     const machineId=String(row.id),capabilities=parseJson<string[]>(row.capabilities,[]),features=parseJson<string[]>(row.features_json,[]);
@@ -1010,4 +1014,24 @@ export class AgentControlStore {
     if(capabilities.includes("grok"))agents.push({agentType:"grok",label:"Grok"});
     return agents;
   }
+}
+
+/**
+ * A pending request as every client sees it, on the stream and over REST alike, so a live card never
+ * lacks what a reload shows. `id` is the generic identity key (stream upserts, list dedup, resolve);
+ * approvalId/requestId stay for callers that read them. Two choices are the Control Plane's own, both
+ * answered as allow: “allow-similar” teaches the reviewer the class of call, “allow-session-all” lets
+ * the session do anything from now on.
+ */
+export function pendingWire(row: PendingRow): Record<string,unknown> {
+  const common={id:row.id,sessionId:row.sessionId,runId:row.runId,turnId:row.turnId,
+    workerId:buildWorkerId((row.agentType??"codex-cli") as AgentType,row.machineId),
+    status:row.status,requestedAt:row.requestedAt,resolvedAt:row.resolvedAt};
+  if(row.kind==="approval"){
+    const choices=Array.isArray(row.request.choices)?row.request.choices as string[]:[];
+    const extra=choices.includes("allow")?[...(row.request.similar?["allow-similar"]:[]),"allow-session-all"]:[];
+    return {approvalId:row.id,...common,kind:row.request.kind,summary:row.request.summary,choices:[...choices,...extra],
+      ...(row.request.analysis?{analysis:row.request.analysis}:{}),decision:row.decision?.choice??null};
+  }
+  return {requestId:row.id,...common,questions:row.request.questions,blocking:row.request.blocking!==false,answers:row.decision?.answers??null};
 }

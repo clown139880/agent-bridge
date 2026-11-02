@@ -93,10 +93,11 @@ const submitWithKeyboard = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
 
 // Never a real option label: the API rejects empty/control-only answers.
 const OTHER = "\0other";
-const choiceLabels: Record<string, string> = { allow: "允许", deny: "拒绝", "allow-session": "本会话始终允许", "allow-always": "永久允许", "allow-similar": "允许类似的操作" };
+const choiceLabels: Record<string, string> = { allow: "允许", deny: "拒绝", "allow-session": "本会话始终允许", "allow-always": "永久允许", "allow-similar": "允许类似的操作", "allow-session-all": "本会话全部允许" };
 /** What a wider choice lets through besides this one call; shown inside its button. */
 const choiceNotes: Record<string, string> = {
   "allow-similar": "放行这一条，并让审核员记住这类操作，以后自动放行",
+  "allow-session-all": "放行这一条，这个会话之后的所有操作（包括超出边界的）都不再问你；可在会话里撤销",
   "allow-session": "放行这个工具在本会话的所有后续调用，不只这一条",
   "allow-always": "这台机器之后的所有会话都放行（写入 Claude 的 settings.json）",
 };
@@ -662,6 +663,8 @@ function Detail({ control, state, id, banners }: { control: ControlState; state:
       {state.syncing ? <p className="sync-note" role="status"><span className="spinner" aria-hidden="true" />正在加载最新消息…</p>
         : session?.status === "active" && <p className="sync-note working" role="status"><AgentIcon agent={session.agent} workerId={session.workerId} size={14} />正在工作<span className="dots" aria-hidden="true"><i /><i /><i /></span></p>}
       {/* At the end of the transcript, beside the composer the page follows, not above the history. */}
+      {session?.trusted && <p className="sync-note" role="status">本会话已全部允许，它的操作不再问你。
+        <button type="button" className="quiet" disabled={!state.writable} onClick={() => { haptic("tick"); void control.untrust(id); }}>撤销</button></p>}
       {session && (pendingCount > 0 || blocked) && <aside className="pending-panel" ref={pendingPanel}><strong>等待你处理</strong>
         {state.approvals.map(p => <ApprovalCard key={pendingId(p)} control={control} pending={p} disabled={!canResolve} />)}
         {state.inputs.map(p => <InputCard key={pendingId(p)} control={control} state={state} pending={p} disabled={!canResolve} />)}

@@ -1,6 +1,6 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { NOTICE_LEVELS, type Store, type AgentControlStore, type PendingRow, type ActionRow, type NoticeLevel } from "@agent-bridge/database";
+import { NOTICE_LEVELS, pendingWire, type Store, type AgentControlStore, type PendingRow, type ActionRow, type NoticeLevel } from "@agent-bridge/database";
 import { parseWorkerId, workerId as buildWorkerId, type AgentType, type ActionKind, type ApprovalChoice, type ControlToBridgeMessage } from "@agent-bridge/protocol";
 import { BridgeRegistry } from "../bridge-registry.js";
 import type { MemoryReviewRoutes } from "../memory-review.js";
@@ -41,6 +41,8 @@ interface ApiOptions {
   toolHub?: ToolHub;
   /** A human answered “allow similar”: learn the class of call so the reviewer allows it next time. */
   onAllowSimilar?: (pending: PendingRow) => void;
+  /** A human let the session do anything: its other pending approvals are allowed too. */
+  onTrustSession?: (pending: PendingRow, by: string) => void;
   /** Schedules, webhooks and their proposals (/api/v1/automations). */
   automations?: Automations;
   /** Chat connectors' room/thread → session bindings (/api/v1/conversations). */
@@ -55,18 +57,7 @@ function actionJson(action: ActionRow): Record<string,unknown> {
     turnId:action.turnId,resolvedAction:action.resolvedAction,error:action.error?{error:{...action.error,requestId:action.actionId}}:null,
     createdAt:action.createdAt,updatedAt:action.updatedAt};
 }
-function pendingJson(row: PendingRow): Record<string,unknown> {
-  // `id` is the generic identity key every client uses for pending rows (list dedup,
-  // stream upserts, resolve). Keep approvalId/requestId too for callers that read them.
-  const common={id:row.id,sessionId:row.sessionId,runId:row.runId,turnId:row.turnId,
-    workerId:buildWorkerId((row.agentType??"codex-cli") as AgentType,row.machineId),
-    status:row.status,requestedAt:row.requestedAt,resolvedAt:row.resolvedAt};
-  // “allow-similar” is answered as allow and teaches the reviewer the class of call it belongs to.
-  if(row.kind==="approval")return {approvalId:row.id,...common,kind:row.request.kind,summary:row.request.summary,
-    choices:row.request.similar&&Array.isArray(row.request.choices)?[...row.request.choices,"allow-similar"]:row.request.choices,
-    ...(row.request.analysis?{analysis:row.request.analysis}:{}),decision:row.decision?.choice??null};
-  return {requestId:row.id,...common,questions:row.request.questions,blocking:row.request.blocking!==false,answers:row.decision?.answers??null};
-}
+const pendingJson=pendingWire;
 // Resume hint for a turn: lets the bridge revive a session it no longer holds
 // (Claude subprocess killed by a restart). workspace is the cwd to relaunch in;
 // nativeSessionId is the agent's own resumable id. Only emitted when both the
@@ -145,7 +136,7 @@ export class AgentControlApi {
       if(request.method==="GET"&&detail){this.sessionDetail(url,response,decodeURIComponent(detail[1]!));return true;}
       const view=url.pathname.match(/^\/api\/v1\/sessions\/([^/]+)\/(view|view\/changes|view\/entries\/[^/]+|events\/[^/]+)$/);
       if(request.method==="GET"&&view){this.sessionView(url,response,decodeURIComponent(view[1]!),view[2]!);return true;}
-      const session=url.pathname.match(/^\/api\/v1\/sessions\/([^/]+)(?:\/(runs|events|turns|interrupt))?$/);
+      const session=url.pathname.match(/^\/api\/v1\/sessions\/([^/]+)(?:\/(runs|events|turns|interrupt|untrust))?$/);
       if(session){await this.sessionRoute(request,response,url,principal,decodeURIComponent(session[1]!),session[2]);return true;}
       const approval=url.pathname.match(/^\/api\/v1\/approvals\/([^/]+)(?:\/(decision))?$/);
       if(approval){await this.pendingRoute("approval",request,response,principal,decodeURIComponent(approval[1]!),approval[2]);return true;}
@@ -471,6 +462,11 @@ export class AgentControlApi {
     }
     if(request.method==="POST"&&action==="turns"){await this.submitTurn(request,response,principal,session);return;}
     if(request.method==="POST"&&action==="interrupt"){await this.interrupt(request,response,principal,session);return;}
+    // Take back “allow everything in this session” (granted by answering an approval with allow-session-all).
+    if(request.method==="POST"&&action==="untrust"){
+      if(!principal.write||!principal.id.startsWith("control:"))throw new ApiProblem(403,"forbidden","only the human changes a session's trust");
+      this.store.setSessionTrust(sessionId,null);this.ok(response,{sessionId,trusted:false});return;
+    }
     throw new ApiProblem(404,"not_found","endpoint not found");
   }
 
@@ -571,6 +567,10 @@ export class AgentControlApi {
     if(kind==="approval"){
       let choice=string(body.choice,"choice",true)!;const choices=pending.request.choices;
       if(choice==="allow-similar"&&pending.request.similar){this.options.onAllowSimilar?.(pending);choice="allow";}
+      if(choice==="allow-session-all"){
+        if(!principal.id.startsWith("control:"))throw new ApiProblem(403,"forbidden","only the human lets a session do anything");
+        this.store.setSessionTrust(pending.sessionId,principal.id);this.options.onTrustSession?.(pending,principal.id);choice="allow";
+      }
       if(!Array.isArray(choices)||!choices.includes(choice))throw new ApiProblem(400,"invalid_choice","choice is not offered",false,{choices});
       const created=this.createAction(principal,key,path,body,"resolve_approval",pending.machineId,pending.sessionId);
       if(!this.store.reservePending(id,created.action.actionId)){

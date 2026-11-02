@@ -207,6 +207,7 @@ export class ControlPlane {
       readToken: options.controlApiReadToken, writeToken: options.controlApiWriteToken, bridgeToken: options.bridgeToken,
       agents, memoryReviews: this.memoryReviews, conversations: this.conversations, automations: this.automations, toolHub: this.toolHub,
       onAllowSimilar: (pending) => this.learnFrom(pending),
+      onTrustSession: (pending) => this.allowWaiting(pending.sessionId, pending.id),
       sseKeepaliveMs: options.sse?.keepaliveMs ?? 15_000,
       ssePollMs: options.sse?.pollMs ?? 2_000, sseMaxBackpressure: options.sse?.maxBackpressure ?? 3,
       actionTimeoutMs: options.sse?.actionTimeoutMs ?? 30_000,
@@ -826,6 +827,16 @@ export class ControlPlane {
   }
 
   /** “允许类似的操作”: turn the allowed call into a rule the reviewer applies from now on. Absolute-boundary calls never become rules. */
+  /** A session just trusted: allow what else it is waiting on, as the next ones will be. */
+  private allowWaiting(sessionId: string, except: string): void {
+    const rows = this.store.db.prepare("SELECT id,machine_id,request_json FROM pending_requests WHERE session_id=? AND kind='approval' AND status='pending' AND id<>?")
+      .all(sessionId, except) as Array<{ id: string; machine_id: string; request_json: string }>;
+    for (const row of rows) {
+      const request = JSON.parse(row.request_json) as ApprovalRequestMessage;
+      if (request.choices?.includes("allow")) this.resolveByReview(row.machine_id, { ...request, approvalId: row.id, sessionId }, "allow", "本会话已由你授权全部允许", true);
+    }
+  }
+
   private learnFrom(pending: PendingRow): void {
     const summary = String(pending.request.summary ?? ""), what = String((pending.request.analysis as { what?: string } | undefined)?.what ?? "");
     const tool = toolOf(pending.request.kind, summary);
@@ -871,6 +882,9 @@ export class ControlPlane {
     const first = !this.controlStore.pending(message.approvalId);
     // Every first request is reviewed before anyone is asked. Allowed or denied, it never reaches the human;
     // otherwise the human sees it with the reviewer's analysis and may let similar ones through from now on.
+    // The human let this session do anything (“本会话全部允许”): nothing it asks reaches anyone.
+    if (first && message.choices.includes("allow") && this.controlStore.sessionTrusted(message.sessionId)
+      && this.resolveByReview(machineId, message, "allow", "本会话已由你授权全部允许", true)) return;
     if (first && !reviewed && this.approvalReviewer && message.choices.includes("allow")) {
       const tool = toolOf(message.kind, message.summary);
       if (alreadyGated(tool) && this.resolveByReview(machineId, message, "allow", "中央工具库和记忆的调用由 Control Plane 自己按档位把关，不再重复确认", true)) return;
@@ -900,7 +914,10 @@ export class ControlPlane {
       return;
     }
     const analysis = this.approvalAnalyses.get(message.approvalId);
-    if (analysis || this.approvalLessons) message = { ...message, ...(analysis ? { analysis } : {}), ...(this.approvalLessons && message.choices.includes("allow") ? { similar: true } : {}) } as typeof message;
+    // “Allow similar” is offered only where a rule can be learned: never behind the absolute boundary.
+    const learnable = Boolean(this.approvalLessons && message.choices.includes("allow")
+      && boundary({ tool: toolOf(message.kind, message.summary), summary: message.summary, choices: message.choices }) !== "absolute");
+    if (analysis || learnable) message = { ...message, ...(analysis ? { analysis } : {}), ...(learnable ? { similar: true } : {}) } as typeof message;
     this.controlStore.upsertApproval(machineId, message);
     if (first) this.notifySession("approval", message.sessionId, message.summary);
     this.store.updateSessionStatus(message.sessionId, "blocked");

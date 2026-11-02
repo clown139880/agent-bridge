@@ -458,7 +458,7 @@ export class MatrixConnector {
     const kind = item.type === "approval.upserted" ? "approval" : "user_input";
     if (kind === "approval") {
       const names: Record<string, string> = { allow: "允许", deny: "拒绝", "allow-session": "本会话允许整个工具", "allow-always": "永久允许整个工具",
-        "allow-similar": "允许类似的操作（以后自动放行）" };
+        "allow-similar": "允许类似的操作（以后自动放行）", "allow-session-all": "本会话全部允许（之后都不再问）" };
       const choices = (row.choices ?? []) as string[];
       const risk: Record<string, string> = { low: "🟢 低", medium: "🟡 中", high: "🔴 高" };
       const analysis = row.analysis as Json | undefined;

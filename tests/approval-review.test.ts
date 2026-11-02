@@ -48,6 +48,31 @@ test("a reviewed approval is answered for the agent and never shown; one the rev
     assert.equal(control.controlStore.pending("a3")?.status, "pending", "an absolute-boundary call is only analysed");
     assert.equal(seen.find((r) => r.summary === "Bash git push")?.boundary, "absolute");
     assert.equal(seen.find((r) => r.summary === "Bash make thing")?.learned, "- 规则 A", "learned rules reach the reviewer");
+    assert.equal(control.controlStore.pending("a3")?.request.similar, undefined, "nothing can be learned behind the absolute boundary");
+
+    // The live stream shows what a reload shows: the analysis and every choice.
+    const { pendingWire } = await import("../packages/database/src/index.js");
+    const live = pendingWire(control.controlStore.pending("a2")!);
+    assert.deepEqual([live.analysis, live.choices], [{ what: "跑构建", risk: "medium", reason: "拿不准" }, ["allow", "deny", "allow-similar", "allow-session-all"]]);
+    assert.deepEqual(pendingWire(control.controlStore.pending("a3")!).choices, ["allow", "deny", "allow-session-all"]);
+
+    // “本会话全部允许” on one approval allows the others waiting, and every later one, absolute or not.
+    const base = `http://127.0.0.1:${control.http.address().port}/api/v1`;
+    const post = (path: string, body: unknown) => fetch(`${base}${path}`, { method: "POST", headers: { authorization: "Bearer w",
+      "content-type": "application/json", "idempotency-key": randomUUID() }, body: JSON.stringify(body) });
+    assert.equal((await post("/approvals/a2/decision", { choice: "allow-session-all" })).status, 202);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const answered = () => sent.filter((m) => m.type === "action.resolve_approval").map((m) => [m.approvalId, m.choice]);
+    assert.deepEqual(answered().map(String).sort(), ["a1,allow", "a2,allow", "a3,allow"], "the waiting absolute one is allowed too");
+    await control.handleBridgeMessage("hal", { type: "approval_request", sessionId: "s", approvalId: "a4", kind: "command", summary: "Bash git push --force", choices: ["allow", "deny"] });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.deepEqual(answered().at(-1), ["a4", "allow"]);
+    assert.equal(seen.some((r) => r.summary.includes("--force")), false, "a trusted session's calls skip the reviewer");
+    assert.equal(control.controlStore.session("s").trusted, true);
+    assert.equal((await post("/sessions/s/untrust", {})).status, 200);
+    await control.handleBridgeMessage("hal", { type: "approval_request", sessionId: "s", approvalId: "a5", kind: "command", summary: "Bash git push", choices: ["allow", "deny"] });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(control.controlStore.pending("a5")?.status, "pending", "taken back, it asks again");
   } finally { await control.stop(); store.db.close(); rmSync(path, { force: true }); }
 });
 

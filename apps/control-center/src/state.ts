@@ -511,6 +511,13 @@ export class ControlState {
     if (!visible) { this.remember(); this.scope.abort(); this.syncStream(); }
     else { this.markRead(); void this.open(this.state.route, false); }
   }
+  /** Take back “allow everything in this session”. */
+  async untrust(sessionId: string) {
+    try {
+      await this.api.request(`/sessions/${encodeURIComponent(sessionId)}/untrust`, { body: {} });
+      if (this.state.session?.sessionId === sessionId) this.patch({ session: { ...this.state.session, trusted: false } });
+    } catch (error) { this.patch({ error: explain(error) }); }
+  }
   async submit(path: string, body: Record<string, unknown>, draftId?: string) {
     const old = this.state.intent;
     if (!this.state.writable || old && (old.submitting || old.uncertain || old.receipt?.status === "accepted")) return;

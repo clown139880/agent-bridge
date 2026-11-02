@@ -37,6 +37,10 @@ export function migrateDatabase(db: DatabaseSync): void {
     CREATE TABLE IF NOT EXISTS schema_migrations (
       version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL
     );
+    -- Sessions the human let do anything: every approval they ask is allowed (docs/approval-permissions.zh.md).
+    CREATE TABLE IF NOT EXISTS session_trust (
+      session_id TEXT PRIMARY KEY, granted_by TEXT NOT NULL, granted_at INTEGER NOT NULL
+    );
   `);
 
   // Version 0 captures compatibility upgrades from older pre-versioned schemas through 0.4.2.
