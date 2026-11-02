@@ -25,9 +25,10 @@ function fixture(reviewer?: (request: { tool: string; args: Record<string, unkno
     transport: { command: ${process.execPath}, args: [${ECHO}] }
     risk: { review: ["*"] }
   web: { title: builtin, transport: { builtin: web }, pinned: [_global] }
+  decide: { title: 判定, transport: { builtin: decide } }
 `);
   const store = new Store(":memory:"), notices: string[] = [];
-  const secrets = { substitute: async (text: string) => text.replace("${GREETING}", "hi-") } as unknown as SecretStore;
+  const secrets = { substitute: async (text: string) => text.replace("${GREETING}", "hi-"), value: async (key: string) => `${key}-value` } as unknown as SecretStore;
   // As the real reviewer does: its deny reaches the human as advice.
   const hub = new ToolHub(store.db, { registry, secrets, notify: (text) => notices.push(text),
     reviewer: reviewer && (async (request) => { const verdict = await reviewer(request); return advised(verdict.decision, verdict.reason); }) });
@@ -107,4 +108,26 @@ test("web search routes by what is asked", async () => {
   assert.equal(classify("上海今天天气"), "realtime");
   assert.equal(classify("比特币今天为什么跌"), "news");
   assert.equal(classify("Binance hack 在 X 上的讨论"), "x");
+});
+
+test("decide answers typed questions through System One, and says unavailable instead of guessing", async () => {
+  const f = fixture();
+  const original = globalThis.fetch;
+  let status = 200;
+  globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
+    assert.equal(String(url), "https://tokensapi.ai/v1/systemone");
+    const body = JSON.parse(String(init!.body));
+    assert.deepEqual([body.model, body.state, Object.keys(body.questions)], ["startlux-27b", "先停一下", ["stop"]]);
+    return status === 200 ? Response.json({ answers: { stop: { type: "noul", noul: 0.98 } }, model: "startlux-27b-q8-GGUF" }) : new Response("busy", { status });
+  }) as typeof fetch;
+  try {
+    assert.ok((await f.hub.search("decide")).tools.some((tool) => tool.name === "decide.decide"));
+    const call = async (args: Record<string, unknown>) => JSON.parse((await f.hub.call("decide.decide", args, "agent:pi") as any).content[0].text);
+    const question = { stop: { type: "noul", instructions: "Does the user want to stop?", criteria: { true: "stop", false: "anything else" } } };
+    const answered = await call({ state: "先停一下", questions: question });
+    assert.equal(answered.answers.stop.noul, 0.98);
+    status = 503;
+    assert.match((await call({ state: "先停一下", questions: question })).unavailable, /HTTP 503/);
+    assert.match((await call({ state: "x", questions: { a: { type: "maybe" } } })).unavailable, /type must be/);
+  } finally { globalThis.fetch = original; f.close(); }
 });

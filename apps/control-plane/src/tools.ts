@@ -9,6 +9,7 @@ import { parse as parseYaml } from "yaml";
 import { advised, type ReviewModel } from "./review-model.js";
 import type { SecretStore } from "./secrets.js";
 import { WEB_TOOLS, WebSearch, type SearchKind } from "./web-search.js";
+import { decide, DECIDE_TOOLS } from "./decide.js";
 
 const log = pino({ name: "tools" });
 const IDLE_MS = 10 * 60_000;
@@ -136,10 +137,14 @@ export class ToolHub {
   /** Every tool of every registered server; a server that cannot be reached is skipped and reported. */
   async catalog(): Promise<{ tools: CatalogTool[]; unavailable: Array<{ server: string; error: string }> }> {
     const tools: CatalogTool[] = [], unavailable: Array<{ server: string; error: string }> = [];
+    const servers = this.definitions();  // loads the registry, built-ins included, before they are read
     const web = this.builtins.get("web");
     if (web) tools.push(...WEB_TOOLS.map((tool) => ({ name: `web.${tool.tool}`, server: "web", tool: tool.tool, title: web.title, description: tool.description,
       inputSchema: tool.inputSchema, risk: riskOf(web, tool.tool) })));
-    await Promise.all([...this.definitions()].map(async ([name, definition]) => {
+    const decision = this.builtins.get("decide");
+    if (decision) tools.push(...DECIDE_TOOLS.map((tool) => ({ name: `decide.${tool.tool}`, server: "decide", tool: tool.tool, title: decision.title,
+      description: tool.description, inputSchema: tool.inputSchema, risk: riskOf(decision, tool.tool) })));
+    await Promise.all([...servers].map(async ([name, definition]) => {
       const cached = this.catalogs.get(name);
       if (cached && Date.now() - cached.at < CATALOG_MS) { tools.push(...cached.tools); return; }
       try {
@@ -177,6 +182,10 @@ export class ToolHub {
       if (tool === "web_search") return text(await this.web.search(String(args.query ?? ""), args.kind as SearchKind | undefined, Number(args.limit ?? 6)));
       if (tool === "web_fetch") return text(await this.web.fetch(String(args.url ?? "")));
       throw new Error(`unknown tool ${name}`);
+    }
+    if (server === "decide" && this.builtins.has("decide")) {
+      if (tool !== "decide") throw new Error(`unknown tool ${name}`);
+      return { content: [{ type: "text", text: JSON.stringify(await decide({ secrets: this.options.secrets, model: process.env.DECIDE_MODEL }, args)) }] };
     }
     const definition = this.servers.get(server);
     if (!definition || !tool) throw new Error(`unknown tool ${name}; find tools with tool_search`);

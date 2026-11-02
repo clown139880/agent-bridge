@@ -122,6 +122,21 @@ servers:
 - **置顶**：会话开局的记忆注入（`/memory/bootstrap`）后面附上本作用域置顶服务的工具名和是否需确认。所有 agent 都经同一个 `/mcp/tools` 调用，所以置顶只影响开局列不列，不另挂 MCP 服务，Bridge 不用改。
 - **脱敏**：Control Plane 启动时和每小时读取 OpenBao `kv/shared/*` 的全部值，写入会话事件和 notice 之前把出现的值（12 个字符以上）替换成 `‹secret:路径#名字›`。流式增量和记忆写入不经过这一层。
 
+## 4.7 判定工具 decide（0.7.60）
+
+内置工具 `decide.decide`，所有会话置顶，免审批（只读）。给一段文字（`state`）和若干类型化问题，返回每个选项的概率，不生成文字：
+
+| type | criteria | 回答 |
+| --- | --- | --- |
+| `noul`（是/否） | `{true: "什么时候算是", false: "什么时候算否"}` | `noul` = 是的概率 |
+| `choice`（单选） | `{标签: 说明, …}` | `choice`、`probabilities`、`none_probability`（都不是的概率） |
+| `score`（分级） | `[最低一级, …, 最高一级]` | `score` = 期望级别（从 0 起）、`probabilities`、`legend` |
+
+- 后端：TokensAPI `POST /v1/systemone`，模型 `startlux-27b`（`DECIDE_MODEL` 可改），密钥 OpenBao `shared/tokensapi`。
+- 实测（2026-11-02，单并发）：30 条中文“要不要停下”判断全对，p50 0.54 秒、p90 2.6 秒；choice、score 各约 0.7–0.8 秒。2026-09 的基准测试里它准确率最高、高置信错误最少（0.1%），当时的长尾（p90 9–17 秒）是并发 4 压出来的。
+- 失败（超时、HTTP 错误、缺密钥、参数不对）一律返回 `{unavailable: 原因}`，不猜；调用方按“没有判定”继续。
+- 用途：路由、过滤、门槛（例如定时任务里判断一条消息值不值得推送、agent 问人之前判断能不能自己查到）。按阈值行动，比如 0.8。
+
 ## 5. 分期
 
 1. **`/mcp/tools` 与登记表**：代理调用、`tool_search`、风险档的确定性分类（auto 放行、human 问人，review 暂时也问人）。先接 comfyui、megumi-radio、Home Assistant 官方 MCP、call-bridge。
