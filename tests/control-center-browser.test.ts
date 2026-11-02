@@ -302,3 +302,14 @@ test("mobile browser on non-secure HTTP: no-login entry, paging, history/SSE, se
   assert.deepEqual(exceptions, []);
   console.log(`Mobile screenshot: ${directory}/mobile.png`);
 });
+
+test("every API path the Control Center's pages call passes the browser entrance", async () => {
+  const { BROWSER_READ, BROWSER_WRITE } = await import("../apps/control-plane/src/web/api.js");
+  for (const path of ["automations", "automations/proposals", "automations/horizon-morning", "memory-reviews", "tool-approvals", "sessions/s1/detail"])
+    assert.ok(BROWSER_READ.test(path), `GET ${path}`);
+  for (const path of ["automations/horizon-morning/run", "automations/horizon-morning/pause", "automations/horizon-morning/resume",
+    "automations/horizon-morning/edit", "automations/horizon-morning/delete", "automations/proposals/p1/decision",
+    "sessions/s1/untrust", "sessions/s1/turns", "approvals/a1/decision"])
+    assert.ok(BROWSER_WRITE.test(path), `POST ${path}`);
+  assert.ok(!BROWSER_WRITE.test("automations/x/../../etc"), "nothing beyond the listed shapes");
+});

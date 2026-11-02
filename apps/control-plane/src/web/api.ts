@@ -6,6 +6,10 @@ import type { AgentControlApi, Principal } from "../api/router.js";
 const PREFIX = "/control/api/v1/";
 const SECURITY = { "cache-control": "no-store", "x-content-type-options": "nosniff", "referrer-policy": "no-referrer" };
 
+/** What the Control Center may call through this entrance; every page's request must be listed here (tests/control-center-browser.test.ts). */
+export const BROWSER_READ = /^(?:access|snapshot|workers|workers\/[^/]+\/models|sessions|sessions\/[^/]+(?:\/detail|\/events|\/events\/[^/]+|\/view|\/view\/changes|\/view\/entries\/[^/]+)?|actions\/[^/]+|approvals|user-input|stream|memory-reviews|automations|automations\/proposals|automations\/[^/]+|tool-approvals)$/;
+export const BROWSER_WRITE = /^(?:sessions|sessions\/[^/]+\/(?:turns|interrupt|untrust)|attachments|approvals\/[^/]+\/decision|user-input\/[^/]+\/response|memory-reviews\/[^/]+\/decision|automations\/proposals\/[^/]+\/decision|tool-approvals\/[^/]+\/decision|automations\/[^/]+\/(?:run|pause|resume|edit|delete))$/;
+
 // This browser entrance trusts network reachability (LAN / Cloudflare Access).
 // The public /api/v1 entrance still requires its original Bearer credentials.
 // Configured tokens only decide what the browser may do; it never sees them.
@@ -25,8 +29,8 @@ export function controlBrowserApi(api: AgentControlApi, tokens: { read?: string;
       } catch { return fail(403, "browser_origin_required"); }
     }
     const url = new URL(c.req.url), path = url.pathname.slice(PREFIX.length), method = c.req.method;
-    const read = method === "GET" && /^(?:access|snapshot|workers|workers\/[^/]+\/models|sessions|sessions\/[^/]+(?:\/detail|\/events|\/events\/[^/]+|\/view|\/view\/changes|\/view\/entries\/[^/]+)?|actions\/[^/]+|approvals|user-input|stream|memory-reviews|automations|automations\/proposals|tool-approvals)$/.test(path);
-    const write = method === "POST" && /^(?:sessions|sessions\/[^/]+\/(?:turns|interrupt)|attachments|approvals\/[^/]+\/decision|user-input\/[^/]+\/response|memory-reviews\/[^/]+\/decision|automations\/proposals\/[^/]+\/decision|tool-approvals\/[^/]+\/decision|automations\/[^/]+\/(?:run|pause|resume))$/.test(path);
+    const read = method === "GET" && BROWSER_READ.test(path);
+    const write = method === "POST" && BROWSER_WRITE.test(path);
     if (!read && !write) return fail(404, "not_found");
     if (!principal) return fail(503, "browser_api_unconfigured");
     if (path === "access") return c.json({ writable: principal.write, version }, 200, { "cache-control": "no-store" });
