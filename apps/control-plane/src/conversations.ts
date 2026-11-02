@@ -119,6 +119,14 @@ export class Conversations {
     return row && this.memory ? this.scopeOf(row.connector, row.room_id)?.id : undefined;
   }
 
+  /** Every chat room bound to a memory scope, named by the scope's title (a notice target picker). */
+  rooms(): Array<{ target: string; name: string; scope: string }> {
+    if (!this.memory) return [];
+    return this.memory.scopes().filter((scope) => scope.status !== "archived")
+      .flatMap((scope) => scope.rooms.map((room) => ({ target: room, name: scope.title || scope.id, scope: scope.id })))
+      .sort((a, b) => a.name.localeCompare(b.name, "zh"));
+  }
+
   /** The room relaying a session, named by its scope's title, for the session list. */
   relayRoom(sessionId: string): { connector: string; roomId: string; name: string } | undefined {
     const row = this.store.db.prepare("SELECT connector,room_id FROM conversation_threads WHERE session_id=? LIMIT 1")

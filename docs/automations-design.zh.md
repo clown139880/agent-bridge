@@ -171,3 +171,8 @@ enabled: true
 
 编辑和删除是人直接改：`POST /api/v1/automations/{id}/edit {yaml}`、`POST /api/v1/automations/{id}/delete`，只接受人的 token。走的是和确认提案同一条路径（校验、写入 agent-skills、加锁提交），只是不再等确认，也不发提案通知。agent 仍然只能用 `automation_propose` 提案。
 
+### 发往和电话（0.7.68）
+
+- 任务页有“发往”勾选：App 推送、绑定了作用域的聊天房间（按作用域名称显示，`GET /api/v1/notice-targets`）、call-bridge 能打的人。保存只改 `deliver`（`POST /api/v1/automations/{id}/deliver {deliver}`），定义的其余部分不动，同样写入 agent-skills 并提交。都不勾等于只发 App。
+- 新的投递目标 `call:<别名>`：Control Plane 每 5 秒取一次未送出的电话 notice，用工具库的 `call-bridge.call_place`（`mode: notify`，不等接听）打给这个人，读出通知正文（去掉 Markdown 和链接，最多 300 字）。可拨的别名取自 call-bridge 工具定义里 `to` 的取值。打不通重试 3 次后放弃，并给你发一条提醒；生成超过 30 分钟还没打出去的不再打。
+

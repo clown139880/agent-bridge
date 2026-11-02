@@ -7,8 +7,8 @@ const PREFIX = "/control/api/v1/";
 const SECURITY = { "cache-control": "no-store", "x-content-type-options": "nosniff", "referrer-policy": "no-referrer" };
 
 /** What the Control Center may call through this entrance; every page's request must be listed here (tests/control-center-browser.test.ts). */
-export const BROWSER_READ = /^(?:access|snapshot|workers|workers\/[^/]+\/models|sessions|sessions\/[^/]+(?:\/detail|\/events|\/events\/[^/]+|\/view|\/view\/changes|\/view\/entries\/[^/]+)?|actions\/[^/]+|approvals|user-input|stream|memory-reviews|automations|automations\/proposals|automations\/[^/]+|tool-approvals)$/;
-export const BROWSER_WRITE = /^(?:sessions|sessions\/[^/]+\/(?:turns|interrupt|untrust)|attachments|approvals\/[^/]+\/decision|user-input\/[^/]+\/response|memory-reviews\/[^/]+\/decision|automations\/proposals\/[^/]+\/decision|tool-approvals\/[^/]+\/decision|automations\/[^/]+\/(?:run|pause|resume|edit|delete))$/;
+export const BROWSER_READ = /^(?:access|snapshot|workers|workers\/[^/]+\/models|sessions|sessions\/[^/]+(?:\/detail|\/events|\/events\/[^/]+|\/view|\/view\/changes|\/view\/entries\/[^/]+)?|actions\/[^/]+|approvals|user-input|stream|memory-reviews|automations|automations\/proposals|automations\/[^/]+|tool-approvals|notice-targets)$/;
+export const BROWSER_WRITE = /^(?:sessions|sessions\/[^/]+\/(?:turns|interrupt|untrust)|attachments|approvals\/[^/]+\/decision|user-input\/[^/]+\/response|memory-reviews\/[^/]+\/decision|automations\/proposals\/[^/]+\/decision|tool-approvals\/[^/]+\/decision|automations\/[^/]+\/(?:run|pause|resume|edit|delete|deliver))$/;
 
 // This browser entrance trusts network reachability (LAN / Cloudflare Access).
 // The public /api/v1 entrance still requires its original Bearer credentials.

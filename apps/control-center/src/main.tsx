@@ -231,7 +231,9 @@ interface AutomationRun { id: string; trigger: string; triggerAt: number; starte
 interface AutomationRow { id: string; scope: string; title: string; kind: string | null; trigger: string | null; error: string | null;
   schedule: { cron?: string; everyMinutes?: number; tz?: string } | null;
   enabled: boolean; paused: boolean; nextAt: number | null; deliver: string[]; lastRun: AutomationRun | null }
-interface AutomationDetail extends AutomationRow { yaml: string | null; runs: AutomationRun[] }
+interface AutomationDetail extends AutomationRow { yaml: string | null; runs: AutomationRun[]; definition: { deliver?: string[] } | null }
+/** The task's own deliver list, as written (none means App). */
+const rawDeliver = (t: AutomationDetail) => t.definition?.deliver ?? ["app"];
 const KIND_LABELS: Record<string, string> = { notify: "通知", script: "脚本", agent: "agent" };
 const TRIGGER_LABELS: Record<string, string> = { schedule: "定时", webhook: "webhook", manual: "手动" };
 /** Broken, or its last run failed or was missed: these come first, with what went wrong. */
@@ -324,6 +326,37 @@ function Automations({ writable }: { writable: boolean }) {
   </section>;
 }
 
+interface NoticeTarget { target: string; name: string; kind: string }
+const TARGET_ICONS: Record<string, string> = { app: "📱", matrix: "💬", call: "📞" };
+/** Where a task delivers, picked from App, the scope-bound rooms and whom call-bridge can ring; saved on its own. */
+function DeliverPicker({ id, current, writable, saved }: { id: string; current: string[]; writable: boolean; saved: () => void }) {
+  const [targets, setTargets] = useState<NoticeTarget[]>([]), [picked, setPicked] = useState(current), [busy, setBusy] = useState(false), [error, setError] = useState("");
+  useEffect(() => {
+    const client = new ControlClient("", () => {}, "/control/api/v1");
+    void client.request<{ data: NoticeTarget[] }>("/notice-targets").then(r => setTargets(r.data), e => setError(explain(e))).finally(() => client.dispose());
+  }, []);
+  useEffect(() => setPicked(current), [current.join("\n")]);
+  // Targets the task names that the list does not know (a room bound to no scope) stay visible and checked.
+  const known = new Set(targets.map(t => t.target)), all = [...targets, ...current.filter(t => !known.has(t)).map(t => ({ target: t, name: t, kind: t.split(":", 1)[0]! }))];
+  const changed = picked.length !== current.length || picked.some(t => !current.includes(t));
+  const toggle = (target: string) => setPicked(picked.includes(target) ? picked.filter(t => t !== target) : [...picked, target]);
+  const save = async () => {
+    setBusy(true); setError("");
+    const client = new ControlClient("", () => {}, "/control/api/v1");
+    try { await client.request(`/automations/${segment(id)}/deliver`, { body: { deliver: picked.length ? picked : ["app"] } }); saved(); }
+    catch (e) { setError(explain(e)); } finally { setBusy(false); client.dispose(); }
+  };
+  return <div className="pending-panel"><strong>发往</strong>
+    {error && <p className="attention">{error}</p>}
+    <div className="target-list">{all.map(t => <label key={t.target} className={`target-option ${picked.includes(t.target) ? "on" : ""}`}>
+      <input type="checkbox" checked={picked.includes(t.target)} disabled={!writable || busy} onChange={() => toggle(t.target)} />
+      <span aria-hidden="true">{TARGET_ICONS[t.kind] ?? "•"}</span><span>{t.name}</span></label>)}</div>
+    {!picked.length && <small className="hint">都不勾时发到 App。</small>}
+    {writable && changed && <div className="row-actions"><button type="button" className="primary" disabled={busy} onClick={() => void save()}>{busy ? "保存中…" : "保存发往"}</button>
+      <button type="button" className="quiet" disabled={busy} onClick={() => setPicked(current)}>还原</button></div>}
+  </div>;
+}
+
 /** One task: what it is, its recent runs (a failed one opens on its error and output), and its definition to edit or delete. */
 function AutomationPage({ id, writable }: { id: string; writable: boolean }) {
   const [task, setTask] = useState<AutomationDetail>(), [error, setError] = useState(""), [busy, setBusy] = useState("");
@@ -357,13 +390,13 @@ function AutomationPage({ id, writable }: { id: string; writable: boolean }) {
       <div className="pending-panel">
         {task.error && <p className="attention">定义有误：{task.error}</p>}
         <p>{[whenText(task), task.nextAt ? `下次 ${time(task.nextAt)}` : "", task.paused ? "已暂停" : !task.enabled ? "未启用" : ""].filter(Boolean).join(" · ")}</p>
-        {task.deliver.length > 0 && <p className="hint">发往 {task.deliver.join("、")}</p>}
         {writable && <div className="row-actions">
           <button type="button" disabled={Boolean(busy) || Boolean(task.error)} onClick={() => void act("run", `/automations/${segment(id)}/run`, {}, "已开始运行，结果稍后出现在下面。")}>立即运行</button>
           <button type="button" className="quiet" disabled={Boolean(busy) || Boolean(task.error)} onClick={() => void act("pause", `/automations/${segment(id)}/${task.paused ? "resume" : "pause"}`, {})}>{task.paused ? "恢复" : "暂停"}</button>
           <button type="button" className="quiet" disabled={Boolean(busy) || !task.yaml} onClick={() => setDraft(draft === undefined ? task.yaml ?? "" : undefined)}>{draft === undefined ? "编辑" : "取消编辑"}</button>
           <button type="button" className="danger" disabled={Boolean(busy)} onClick={() => void remove()}>删除</button></div>}
       </div>
+      {task.definition && <DeliverPicker id={id} current={rawDeliver(task)} writable={writable} saved={() => { setNotice("已保存发往。"); void load(); }} />}
       {draft !== undefined && <div className="pending-panel"><strong>编辑定义（YAML）</strong>
         <textarea className="yaml-editor" value={draft} spellCheck={false} onChange={e => setDraft(e.target.value)} rows={Math.min(30, Math.max(8, draft.split("\n").length + 1))} />
         <div className="row-actions"><button type="button" className="primary" disabled={busy === "save" || draft === task.yaml} onClick={() => void save()}>{busy === "save" ? "保存中…" : "保存"}</button></div>

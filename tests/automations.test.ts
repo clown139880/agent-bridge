@@ -199,6 +199,13 @@ test("over HTTP: hooks are served at /hooks/<id>; an agent may propose but only 
     const edited = await call("human", "POST", "/api/v1/automations/remind/edit", { yaml: detail.body.yaml.replace("提醒", "每周提醒") });
     assert.equal(edited.body.status, "applied");
     assert.equal((await call("human", "GET", "/api/v1/automations/remind")).body.title, "每周提醒");
+    // Only the deliver list changes; the rest of the definition stays.
+    assert.equal((await call("agent", "POST", "/api/v1/automations/remind/deliver", { deliver: ["call:simon"] })).status, 403);
+    assert.equal((await call("human", "POST", "/api/v1/automations/remind/deliver", { deliver: ["matrix:!a:example.org", "call:simon"] })).body.status, "applied");
+    const delivered = (await call("human", "GET", "/api/v1/automations/remind")).body;
+    assert.deepEqual([delivered.definition.deliver, delivered.title], [["matrix:!a:example.org", "call:simon"], "每周提醒"]);
+    assert.equal((await call("human", "POST", "/api/v1/automations/remind/deliver", { deliver: ["nowhere"] })).body.error.code, "invalid_definition");
+    assert.deepEqual((await call("human", "GET", "/api/v1/notice-targets")).body.data[0], { target: "app", name: "App 推送", kind: "app" });
     assert.equal((await call("human", "POST", "/api/v1/automations/remind/delete", {})).body.status, "applied");
     assert.deepEqual((await call("human", "GET", "/api/v1/automations")).body.data.map((row: any) => row.id), ["washer"]);
   } finally { await control.stop(); store.db.close(); rmSync(root, { recursive: true, force: true }); }

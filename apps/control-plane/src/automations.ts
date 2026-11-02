@@ -537,6 +537,16 @@ export class Automations {
     return decided;
   }
 
+  /** Change only where a task delivers (the Control Center's target picker); the rest of its definition stays. */
+  setDeliver(id: string, deliver: string[], by: string): AutomationProposal {
+    const task = this.require(id);
+    if (!task.definition) throw new AutomationError(409, "automation_invalid", "fix the definition first");
+    const proposal = this.propose({ action: "update", id, definition: { ...task.definition, deliver }, reason: "在控制中心改投递目标" }, by, false);
+    const decided = this.decide(proposal.id, "allow", by);
+    if (decided.status !== "applied") throw new AutomationError(500, "automation_write_failed", decided.error ?? "write failed");
+    return decided;
+  }
+
   /** The human's decision. Allowing writes the definition and commits it; the next reload schedules it. */
   decide(id: string, choice: "allow" | "deny", decidedBy: string): AutomationProposal {
     this.proposals();

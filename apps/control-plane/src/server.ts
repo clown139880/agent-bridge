@@ -43,6 +43,7 @@ import { memoryReviewer, MemoryReviews } from "./memory-review.js";
 import { mcpRoute } from "./mcp/route.js";
 import { bridgeEndpoint } from "./mcp/bridge.js";
 import { SessionContacts } from "./mcp/contacts.js";
+import { CallNotices } from "./call-notices.js";
 import { compareBridgeVersions } from "./bridge-version.js";
 import { PostDeployResumer } from "./post-deploy.js";
 import { createHttpApp, type HttpEnv } from "./http.js";
@@ -82,6 +83,8 @@ export class ControlPlane {
   private readonly toolHub?: ToolHub;
   private readonly secrets?: SecretStore;
   private readonly toolReviewer?: ToolReviewer;
+  /** Notices addressed `call:<who>`: call-bridge rings and reads them out. */
+  private calls?: CallNotices;
   private approvalReviewer?: ApprovalReviewer;
   private learnRule?: (summary: string, what: string) => Promise<string>;
   private approvalLessons?: ApprovalLessons;
@@ -201,6 +204,9 @@ export class ControlPlane {
     }
     if (options.toolsRegistry) this.toolHub = new ToolHub(store.db, { registry: options.toolsRegistry, secrets, reviewer: tools,
       notify: (text, level) => this.controlStore.createNotice({ ...operator, text, level, source: "control-plane" }) });
+    const hub = this.toolHub;
+    if (hub) this.calls = new CallNotices(this.controlStore, (args) => hub.call("call-bridge.call_place", args, "control-plane"),
+      (text) => this.controlStore.createNotice({ ...operator, text, level: "alert", source: "control-plane" }));
     if (options.automations) this.automations = new Automations({ ...options.automations, secrets,
       operatorTarget: options.noticeTarget ?? { connector: "app", roomId: "operator", threadId: "" } }, {
       store: this.controlStore, registry: this.registry,
@@ -213,6 +219,11 @@ export class ControlPlane {
       agents, memoryReviews: this.memoryReviews, conversations: this.conversations, automations: this.automations, toolHub: this.toolHub,
       onAllowSimilar: (pending) => this.learnFrom(pending),
       onTrustSession: (pending) => this.allowWaiting(pending.sessionId, pending.id),
+      callees: async () => {
+        const tool = (await this.toolHub?.search("call_place", 3))?.tools.find((item) => item.name === "call-bridge.call_place");
+        const to = (tool?.inputSchema as { properties?: { to?: { enum?: unknown[] } } } | undefined)?.properties?.to?.enum;
+        return Array.isArray(to) ? to.map(String) : [];
+      },
       sseKeepaliveMs: options.sse?.keepaliveMs ?? 15_000,
       ssePollMs: options.sse?.pollMs ?? 2_000, sseMaxBackpressure: options.sse?.maxBackpressure ?? 3,
       actionTimeoutMs: options.sse?.actionTimeoutMs ?? 30_000,
@@ -262,6 +273,7 @@ export class ControlPlane {
     await new Promise<void>((resolve) => this.http.listen(this.options.port, this.options.host, resolve));
     this.messages?.start();
     this.automations?.start();
+    this.calls?.start();
     // Secret values never reach stored history or notices; refreshed hourly so a rotated key is covered.
     if (this.secrets) {
       const refresh = () => void this.secrets!.all().then(setRedactedSecrets, (error) => log.warn({ error: String(error) }, "Unable to load secrets for redaction"));
@@ -295,6 +307,7 @@ export class ControlPlane {
   async stop(): Promise<void> {
     clearInterval(this.cleanupTimer);
     this.automations?.stop();
+    this.calls?.stop();
     this.toolHub?.stop();
     await this.messages?.stop();
     for (const bridge of this.bridges.values()) bridge.socket.close(1001, "server shutdown");

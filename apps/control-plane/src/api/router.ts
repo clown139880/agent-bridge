@@ -45,6 +45,8 @@ interface ApiOptions {
   onTrustSession?: (pending: PendingRow, by: string) => void;
   /** Schedules, webhooks and their proposals (/api/v1/automations). */
   automations?: Automations;
+  /** Whom a notice can ring (call-bridge aliases), for the target picker. */
+  callees?: () => Promise<string[]>;
   /** Chat connectors' room/thread → session bindings (/api/v1/conversations). */
   conversations?: Conversations;
   sseKeepaliveMs: number; ssePollMs: number; sseMaxBackpressure: number; actionTimeoutMs: number; }
@@ -144,6 +146,8 @@ export class AgentControlApi {
       if(review&&this.options.memoryReviews){await this.memoryReviewRoute(request,response,url,principal,review[1]&&decodeURIComponent(review[1]),review[2]);return true;}
       const conversation=url.pathname.match(/^\/api\/v1\/conversations(?:\/([a-z][a-z0-9_-]*)(?:\/([^/]+)(?:\/(bind))?)?)?$/);
       if(conversation&&this.options.conversations){await this.conversationRoute(request,response,url,principal,conversation[1],conversation[2]&&decodeURIComponent(conversation[2]),conversation[3]);return true;}
+      // Where a notice can go, named for a person: App, the scope-bound chat rooms, and whom call-bridge can ring.
+      if(request.method==="GET"&&url.pathname==="/api/v1/notice-targets"){this.ok(response,{data:await this.noticeTargets()});return true;}
       const automation=url.pathname.match(/^\/api\/v1\/automations(?:\/([^/]+)(?:\/([^/]+)(?:\/(decision))?)?)?$/);
       if(automation&&this.options.automations){await this.automationRoute(request,response,url,principal,automation[1]&&decodeURIComponent(automation[1]),automation[2]&&decodeURIComponent(automation[2]),automation[3]);return true;}
       const toolApproval=url.pathname.match(/^\/api\/v1\/tool-approvals(?:\/([^/]+)(?:\/(decision))?)?$/);
@@ -265,6 +269,11 @@ export class AgentControlApi {
         this.ok(response,{runId:automations.runNow(id,body.payload&&typeof body.payload==="object"?body.payload as Record<string,unknown>:{})},202);return;}
       if(request.method==="POST"&&(sub==="pause"||sub==="resume")){await jsonBody(request);this.ok(response,automations.setPaused(id,sub==="pause"));return;}
       // The human editing or deleting a task directly; agents still propose (POST /automations/proposals).
+      if(request.method==="POST"&&sub==="deliver"){
+        if(!principal.write||!principal.id.startsWith("control:"))throw new ApiProblem(403,"forbidden","only the human edits a task directly; agents propose");
+        const body=await jsonBody(request) as Record<string,unknown>;
+        if(!Array.isArray(body.deliver)||body.deliver.some(item=>typeof item!=="string"))throw new ApiProblem(400,"invalid_parameter","deliver must be a list of targets");
+        this.ok(response,automations.setDeliver(id,body.deliver as string[],principal.id));return;}
       if(request.method==="POST"&&(sub==="edit"||sub==="delete")){
         if(!principal.write||!principal.id.startsWith("control:"))throw new ApiProblem(403,"forbidden","only the human edits a task directly; agents propose");
         const body=await jsonBody(request) as Record<string,unknown>;
@@ -557,6 +566,13 @@ export class AgentControlApi {
       limit:integer(url.searchParams.get("limit"),"limit",50,1,200),cursor:url.searchParams.get("cursor")??undefined});
       this.ok(response,{data:page.data.map(pendingJson),nextCursor:page.nextCursor,hasMore:page.hasMore,streamCursor:this.store.streamCursor()});
     }catch(error){this.cursorError(error);}}
+
+  private async noticeTargets(): Promise<Array<{ target: string; name: string; kind: string }>> {
+    const callees=await this.options.callees?.().catch(()=>[])??[];
+    return [{target:"app",name:"App 推送",kind:"app"},
+      ...(this.options.conversations?.rooms()??[]).map(room=>({target:room.target,name:room.name,kind:room.target.split(":",1)[0]!})),
+      ...callees.map(alias=>({target:`call:${alias}`,name:`电话 · ${alias}`,kind:"call"}))];
+  }
 
   private async pendingRoute(kind:"approval"|"user_input",request:IncomingMessage,response:ServerResponse,
     principal:Principal,id:string,action?:string):Promise<void>{
