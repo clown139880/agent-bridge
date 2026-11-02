@@ -182,7 +182,7 @@ test("history hydration reuses the live canonical item event ids", async () => {
   ]);
 });
 
-test("restoration only hydrates unique threads inside the allowed roots", async () => {
+test("restoration only discovers unique threads inside the allowed roots", async () => {
   const root = join(tmpdir(), `agent-bridge-inventory-${randomUUID()}`);
   const allowed = join(root, "allowed");
   const outside = join(root, "outside");
@@ -214,7 +214,7 @@ test("restoration only hydrates unique threads inside the allowed roots", async 
 
   try {
     await internals.restoreLoadedThreads();
-    assert.deepEqual(reads, ["allowed-thread", "allowed-thread"]);
+    assert.deepEqual(reads, ["allowed-thread"], "only the active-turn check reads it: history waits for the Control Plane's backfill");
     assert.equal(emitted.filter((message) => message.type === "session.discovered").length, 1);
     assert.equal(emitted.some((message) => "sessionId" in message
       && message.sessionId === "outside-thread"), false);

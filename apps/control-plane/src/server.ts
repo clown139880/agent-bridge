@@ -56,6 +56,8 @@ interface PendingApproval {
 }
 
 const ORPHANED_RUN_REASON = "The worker's Bridge restarted and no longer holds this run's session; its turn was interrupted";
+/** The Bridge heartbeats every 15 s: it may have gone away up to two beats after it was last heard of. */
+const BACKFILL_MARGIN_MS = 30_000;
 /** A turn a Bridge restart cut off is continued after this, unless someone continued the session first (a post-deploy turn, the user). */
 const RESUME_DELAY_MS = 20_000;
 /** Only turns active this recently are continued: an older "active" turn was more likely stuck than working. */
@@ -375,7 +377,10 @@ export class ControlPlane {
         machineId = registeredId;
         clearTimeout(registrationTimeout);
         this.bridges.get(registeredId)?.socket.close(1000, "replaced");
+        // Read before the registration below overwrites it: the Bridge was last heard of here.
+        const lastSeen = (this.store.db.prepare("SELECT last_seen_at FROM machines WHERE id=?").get(registeredId) as { last_seen_at: number } | undefined)?.last_seen_at;
         this.bridges.set(registeredId, {
+          backfillSince: message.features?.includes("history-backfill") ? (lastSeen ? Math.max(0, lastSeen - BACKFILL_MARGIN_MS) : 0) : undefined,
           machineId: registeredId,
           name: message.name || registeredId,
           capabilities: message.capabilities,
@@ -469,6 +474,7 @@ export class ControlPlane {
           if (session.active_turn_id) this.resumeInterrupted(session.id, machineId, session.active_turn_id);
         }
         this.reclaimOrphanedRuns(machineId, present);
+        this.backfillOffline(machineId, message.sessions);
         const pendingIds = new Set([...message.approvals.map((item) => item.approvalId),
           ...message.userInputs.map((item) => item.requestId)]);
         const rows = this.store.db.prepare("SELECT id FROM pending_requests WHERE machine_id=? AND status='pending'")
@@ -659,6 +665,23 @@ export class ControlPlane {
       } catch (error) { log.warn({ error, sessionId }, "Unable to continue an interrupted turn"); }
     }, RESUME_DELAY_MS);
     timer.unref();
+  }
+
+  /**
+   * After a reconnect, only the sessions that changed while the Bridge was away get their history, and only
+   * from then on (docs/agent-control-api.md §14): a plain restart compares one timestamp per session and
+   * resends nothing. A machine never seen gets its recent sessions' history once.
+   */
+  private backfillOffline(machineId: string, sessions: Array<{ sessionId: string; updatedAt?: number }>): void {
+    const bridge = this.bridges.get(machineId);
+    if (!bridge || bridge.backfillSince === undefined) return;
+    const since = bridge.backfillSince;
+    bridge.backfillSince = undefined;
+    const changed = since === 0
+      ? [...sessions].sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0)).slice(0, 100)
+      : sessions.filter((session) => (session.updatedAt ?? 0) > since);
+    for (const session of changed) this.send(bridge.socket, { type: "history.backfill", sessionId: session.sessionId, since });
+    if (changed.length) log.info({ machineId, since, sessions: changed.length }, "Backfilling the sessions that changed while the Bridge was offline");
   }
 
   // Resume hint for submit_turn: lets the bridge revive a session it no longer

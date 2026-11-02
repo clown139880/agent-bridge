@@ -995,3 +995,18 @@ Bridge 重启（自更新、部署或崩溃）时，正在跑的 turn 会断掉�
 - 续跑消息以 `[Agent Bridge 自动续跑]` 开头，要求 agent 先查清上一轮的对外操作（提交、推送、发消息、部署）是否已经做过，再接着做。
 - 每个被打断的 turn 只续跑一次（action 幂等键 `resume:<session>:<turn>`，`principal=system:resume`）。续跑的 turn 和普通 turn 一样，Matrix 房间里照常收到回复。
 - `RESUME_INTERRUPTED=off` 关闭。
+
+## 14. 重连只补离线期间的历史（0.7.63 / Bridge 0.7.42）
+
+0.7.62 之前，Codex 适配器每次启动都把最近 100 个线程、每个最多 50 个 turn 的历史重发一遍（HAL 上约 1.2 万条，全是 Control Plane 已有的）。结果是发件箱溢出、报出大量假的 `outbox-capacity` 缺口，而且 Control Plane 按顺序处理同一个 Bridge 的消息，实时事件和 action 回执要排队 30 秒以上（`bridge_timeout`）。
+
+现在 Bridge 启动时不再重发历史，也不保存任何同步状态。改为：
+
+1. Bridge 在 `register.features` 里声明 `history-backfill`。
+2. Control Plane 在注册时读出这台机器上一次的 `machines.last_seen_at`（每 15 秒随心跳更新），减去 30 秒余量，作为离线时刻。
+3. 收到这次连接的第一份完整清单后，只给 `updatedAt` 晚于离线时刻的会话发 `history.backfill {sessionId, since}`。重启只离线几秒，通常一个都没有。
+4. Bridge 只读这些线程，只发 `since` 之后结束的 turn（以及仍在运行的 turn）。
+
+离线前产生、还没被确认的事件仍在 Bridge 的发件箱里，重连后补发，和第 4 步接起来不会漏。从没见过的机器在第一份清单后补最近 100 个会话的历史一次。没声明该特性的旧 Bridge 照旧自己补。
+
+设计原则：同步、重连、恢复用轻量的比对（时间戳、离线区间、游标）找出变化的部分，只处理那部分，不做“全量重发、靠对端去重”。

@@ -766,8 +766,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
         for (const thread of result.data) {
           if (!thread.id || listedThreadIds.has(thread.id)) continue;
           listedThreadIds.add(thread.id);
-          const discovered = await this.discoverThread(thread);
-          if (discovered && page === 0) await this.hydrateThreadHistory(thread);
+          // History is not resent here: the Control Plane asks for the threads that changed while this Bridge was away.
+          await this.discoverThread(thread);
         }
         cursor = result.nextCursor ?? undefined;
         if (!cursor) break;
@@ -861,12 +861,19 @@ export class CodexAppServerAdapter implements AgentAdapter {
     }
   }
 
-  private async hydrateThreadHistory(thread: CodexThread): Promise<void> {
+  async backfillHistory(threadId: string, since: number): Promise<void> {
+    const thread = this.threadsById.get(threadId);
+    if (thread) await this.hydrateThreadHistory(thread, since);
+  }
+
+  /** Resend the thread's recent turns that ended (or are still running) after `since`. */
+  private async hydrateThreadHistory(thread: CodexThread, since = 0): Promise<void> {
     const threadId = thread.id;
     const historyTimestamp = threadTimestamp(thread);
     try {
       const result=await this.request<{thread:CodexThread&{turns?:CodexTurn[]}}>("thread/read",{threadId,includeTurns:true});
-      const turns=(result.thread.turns??[]).slice(-50);
+      const turns=(result.thread.turns??[]).slice(-50)
+        .filter(turn=>turn.status==="inProgress"||(codexTimestamp(turn.completedAt??turn.startedAt)??historyTimestamp)>since);
       for(const turn of turns){
         const timestamp=codexTimestamp(turn.completedAt??turn.startedAt)??historyTimestamp;
         const startedAt=codexTimestamp(turn.startedAt)??timestamp;

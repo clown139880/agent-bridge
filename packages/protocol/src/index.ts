@@ -455,6 +455,17 @@ export interface ArchiveGapAckMessage {
   gapId: string;
 }
 
+/**
+ * Re-send the session's history from `since` (ms): only what happened while its Bridge was offline.
+ * Sent after a reconnect to a Bridge advertising `history-backfill`, for the sessions whose inventory
+ * `updatedAt` is later than when it went away, so a restart reads and resends nothing else.
+ */
+export interface HistoryBackfillMessage {
+  type: "history.backfill";
+  sessionId: string;
+  since: number;
+}
+
 export type BridgeToControlMessage =
   | RegisterMessage
   | BridgeUpdateCheckMessage
@@ -489,6 +500,7 @@ export type ControlToBridgeMessage =
   | ModelCatalogRequestMessage
   | ArchiveAckMessage
   | ArchiveGapAckMessage
+  | HistoryBackfillMessage
   | ErrorMessage;
 
 export function parseMessage(raw: string): { type: string; [key: string]: unknown } | undefined {

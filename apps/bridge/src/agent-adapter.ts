@@ -18,6 +18,8 @@ export interface ResumeTarget {
 }
 
 export interface AgentAdapter {
+  /** Re-send the session's history from `since` (ms), for what happened while the Bridge was offline. */
+  backfillHistory?(sessionId: string, since: number): Promise<void>;
   /** Begin connecting / spawning. Resolves once ready (or keeps retrying internally). */
   start(): Promise<void>;
   /** Tear down connections/processes. */

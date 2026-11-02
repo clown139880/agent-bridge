@@ -307,7 +307,7 @@ export class BridgeClient {
         ],
         protocolVersion: BRIDGE_PROTOCOL_VERSION,
         features: ["session-inventory", "session-events", "session-actions", "turn-steer",
-          "turn-interrupt", "approvals", "user-input", "desktop-terminal-history"],
+          "turn-interrupt", "approvals", "user-input", "desktop-terminal-history", "history-backfill"],
         bridgeVersion: this.options.version,
         sharedSkills: this.sharedSkillsStatus(),
         token: this.options.token,
@@ -343,6 +343,12 @@ export class BridgeClient {
         case "archive.ack":
           this.archiveOutbox.ack(message.eventId);
           break;
+        case "history.backfill": {
+          const adapter = this.ownedBy(message.sessionId);
+          void adapter?.backfillHistory?.(message.sessionId, message.since)
+            .catch((error) => log.warn({ error, sessionId: message.sessionId }, "History backfill failed"));
+          break;
+        }
         case "archive.gap_ack":
           this.archiveOutbox.ackGap(message.gapId);
           break;

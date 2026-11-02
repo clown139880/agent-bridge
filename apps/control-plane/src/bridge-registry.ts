@@ -11,6 +11,11 @@ export interface BridgeConnection {
   socket: WebSocket;
   /** When this connection registered; runs touched since then belong to it. */
   registeredAt?: number;
+  /**
+   * Until its first complete inventory: when this Bridge was last heard of before this connection, so the
+   * sessions changed since then get their history (HistoryBackfillMessage); 0 for a machine never seen.
+   */
+  backfillSince?: number;
 }
 
 export class BridgeRegistry {
