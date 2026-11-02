@@ -26,6 +26,8 @@ const AGENT_TYPES: Record<string, AgentType> = { pi: "pi", codex: "codex-cli", c
 export interface AutomationDefinition {
   title: string;
   trigger: { schedule?: { cron?: string; everyMinutes?: number; tz?: string; catchUp?: "once" | "skip" };
+    /** Once, at this local time (`2026-11-06 14:00`, Asia/Shanghai unless `tz`); afterwards the task is done. */
+    at?: string; tz?: string;
     webhook?: { secretRef?: string; template?: string;
       /** Other hook names that reach this task, optionally with fixed query parameters: `comfy-chain?continue=1`. */
       aliases?: string[] } };
@@ -33,6 +35,18 @@ export interface AutomationDefinition {
   agent?: { prompt: string; agent?: string; model?: string; target?: string; timeoutMin?: number;
     /** Run the agent only when this renders non-empty (not "0"/"false"), e.g. `{query.continue}`; otherwise deliver like a notify task. */
     when?: string };
+  /**
+   * Wake a session that planned this itself: it gets one turn, “[约定的时间到了] <note>”, and knows the rest
+   * from its own context. A busy session takes it into the running turn. `deliver` (none by default) is sent
+   * as the turn starts, whether or not the session's machine is on.
+   */
+  session?: { id: string; note?: string };
+  /**
+   * Post into a chat room (a webhook from another system, usually): the text, then, when `agent` renders truthy,
+   * the same text as a turn to the session the room (or thread) continues now, steering it when busy; a room
+   * with no session starts one in its scope. Its reply reaches the room the usual way.
+   */
+  room?: { to: string; text?: string; agent?: string | boolean };
   /** Notify only: the message, with `{a.b}` placeholders filled from the webhook body or the script's JSON. */
   template?: string;
   deliver?: string[];
@@ -50,9 +64,16 @@ export interface AutomationRun { id: string; automationId: string; trigger: stri
 export interface AutomationProposal { id: string; action: "create" | "update" | "delete"; automationId: string; scope: string;
   definition: AutomationDefinition | null; previous: AutomationDefinition | null; reason: string | null; proposedBy: string;
   status: "pending" | "applied" | "denied" | "expired" | "failed"; error: string | null; createdAt: number; decidedAt: number | null;
-  decidedBy: string | null }
+  decidedBy: string | null;
+  /** Why the reviewer handed it to the human, when it did. */
+  review: string | null }
+
+/** Judges an agent's proposal: allow applies it at once; anything else waits for the human. */
+export type AutomationReviewer = (proposal: AutomationProposal & { current: AutomationDefinition | null }) =>
+  Promise<{ decision: "allow" | "human"; reason: string }>;
 
 export interface AutomationOptions {
+  reviewer?: AutomationReviewer;
   /** `<dir>/<scope>/<id>/automation.yaml`; usually the private skill repository's `automations/`. */
   dir: string;
   /** Absolute directories (besides a task's own) its script may live in. */
@@ -77,6 +98,10 @@ export interface AutomationDeps {
   /** A scope's default place to run a new session, as chat rooms pick theirs. */
   scopeTarget?(scope: string, agent: string): { workerId: string; workspace: string } | null | undefined;
   validScope?(scope: string): boolean;
+  /** One turn to a session, steering it when busy; throws when it cannot be reached (deleted, machine offline). */
+  sendTurn?(sessionId: string, input: string, key: string): void;
+  /** One turn to the session a room (or thread) continues, starting one in the room's scope if none; its session id. */
+  roomTurn?(target: NoticeTarget, input: string, key: string): Promise<string>;
   now?: () => number;
   /** How often an agent run checks its session (2 s). */
   pollMs?: number;
@@ -105,8 +130,9 @@ export function validateDefinition(raw: unknown): AutomationDefinition {
   const value = raw as Record<string, any>;
   if (typeof value.title !== "string" || !value.title.trim()) fail("title is required");
   const trigger = value.trigger ?? {};
-  const schedule = trigger.schedule, webhook = trigger.webhook;
-  if (!schedule === !webhook) fail("trigger needs exactly one of schedule or webhook");
+  const schedule = trigger.schedule, webhook = trigger.webhook, at = trigger.at;
+  if ([schedule, webhook, at].filter(Boolean).length !== 1) fail("trigger needs exactly one of schedule, webhook or at");
+  if (at !== undefined && parseAt(String(at), trigger.tz) === undefined) fail("trigger.at must be a local time like 2026-11-06 14:00");
   if (schedule) {
     if (!schedule.cron === !schedule.everyMinutes) fail("schedule needs exactly one of cron or everyMinutes");
     if (schedule.cron) parseCron(String(schedule.cron));
@@ -119,7 +145,10 @@ export function validateDefinition(raw: unknown): AutomationDefinition {
   if (value.agent && (typeof value.agent.prompt !== "string" || !value.agent.prompt.trim())) fail("agent.prompt is required");
   if (value.agent?.agent && !AGENT_TYPES[value.agent.agent]) fail(`agent must be one of ${Object.keys(AGENT_TYPES).join(", ")}`);
   if (value.agent?.target && !/^[a-z]+@[^:]+:\/.*/.test(value.agent.target)) fail("agent.target must be <agent>@<machine>:/path");
-  if (!value.script && !value.agent && !value.template && !webhook?.template) fail("a task needs a script, an agent or a template");
+  if (value.session && (typeof value.session.id !== "string" || !value.session.id)) fail("session.id is required");
+  if (value.room && (typeof value.room.to !== "string" || !parseNoticeTarget(value.room.to))) fail("room.to must be a target like matrix:!room:server");
+  if ([value.agent, value.session, value.room].filter(Boolean).length > 1) fail("a task is one of agent, session or room");
+  if (!value.script && !value.agent && !value.session && !value.room && !value.template && !webhook?.template) fail("a task needs a script, an agent, a session, a room or a template");
   if (value.deliver !== undefined && (!Array.isArray(value.deliver) || value.deliver.some((item: unknown) => typeof item !== "string"
     || (item !== "app" && !parseNoticeTarget(item))))) fail("deliver must list targets like app or matrix:!room:server");
   if (value.level && !["silent", "notice", "alert"].includes(value.level)) fail("level must be silent, notice or alert");
@@ -152,6 +181,9 @@ export class Automations {
         scope TEXT NOT NULL, definition TEXT, previous TEXT, reason TEXT, proposed_by TEXT NOT NULL, status TEXT NOT NULL,
         error TEXT, created_at INTEGER NOT NULL, decided_at INTEGER, decided_by TEXT);
     `);
+    // The reviewer's analysis of a proposal it handed to the human (0.7.70).
+    if (!(this.deps.store.db.prepare("PRAGMA table_info(automation_proposals)").all() as Array<{ name: string }>).some((c) => c.name === "review"))
+      this.deps.store.db.exec("ALTER TABLE automation_proposals ADD COLUMN review TEXT");
     // A run cut off by a restart never finishes.
     deps.store.db.prepare("UPDATE automation_runs SET status='failed',error='Control Plane 重启，运行中断',finished_at=? WHERE status='running'")
       .run(this.now());
@@ -206,12 +238,18 @@ export class Automations {
     }
   }
 
+  /** A one-time task that has run (or was missed) is done. */
+  private ranOnce(id: string): boolean {
+    return Boolean(this.deps.store.db.prepare("SELECT 1 FROM automation_runs WHERE automation_id=? AND trigger IN ('schedule') LIMIT 1").get(id));
+  }
+
   private state(id: string): { definition_hash: string; next_at: number | null; paused: number } | undefined {
     return this.deps.store.db.prepare("SELECT definition_hash,next_at,paused FROM automation_state WHERE id=?").get(id) as never;
   }
 
   private nextAfter(task: Automation, after: number): number | undefined {
-    const schedule = task.definition?.trigger.schedule;
+    const trigger = task.definition?.trigger, schedule = trigger?.schedule;
+    if (trigger?.at && !task.error) { const at = parseAt(trigger.at, trigger.tz)!; return at > after - CATCH_UP_MS && !this.ranOnce(task.id) ? at : undefined; }
     if (!schedule || task.error) return undefined;
     if (task.cron) return nextCron(task.cron, after, schedule.tz ?? "Asia/Shanghai");
     return after + schedule.everyMinutes! * 60_000;
@@ -231,9 +269,10 @@ export class Automations {
     const state = this.state(task.id), definition = task.definition;
     const last = this.deps.store.db.prepare("SELECT * FROM automation_runs WHERE automation_id=? ORDER BY trigger_at DESC LIMIT 1").get(task.id);
     return { id: task.id, scope: task.scope, title: definition?.title ?? task.id, error: task.error ?? null,
-      trigger: definition?.trigger.schedule ? "schedule" : definition?.trigger.webhook ? "webhook" : null,
+      trigger: definition?.trigger.schedule ? "schedule" : definition?.trigger.webhook ? "webhook" : definition?.trigger.at ? "at" : null,
       schedule: definition?.trigger.schedule ?? null, kind: definition ? kindOf(definition) : null,
       enabled: definition ? definition.enabled !== false : false, paused: Boolean(state?.paused), nextAt: state?.next_at ?? null,
+      at: definition?.trigger.at ?? null, completed: Boolean(definition?.trigger.at && !state?.next_at && last),
       deliver: definition ? this.targets(definition).map(targetText) : [], lastRun: last ? runWire(last as Record<string, unknown>) : null };
   }
 
@@ -262,12 +301,13 @@ export class Automations {
     const now = this.now();
     for (const task of this.tasks.values()) {
       const state = this.state(task.id), definition = task.definition;
-      if (!definition?.trigger.schedule || task.error || !state?.next_at || state.next_at > now) continue;
+      if (!(definition?.trigger.schedule || definition?.trigger.at) || task.error || !state?.next_at || state.next_at > now) continue;
       const due = state.next_at;
+      // A one-time task is due once: whatever happens next (run, skip, miss), it has no next time.
       this.deps.store.db.prepare("UPDATE automation_state SET next_at=?,updated_at=? WHERE id=?")
-        .run(this.nextAfter(task, now) ?? null, now, task.id);
+        .run(definition.trigger.at ? null : this.nextAfter(task, now) ?? null, now, task.id);
       if (state.paused || definition.enabled === false) continue;
-      const late = now - due, catchUp = definition.trigger.schedule.catchUp ?? "once";
+      const late = now - due, catchUp = definition.trigger.schedule?.catchUp ?? "once";
       if (late > ON_TIME_MS && (catchUp === "skip" || late > CATCH_UP_MS)) { this.record(task.id, "schedule", due, "missed", `晚了 ${Math.round(late / 60_000)} 分钟，未补跑`); continue; }
       void this.fire(task, "schedule", due, {});
     }
@@ -334,15 +374,16 @@ export class Automations {
   }
 
   private fire(task: Automation, trigger: string, at: number, payload: Record<string, unknown>): string {
-    if (this.running.has(task.id)) return this.record(task.id, trigger, at, "skipped", "上一次运行尚未结束");
+    // Messages into a room are independent and short: a burst must not drop any. Other tasks run one at a time.
+    if (this.running.has(task.id) && !task.definition?.room) return this.record(task.id, trigger, at, "skipped", "上一次运行尚未结束");
     const runId = randomUUID();
     this.deps.store.db.prepare(`INSERT INTO automation_runs(id,automation_id,trigger,trigger_at,started_at,status) VALUES(?,?,?,?,?,'running')`)
       .run(runId, task.id, trigger, at, this.now());
-    this.running.add(task.id);
+    if (!task.definition?.room) this.running.add(task.id);
     void this.execute(task, runId, payload)
       .then((result) => this.finish(task, runId, result))
       .catch((error) => this.finish(task, runId, { status: "failed", error: error instanceof Error ? error.message : String(error) }))
-      .finally(() => this.running.delete(task.id));
+      .finally(() => { if (!task.definition?.room) this.running.delete(task.id); });
     return runId;
   }
 
@@ -357,6 +398,8 @@ export class Automations {
       try { const parsed = JSON.parse(output); if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) { data = { ...data, ...parsed }; json = true; } } catch {}
       if (!definition.agent && !definition.template && !definition.trigger.webhook?.template) return { status: silent(output) ? "silent" : "ok", output, text: output };
     }
+    if (definition.session) return this.wakeSession(task, runId, definition.session, output);
+    if (definition.room) return this.postToRoom(task, runId, definition.room, data, definition.script ? output : undefined);
     const template = definition.template ?? definition.trigger.webhook?.template;
     const when = definition.agent?.when === undefined ? "1" : renderTemplate(definition.agent.when, data).trim();
     if (!definition.agent || !when || when === "0" || when === "false") {
@@ -369,6 +412,33 @@ export class Automations {
     const prompt = [definition.script && !json ? `[脚本输出]\n${output.trim()}\n` : "", renderTemplate(definition.agent.prompt, data)].filter(Boolean).join("\n");
     const run = await this.runAgent(task, runId, prompt);
     return { ...run, output: run.text };
+  }
+
+  /** The session gets its turn; what `deliver` names gets the reminder now, so it arrives even with the session's machine off. */
+  private async wakeSession(task: Automation, runId: string, session: { id: string; note?: string }, output: string):
+    Promise<{ status: "ok" | "failed"; error?: string; sessionId?: string; text?: string }> {
+    const title = task.definition!.title, note = session.note?.trim();
+    const reminder = `⏰ ${title}${note ? `\n${note}` : ""}`;
+    const input = [`[约定的时间到了 · ${title}] 这是你之前设好的唤回，不是用户刚发的消息。`, note ?? "", output.trim() ? `[脚本输出]\n${output.trim()}` : ""]
+      .filter(Boolean).join("\n");
+    try { this.deps.sendTurn!(session.id, input, `automation:${runId}`); }
+    catch (error) { return { status: "failed", sessionId: session.id, text: reminder, error: `会话没有唤回：${error instanceof Error ? error.message : String(error)}` }; }
+    return { status: "ok", sessionId: session.id, text: reminder };
+  }
+
+  /** Post into a room; when `agent` says so, hand the same text to the session the room continues now (starting one if none). */
+  private async postToRoom(task: Automation, runId: string, room: { to: string; text?: string; agent?: string | boolean }, data: Record<string, unknown>, output?: string):
+    Promise<{ status: "ok" | "silent" | "failed"; error?: string; sessionId?: string; text?: string }> {
+    const definition = task.definition!, target = parseNoticeTarget(room.to)!;
+    const text = (room.text ? renderTemplate(room.text, data) : output?.trim() || renderTemplate(definition.trigger.webhook?.template ?? "{text}", data)).trim();
+    if (!text || silent(text)) return { status: "silent", text };
+    this.deps.store.createNotice({ id: `run:${runId}:room`, ...target, text: clip(text, 19_000), level: definition.level ?? "notice", source: `automation:${task.id}` });
+    const wants = typeof room.agent === "boolean" ? room.agent : room.agent ? renderTemplate(room.agent, data).trim() : "";
+    if (!wants || wants === "0" || wants === "false") return { status: "ok", text };
+    try {
+      const sessionId = await this.deps.roomTurn!(target, `[系统消息 · ${definition.title}] 下面这条是系统推送到房间的消息，不是用户发的；需要处理就处理。\n\n${text}`, `automation:${runId}`);
+      return { status: "ok", sessionId, text };
+    } catch (error) { return { status: "failed", text, error: `房间的会话没有接手：${error instanceof Error ? error.message : String(error)}` }; }
   }
 
   private scriptPath(task: Automation): string {
@@ -455,9 +525,12 @@ export class Automations {
     this.deps.store.db.prepare("UPDATE automation_runs SET status=?,finished_at=?,output=?,error=?,session_id=COALESCE(?,session_id) WHERE id=?")
       .run(result.status, this.now(), result.output ? clip(result.output) : null, result.error ?? null, result.sessionId ?? null, runId);
     const definition = task.definition!;
-    if (result.status === "ok" && result.text) this.targets(definition).forEach((target, index) =>
+    // A room task has already posted its text; a session task delivers only what it names.
+    if (result.status === "ok" && result.text && !definition.room && (!definition.session || definition.deliver?.length)) this.targets(definition).forEach((target, index) =>
       this.deps.store.createNotice({ id: `run:${runId}:${index}`, ...target, text: clip(result.text!.trim(), 19_000),
         level: definition.level ?? "notice", source: `automation:${task.id}`, ...(result.sessionId && target.connector !== "app" ? { sessionId: result.sessionId } : {}) }));
+    if (result.status === "failed" && definition.session && result.text && definition.deliver?.length) this.targets(definition).forEach((target, index) =>
+      this.deps.store.createNotice({ id: `run:${runId}:${index}`, ...target, text: result.text!, level: definition.level ?? "notice", source: `automation:${task.id}` }));
     if (result.status === "failed") {
       log.warn({ automation: task.id, runId, error: result.error }, "Automation run failed");
       this.deps.store.createNotice({ id: `run:${runId}:failed`, ...this.options.operatorTarget, level: "alert", source: `automation:${task.id}`,
@@ -537,6 +610,24 @@ export class Automations {
     return decided;
   }
 
+  /**
+   * An agent's proposal, judged by the reviewer first (clown 2026-11-02: no human confirmation where the review
+   * suffices). Allowed, it is applied at once and nobody is told; otherwise it waits for the human with the
+   * reviewer's analysis, as before. Without a reviewer every proposal waits.
+   */
+  async proposeReviewed(input: Parameters<Automations["propose"]>[0], proposedBy: string): Promise<AutomationProposal> {
+    const proposal = this.propose(input, proposedBy, !this.options.reviewer);
+    if (!this.options.reviewer) return proposal;
+    const verdict = await this.options.reviewer({ ...proposal, current: proposal.previous })
+      .catch((error: unknown) => ({ decision: "human" as const, reason: `审核失败：${error instanceof Error ? error.message : String(error)}` }));
+    if (verdict.decision === "allow") return this.decide(proposal.id, "allow", "review");
+    this.deps.store.db.prepare("UPDATE automation_proposals SET review=? WHERE id=?").run(verdict.reason, proposal.id);
+    const verb = { create: "新建", update: "修改", delete: "删除" }[proposal.action];
+    this.deps.store.createNotice({ id: `proposal:${proposal.id}`, ...this.options.operatorTarget, level: "alert", source: proposedBy,
+      text: `🗓️ 定时任务提案待你确认：${verb} ${proposal.definition?.title ?? proposal.previous?.title ?? proposal.automationId}\n${proposedBy} 提出；审核员：${verdict.reason}` });
+    return this.proposal(proposal.id)!;
+  }
+
   /** Change only where a task delivers (the Control Center's target picker); the rest of its definition stays. */
   setDeliver(id: string, deliver: string[], by: string): AutomationProposal {
     const task = this.require(id);
@@ -586,6 +677,8 @@ export class Automations {
 }
 
 function kindOf(definition: AutomationDefinition): string {
+  if (definition.session) return "session";
+  if (definition.room) return definition.script ? "script+room" : "room";
   return definition.agent ? definition.script ? "script+agent" : "agent" : definition.script ? "script" : "notify";
 }
 
@@ -605,7 +698,8 @@ function proposalWire(row: Record<string, unknown>): AutomationProposal {
   return { id: String(row.id), action: row.action as AutomationProposal["action"], automationId: String(row.automation_id), scope: String(row.scope),
     definition: json(row.definition), previous: json(row.previous), reason: (row.reason as string | null) ?? null, proposedBy: String(row.proposed_by),
     status: row.status as AutomationProposal["status"], error: (row.error as string | null) ?? null, createdAt: Number(row.created_at),
-    decidedAt: row.decided_at == null ? null : Number(row.decided_at), decidedBy: (row.decided_by as string | null) ?? null };
+    decidedAt: row.decided_at == null ? null : Number(row.decided_at), decidedBy: (row.decided_by as string | null) ?? null,
+    review: (row.review as string | null) ?? null };
 }
 
 /** GitHub, GitLab and Hermes (generic V1/V2) webhook signatures, as the callers being migrated send them. */
@@ -623,4 +717,20 @@ export function verifySignature(headers: Record<string, string | string[] | unde
   if (header("x-gitlab-token")) return equal(header("x-gitlab-token"), secret);
   if (header("x-webhook-signature")) return equal(header("x-webhook-signature"), hex(body));
   return false;
+}
+
+/** `2026-11-06 14:00` (or with seconds, or a `T`) in `tz` (Asia/Shanghai) as epoch ms; undefined when unreadable. */
+export function parseAt(value: string, tz = "Asia/Shanghai"): number | undefined {
+  const match = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?$/.exec(value.trim());
+  if (!match) return undefined;
+  const [y, mo, d, h, mi, se] = match.slice(1).map((part) => Number(part ?? 0)) as number[];
+  const guess = Date.UTC(y!, mo! - 1, d!, h!, mi!, se ?? 0);
+  // The zone's offset at that moment: format the guess there and correct by the difference.
+  let parts: Record<string, number>;
+  try {
+    parts = Object.fromEntries(new Intl.DateTimeFormat("en-US", { timeZone: tz, hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", second: "2-digit" }).formatToParts(guess).filter((p) => p.type !== "literal").map((p) => [p.type, Number(p.value)]));
+  } catch { return undefined; }
+  const shown = Date.UTC(parts.year!, parts.month! - 1, parts.day!, parts.hour!, parts.minute!, parts.second!);
+  return guess - (shown - guess);
 }

@@ -11,7 +11,13 @@ import type { McpEndpoint, McpTool } from "./route.js";
  * single place that authorizes, records idempotent actions and audits.
  */
 
-export interface BridgePrincipal { write: boolean; authorization: string }
+export interface BridgePrincipal { write: boolean; authorization: string; id?: string }
+
+/** Who is calling from where: the session of `principal` that is calling `tool` right now, and the room a session reports to. */
+export interface CallerLookup {
+  session(principal: string, tool: string): Promise<string | undefined>;
+  room(sessionId: string): string | undefined;
+}
 
 const SESSION_ID = { type: "string", description: "Agent Bridge session id (from sessions)." };
 const DEFAULT_WAIT_SECONDS = 120;
@@ -29,7 +35,7 @@ async function introduce(client: ControlClient, sessionId: string): Promise<stri
   return `${sessionId}（${session.workerId ?? "?"} · ${session.workspace ?? "?"}${session.title ? ` · ${String(session.title).slice(0, 40)}` : ""}）`;
 }
 
-export function bridgeTools(apiBase: () => string, contacts?: SessionContacts, notify?: (text: string) => void): Array<McpTool<BridgePrincipal>> {
+export function bridgeTools(apiBase: () => string, contacts?: SessionContacts, notify?: (text: string) => void, caller?: CallerLookup): Array<McpTool<BridgePrincipal>> {
   const ops = (principal: BridgePrincipal) =>
     new BridgeOps(new ControlClient({ url: apiBase(), token: principal.authorization.slice(7) }));
   const client = (principal: BridgePrincipal) => new ControlClient({ url: apiBase(), token: principal.authorization.slice(7) });
@@ -45,6 +51,10 @@ export function bridgeTools(apiBase: () => string, contacts?: SessionContacts, n
     notify?.(`🔁 两个会话今天已来回 ${PAIR_MESSAGES_PER_DAY} 条消息，已暂停它们之间的对话：${a} ↔ ${b}`);
     throw Object.assign(new Error(`these two sessions exchanged ${PAIR_MESSAGES_PER_DAY} messages today; the person was told, stop and report instead`), { code: "pair_limit" });
   };
+  /** The caller's own session: as given, or found from the call itself (so Codex, which cannot know its id, is covered). */
+  const fromSession = async (args: Record<string, any>, principal: BridgePrincipal, tool: string): Promise<string | undefined> =>
+    typeof args.from_session_id === "string" && args.from_session_id ? args.from_session_id
+      : principal.id && caller ? await caller.session(principal.id, tool) : undefined;
   /** The line a message from another session starts with: who sent it and how to answer. */
   const contactInput = async (principal: BridgePrincipal, from: string, to: string | undefined, input: string) => {
     if (!contacts) return { input, key: undefined };
@@ -113,8 +123,8 @@ export function bridgeTools(apiBase: () => string, contacts?: SessionContacts, n
         input: { type: "string" }, model: { type: "string" }, from_session_id: FROM_SESSION,
       }, ["worker_id", "workspace"]),
       run: async (args: Record<string, any>, principal) => {
-        const contact = typeof args.from_session_id === "string" && args.from_session_id && typeof args.input === "string" && args.input
-          ? await contactInput(principal, args.from_session_id, undefined, args.input) : { input: args.input, key: undefined };
+        const from = typeof args.input === "string" && args.input ? await fromSession(args, principal, "create") : undefined;
+        const contact = from ? await contactInput(principal, from, undefined, args.input) : { input: args.input, key: undefined };
         const created = await ops(principal).create({ workerId: need(args, "worker_id"), workspace: need(args, "workspace"), input: contact.input, model: args.model });
         if (contact.key) contacts!.bind(contact.key, created.sessionId);
         return { ...created };
@@ -130,8 +140,9 @@ export function bridgeTools(apiBase: () => string, contacts?: SessionContacts, n
       }, ["session_id", "input"]),
       run: async (args: Record<string, any>, principal) => {
         const to = need(args, "session_id");
-        const contact = typeof args.from_session_id === "string" && args.from_session_id
-          ? await contactInput(principal, args.from_session_id, to, need(args, "input")) : { input: need(args, "input"), key: undefined };
+        const from = await fromSession(args, principal, "turn");
+        // A session sending to itself by name is a mistake; one found to be the target is just not another session.
+        const contact = from && (from !== to || args.from_session_id) ? await contactInput(principal, from, to, need(args, "input")) : { input: need(args, "input"), key: undefined };
         return { ...await ops(principal).send(to, contact.input, { delivery: args.delivery, model: args.model, reasoningEffort: args.reasoning_effort }) };
       },
     },
@@ -182,13 +193,28 @@ export function bridgeTools(apiBase: () => string, contacts?: SessionContacts, n
     },
     {
       name: "automation_propose", allowed: write,
-      description: "Propose creating, changing or deleting a scheduled/webhook task. Nothing runs until the human confirms it in the Control Center; tell the user that. definition: {title, trigger: {schedule: {cron | everyMinutes, tz?}} | {webhook: {secretRef, template?}}, script?: {path, cwd?} (an existing script only), agent?: {prompt, agent?, model?, target?}, template?, deliver?: [\"app\" | \"matrix:!room:server\"], level?}. Output starting with [SILENT] is not delivered.",
+      description: "Create, change or delete a scheduled/webhook task. A reviewer checks it; most take effect at once, the rest wait for the human (the result says which). definition: {title, trigger: {schedule: {cron | everyMinutes, tz?}} | {at: \"2026-11-06 14:00\", tz?} (once; then done) | {webhook: {secretRef?, template?}}, and one of: session: {id: \"self\" | <session id>, note} (at the time, wake that session with your note; you have the context, so no prompt; a busy session gets it in its running turn) | room: {to: \"self\" | \"matrix:!room:server\", text?, agent?} (post to a room; when agent renders truthy, the room's current session handles it) | agent: {prompt, agent?, model?, target?} (a new session) | script: {path, cwd?} (an existing script) | template; plus deliver?: [\"app\" | \"matrix:!room:server\" | \"call:<who>\"], level?. Output starting with [SILENT] is not delivered. To be reminded later yourself, use trigger.at with session: {id: self, note}.",
       inputSchema: object({
         action: { type: "string", enum: ["create", "update", "delete"] }, id: { type: "string", description: "lowercase slug" },
         scope: { type: "string", description: "memory scope (new tasks)" }, definition: { type: "object" }, reason: { type: "string" },
+        from_session_id: FROM_SESSION,
       }, ["action", "id"]),
-      run: async (args: Record<string, any>, principal) => ({ ...await client(principal).post("/automations/proposals",
-        { action: args.action, id: args.id, scope: args.scope, definition: args.definition, reason: args.reason }) }),
+      run: async (args: Record<string, any>, principal) => {
+        // `session: self` / `room: { to: self }` name the proposing session, or the room it reports to.
+        let definition = args.definition && typeof args.definition === "object" ? { ...args.definition } : args.definition;
+        if (definition?.session?.id === "self" || definition?.room?.to === "self") {
+          const self = await fromSession(args, principal, "automation_propose");
+          if (!self) throw new Error("could not tell which session is calling; pass from_session_id, or name the session id");
+          if (definition.session?.id === "self") definition = { ...definition, session: { ...definition.session, id: self } };
+          if (definition.room?.to === "self") {
+            const room = caller?.room(self);
+            if (!room) throw new Error("this session reports to no chat room; use session: self instead");
+            definition = { ...definition, room: { ...definition.room, to: room } };
+          }
+        }
+        return { ...await client(principal).post("/automations/proposals",
+          { action: args.action, id: args.id, scope: args.scope, definition, reason: args.reason }) };
+      },
     },
     {
       name: "automation_run", allowed: write,
@@ -213,11 +239,11 @@ export function bridgeTools(apiBase: () => string, contacts?: SessionContacts, n
 }
 
 /** Any Control API token except the Bridge registration token; a read token sees only the read tools. */
-export function bridgeEndpoint(api: AgentControlApi, apiBase: () => string, contacts?: SessionContacts, notify?: (text: string) => void): McpEndpoint<BridgePrincipal> {
+export function bridgeEndpoint(api: AgentControlApi, apiBase: () => string, contacts?: SessionContacts, notify?: (text: string) => void, caller?: CallerLookup): McpEndpoint<BridgePrincipal> {
   return { name: "agent-bridge", version: "0.7.0", instructions: BRIDGE_INSTRUCTIONS,
     authenticate: (authorization) => {
       const principal = api.principalFor(authorization);
-      return principal && principal.id !== "bridge" && principal.read ? { write: principal.write, authorization: authorization! } : undefined;
+      return principal && principal.id !== "bridge" && principal.read ? { write: principal.write, authorization: authorization!, id: principal.id } : undefined;
     },
-    tools: bridgeTools(apiBase, contacts, notify) };
+    tools: bridgeTools(apiBase, contacts, notify, caller) };
 }

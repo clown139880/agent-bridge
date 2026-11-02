@@ -30,7 +30,7 @@ import { WebhookNotifier, type WebhookOptions } from "./webhook.js";
 import { OperatorNotices, type NoticeTarget, type OperatorEvent } from "./notices.js";
 import { Automations, type AutomationOptions } from "./automations.js";
 import { SecretStore, type SecretStoreOptions } from "./secrets.js";
-import { approvalReviewer, learnRule, ToolHub, toolReviewer, type ApprovalReviewer, type ToolReviewer } from "./tools.js";
+import { approvalReviewer, automationReviewer, learnRule, ToolHub, toolReviewer, type ApprovalReviewer, type ToolReviewer } from "./tools.js";
 import { reviewModel } from "./review-model.js";
 import { alreadyGated, ApprovalLessons, boundary, toolOf, type ApprovalAnalysis } from "./approval-review.js";
 import { toolsEndpoint } from "./mcp/tools.js";
@@ -208,11 +208,14 @@ export class ControlPlane {
     if (hub) this.calls = new CallNotices(this.controlStore, (args) => hub.call("call-bridge.call_place", args, "control-plane"),
       (text) => this.controlStore.createNotice({ ...operator, text, level: "alert", source: "control-plane" }));
     if (options.automations) this.automations = new Automations({ ...options.automations, secrets,
+      reviewer: model && options.review?.tools ? automationReviewer(model) : undefined,
       operatorTarget: options.noticeTarget ?? { connector: "app", roomId: "operator", threadId: "" } }, {
       store: this.controlStore, registry: this.registry,
       dispatch: (action, message) => this.controlApi.actionsForBridge().dispatch(this.controlStore.action(action.actionId)!, message),
       scopeTarget: (scope, agent) => this.conversations.scopeTarget(scope, agent),
       validScope: (scope) => this.conversations.validScope(scope),
+      sendTurn: (sessionId, input, key) => this.automationTurn(sessionId, input, key),
+      roomTurn: (target, input, key) => this.roomTurn(target, input, key),
     });
     this.controlApi = new AgentControlApi(store, this.controlStore, this.registry, {
       readToken: options.controlApiReadToken, writeToken: options.controlApiWriteToken, bridgeToken: options.bridgeToken,
@@ -250,7 +253,9 @@ export class ControlPlane {
       mcp: {
         ...(memoryOptions ? { memory: mcpRoute(memoryEndpoint(this.memory, memoryOptions)) } : {}),
         ...(apiEnabled ? { bridge: mcpRoute(bridgeEndpoint(this.controlApi, () => this.loopbackBase(), new SessionContacts(store.db),
-          (text) => this.controlStore.createNotice({ ...(this.options.noticeTarget ?? { connector: "app", roomId: "operator", threadId: "" }), text, level: "notice", source: "bridge" }))) } : {}),
+          (text) => this.controlStore.createNotice({ ...(this.options.noticeTarget ?? { connector: "app", roomId: "operator", threadId: "" }), text, level: "notice", source: "bridge" }),
+          { session: (principal, tool) => this.callerSession(principal, tool),
+            room: (sessionId) => { const room = this.conversations.relayRoom(sessionId); return room && `${room.connector}:${room.roomId}`; } })) } : {}),
         ...(apiEnabled && this.toolHub ? { tools: mcpRoute(toolsEndpoint(this.controlApi, this.toolHub)) } : {}),
       },
       legacyMcp: this.memoryMcp && ((request, response) => this.memoryMcp!.handle(request, response)),
@@ -845,6 +850,61 @@ export class ControlPlane {
   }
 
   /** “允许类似的操作”: turn the allowed call into a rule the reviewer applies from now on. Absolute-boundary calls never become rules. */
+  /**
+   * The session an agent's MCP call comes from. The token names the agent and its machine (`codex@dev-windows`),
+   * not the session; but the session's Bridge reports the tool call as it starts, so the one session of that machine
+   * calling `tool` right now is the caller. Several, or none within a second, is unknown.
+   */
+  private async callerSession(principal: string, tool: string): Promise<string | undefined> {
+    const name = principal.replace(/^agent:/, ""), at = name.indexOf("@");
+    if (at < 1) return undefined;
+    const machine = name.slice(at + 1), since = Date.now() - 30_000;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const rows = this.store.db.prepare(`SELECT DISTINCT e.session_id AS id FROM events e JOIN sessions s ON s.id=e.session_id
+        WHERE s.machine_id=? AND e.type='tool.started' AND e.created_at>? AND json_extract(e.body,'$.name') IN (?,?)`)
+        .all(machine, since, tool, `mcp__bridge__${tool}`) as Array<{ id: string }>;
+      if (rows.length === 1) return rows[0]!.id;
+      if (rows.length > 1) return undefined;
+      await new Promise((wake) => setTimeout(wake, 200));
+    }
+    return undefined;
+  }
+
+  /** A turn an automation sends a session: steers it when busy, revives it when its Bridge no longer holds it. */
+  private automationTurn(sessionId: string, input: string, key: string): void {
+    const session = this.store.getSession(sessionId);
+    if (!session) throw new Error("会话不存在（可能已删除）");
+    if (!this.registry.get(session.machineId)) throw new Error(`${session.machineId} 不在线`);
+    const created = this.controlStore.createAction({ principal: "system:automations", key, method: "POST", path: `/api/v1/sessions/${sessionId}/turns`,
+      body: { input, delivery: "auto" }, kind: "submit_turn", machineId: session.machineId, sessionId });
+    if (!created.existing) this.controlApi.actionsForBridge().dispatch(created.action, { type: "action.submit_turn", actionId: created.action.actionId,
+      sessionId, input, delivery: "auto", resume: this.resumeContext(sessionId) });
+  }
+
+  /** A turn to the session a room (or thread) continues; a room without one starts one in its scope and continues it from then on. */
+  private async roomTurn(target: NoticeTarget, input: string, key: string): Promise<string> {
+    const conversation = this.conversations.get(target.connector, target.roomId, target.threadId);
+    if (conversation.sessionId) { this.automationTurn(conversation.sessionId, input, key); return conversation.sessionId; }
+    if (!conversation.target || conversation.problem) throw new Error(String(conversation.problem ?? "房间没有可用的工作目录"));
+    const { workerId, workspace } = conversation.target, machineId = workerId.slice(workerId.indexOf("@") + 1), agentType = agentTypeOfWorker(workerId);
+    if (!agentType) throw new Error(`无效的 worker ${workerId}`);
+    if (!this.registry.get(machineId)) throw new Error(`${machineId} 不在线`);
+    const memoryScope = conversation.scope?.id;
+    const created = this.controlStore.createAction({ principal: "system:automations", key, method: "POST", path: "/api/v1/sessions",
+      body: { workerId, workspace, input, ...(memoryScope ? { memoryScope } : {}) }, kind: "create_session", machineId });
+    if (!created.existing) this.controlApi.actionsForBridge().dispatch(created.action, { type: "action.create_session", actionId: created.action.actionId,
+      agentType, projectPath: workspace, input, ...(memoryScope ? { memoryScope } : {}) });
+    for (const deadline = Date.now() + 120_000; Date.now() < deadline; await new Promise((wake) => setTimeout(wake, 1_000))) {
+      const action = this.controlStore.action(created.action.actionId);
+      if (action?.status === "failed") throw new Error(`会话没有建成：${action.error?.message ?? action.error?.code}`);
+      if (action?.status === "succeeded" && action.sessionId) {
+        this.conversations.set(target.connector, target.roomId, target.threadId, { sessionId: action.sessionId });
+        return action.sessionId;
+      }
+    }
+    throw new Error("会话迟迟没有建成");
+  }
+
   /** A session just trusted: allow what else it is waiting on, as the next ones will be. */
   private allowWaiting(sessionId: string, except: string): void {
     const rows = this.store.db.prepare("SELECT id,machine_id,request_json FROM pending_requests WHERE session_id=? AND kind='approval' AND status='pending' AND id<>?")

@@ -55,6 +55,9 @@ export class MatrixConnector {
   private readonly answering = new Set<string>();              // prompt ids this connector is answering
   private readonly awaiting = new Map<string, string>();       // place key → the user's message whose turn has not started yet
   private outbox: Promise<void> = Promise.resolve();
+  private bindingsReading = false;
+  private readonly lookedUp = new Set<string>();             // unknown sessions looked up once
+  private readonly notRoom = new Set<string>();              // unknown sessions no room continues
   private displayName?: string;
   private saveTimer?: NodeJS.Timeout;
 
@@ -343,11 +346,13 @@ export class MatrixConnector {
     const place = this.places.get(sessionId);
     if (!place) {
       if (item.type !== "session.event.appended") return;
-      // A session this connector just created reports before its binding is stored.
+      // A session this connector just created reports before its binding is stored; one the Control Plane
+      // bound itself (a webhook handing a room message to a new session) is found by reading the bindings again.
       const buffered = this.orphans.get(sessionId) ?? [];
       buffered.push(item);
       this.orphans.delete(sessionId); this.orphans.set(sessionId, buffered.slice(-200));
       while (this.orphans.size > 50) this.orphans.delete(this.orphans.keys().next().value!);
+      void this.refreshBindings();
       return;
     }
     if (item.type === "approval.upserted" || item.type === "user_input.upserted") { this.pending(place, item); return; }
@@ -420,6 +425,26 @@ export class MatrixConnector {
     const clip = (value: string) => Array.from(value).length > NOTICE_CONTEXT_CHARS ? `${Array.from(value).slice(0, NOTICE_CONTEXT_CHARS).join("")}…` : value;
     return ["[房间里新近的通知] 你上一轮之后，这里发过这些通知（不是用户写的），供理解用户这条消息：",
       ...rows.map((row) => `- ${time(row.createdAt)} ${clip(row.text).replace(/\n/g, "\n  ")}`), "", "用户消息：", text].join("\n");
+  }
+
+  /**
+   * Read the Control Plane's room bindings again for sessions this connector does not know, and adopt those bound
+   * meanwhile. Each unknown session is looked up twice at most (now, and 6 s later in case its binding was stored
+   * just after), then remembered as not a room's.
+   */
+  private async refreshBindings(): Promise<void> {
+    const unknown = [...this.orphans.keys()].filter((id) => !this.notRoom.has(id) && !this.places.has(id));
+    if (!unknown.length || this.bindingsReading) return;
+    this.bindingsReading = true;
+    try {
+      for (const row of (await this.control.call("GET", `/conversations/${CONNECTOR}`)).data as Array<Json>)
+        if (!this.places.has(row.sessionId) && this.orphans.has(row.sessionId)) this.bindPlace(row.sessionId, { roomId: row.roomId, threadId: row.threadId });
+    } catch (error) { log("warn", "Unable to read room bindings", { error: describe(error) }); }
+    finally { this.bindingsReading = false; }
+    const again = unknown.filter((id) => !this.places.has(id) && !this.lookedUp.has(id));
+    for (const id of unknown) if (!this.places.has(id)) { if (this.lookedUp.has(id)) this.notRoom.add(id); else this.lookedUp.add(id); }
+    for (const set of [this.notRoom, this.lookedUp]) while (set.size > 1_000) set.delete(set.values().next().value!);
+    if (again.length) setTimeout(() => void this.refreshBindings(), 6_000).unref();
   }
 
   private bindPlace(sessionId: string, place: Place): void {

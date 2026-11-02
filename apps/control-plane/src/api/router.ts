@@ -253,7 +253,7 @@ export class AgentControlApi {
         const body=await jsonBody(request) as Record<string,unknown>;
         if(request.method==="POST"&&!sub){
           if(body.action!=="create"&&body.action!=="update"&&body.action!=="delete")throw new ApiProblem(400,"invalid_action","action must be create, update or delete");
-          this.ok(response,automations.propose({action:body.action,id:string(body.id,"id",true)!,scope:string(body.scope,"scope"),
+          this.ok(response,await automations.proposeReviewed({action:body.action,id:string(body.id,"id",true)!,scope:string(body.scope,"scope"),
             definition:body.definition,reason:string(body.reason,"reason")},principal.id),201);return;}
         if(request.method==="POST"&&sub&&decision){
           if(!principal.id.startsWith("control:"))throw new ApiProblem(403,"forbidden","only the human confirms an automation change");

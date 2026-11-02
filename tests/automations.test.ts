@@ -13,7 +13,7 @@ const settle = async (check: () => boolean, ms = 15_000) => {
   throw new Error("timed out");
 };
 
-function fixture(files: Record<string, string>, extra: { secrets?: string; online?: boolean } = {}) {
+function fixture(files: Record<string, string>, extra: { secrets?: string; online?: boolean; reviewer?: (p: any) => Promise<{ decision: "allow" | "human"; reason: string }> } = {}) {
   const root = mkdtempSync(join(tmpdir(), "automations-"));
   const dir = join(root, "automations");
   for (const [path, text] of Object.entries(files)) {
@@ -25,17 +25,19 @@ function fixture(files: Record<string, string>, extra: { secrets?: string; onlin
   const store = new Store(":memory:");
   store.upsertMachine({ id: "hal", name: "hal", hostname: "hal", platform: "linux", capabilities: ["pi"] });
   const control = new AgentControlStore(store.db, { actionsMs: 86_400_000, attachmentsMs: 86_400_000 });
-  const dispatched: any[] = [];
+  const dispatched: any[] = [], turns: Array<{ sessionId: string; input: string; key: string }> = [];
   let now = Date.UTC(2026, 9, 31, 0, 0);
   const automations = new Automations({ dir, scriptRoots: [], secretsFile: join(root, "secrets.env"), defaultAgent: "pi",
-    operatorTarget: { connector: "app", roomId: "operator", threadId: "" }, push: false }, {
+    operatorTarget: { connector: "app", roomId: "operator", threadId: "" }, push: false, reviewer: extra.reviewer }, {
     store: control, registry: { get: (id: string) => extra.online === false ? undefined : id === "hal" ? {} : undefined } as any,
     dispatch: (action, message) => { dispatched.push({ action, message }); },
     scopeTarget: () => ({ workerId: "pi@hal", workspace: "/root/app" }), validScope: (scope) => scope === "repo-app",
+    sendTurn: (sessionId, input, key) => { if (sessionId === "gone") throw new Error("会话不存在（可能已删除）"); turns.push({ sessionId, input, key }); },
+    roomTurn: async (target, input, key) => { turns.push({ sessionId: `room:${target.roomId}`, input, key }); return "room-session"; },
     now: () => now, pollMs: 10 });
   automations.reload();
   const notices = () => control.notices({ connector: "app", limit: 50 }).concat(control.notices({ connector: "matrix", limit: 50 }));
-  return { automations, control, store, dispatched, notices, root, advance: (ms: number) => { now += ms; },
+  return { automations, control, store, dispatched, turns, notices, root, advance: (ms: number) => { now += ms; },
     close: () => { store.db.close(); rmSync(root, { recursive: true, force: true }); } };
 }
 
@@ -54,7 +56,7 @@ test("cron: Shanghai wall clock, steps, ranges and the either-day rule", () => {
 test("templates fill dotted fields; definitions are checked", () => {
   assert.equal(renderTemplate("{emoji} {title}\n{detail.a}{missing}", { emoji: "✅", title: "完成", detail: { a: 1 } }), "✅ 完成\n1");
   assert.throws(() => validateDefinition({ title: "x", trigger: {} }), /exactly one/);
-  assert.throws(() => validateDefinition({ title: "x", trigger: { schedule: { cron: "0 9 * * *" } } }), /script, an agent or a template/);
+  assert.throws(() => validateDefinition({ title: "x", trigger: { schedule: { cron: "0 9 * * *" } } }), /a script, an agent, a session, a room or a template/);
   assert.throws(() => validateDefinition({ title: "x", trigger: { schedule: { everyMinutes: 5 } }, template: "t", deliver: ["nowhere"] }), /deliver/);
   assert.ok(validateDefinition({ title: "x", trigger: { webhook: { secretRef: "HOOK" } }, template: "{text}", deliver: ["app", "matrix:!a:b"] }));
 });
@@ -249,5 +251,55 @@ test("one hook, old names as aliases; ?continue=1 decides at dispatch time wheth
     f.control.completeAction({ type: "action.result", actionId: action.actionId, kind: "create_session", status: "failed",
       error: { code: "x", message: "stop", retryable: false }, timestamp: Date.now() } as any);
     await settle(() => !f.automations.runs("velvet").some((run) => run.status === "running"));
+  } finally { f.close(); }
+});
+
+test("a one-time task wakes its session at the time, with its reminder sent first, and is then done", async () => {
+  const f = fixture({
+    "guadao/check/automation.yaml": "title: 挂刀看价\ntrigger: { at: \"2026-10-31 08:30\" }\nsession: { id: codex-1, note: 看两把红线当前价格 }\ndeliver: [app]\n",
+    "blg/remind/automation.yaml": "title: BLG 赛前\ntrigger: { at: \"2026-10-31 08:30\" }\nsession: { id: claude-2, note: 先跑市场情况 }\n",
+    "x/gone/automation.yaml": "title: 已删\ntrigger: { at: \"2026-10-31 08:30\" }\nsession: { id: gone }\n",
+  });
+  try {
+    assert.equal(f.automations.get("check")!.nextAt, Date.UTC(2026, 9, 31, 0, 30), "08:30 Shanghai");
+    f.advance(31 * 60_000); f.automations.tick();
+    await settle(() => f.turns.length === 2 && f.automations.get("gone")!.lastRun?.status === "failed");
+    assert.deepEqual(f.turns.map((t) => t.sessionId).sort(), ["claude-2", "codex-1"]);
+    assert.match(f.turns.find((t) => t.sessionId === "codex-1")!.input, /^\[约定的时间到了 · 挂刀看价\][\s\S]*看两把红线当前价格/);
+    const sent = f.notices().map((n) => n.text);
+    assert.ok(sent.includes("⏰ 挂刀看价\n看两把红线当前价格"), "deliver gets the reminder");
+    assert.ok(!sent.some((t) => t.includes("BLG 赛前")), "a session task delivers nothing it does not name");
+    assert.ok(sent.some((t) => t.includes("定时任务失败：已删")), "a deleted session is reported");
+    f.advance(60_000); f.automations.tick(); await new Promise((r) => setTimeout(r, 30));
+    assert.equal(f.turns.length, 2, "once only");
+    assert.deepEqual([f.automations.get("check")!.completed, f.automations.get("check")!.nextAt], [true, null]);
+  } finally { f.close(); }
+});
+
+test("a webhook into a room posts the text, and hands it to the room's session only when it asks for an agent", async () => {
+  const f = fixture({ "silas/inbox/automation.yaml": "title: Silas Grey\ntrigger: { webhook: {} }\nroom: { to: \"matrix:!silas:example.org\", text: \"{text}\", agent: \"{agent}\" }\n" });
+  try {
+    await f.automations.hook("inbox", {}, Buffer.from(JSON.stringify({ text: "订单 42 已发货" })));
+    await f.automations.hook("inbox", { "x-request-id": "2" }, Buffer.from(JSON.stringify({ text: "订单 43 退款，需要处理", agent: true })));
+    await settle(() => f.turns.length === 1 && f.automations.runs("inbox").filter((r) => r.status === "ok").length === 2);
+    assert.equal(f.notices().filter((n) => n.roomId === "!silas:example.org").length, 2, "both posted, the second while the first ran");
+    assert.equal(f.turns[0]!.sessionId, "room:!silas:example.org");
+    assert.match(f.turns[0]!.input, /^\[系统消息 · Silas Grey\][\s\S]*订单 43 退款，需要处理$/);
+    assert.equal(f.notices().filter((n) => n.connector === "app").length, 0, "nothing else is delivered");
+  } finally { f.close(); }
+});
+
+test("an agent's proposal the reviewer allows takes effect at once and tells nobody; one it doubts waits with its reason", async () => {
+  const f = fixture({}, { reviewer: async (p) => p.definition?.session ? { decision: "allow", reason: "唤回自己的会话" } : { decision: "human", reason: "建议拒绝：每分钟开会话" } });
+  try {
+    const wake = await f.automations.proposeReviewed({ action: "create", id: "remind", scope: "guadao",
+      definition: { title: "挂刀看价", trigger: { at: "2026-11-06 14:00" }, session: { id: "codex-1", note: "看价格" } } }, "agent:codex@dev-windows");
+    assert.deepEqual([wake.status, wake.decidedBy], ["applied", "review"]);
+    assert.deepEqual(f.automations.list().map((t) => t.id), ["remind"]);
+    assert.equal(f.notices().length, 0, "nobody is told");
+    const busy = await f.automations.proposeReviewed({ action: "create", id: "busy", scope: "x",
+      definition: { title: "刷屏", trigger: { schedule: { everyMinutes: 1 } }, agent: { prompt: "看看" } } }, "agent:pi");
+    assert.deepEqual([busy.status, busy.review], ["pending", "建议拒绝：每分钟开会话"]);
+    assert.match(f.notices()[0]!.text, /待你确认[\s\S]*审核员：建议拒绝：每分钟开会话/);
   } finally { f.close(); }
 });

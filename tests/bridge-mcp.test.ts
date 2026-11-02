@@ -23,7 +23,7 @@ async function fixture() {
     send(value: string) { sent.push(JSON.parse(value) as ControlToBridgeMessage); }, close() {} } as unknown as WebSocket;
   const control = new ControlPlane(store, { host: "127.0.0.1", port: 0,
     controlApiReadToken: "read", controlApiWriteToken: "write", bridgeToken: "bridge-registration",
-    agents: [{ name: "claude@hal", role: "project", token: "agent-claude-hal" }], sse: { keepaliveMs: 50, pollMs: 5, maxBackpressure: 3 } });
+    agents: [{ name: "claude@hal", role: "project", token: "agent-claude-hal" }, { name: "codex@dev", role: "project", token: "agent-codex-dev" }], sse: { keepaliveMs: 50, pollMs: 5, maxBackpressure: 3 } });
   const internals = control as unknown as Internals;
   internals.bridges.set("dev", { machineId: "dev", name: "Workstation", capabilities: ["codex-cli", "codex-app-server"],
     features: ["session-actions", "session-events"], bridgeVersion: "0.4.2", socket });
@@ -263,4 +263,23 @@ test("a turn a Bridge restart cut off is continued once, unless someone continue
     mock.timers.tick(25_000);
     assert.equal(resumes().length, 1, "a turn submitted through the Control Plane wins, whether or not its events arrived");
   } finally { mock.timers.reset(); await f.close(); }
+});
+
+test("a Codex session that cannot name itself is found from its own tool call, and can be answered", async () => {
+  const f = await fixture();
+  try {
+    // thread-1's Bridge reports the MCP call as it starts, under the bare tool name, as Codex does.
+    await f.bridge({ type: "session.event", eventId: "call-1", eventType: "tool.started", sessionId: "thread-1", turnId: "t", timestamp: Date.now(), payload: { name: "turn" } });
+    const sending = f.mcp("agent-codex-dev", "tools/call", { name: "turn", arguments: { session_id: "thread-2", input: "帮我看下这个" } });
+    const sent = await f.ack("action.submit_turn", { sessionId: "thread-2", turnId: "turn-x", resolvedAction: "start_turn" });
+    await sending;
+    assert.match(sent.input, /^\[Agent Bridge 会话消息\] 来自另一个会话 thread-1/);
+
+    // A second session calling the same tool at the same time makes the caller unknown: no header, no guess.
+    await f.bridge({ type: "session.event", eventId: "call-2", eventType: "tool.started", sessionId: "thread-2", turnId: "t", timestamp: Date.now(), payload: { name: "turn" } });
+    const again = f.mcp("agent-codex-dev", "tools/call", { name: "turn", arguments: { session_id: "thread-1", input: "plain" } });
+    const plain = await f.ack("action.submit_turn", { sessionId: "thread-1", turnId: "turn-y", resolvedAction: "start_turn" });
+    await again;
+    assert.equal(plain.input, "plain");
+  } finally { await f.close(); }
 });

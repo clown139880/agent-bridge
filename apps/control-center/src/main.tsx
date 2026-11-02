@@ -225,20 +225,25 @@ function ToolApprovalPanel({ writable }: { writable: boolean }) {
 }
 
 interface AutomationProposal { id: string; action: "create" | "update" | "delete"; automationId: string; scope: string;
-  definition: Record<string, unknown> | null; previous: Record<string, unknown> | null; reason: string | null; proposedBy: string; createdAt: number }
+  definition: Record<string, unknown> | null; previous: Record<string, unknown> | null; reason: string | null; proposedBy: string; createdAt: number;
+  review?: string | null }
 interface AutomationRun { id: string; trigger: string; triggerAt: number; startedAt: number | null; finishedAt: number | null;
   status: string; sessionId: string | null; output: string | null; error: string | null }
 interface AutomationRow { id: string; scope: string; title: string; kind: string | null; trigger: string | null; error: string | null;
   schedule: { cron?: string; everyMinutes?: number; tz?: string } | null;
+  /** A one-time task's local time, and whether it has run. */
+  at: string | null; completed: boolean;
   enabled: boolean; paused: boolean; nextAt: number | null; deliver: string[]; lastRun: AutomationRun | null }
-interface AutomationDetail extends AutomationRow { yaml: string | null; runs: AutomationRun[]; definition: { deliver?: string[] } | null }
+interface AutomationDetail extends AutomationRow { yaml: string | null; runs: AutomationRun[];
+  definition: { deliver?: string[]; session?: { id: string; note?: string }; room?: { to: string; agent?: unknown } } | null }
 /** The task's own deliver list, as written (none means App). */
 const rawDeliver = (t: AutomationDetail) => t.definition?.deliver ?? ["app"];
-const KIND_LABELS: Record<string, string> = { notify: "通知", script: "脚本", agent: "agent" };
-const TRIGGER_LABELS: Record<string, string> = { schedule: "定时", webhook: "webhook", manual: "手动" };
+const KIND_LABELS: Record<string, string> = { notify: "通知", script: "脚本", agent: "新会话", "script+agent": "脚本+新会话",
+  session: "唤回会话", room: "推到房间", "script+room": "脚本+推到房间" };
+const TRIGGER_LABELS: Record<string, string> = { schedule: "定时", webhook: "webhook", manual: "手动", at: "一次" };
 /** Broken, or its last run failed or was missed: these come first, with what went wrong. */
 const needsYou = (t: AutomationRow) => Boolean(t.error) || t.lastRun?.status === "failed" || t.lastRun?.status === "missed";
-const whenText = (t: AutomationRow) => t.trigger === "webhook" ? "webhook 触发"
+const whenText = (t: AutomationRow) => t.trigger === "webhook" ? "webhook 触发" : t.at ? `一次：${t.at}`
   : t.schedule?.cron ? `cron ${t.schedule.cron}${t.schedule.tz ? ` (${t.schedule.tz})` : ""}`
   : t.schedule?.everyMinutes ? `每 ${t.schedule.everyMinutes} 分钟` : "";
 const tookText = (r: AutomationRun) => r.startedAt && r.finishedAt ? `${Math.max(1, Math.round((r.finishedAt - r.startedAt) / 1000))} 秒` : "";
@@ -277,6 +282,7 @@ function AutomationPanel({ writable, proposalsOnly }: { writable: boolean; propo
       {proposals.map(p => <div key={p.id} className="pending-item">
         <div className="pending-kind">{VERBS[p.action]} {p.scope}/{p.automationId} · {p.proposedBy} · {time(p.createdAt)}</div>
         {p.reason && <p className="hint">{p.reason}</p>}
+        {p.review && <p className="attention">审核员：{p.review}</p>}
         {p.definition && <LongText className="pending-summary" text={JSON.stringify(p.definition, null, 2)} />}
         {p.previous && <details><summary>当前定义</summary><pre className="pending-summary">{JSON.stringify(p.previous, null, 2)}</pre></details>}
         {writable && <div className="row-actions">
@@ -303,7 +309,7 @@ function Automations({ writable }: { writable: boolean }) {
     return () => { clearInterval(timer); client.dispose(); };
   }, []);
   const all = tasks ?? [], broken = all.filter(needsYou), rest = all.filter(t => !needsYou(t));
-  const off = rest.filter(t => t.paused || !t.enabled), on = rest.filter(t => !t.paused && t.enabled);
+  const done = rest.filter(t => t.completed), off = rest.filter(t => !t.completed && (t.paused || !t.enabled)), on = rest.filter(t => !t.completed && !t.paused && t.enabled);
   const scheduled = on.filter(t => t.nextAt).sort((a, b) => a.nextAt! - b.nextAt!), hooks = on.filter(t => !t.nextAt);
   const row = (t: AutomationRow) => <Link key={t.id} to={`/control/automations/${segment(t.id)}`} className="session-row automation-row">
     <div className="session-row-top"><span className="hint">{t.scope} · {KIND_LABELS[t.kind ?? ""] ?? t.kind ?? "?"}</span>
@@ -322,6 +328,7 @@ function Automations({ writable }: { writable: boolean }) {
     {scheduled.length > 0 && <><h3 className="list-group">接下来</h3><div className="session-list">{scheduled.map(row)}</div></>}
     {hooks.length > 0 && <><h3 className="list-group">webhook 触发</h3><div className="session-list">{hooks.map(row)}</div></>}
     {off.length > 0 && <details><summary className="list-group">已暂停或未启用 · {off.length}</summary><div className="session-list">{off.map(row)}</div></details>}
+    {done.length > 0 && <details><summary className="list-group">已完成 · {done.length}</summary><div className="session-list">{done.map(row)}</div></details>}
     {tasks && !all.length && <div className="empty">还没有定时任务。<p>让 agent 用 automation_propose 提一个，确认后生效。</p></div>}
   </section>;
 }
@@ -389,7 +396,9 @@ function AutomationPage({ id, writable }: { id: string; writable: boolean }) {
     {task && <>
       <div className="pending-panel">
         {task.error && <p className="attention">定义有误：{task.error}</p>}
-        <p>{[whenText(task), task.nextAt ? `下次 ${time(task.nextAt)}` : "", task.paused ? "已暂停" : !task.enabled ? "未启用" : ""].filter(Boolean).join(" · ")}</p>
+        <p>{[whenText(task), task.completed ? "已完成" : task.nextAt ? `下次 ${time(task.nextAt)}` : "", task.paused ? "已暂停" : !task.enabled ? "未启用" : ""].filter(Boolean).join(" · ")}</p>
+        {task.definition?.session && <p className="hint">唤回会话 <Link to={`/control/sessions/${segment(task.definition.session.id)}`} className="inline">{task.definition.session.id.slice(0, 18)}…</Link>{task.definition.session.note ? `：${task.definition.session.note}` : ""}</p>}
+        {task.definition?.room && <p className="hint">推到房间{task.definition.room.agent ? "，需要时交给房间当前的会话" : ""}</p>}
         {writable && <div className="row-actions">
           <button type="button" disabled={Boolean(busy) || Boolean(task.error)} onClick={() => void act("run", `/automations/${segment(id)}/run`, {}, "已开始运行，结果稍后出现在下面。")}>立即运行</button>
           <button type="button" className="quiet" disabled={Boolean(busy) || Boolean(task.error)} onClick={() => void act("pause", `/automations/${segment(id)}/${task.paused ? "resume" : "pause"}`, {})}>{task.paused ? "恢复" : "暂停"}</button>
