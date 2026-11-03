@@ -321,8 +321,9 @@ export class AgentControlApi {
   }
 
   private workerJson(machine:ReturnType<Store["listMachines"]>[number],agentType:AgentType,label:string):Record<string,unknown>{
-    const bridge=this.bridges.get(machine.id);const workspaces=this.legacy.listProjectPaths(machine.id);
-    const recent=workspaces.map(path=>{const row=this.store.db.prepare("SELECT MAX(updated_at) AS t,COUNT(*) AS n FROM sessions WHERE machine_id=? AND project_path=?").get(machine.id,path) as {t:number;n:number};return{path,name:path.replace(/[\\/]$/,"").split(/[\\/]/).at(-1)||path,lastUsedAt:Number(row.t),sessionCount:Number(row.n)};});
+    const bridge=this.bridges.get(machine.id);const workspaces=this.legacy.listAllProjectPaths(machine.id);
+    // Every workspace the machine ever used is indexed for search; the quick buttons stay on the recent few.
+    const recent=workspaces.slice(0,8).map(path=>{const row=this.store.db.prepare("SELECT MAX(updated_at) AS t,COUNT(*) AS n FROM sessions WHERE machine_id=? AND project_path=?").get(machine.id,path) as {t:number;n:number};return{path,name:path.replace(/[\\/]$/,"").split(/[\\/]/).at(-1)||path,lastUsedAt:Number(row.t),sessionCount:Number(row.n)};});
     const active=Number((this.store.db.prepare("SELECT COUNT(*) AS n FROM sessions WHERE machine_id=? AND activity_status IN ('active','waiting_for_approval','waiting_for_input')").get(machine.id) as {n:number}).n);
     const sessionCount=Number((this.store.db.prepare('SELECT COUNT(*) AS n FROM sessions WHERE machine_id=? AND agent_type=?').get(machine.id,agentType) as {n:number}).n);
     return{id:buildWorkerId(agentType,machine.id),machineId:machine.id,machineName:machine.name,agentType,sessionCount,name:`${label} @ ${machine.name}`,status:bridge?"online":"offline",

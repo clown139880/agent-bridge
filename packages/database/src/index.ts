@@ -149,6 +149,17 @@ export class Store {
     return rows.map((row) => String(row.project_path));
   }
 
+  /** Every distinct workspace path ever used for a machine, most-recent first. Used for workspace search. */
+  listAllProjectPaths(machineId: string): string[] {
+    const rows = this.db.prepare(`
+      SELECT project_path FROM sessions
+      WHERE machine_id=?
+      GROUP BY project_path
+      ORDER BY MAX(updated_at) DESC
+    `).all(machineId) as Array<{ project_path: string }>;
+    return rows.map((row) => String(row.project_path));
+  }
+
   createWorkerRun(run: WorkerRunRecord): void {
     this.db.exec("BEGIN IMMEDIATE");
     try { this.db.prepare(`

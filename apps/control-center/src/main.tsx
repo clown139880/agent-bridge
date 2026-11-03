@@ -664,7 +664,8 @@ function NewSession({ control, state, banners }: { control: ControlState; state:
   const input = state.drafts.new ?? "", [model, setModel] = useState<ModelChoice>({ model: "", effort: "" });
   const choices = state.workers.filter(w => w.status === "online" && w.capabilities.includes("session-actions"));
   const worker = choices.find(w => w.id === workerId);
-  const spaces = worker?.recentWorkspaces?.length ? worker.recentWorkspaces : (worker?.workspaces ?? []).map(path => ({ name: path, path }));
+  const allSpaces = (worker?.workspaces ?? []).map(path => ({ name: path, path }));
+  const quickSpaces = worker?.recentWorkspaces?.length ? worker.recentWorkspaces : allSpaces.slice(0, 8);
   const busy = isBusy(state) || uploading(state, "new");
   const absolute = /^(?:\/|[A-Za-z]:[\\/]|\\\\)/.test(workspace);
   return <section className="page"><TopBar back="/control/sessions" title="新的对话" />
@@ -681,8 +682,8 @@ function NewSession({ control, state, banners }: { control: ControlState; state:
       {!choices.length && <p className="hint">没有在线且支持会话操作的 Worker，请刷新后重试。</p>}
       <label htmlFor="workspace">工作目录</label><input id="workspace" list="recent-spaces" value={workspace} required
         onChange={e => setWorkspace(e.target.value)} placeholder="选择最近目录，或输入目标机器绝对路径" autoCapitalize="none" spellCheck={false} />
-      <datalist id="recent-spaces">{spaces.map(s => <option key={s.path} value={s.path}>{s.name}</option>)}</datalist>
-      {worker && spaces.length > 0 && <div className="workspace-choices">{spaces.slice(0, 6).map(s => <button type="button" key={s.path} onClick={() => setWorkspace(s.path)}>{s.name}</button>)}</div>}
+      <datalist id="recent-spaces">{allSpaces.map(s => <option key={s.path} value={s.path}>{s.name}</option>)}</datalist>
+      {worker && quickSpaces.length > 0 && <div className="workspace-choices">{quickSpaces.slice(0, 6).map(s => <button type="button" key={s.path} onClick={() => setWorkspace(s.path)}>{s.name}</button>)}</div>}
       {workspace && !absolute && <p className="hint">请使用目标机器上的绝对路径。</p>}
       <label htmlFor="first-message">第一条消息 <span className="muted">（可选）</span></label><textarea id="first-message" rows={6} value={input} onChange={e => control.setDraft("new", e.target.value)} onPaste={pasteImages(control, "new")} onKeyDown={submitWithKeyboard} aria-keyshortcuts="Control+Enter Meta+Enter" placeholder="想让 Agent 做什么？" />
       <AttachmentList control={control} state={state} id="new" />
