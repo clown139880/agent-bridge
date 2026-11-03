@@ -263,6 +263,32 @@ export class AgentMessagePublisher {
       .run(message.key, message.data.sessionId, fingerprint, message.revision, message.state, topic, payload, message.expiresAt);
   }
 
+  /**
+   * An event a LAN source sent to `POST /events/<source>`, published under that source as it would
+   * have published it itself (docs/event-routing.zh.md). Its revision is the event bus's.
+   */
+  relay(event: { eventId: string; source: string; key: string; state: string; expiresAt: number }): void {
+    if (event.expiresAt <= this.now()) return;
+    const retain = event.state !== "message", payload = JSON.stringify(event);
+    const topic = retain ? `uctw/messages/${event.source}/state/${hash(event.key).slice(0, 32)}` : `uctw/messages/${event.source}/events`;
+    // Keys of other sources are kept apart from the Agent's own; the expiry sweep clears their retained state the same way.
+    const key = `${event.source}\n${event.key}`, now = this.now();
+    this.control.transaction(() => {
+      const inserted = this.store.db.prepare(`INSERT OR IGNORE INTO message_outbox
+        (event_id,message_key,topic,payload,retain,expires_at,created_at,next_at) VALUES(?,?,?,?,?,?,?,?)`)
+        .run(`${event.source}:${event.eventId}`, key, topic, payload, Number(retain), event.expiresAt, now, now);
+      if (!inserted.changes) return;
+      this.store.db.prepare("UPDATE message_outbox SET status='superseded' WHERE message_key=? AND seq!=? AND status='pending'")
+        .run(key, Number(inserted.lastInsertRowid));
+      if (retain) this.store.db.prepare(`INSERT INTO message_publisher_keys
+        (message_key,session_id,fingerprint,revision,state,topic,payload,expires_at) VALUES(?,'',?,?,?,?,?,?)
+        ON CONFLICT(message_key) DO UPDATE SET fingerprint=excluded.fingerprint,revision=excluded.revision,
+        state=excluded.state,topic=excluded.topic,payload=excluded.payload,expires_at=excluded.expires_at,clear_queued=0`)
+        .run(key, hash(payload), Number(inserted.lastInsertRowid), event.state, topic, payload, event.expiresAt);
+    });
+    void this.flush();
+  }
+
   /** Drain only due deliveries; broker failures never reject the Agent's turn. */
   flush(): Promise<void> {
     if (this.closed) return Promise.resolve();

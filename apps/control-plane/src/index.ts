@@ -28,6 +28,7 @@ const control = new ControlPlane(store, {
   toolsRegistry: config.toolsRegistry,
   ntfy: config.ntfy,
   messages: config.messages,
+  events: config.events,
 });
 
 await control.start();

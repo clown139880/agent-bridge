@@ -10,6 +10,7 @@ import { parseWorkerId, type AgentType, type ControlToBridgeMessage } from "@age
 import type { BridgeRegistry } from "./bridge-registry.js";
 import { nextCron, parseCron, type Cron } from "./cron.js";
 import { parseNoticeTarget, type NoticeTarget } from "./notices.js";
+import type { BusEvent } from "./event-bus.js";
 import type { SecretStore } from "./secrets.js";
 
 const log = pino({ name: "automations" });
@@ -30,7 +31,11 @@ export interface AutomationDefinition {
     at?: string; tz?: string;
     webhook?: { secretRef?: string; template?: string;
       /** Other hook names that reach this task, optionally with fixed query parameters: `comfy-chain?continue=1`. */
-      aliases?: string[] } };
+      aliases?: string[] };
+    /** An event on the bus (docs/event-routing.zh.md): `type` matches exactly or by a `prefix.*`. */
+    event?: { source: string; type?: string; level?: string; handling?: "notify" | "investigate" };
+    /** A source's heartbeat expired (`{stale}` is 1), or came back (`{stale}` is empty). */
+    stale?: { source: string } };
   script?: { path: string; cwd?: string; timeoutSec?: number; envFile?: string };
   agent?: { prompt: string; agent?: string; model?: string; target?: string; timeoutMin?: number;
     /** Run the agent only when this renders non-empty (not "0"/"false"), e.g. `{query.continue}`; otherwise deliver like a notify task. */
@@ -132,8 +137,11 @@ export function validateDefinition(raw: unknown): AutomationDefinition {
   const value = raw as Record<string, any>;
   if (typeof value.title !== "string" || !value.title.trim()) fail("title is required");
   const trigger = value.trigger ?? {};
-  const schedule = trigger.schedule, webhook = trigger.webhook, at = trigger.at;
-  if ([schedule, webhook, at].filter(Boolean).length !== 1) fail("trigger needs exactly one of schedule, webhook or at");
+  const schedule = trigger.schedule, webhook = trigger.webhook, at = trigger.at, event = trigger.event, stale = trigger.stale;
+  if ([schedule, webhook, at, event, stale].filter(Boolean).length !== 1) fail("trigger needs exactly one of schedule, webhook, at, event or stale");
+  for (const [name, item] of [["event", event], ["stale", stale]] as const)
+    if (item && (typeof item.source !== "string" || !SLUG.test(item.source))) fail(`trigger.${name}.source must name a source`);
+  if (event?.handling !== undefined && !["notify", "investigate"].includes(event.handling)) fail("trigger.event.handling must be notify or investigate");
   if (at !== undefined && parseAt(String(at), trigger.tz) === undefined) fail("trigger.at must be a local time like 2026-11-06 14:00");
   if (schedule) {
     if (!schedule.cron === !schedule.everyMinutes) fail("schedule needs exactly one of cron or everyMinutes");
@@ -271,7 +279,7 @@ export class Automations {
     const state = this.state(task.id), definition = task.definition;
     const last = this.deps.store.db.prepare("SELECT * FROM automation_runs WHERE automation_id=? ORDER BY trigger_at DESC LIMIT 1").get(task.id);
     return { id: task.id, scope: task.scope, title: definition?.title ?? task.id, error: task.error ?? null,
-      trigger: definition?.trigger.schedule ? "schedule" : definition?.trigger.webhook ? "webhook" : definition?.trigger.at ? "at" : null,
+      trigger: definition ? (["schedule", "webhook", "at", "event", "stale"] as const).find((name) => definition.trigger[name]) ?? null : null,
       schedule: definition?.trigger.schedule ?? null, kind: definition ? kindOf(definition) : null,
       enabled: definition ? definition.enabled !== false : false, paused: Boolean(state?.paused), nextAt: state?.next_at ?? null,
       at: definition?.trigger.at ?? null, completed: Boolean(definition?.trigger.at && !state?.next_at && last),
@@ -356,6 +364,30 @@ export class Automations {
     return { status: 202, body: { runId: this.fire(task, "webhook", now, payload) } };
   }
 
+  /** An event from the bus: each task whose `event` trigger matches runs once. */
+  onEvent(event: BusEvent): boolean {
+    const payload = { ...event, text: [event.title, event.body].filter(Boolean).join("\n") };
+    for (const task of this.tasks.values()) {
+      const want = task.definition?.trigger.event;
+      if (!want || task.error || want.source !== event.source || !this.active(task)) continue;
+      if (want.type && !(want.type.endsWith(".*") ? event.type.startsWith(want.type.slice(0, -1)) : event.type === want.type)) continue;
+      if ((want.level && want.level !== event.level) || (want.handling && want.handling !== event.handling)) continue;
+      this.fire(task, "event", this.now(), payload);
+    }
+    return true;
+  }
+
+  /** A source's heartbeat expired, or came back. */
+  onStale(source: string, stale: boolean, expiresAt: number): void {
+    const title = stale ? `⚠️ ${source} 没有心跳了` : `✅ ${source} 恢复心跳`;
+    const payload = { source, stale: stale ? "1" : "", state: stale ? "stale" : "recovered", expiresAt, title,
+      text: stale ? `${title}：最后一次心跳在 ${new Date(expiresAt).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" })} 到期。` : title };
+    for (const task of this.tasks.values())
+      if (task.definition?.trigger.stale?.source === source && !task.error && this.active(task)) this.fire(task, "stale", this.now(), payload);
+  }
+
+  private active(task: Automation): boolean { return task.definition!.enabled !== false && !this.state(task.id)?.paused; }
+
   private secret(name: string): string | undefined {
     const file = this.options.secretsFile;
     if (!file || !existsSync(file)) return undefined;
@@ -400,7 +432,7 @@ export class Automations {
       try { const parsed = JSON.parse(output); if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) { data = { ...data, ...parsed }; json = true; } } catch {}
       if (!definition.agent && !definition.template && !definition.trigger.webhook?.template) return { status: silent(output) ? "silent" : "ok", output, text: output };
     }
-    if (definition.session) return this.wakeSession(task, runId, definition.session, output);
+    if (definition.session) return this.wakeSession(task, runId, definition.session, output, data);
     if (definition.room) return this.postToRoom(task, runId, definition.room, data, definition.script ? output : undefined);
     const template = definition.template ?? definition.trigger.webhook?.template;
     const when = definition.agent?.when === undefined ? "1" : renderTemplate(definition.agent.when, data).trim();
@@ -417,11 +449,14 @@ export class Automations {
   }
 
   /** The session gets its turn; what `deliver` names gets the reminder now, so it arrives even with the session's machine off. */
-  private async wakeSession(task: Automation, runId: string, session: { id: string; note?: string }, output: string):
+  private async wakeSession(task: Automation, runId: string, session: { id: string; note?: string }, output: string, data: Record<string, unknown>):
     Promise<{ status: "ok" | "failed"; error?: string; sessionId?: string; text?: string }> {
-    const title = task.definition!.title, note = session.note?.trim();
-    const reminder = `⏰ ${title}${note ? `\n${note}` : ""}`;
-    const input = [`[约定的时间到了 · ${title}] 这是你之前设好的唤回，不是用户刚发的消息。`, note ?? "", output.trim() ? `[脚本输出]\n${output.trim()}` : ""]
+    const title = task.definition!.title, bus = task.definition!.trigger.event || task.definition!.trigger.stale;
+    const note = (bus && session.note ? renderTemplate(session.note, data) : session.note)?.trim();
+    const reminder = `${bus ? "📡" : "⏰"} ${title}${note ? `\n${note}` : ""}`;
+    const head = bus ? `[事件 · ${title}] 下面是事件总线上的事件（来源 ${String(data.source)}），不是用户发的消息；需要处理就处理。`
+      : `[约定的时间到了 · ${title}] 这是你之前设好的唤回，不是用户刚发的消息。`;
+    const input = [head, note ?? "", bus && !session.note ? String(data.text ?? "") : "", output.trim() ? `[脚本输出]\n${output.trim()}` : ""]
       .filter(Boolean).join("\n");
     try { this.deps.sendTurn!(session.id, input, `automation:${runId}`); }
     catch (error) { return { status: "failed", sessionId: session.id, text: reminder, error: `会话没有唤回：${error instanceof Error ? error.message : String(error)}` }; }

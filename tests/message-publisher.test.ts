@@ -236,3 +236,20 @@ test("an App notice becomes one agent.notice message, its first line the title, 
     assert.equal(f.deliveries.length, 1, "the delivered notice's own change does not publish again");
   } finally { f.store.db.close(); }
 });
+
+test("an event from the LAN webhook is published under its own source; its retained state is cleared once it expires", async () => {
+  const f = fixture();
+  try {
+    const producer = f.publisher(), now = Date.now();
+    const event = { v: 1, eventId: "d1", source: "ha", type: "ha.door.open", key: "door:front", revision: 7, state: "active",
+      level: "notice", handling: "notify", title: "前门开着", createdAt: now, expiresAt: now + 60_000 };
+    producer.relay(event); producer.relay(event);
+    producer.relay({ ...event, eventId: "n1", key: "note", state: "message" });
+    await producer.flush();
+    assert.deepEqual(f.deliveries.map((d) => [d.topic.replace(/[0-9a-f]{32}$/, "<hash>"), d.retain]),
+      [["uctw/messages/ha/state/<hash>", true], ["uctw/messages/ha/events", false]], "once each, under ha");
+    assert.deepEqual(JSON.parse(f.deliveries[0]!.payload), event, "as the source would have sent it");
+    f.advance(120_000); producer.capture(); await producer.flush();
+    assert.deepEqual([f.deliveries[2]!.topic, f.deliveries[2]!.payload, f.deliveries[2]!.retain], [f.deliveries[0]!.topic, "", true]);
+  } finally { f.store.db.close(); }
+});

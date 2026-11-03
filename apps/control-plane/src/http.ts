@@ -22,6 +22,8 @@ export interface HttpAppDeps {
   controlApi: AgentControlApi;
   /** POST /hooks/<id>: webhook-triggered automations, authenticated by each hook's own signature. */
   hooks?: (id: string, headers: Record<string, string | string[] | undefined>, body: Buffer, query: Record<string, string>) => Promise<{ status: number; body: Record<string, unknown> }>;
+  /** POST /events/<source>: a LAN source's v1 event, for sources that do not publish to MQTT themselves. */
+  events?: (source: string, body: Buffer) => { status: number; body: Record<string, unknown> };
   /** Whether the public /api/v1 entrance has any credential configured. */
   apiEnabled: boolean;
   browserTokens: { read?: string; write?: string };
@@ -69,6 +71,16 @@ export function createHttpApp(deps: HttpAppDeps) {
     };
     app.post("/hooks/:id", route);
     app.post("/webhooks/:id", route);
+  }
+  if (deps.events) {
+    const events = deps.events;
+    app.post("/events/:source", async (c) => {
+      if (Number(c.req.header("content-length") ?? 0) > HOOK_MAX_BYTES) return c.json({ error: "payload_too_large" }, 413);
+      const body = Buffer.from(await c.req.arrayBuffer());
+      if (body.length > HOOK_MAX_BYTES) return c.json({ error: "payload_too_large" }, 413);
+      const result = events(c.req.param("source"), body);
+      return c.json(result.body, result.status as 202);
+    });
   }
   if (deps.apiEnabled) app.all("/api/v1/*", nodeRoute("Control API", (request, response) => deps.controlApi.handle(request, response)));
   app.all("/control/api/v1/*", controlBrowserApi(deps.controlApi, deps.browserTokens, deps.version));

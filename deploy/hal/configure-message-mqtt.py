@@ -19,16 +19,27 @@ START = "# BEGIN uctw-message-center-v1"
 END = "# END uctw-message-center-v1"
 PUBLISHER = "uctw-agent-publisher"
 SUBSCRIBER = "uctw-phone-consumer"
-BLOCK = f"""{START}
-user {PUBLISHER}
-topic write uctw/messages/agent-bridge/events
-topic write uctw/messages/agent-bridge/state/#
+# The Control Plane as one subscriber of the event bus (docs/event-routing.zh.md).
+BRIDGE_CONSUMER = "uctw-bridge-consumer"
 
-user {SUBSCRIBER}
-topic read uctw/messages/agent-bridge/events
-topic read uctw/messages/agent-bridge/state/#
-{END}
-"""
+
+def topics(mode: str, sources: list[str]) -> str:
+    return "".join(f"topic {mode} uctw/messages/{source}/events\ntopic {mode} uctw/messages/{source}/state/#\n" for source in sources)
+
+
+def source_account(source: str) -> str:
+    return f"uctw-source-{source}"
+
+
+def managed_block(sources: list[str], hook_sources: list[str]) -> str:
+    """Each direct source writes only its own topics; the Control Plane also writes for the LAN webhook's sources."""
+    block = f"{START}\nuser {PUBLISHER}\n" + topics("write", ["agent-bridge", *hook_sources])
+    block += f"\nuser {SUBSCRIBER}\n" + topics("read", ["agent-bridge", *sources, *hook_sources])
+    if sources or hook_sources:
+        block += f"\nuser {BRIDGE_CONSUMER}\n" + topics("read", [*sources, *hook_sources])
+    for source in sources:
+        block += f"\nuser {source_account(source)}\n" + topics("write", [source])
+    return block + f"{END}\n"
 
 
 def private_file(path: Path, content: str) -> None:
@@ -40,18 +51,19 @@ def private_file(path: Path, content: str) -> None:
     os.replace(temporary, path)
 
 
-def amended_acl(original: str) -> str:
+def amended_acl(original: str, block: str, names: list[str]) -> str:
     if START in original or END in original:
         if original.count(START) != 1 or original.count(END) != 1:
             raise RuntimeError("Unexpected notification ACL markers; investigate before changing")
         before, rest = original.split(START, 1)
-        current, after = rest.split(END, 1)
-        if START + current + END + "\n" != BLOCK:
-            raise RuntimeError("Existing notification ACL differs; investigate before changing")
-        return original
-    if f"user {PUBLISHER}" in original or f"user {SUBSCRIBER}" in original:
+        _, after = rest.split(END, 1)
+        outside = before + after
+    else:
+        before, after, outside = original.rstrip() + "\n\n", "", original
+    if any(f"user {name}" in outside for name in names):
         raise RuntimeError("Account already has unmanaged ACL rules; investigate before changing")
-    return original.rstrip() + "\n\n" + BLOCK
+    # The managed block is ours: it is rewritten whole for the current source lists.
+    return before + block + after.lstrip("\n")
 
 
 def main() -> None:
@@ -60,7 +72,15 @@ def main() -> None:
     parser.add_argument("--ssh-key", default="/root/.ssh/ha_ed25519")
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--restart-broker", action="store_true")
+    parser.add_argument("--sources", default="", help="comma-separated sources publishing to MQTT themselves")
+    parser.add_argument("--hook-sources", default="", help="comma-separated sources the Control Plane accepts at POST /events/<source>")
     args = parser.parse_args()
+    sources = [item.strip() for item in args.sources.split(",") if item.strip()]
+    hook_sources = [item.strip() for item in args.hook_sources.split(",") if item.strip()]
+    for source in sources + hook_sources:
+        if not source.replace("-", "").replace(".", "").replace("_", "").isalnum() or source != source.lower() or source == "agent-bridge":
+            parser.error(f"invalid source {source}")
+    names = [PUBLISHER, SUBSCRIBER] + ([BRIDGE_CONSUMER] if sources or hook_sources else []) + [source_account(s) for s in sources]
     if args.restart_broker and not args.apply:
         parser.error("--restart-broker requires --apply")
     ssh = ["ssh", "-i", args.ssh_key, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
@@ -91,15 +111,15 @@ def main() -> None:
         raise RuntimeError("Unexpected Mosquitto custom configuration; investigate before changing")
     acl_path = "/share/mosquitto/accesscontrollist"
     original_acl = remote("cat " + shlex.quote(acl_path))
-    updated_acl = amended_acl(original_acl)
+    updated_acl = amended_acl(original_acl, managed_block(sources, hook_sources), names)
     logins = options.get("logins", [])
     accounts = {entry["username"]: entry for entry in logins}
     if len(accounts) != len(logins):
         raise RuntimeError("Duplicate existing MQTT usernames; investigate before changing")
-    if START not in original_acl and any(name in accounts for name in [PUBLISHER, SUBSCRIBER]):
+    if START not in original_acl and any(name in accounts for name in names):
         raise RuntimeError("Notification username already exists without managed ACL; investigate before changing")
     print(json.dumps({"mode": "apply" if args.apply else "plan", "brokerState": info.get("state"),
-                      "newAccounts": [name for name in [PUBLISHER, SUBSCRIBER] if name not in accounts],
+                      "newAccounts": [name for name in names if name not in accounts],
                       "aclChanges": updated_acl != original_acl,
                       "restartRequested": args.restart_broker}, ensure_ascii=False))
     if not args.apply:
@@ -109,7 +129,7 @@ def main() -> None:
     backup.mkdir(parents=True, mode=0o700)
     private_file(backup / "mosquitto-options.json", json.dumps(options))
     private_file(backup / "accesscontrollist", original_acl)
-    for name in [PUBLISHER, SUBSCRIBER]:
+    for name in names:
         if name not in accounts:
             entry = {"username": name, "password": secrets.token_urlsafe(32)}
             logins.append(entry)
@@ -120,13 +140,20 @@ def main() -> None:
                'chmod 644 /share/mosquitto/accesscontrollist.uctw-new && '
                'mv /share/mosquitto/accesscontrollist.uctw-new /share/mosquitto/accesscontrollist', updated_acl)
     supervisor("options", {"options": options})
-    for account, path in [(PUBLISHER, Path("/etc/agent-bridge/messages.env")),
-                          (SUBSCRIBER, Path("/etc/uctw-gateway/mqtt.env"))]:
+    url = f"mqtt://{args.host}:1883"
+    files = [(Path("/etc/agent-bridge/messages.env"), f"MESSAGE_MQTT_URL={url}\nMESSAGE_MQTT_USER={PUBLISHER}\n"
+              f"MESSAGE_MQTT_PASSWORD={accounts[PUBLISHER]['password']}\n"
+              + (f"EVENT_MQTT_USER={BRIDGE_CONSUMER}\nEVENT_MQTT_PASSWORD={accounts[BRIDGE_CONSUMER]['password']}\n"
+                 if BRIDGE_CONSUMER in names else "")),
+             (Path("/etc/uctw-gateway/mqtt.env"), f"MESSAGE_MQTT_URL={url}\nMESSAGE_MQTT_USER={SUBSCRIBER}\n"
+              f"MESSAGE_MQTT_PASSWORD={accounts[SUBSCRIBER]['password']}\n")]
+    # A direct source's credentials, for its operator to install on the source's own host.
+    files += [(Path("/etc/agent-bridge/sources") / f"{source}.env", f"MESSAGE_MQTT_URL={url}\nMESSAGE_MQTT_USER={source_account(source)}\n"
+               f"MESSAGE_MQTT_PASSWORD={accounts[source_account(source)]['password']}\n") for source in sources]
+    for path, content in files:
         if path.exists():
             private_file(backup / path.name.replace(".env", "-previous.env"), path.read_text())
-        private_file(path, f"MESSAGE_MQTT_URL=mqtt://{args.host}:1883\n"
-                          f"MESSAGE_MQTT_USER={account}\n"
-                          f"MESSAGE_MQTT_PASSWORD={accounts[account]['password']}\n")
+        private_file(path, content)
     print("Accounts and ACL configured; root-only environment files written. Backup:", backup)
     if args.restart_broker:
         supervisor("restart", {})

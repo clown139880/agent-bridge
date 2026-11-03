@@ -19,7 +19,7 @@
 ## 2. 总体结构
 
 ```text
-触发（schedule：cron 表达式 / 间隔；webhook：POST /hooks/<id>）
+触发（schedule：cron 表达式 / 间隔；webhook：POST /hooks/<id>；event / stale：事件总线，见 event-routing.zh.md）
   -> 运行（notify 渲染 / script 执行 / agent 会话）
   -> 结果文本（[SILENT] 则结束）
   -> notice 出站箱（Control Plane SQLite）
@@ -104,6 +104,8 @@ enabled: true
 - 不同运行之间的连续性（去重账本、偏好）靠记忆作用域和项目文件，不复用会话。
 
 ## 6. Webhook 入口
+
+> 2026-11-03 起，新来源改用事件入口 `POST /events/<source>` 加 `event` 触发（[事件总线与 Bridge 订阅](event-routing.zh.md)）：webhook 进来的一律是事件，和直发 MQTT 效果相同。下面的 `/hooks/<id>` 照旧可用，碰到时再迁移。
 
 - 路由：`POST /hooks/<id>`，挂在 Control Plane 现有的 Hono 入口上，暴露范围与 Control Plane 相同。`POST /webhooks/<id>` 是同一入口的别名，和 Hermes 的路径一致，迁移来的调用方只需改主机和端口。
 - 鉴权（可选）：定义里写了 `secretRef` 才校验签名；不写就是开放的 hook，任何能访问 Control Plane 的请求都能触发它定义的那次运行（clown 2026-10-31：本机和局域网回调不需要密钥）。写了 `secretRef` 时，密钥先从 OpenBao `shared/webhooks` 找，再找 `AUTOMATION_SECRETS_FILE`。

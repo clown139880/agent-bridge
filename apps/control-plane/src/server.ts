@@ -36,6 +36,7 @@ import { alreadyGated, ApprovalLessons, boundary, toolOf, type ApprovalAnalysis 
 import { toolsEndpoint } from "./mcp/tools.js";
 import { NtfyNotifier, type NtfyOptions, type SessionNotificationKind } from "./ntfy.js";
 import { AgentMessagePublisher, type MessageMqttOptions } from "./message-publisher.js";
+import { EventBus, type EventBusOptions } from "./event-bus.js";
 import { AgentMemory, AgentSkills, type Writer } from "@agent-bridge/agent-memory";
 import { ConversationMcpServer } from "./memory-mcp.js";
 import { memoryEndpoint, reviewContext, runMemoryTool, type AgentMemoryMcpOptions } from "./mcp/memory.js";
@@ -92,6 +93,7 @@ export class ControlPlane {
   private readonly approvalAnalyses = new Map<string, ApprovalAnalysis>();
   private readonly ntfy: NtfyNotifier;
   private readonly messages?: AgentMessagePublisher;
+  private readonly events?: EventBus;
   private readonly memory: ConversationMemoryStore;
   private readonly memoryMcp?: ConversationMcpServer;
   private readonly memoryReviews?: MemoryReviews;
@@ -143,6 +145,7 @@ export class ControlPlane {
       toolsRegistry?: string;
       ntfy?: NtfyOptions;
       messages?: MessageMqttOptions;
+      events?: EventBusOptions;
     },
   ) {
     this.webhook = new WebhookNotifier(options.webhook);
@@ -217,6 +220,15 @@ export class ControlPlane {
       sendTurn: (sessionId, input, key) => this.automationTurn(sessionId, input, key),
       roomTurn: (target, input, key) => this.roomTurn(target, input, key),
     });
+    const automations = this.automations;
+    if (options.events && (options.events.hookSources.length || (options.events.mqtt && options.events.sources.length)))
+      this.events = new EventBus(options.events, {
+        db: this.controlStore.db,
+        dispatch: (event) => automations?.onEvent(event) ?? true,
+        stale: (source, stale, expiresAt) => automations?.onStale(source, stale, expiresAt),
+        relay: this.messages && ((event) => this.messages!.relay(event)),
+        announce: (text, level) => this.controlStore.createNotice({ ...operator, text, level, source: "event-bus" }),
+      });
     this.controlApi = new AgentControlApi(store, this.controlStore, this.registry, {
       readToken: options.controlApiReadToken, writeToken: options.controlApiWriteToken, bridgeToken: options.bridgeToken,
       agents, memoryReviews: this.memoryReviews, conversations: this.conversations, automations: this.automations, toolHub: this.toolHub,
@@ -248,7 +260,8 @@ export class ControlPlane {
     const apiEnabled = Boolean(options.controlApiReadToken || options.controlApiWriteToken || agents.length);
     const app = createHttpApp({
       health: () => ({ ok: true, bridges: this.bridges.size, legacyMcpCalls: this.memoryMcp?.legacyCalls ?? 0,
-        messages: this.messages ? { enabled: true, ...this.messages.status() } : { enabled: false } }),
+        messages: this.messages ? { enabled: true, ...this.messages.status() } : { enabled: false },
+        events: this.events ? { enabled: true, ...this.events.status() } : { enabled: false } }),
       memoryBootstrap: (c) => this.handleMemoryBootstrap(c),
       mcp: {
         ...(memoryOptions ? { memory: mcpRoute(memoryEndpoint(this.memory, memoryOptions)) } : {}),
@@ -261,6 +274,7 @@ export class ControlPlane {
       legacyMcp: this.memoryMcp && ((request, response) => this.memoryMcp!.handle(request, response)),
       controlApi: this.controlApi,
       hooks: this.automations && ((id, headers, body, query) => this.automations!.hook(id, headers, body, query)),
+      events: this.events && ((source, body) => this.events!.hook(source, body)),
       apiEnabled,
       browserTokens: { read: options.controlApiReadToken, write: options.controlApiWriteToken },
       version: options.version,
@@ -278,6 +292,7 @@ export class ControlPlane {
     await new Promise<void>((resolve) => this.http.listen(this.options.port, this.options.host, resolve));
     this.messages?.start();
     this.automations?.start();
+    this.events?.start();
     this.calls?.start();
     // Secret values never reach stored history or notices; refreshed hourly so a rotated key is covered.
     if (this.secrets) {
@@ -312,6 +327,7 @@ export class ControlPlane {
   async stop(): Promise<void> {
     clearInterval(this.cleanupTimer);
     this.automations?.stop();
+    this.events?.stop();
     this.calls?.stop();
     this.toolHub?.stop();
     await this.messages?.stop();

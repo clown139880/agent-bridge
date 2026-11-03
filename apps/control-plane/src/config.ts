@@ -112,7 +112,19 @@ export const config = {
     username: process.env.MESSAGE_MQTT_USER,
     password: process.env.MESSAGE_MQTT_PASSWORD,
   } : undefined,
+  // The event bus (docs/event-routing.zh.md): sources read from MQTT with their own account, and those accepted at POST /events/<source>.
+  events: {
+    sources: sources("EVENT_SOURCES"),
+    hookSources: sources("EVENT_HOOK_SOURCES"),
+    mqtt: process.env.MESSAGE_MQTT_URL && process.env.EVENT_MQTT_USER ? {
+      url: process.env.MESSAGE_MQTT_URL, username: process.env.EVENT_MQTT_USER, password: process.env.EVENT_MQTT_PASSWORD,
+    } : undefined,
+  },
 };
+
+function sources(name: string): string[] {
+  return (process.env[name] ?? "").split(",").map((item) => item.trim()).filter(Boolean);
+}
 
 /**
  * AGENT_TOKENS: one token per agent (Hermes, Dorothy, claude@hal, ...), comma-separated
