@@ -3,7 +3,8 @@ import { readFile, rename, writeFile } from "node:fs/promises";
 import type { ConnectorConfig } from "./config.js";
 import { ControlError, type ControlClient, type Json, type StreamItem } from "./control.js";
 import { MatrixError, type Content, type MatrixClient, type MatrixEvent, type SyncResponse } from "./matrix.js";
-import { NUMBER_KEYS, command, footer, mentions, message, plainBody, split, threadOf, withoutMention, type Command } from "./render.js";
+import { NUMBER_KEYS, approvalParts, codeBlock, command, footer, mentions, message, plainBody, replacement, split, threadOf, withoutMention,
+  type Command } from "./render.js";
 
 const CONNECTOR = "matrix";
 const MAX_ATTACHMENTS = 8, MAX_BYTES = 15_000_000;
@@ -19,6 +20,8 @@ const log = (level: "info" | "warn" | "error", msg: string, extra: Json = {}) =>
 interface Prompt { eventId: string; roomId: string; threadId: string; kind: "approval" | "user_input"; id: string; choices?: string[]; questions?: Json[];
   /** The reactions this account put under the prompt, as one-tap choices; removed once it is resolved. */
   offered?: string[];
+  /** An approval's one-line title; the message is edited down to it once resolved. */
+  brief?: string;
   /** Set once resolved; kept a while so a late answer is told so instead of ignored. */
   resolved?: string }
 /** The ⏹ under the user's messages of a running turn: tapping one stops it; they go away when the turn ends. */
@@ -471,6 +474,7 @@ export class MatrixConnector {
       if (prompt && !prompt.resolved) {
         prompt.resolved = String(row.status);
         this.withdraw(prompt);
+        this.collapse(prompt);
         // Answered here, the ✔️ already says so; anything else (expired with a restart, answered elsewhere) is said in words.
         if (!this.answering.delete(id)) this.say(prompt, row.status === "expired" ? "⌛ 这条请求已失效（agent 重启或超时），需要的话让它重新来一次。"
           : `这条请求已在别处处理（${row.status === "denied" ? "拒绝" : "已处理"}）。`, `resolved:${id}`);
@@ -479,7 +483,7 @@ export class MatrixConnector {
       return;
     }
     if (prompts.some((prompt) => prompt.id === id)) return;
-    let text: string;
+    let text: string, brief: string | undefined;
     const kind = item.type === "approval.upserted" ? "approval" : "user_input";
     if (kind === "approval") {
       const names: Record<string, string> = { allow: "允许", deny: "拒绝", "allow-session": "本会话允许整个工具", "allow-always": "永久允许整个工具",
@@ -488,7 +492,9 @@ export class MatrixConnector {
       const risk: Record<string, string> = { low: "🟢 低", medium: "🟡 中", high: "🔴 高" };
       const analysis = row.analysis as Json | undefined;
       const explained = analysis ? `\n\n🤖 **审核员**：${String(analysis.what ?? "")}\n风险：${risk[String(analysis.risk)] ?? String(analysis.risk)}　${String(analysis.reason ?? "")}` : "";
-      text = `**需要审批**：${String(row.summary ?? "")}${explained}\n\n${choices.map((choice, i) => `${NUMBER_KEYS[i] ?? i + 1} ${names[choice] ?? choice}`).join("\n")}\n\n回复数字，或添加对应反应（✅ 允许 / ❌ 拒绝）。`;
+      const { title, detail } = approvalParts(String(row.summary ?? ""));
+      brief = title;
+      text = `**需要审批**：${title}${detail ? `\n\n${codeBlock(detail, title === "Bash" ? "sh" : "")}` : ""}${explained}\n\n${choices.map((choice, i) => `${NUMBER_KEYS[i] ?? i + 1} ${names[choice] ?? choice}`).join("\n")}\n\n回复数字，或添加对应反应（✅ 允许 / ❌ 拒绝）。`;
     } else {
       const questions = (row.questions ?? []) as Json[];
       if (questions.some((question) => question.isSecret)) text = "agent 在等一个秘密输入，请到本地客户端回答。";
@@ -497,7 +503,7 @@ export class MatrixConnector {
         + (questions.length > 1 ? "\n\n回复本消息，逐行写：`1: 答案`、`2: 答案`" : "\n\n回复本消息作答；有选项时也可回复数字或添加对应反应。");
     }
     const prompt: Prompt = { eventId: "", roomId: place.roomId, threadId: place.threadId, kind, id,
-      ...(kind === "approval" ? { choices: row.choices } : { questions: row.questions }) };
+      ...(kind === "approval" ? { choices: row.choices, brief } : { questions: row.questions }) };
     prompts.push(prompt);
     this.state.prompts = prompts.slice(-200);
     const offer = kind === "approval" ? ((row.choices ?? []) as string[]).map((_, i) => NUMBER_KEYS[i]).filter((key): key is string => Boolean(key))
@@ -516,6 +522,14 @@ export class MatrixConnector {
   private withdraw(prompt: Prompt): void {
     for (const reaction of prompt.offered ?? []) void this.matrix.redact(prompt.roomId, reaction, `withdraw-${hash(reaction)}`).catch(() => undefined);
     prompt.offered = [];
+  }
+
+  /** Edit a resolved approval down to one line: the command block and choices are no longer needed. */
+  private collapse(prompt: Prompt): void {
+    if (prompt.kind !== "approval" || !prompt.eventId || prompt.brief === undefined) return;
+    const outcome: Record<string, string> = { accepted: "✅ 已允许", denied: "❌ 已拒绝", expired: "⌛ 已失效", resolved_elsewhere: "☑️ 已在别处处理" };
+    this.send(prompt.roomId, "m.room.message", replacement(prompt.eventId, `${outcome[prompt.resolved ?? ""] ?? `☑️ ${prompt.resolved}`}　审批：${prompt.brief}`),
+      `collapse:${prompt.id}`);
   }
 
   private prompt(eventId: unknown): Prompt | undefined {

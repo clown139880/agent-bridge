@@ -17,6 +17,32 @@ export function message(text: string, threadId = "", msgtype: "m.text" | "m.noti
       "m.in_reply_to": { event_id: threadId } } } : {}) };
 }
 
+/** An edit of `eventId` to `text` (m.replace); clients show the new content in place of the old. */
+export function replacement(eventId: string, text: string): Content {
+  const { msgtype, body, format, formatted_body } = message(text);
+  return { msgtype, body: `* ${body}`, format, formatted_body, "m.new_content": { msgtype, body, format, formatted_body },
+    "m.relates_to": { rel_type: "m.replace", event_id: eventId } };
+}
+
+/**
+ * An approval summary as a short title plus its long part (a command, arguments) for a code block:
+ * Claude `$ cmd` and `Tool {json}`, Codex's multi-line `… approval required\nCommand: …`.
+ */
+export function approvalParts(summary: string, limit = 1_500): { title: string; detail: string } {
+  const text = summary.trim(), newline = text.indexOf("\n");
+  let title = text, detail = "";
+  if (newline >= 0) { title = text.slice(0, newline).trim(); detail = text.slice(newline + 1).trim(); }
+  else if (text.startsWith("$ ")) { title = "Bash"; detail = text.slice(2).trim(); }
+  else if (text.length > 60 && /^\S+\s/.test(text)) { const space = text.search(/\s/); title = text.slice(0, space); detail = text.slice(space + 1).trim(); }
+  return { title, detail: detail.length > limit ? `${detail.slice(0, limit)}…` : detail };
+}
+
+/** `text` as a fenced block, the fence longer than any backtick run inside it. */
+export function codeBlock(text: string, lang = ""): string {
+  const fence = "`".repeat(Math.max(3, ...[...text.matchAll(/`+/g)].map((run) => run[0].length + 1)));
+  return `${fence}${lang}\n${text}\n${fence}`;
+}
+
 const AGENT_NAMES: Record<string, string> = { "claude-code": "Claude", "codex-cli": "Codex", pi: "pi", grok: "Grok" };
 
 /** The small print under a reply: which agent answered, where, and how long the turn took. */

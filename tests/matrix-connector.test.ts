@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { MatrixConnector } from "../apps/matrix-connector/src/connector.js";
 import { ControlError } from "../apps/matrix-connector/src/control.js";
-import { command, footer, withoutMention } from "../apps/matrix-connector/src/render.js";
+import { approvalParts, codeBlock, command, footer, withoutMention } from "../apps/matrix-connector/src/render.js";
 
 const config = { homeserver: "https://m.example", userId: "@bot:example.org", allowedUsers: ["@me:example.org"],
   controlUrl: "http://cp", controlToken: "t", stateFile: "/dev/null" };
@@ -124,6 +124,28 @@ test("an approval is asked in its conversation and answered with the offered opt
   const decision = h.calls.find((call) => call.path === "/approvals/ap1/decision")!;
   assert.deepEqual(decision.body, { choice: "deny" });
   assert.equal(h.calls.filter((call) => call.path.endsWith("/turns")).length, 0, "an answer is not a new task");
+});
+
+test("an approval shows its command in a code block; once decided the message is edited down to one line", async () => {
+  const h = harness();
+  h.text("开始"); await tick();
+  const long = "cd /root/app && pnpm exec tsx scripts/migrate.ts --from 2026-10-01 --to 2026-11-01 --dry-run | tee /tmp/out.log";
+  h.connector.project({ cursor: "c", type: "approval.upserted", sessionId: "s1",
+    data: { id: "ap3", status: "pending", summary: `$ ${long}`, choices: ["allow", "deny"] } });
+  await tick();
+  const prompt = h.sent.find((item) => item.content.body?.includes("需要审批"))!;
+  assert.match(prompt.content.body, /\*\*需要审批\*\*：Bash\n\n```sh\n/);
+  assert.match(prompt.content.formatted_body, /<pre><code class="language-sh">cd \/root\/app/);
+  h.text("1", { "m.relates_to": { "m.in_reply_to": { event_id: prompt.eventId } } }); await tick();
+  h.connector.project({ cursor: "c", type: "approval.upserted", sessionId: "s1", data: { id: "ap3", status: "accepted" } });
+  await tick();
+  const edit = h.sent.find((item) => item.content["m.relates_to"]?.rel_type === "m.replace")!;
+  assert.equal(edit.content["m.relates_to"].event_id, prompt.eventId);
+  assert.equal(edit.content["m.new_content"].body, "✅ 已允许　审批：Bash");
+  assert.doesNotMatch(edit.content["m.new_content"].formatted_body, /<pre>/);
+  assert.deepEqual(approvalParts("Command approval required\nCommand: ls\nDirectory: /tmp"), { title: "Command approval required", detail: "Command: ls\nDirectory: /tmp" });
+  assert.deepEqual(approvalParts("Write /root/app/a.ts"), { title: "Write /root/app/a.ts", detail: "" });
+  assert.equal(codeBlock("a ``` b"), "````\na ``` b\n````");
 });
 
 test("attachments wait for the next text and go with it", async () => {
