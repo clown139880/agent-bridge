@@ -233,6 +233,8 @@ interface AutomationRow { id: string; scope: string; title: string; kind: string
   schedule: { cron?: string; everyMinutes?: number; tz?: string } | null;
   /** A one-time task's local time, and whether it has run. */
   at: string | null; completed: boolean;
+  /** Where a webhook task is called. */
+  hooks?: string[];
   enabled: boolean; paused: boolean; nextAt: number | null; deliver: string[]; lastRun: AutomationRun | null }
 interface AutomationDetail extends AutomationRow { yaml: string | null; runs: AutomationRun[];
   definition: { deliver?: string[]; session?: { id: string; note?: string }; room?: { to: string; agent?: unknown } } | null }
@@ -364,6 +366,23 @@ function DeliverPicker({ id, current, writable, saved }: { id: string; current: 
   </div>;
 }
 
+/** A webhook task's addresses, a curl line to copy, and a sample payload to try it with. */
+function HookPanel({ task, writable, run }: { task: AutomationDetail; writable: boolean; run: (payload: Record<string, unknown>) => Promise<boolean | undefined> }) {
+  const [sample, setSample] = useState('{"text": "试发一条", "agent": false}'), [bad, setBad] = useState("");
+  const hooks = task.hooks ?? [], first = hooks.find(h => !h.includes("127.0.0.1")) ?? hooks[0];
+  const tryIt = () => {
+    try { const payload = JSON.parse(sample); setBad(""); void run(payload && typeof payload === "object" ? payload : { value: payload }); }
+    catch { setBad("不是合法的 JSON"); }
+  };
+  return <div className="pending-panel"><strong>webhook 地址</strong>
+    {hooks.map(h => <p key={h} className="hook-url">{h}</p>)}
+    {first && <pre className="pending-summary">{`curl -X POST ${first} -H 'Content-Type: application/json' -d '${sample.replace(/'/g, "'\\''")}'`}</pre>}
+    {writable && <><textarea className="yaml-editor" rows={3} value={sample} spellCheck={false} onChange={e => setSample(e.target.value)} />
+      {bad && <p className="attention">{bad}</p>}
+      <div className="row-actions"><button type="button" onClick={tryIt}>试发一条</button></div></>}
+  </div>;
+}
+
 /** One task: what it is, its recent runs (a failed one opens on its error and output), and its definition to edit or delete. */
 function AutomationPage({ id, writable }: { id: string; writable: boolean }) {
   const [task, setTask] = useState<AutomationDetail>(), [error, setError] = useState(""), [busy, setBusy] = useState("");
@@ -405,6 +424,7 @@ function AutomationPage({ id, writable }: { id: string; writable: boolean }) {
           <button type="button" className="quiet" disabled={Boolean(busy) || !task.yaml} onClick={() => setDraft(draft === undefined ? task.yaml ?? "" : undefined)}>{draft === undefined ? "编辑" : "取消编辑"}</button>
           <button type="button" className="danger" disabled={Boolean(busy)} onClick={() => void remove()}>删除</button></div>}
       </div>
+      {task.trigger === "webhook" && <HookPanel task={task} writable={writable} run={(payload) => act("run", `/automations/${segment(id)}/run`, { payload }, "已试发，结果稍后出现在下面。")} />}
       {task.definition && <DeliverPicker id={id} current={rawDeliver(task)} writable={writable} saved={() => { setNotice("已保存发往。"); void load(); }} />}
       {draft !== undefined && <div className="pending-panel"><strong>编辑定义（YAML）</strong>
         <textarea className="yaml-editor" value={draft} spellCheck={false} onChange={e => setDraft(e.target.value)} rows={Math.min(30, Math.max(8, draft.split("\n").length + 1))} />

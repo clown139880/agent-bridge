@@ -193,7 +193,7 @@ export function bridgeTools(apiBase: () => string, contacts?: SessionContacts, n
     },
     {
       name: "automation_propose", allowed: write,
-      description: "Create, change or delete a scheduled/webhook task. A reviewer checks it; most take effect at once, the rest wait for the human (the result says which). definition: {title, trigger: {schedule: {cron | everyMinutes, tz?}} | {at: \"2026-11-06 14:00\", tz?} (once; then done) | {webhook: {secretRef?, template?}}, and one of: session: {id: \"self\" | <session id>, note} (at the time, wake that session with your note; you have the context, so no prompt; a busy session gets it in its running turn) | room: {to: \"self\" | \"matrix:!room:server\", text?, agent?} (post to a room; when agent renders truthy, the room's current session handles it) | agent: {prompt, agent?, model?, target?} (a new session) | script: {path, cwd?} (an existing script) | template; plus deliver?: [\"app\" | \"matrix:!room:server\" | \"call:<who>\"], level?. Output starting with [SILENT] is not delivered. To be reminded later yourself, use trigger.at with session: {id: self, note}.",
+      description: "Create, change or delete a scheduled/webhook task. A reviewer checks it; most take effect at once, the rest wait for the human (the result says which). definition: {title, trigger: {schedule: {cron | everyMinutes, tz?}} | {at: \"2026-11-06 14:00\", tz?} (once; then done) | {webhook: {secretRef?, template?}}, and one of: session: {id: \"self\" | <session id>, note} (at the time, wake that session with your note; you have the context, so no prompt; a busy session gets it in its running turn) | room: {to: \"self\" | \"matrix:!room:server\", text?, agent?} (post to a room; when agent renders truthy, the room's current session handles it) | agent: {prompt, agent?, model?, target?} (a new session) | script: {path, cwd?} (an existing script) | template; plus deliver?: [\"app\" | \"matrix:!room:server\" | \"call:<who>\"], level?. Output starting with [SILENT] is not delivered. To be reminded later yourself, use trigger.at with session: {id: self, note}. For a system that pushes messages into your room: trigger: {webhook: {}}, room: {to: self, text: \"{text}\", agent: \"{agent}\"}; the result lists the hook URLs (POST JSON there; no secret is needed on this machine or the LAN), so wire the caller to one and try it with curl.",
       inputSchema: object({
         action: { type: "string", enum: ["create", "update", "delete"] }, id: { type: "string", description: "lowercase slug" },
         scope: { type: "string", description: "memory scope (new tasks)" }, definition: { type: "object" }, reason: { type: "string" },
@@ -212,8 +212,15 @@ export function bridgeTools(apiBase: () => string, contacts?: SessionContacts, n
             definition = { ...definition, room: { ...definition.room, to: room } };
           }
         }
-        return { ...await client(principal).post("/automations/proposals",
-          { action: args.action, id: args.id, scope: args.scope, definition, reason: args.reason }) };
+        const result = await client(principal).post("/automations/proposals",
+          { action: args.action, id: args.id, scope: args.scope, definition, reason: args.reason });
+        // A webhook task in effect: say where to call it, so the agent can wire its caller and try it at once.
+        if (result.status === "applied" && definition?.trigger?.webhook) {
+          const task = await client(principal).get(`/automations/${encodeURIComponent(String(args.id))}`).catch(() => undefined);
+          if (task?.hooks?.length) return { ...result, hooks: task.hooks,
+            howToCall: "POST JSON to one of hooks (127.0.0.1 from the same machine); its fields fill the templates, e.g. {\"text\": \"…\", \"agent\": true}. Try it now with curl and check the room." };
+        }
+        return { ...result };
       },
     },
     {

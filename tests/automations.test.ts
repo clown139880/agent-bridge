@@ -168,7 +168,7 @@ test("over HTTP: hooks are served at /hooks/<id>; an agent may propose but only 
   const store = new Store(db);
   const control = new ControlPlane(store, { host: "127.0.0.1", port: 0, controlApiWriteToken: "human",
     agents: [{ name: "pi", token: "agent", role: "agent" }],
-    automations: { dir, scriptRoots: [], secretsFile: join(root, "secrets.env"), defaultAgent: "pi", push: false },
+    automations: { dir, scriptRoots: [], secretsFile: join(root, "secrets.env"), defaultAgent: "pi", push: false, hookBases: ["http://127.0.0.1:8787", "http://lan:8787"] },
     sse: { keepaliveMs: 50, pollMs: 5, maxBackpressure: 3 } });
   await control.start();
   try {
@@ -191,6 +191,7 @@ test("over HTTP: hooks are served at /hooks/<id>; an agent may propose but only 
     const decided = await call("human", "POST", `/api/v1/automations/proposals/${proposed.body.id}/decision`, { choice: "allow" });
     assert.equal(decided.body.status, "applied");
     const list = await call("agent", "GET", "/api/v1/automations");
+    assert.deepEqual(list.body.data.find((row: any) => row.id === "washer").hooks, ["http://127.0.0.1:8787/hooks/washer", "http://lan:8787/hooks/washer"], "callers are told where to post");
     assert.deepEqual(list.body.data.map((row: any) => row.id).sort(), ["remind", "washer"]);
 
     // The human edits and deletes directly, in YAML; an agent may not.

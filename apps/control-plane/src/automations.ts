@@ -74,6 +74,8 @@ export type AutomationReviewer = (proposal: AutomationProposal & { current: Auto
 
 export interface AutomationOptions {
   reviewer?: AutomationReviewer;
+  /** Origins a webhook caller can use, e.g. `http://127.0.0.1:8787`; each task's URLs are `<base>/hooks/<id>`. */
+  hookBases?: string[];
   /** `<dir>/<scope>/<id>/automation.yaml`; usually the private skill repository's `automations/`. */
   dir: string;
   /** Absolute directories (besides a task's own) its script may live in. */
@@ -273,7 +275,7 @@ export class Automations {
       schedule: definition?.trigger.schedule ?? null, kind: definition ? kindOf(definition) : null,
       enabled: definition ? definition.enabled !== false : false, paused: Boolean(state?.paused), nextAt: state?.next_at ?? null,
       at: definition?.trigger.at ?? null, completed: Boolean(definition?.trigger.at && !state?.next_at && last),
-      deliver: definition ? this.targets(definition).map(targetText) : [], lastRun: last ? runWire(last as Record<string, unknown>) : null };
+      deliver: definition ? this.targets(definition).map(targetText) : [], hooks: definition ? this.hookUrls(task.id, definition) : [], lastRun: last ? runWire(last as Record<string, unknown>) : null };
   }
 
   runs(id: string, limit = 50): AutomationRun[] {
@@ -608,6 +610,13 @@ export class Automations {
     const decided = this.decide(proposal.id, "allow", by);
     if (decided.status !== "applied") throw new AutomationError(500, "automation_write_failed", decided.error ?? "write failed");
     return decided;
+  }
+
+  /** Where a webhook task is called: each base with its id, and with each alias (its fixed query included). */
+  hookUrls(id: string, definition: AutomationDefinition): string[] {
+    if (!definition.trigger.webhook) return [];
+    const paths = [id, ...(definition.trigger.webhook.aliases ?? [])];
+    return (this.options.hookBases ?? []).flatMap((base) => paths.map((path) => `${base}/hooks/${path}`));
   }
 
   /**

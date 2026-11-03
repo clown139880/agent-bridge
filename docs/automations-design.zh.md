@@ -204,3 +204,13 @@ clown 2026-11-02 定下两类场景：
 
 执行方式现在一共五种：notify、script、agent（新会话）、session（唤回会话）、room（推到房间）。
 
+### webhook 的创建流程（0.7.71）
+
+agent 自己就能从头做完，不需要人：
+
+1. 用 `automation_propose` 提案，写 `trigger: {webhook: {}}` 和 `room: {to: self, text: "{text}", agent: "{agent}"}`。`self` 由 Control Plane 认出发起提案的会话所在的房间。
+2. 审核员放行后立即生效。返回结果里带上 `hooks`，即这个任务的调用地址：本机地址，再加上部署配置的 `AUTOMATION_HOOK_BASES`（比如局域网地址），每个别名一条。
+3. agent 把推送方接到这个地址，然后自己用 curl 试发一条确认效果。本机和局域网的调用不需要密钥。
+
+任务页也显示 webhook 地址和一行可直接复制的 curl，还能填一段示例 JSON “试发一条”（就是带请求体的立即运行）。外网入口暂不提供。
+

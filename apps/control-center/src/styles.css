@@ -279,3 +279,4 @@ details > summary.list-group { cursor: pointer; }
 .target-option.on { border-color: var(--accent); }
 .target-option input { flex: none; width: 18px; height: 18px; min-height: 0; margin: 0; padding: 0; accent-color: var(--accent); }
 .target-option span:last-child { flex: 1; }
+.hook-url { margin: 4px 0; font: .78rem/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; user-select: all; }

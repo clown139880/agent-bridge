@@ -90,6 +90,9 @@ export const config = {
     defaultModel: process.env.AUTOMATION_DEFAULT_MODEL || undefined,
     lockPath: process.env.AGENT_SKILLS_LOCK,
     push: process.env.AUTOMATION_PUSH !== "false",
+    // Where callers reach /hooks/<id>: this machine first, then whatever the deployment adds (its LAN address).
+    hookBases: [`http://127.0.0.1:${process.env.CONTROL_PORT ?? "8787"}`,
+      ...(process.env.AUTOMATION_HOOK_BASES ?? "").split(",").map((base) => base.trim().replace(/\/$/, "")).filter(Boolean)],
   } : undefined,
   // The operator's chat room for lifecycle notices, e.g. matrix:!room:server; a chat connector posts them.
   noticeTarget: noticeTarget(process.env.CONTROL_NOTICE_TARGET),
