@@ -46,6 +46,9 @@ interface PiSession {
   memoryScope?: string;     // memory scope named at creation; relaunches bootstrap from it again
   requestId?: string;
   model?: string;           // current model id (bare, without provider prefix)
+  provider?: string;        // provider of the current model
+  /** The model in use before an optimistic switch; restored when pi rejects set_model. */
+  modelBeforeSwitch?: { model?: string; provider?: string };
   cwd: string;
   projectPath: string;
   projectIdentity?: string;
@@ -173,10 +176,13 @@ export class PiAdapter implements AgentAdapter {
     // a bare model id (or no model) falls back to the adapter-configured provider.
     // This mirrors the applyModel() convention so the launch path honours the
     // same provider-qualified model ids as runtime model switching.
-    const effectiveModel = model ?? this.options.model;
+    // A resumed session without a requested model passes neither flag: pi then
+    // restores the model its session file last recorded, so a switch survives
+    // the process being reaped or the Bridge restarting.
+    const effectiveModel = model ?? (resumeNativeId ? undefined : this.options.model);
     const launchProvider = effectiveModel?.includes("/")
       ? effectiveModel.slice(0, effectiveModel.indexOf("/"))
-      : this.options.provider;
+      : effectiveModel || !resumeNativeId ? this.options.provider : undefined;
     if (launchProvider) { args.push("--provider", launchProvider); }
     if (effectiveModel) {
       const launchModel = bareModelId(effectiveModel);
@@ -204,6 +210,7 @@ export class PiAdapter implements AgentAdapter {
       nativeSessionId: resumeNativeId,
       requestId,
       model: bareModelId(effectiveModel),
+      provider: launchProvider,
       cwd,
       projectPath: cwd,
       projectIdentity: await deriveProjectIdentity(cwd),
@@ -347,10 +354,10 @@ export class PiAdapter implements AgentAdapter {
       const data = (event.data as Record<string, unknown>) ?? {};
       const sessionId = data.sessionId as string | undefined;
       const sessionFile = data.sessionFile as string | undefined;
-      const modelData = data.model as { id?: string } | undefined;
+      const modelData = data.model as { id?: string; provider?: string } | undefined;
       if (sessionId) session.nativeSessionId = sessionId;
       if (sessionFile) session.sessionFile = sessionFile;
-      if (modelData?.id) session.model = modelData.id;
+      if (modelData?.id) { session.model = modelData.id; session.provider = modelData.provider ?? session.provider; }
       this.emitDiscovered(session);
       if (session.pendingTurnStart && !session.activeTurnId) {
         session.pendingTurnStart = false;
@@ -362,12 +369,14 @@ export class PiAdapter implements AgentAdapter {
     }
     if (command === "set_model") {
       if (success) {
-        const modelData = (event.data as { id?: string } | undefined);
-        if (modelData?.id) session.model = modelData.id;
-        this.appendLog(session, `Model switched to ${session.model ?? "?"}`);
+        const modelData = (event.data as { id?: string; provider?: string } | undefined);
+        if (modelData?.id) { session.model = modelData.id; session.provider = modelData.provider ?? session.provider; }
+        this.appendLog(session, `Model switched to ${session.provider ?? "?"}/${session.model ?? "?"}`);
       } else {
+        if (session.modelBeforeSwitch) ({ model: session.model, provider: session.provider } = session.modelBeforeSwitch);
         this.appendLog(session, `pi set_model failed: ${event.error ?? ""}`);
       }
+      session.modelBeforeSwitch = undefined;
       return;
     }
     if (command === "prompt" || command === "steer" || command === "follow_up") {
@@ -531,24 +540,27 @@ export class PiAdapter implements AgentAdapter {
    * Switch the pi subprocess to a different model before a new turn when the
    * caller supplies one. pi exposes set_model over RPC; the bridge only sends a
    * model on a fresh (idle) turn, so this is safe. Returns early when the model
-   * is unchanged, unknown, or a turn is active.
+   * is unchanged, unknown, or a turn is active. A bare id equal to the current
+   * one is unchanged; a `provider/id` is unchanged only when both parts match.
    */
   private applyModel(session: PiSession, model?: string): void {
     if (!model) return;
     const wantId = bareModelId(model);
-    if (!wantId || wantId === session.model) return;
+    if (!wantId) return;
+    const named = model.includes("/") ? model.slice(0, model.indexOf("/")) : undefined;
+    if (wantId === session.model && (!named || named === session.provider)) return;
     if (session.activeTurnId) return; // cannot switch mid-turn
-    let provider = model.includes("/") ? model.slice(0, model.indexOf("/")) : this.options.provider;
-    if (!provider) {
-      provider = this.availableModels.find((m) => m.id === wantId)?.provider;
-    }
+    const provider = named ?? this.options.provider ?? this.availableModels.find((m) => m.id === wantId)?.provider;
     if (!provider) {
       this.appendLog(session, `Cannot switch model to ${wantId}: provider unknown`);
       return;
     }
     this.sendCommand(session, { type: "set_model", provider, modelId: wantId });
-    session.model = wantId; // optimistic; corrected by the set_model response
-    this.appendLog(session, `Switching model to ${wantId}`);
+    // Optimistic; confirmed by the set_model response, or put back when pi rejects it.
+    session.modelBeforeSwitch = { model: session.model, provider: session.provider };
+    session.model = wantId;
+    session.provider = provider;
+    this.appendLog(session, `Switching model to ${provider}/${wantId}`);
   }
 
   private startTurnEvents(session: PiSession): string {

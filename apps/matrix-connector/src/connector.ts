@@ -30,7 +30,15 @@ interface State { since?: string; cursor?: string; accessToken?: string; deviceI
   /** place key → when its last message went to the conversation; later notices are its context. */
   heard?: Record<string, number>;
   /** sessionId → the stop button of its running turn. */
-  stops?: Record<string, StopOffer> }
+  stops?: Record<string, StopOffer>;
+  /** place key → the model chosen with !model for its session. */
+  models?: Record<string, ModelChoice> }
+/**
+ * A model chosen in a conversation. It goes with the next turn that starts (or the next session created) and the agent keeps
+ * it from then on; `sessionId` is the session it belongs to, unset until the conversation has one.
+ */
+interface ModelChoice { model: string; sessionId?: string; pending: boolean }
+interface CatalogModel { id: string; model?: string; displayName?: string; isDefault?: boolean }
 interface Place { roomId: string; threadId: string }
 interface Attachment { id: string; filename: string; mimeType: string; size: number }
 interface Notice { id: string; connector: string; roomId: string; threadId: string; text: string; sessionId: string | null;
@@ -205,11 +213,22 @@ export class MatrixConnector {
     text = await this.withNotices(place, text, conversation.sessionId ?? undefined);
     // The turn this message starts puts its ⏹ here; a message that joins a running turn gets one at once.
     this.awaiting.set(key(place), event.event_id);
+    const choice = this.choice(place, conversation.sessionId ?? undefined);
+    const model = choice?.pending ? { model: choice.model } : {};
     if (conversation.sessionId) {
       const sessionId = String(conversation.sessionId);
+      const turn = (body: Json, suffix = "") => this.control.call("POST", `/sessions/${enc(sessionId)}/turns`,
+        { input: text, delivery: "auto", ...extra, ...body }, `matrix:turn:${hash(event.event_id)}${suffix}`);
       try {
-        await this.control.settle(await this.control.call("POST", `/sessions/${enc(sessionId)}/turns`,
-          { input: text, delivery: "auto", ...extra }, `matrix:turn:${hash(event.event_id)}`));
+        // A model cannot change inside a running turn: the message joins it and the choice waits for the next one.
+        let switched = Boolean(choice?.pending);
+        const accepted = await turn(model).catch((error) => {
+          if (!switched || !(error instanceof ControlError && error.code === "model_not_applicable")) throw error;
+          switched = false;
+          return turn({}, ":joined");
+        });
+        await this.control.settle(accepted);
+        if (switched) { choice!.pending = false; choice!.sessionId = sessionId; this.scheduleSave(); }
       } catch (error) {
         if (this.awaiting.get(key(place)) === event.event_id) this.awaiting.delete(key(place));
         throw error;
@@ -225,8 +244,9 @@ export class MatrixConnector {
     const created = await this.control.settle(await this.control.call("POST", "/sessions", {
       workerId: conversation.target.workerId, workspace: conversation.target.workspace,
       input: conversation.setup ? setupInput(place.roomId, text) : text,
-      memoryScope: conversation.scope?.id, ...extra }, `matrix:create:${hash(event.event_id)}`), 180_000);
+      memoryScope: conversation.scope?.id, ...model, ...extra }, `matrix:create:${hash(event.event_id)}`), 180_000);
     const sessionId = String(created.sessionId);
+    if (choice) { choice.pending = false; choice.sessionId = sessionId; this.scheduleSave(); }
     await this.control.call("PUT", `/conversations/${CONNECTOR}/${enc(place.roomId)}`, { threadId: place.threadId, sessionId });
     this.bindPlace(sessionId, place);
   }
@@ -290,6 +310,7 @@ export class MatrixConnector {
         "直接发消息就是继续当前会话；turn 运行时发的消息会补充进这个 turn。运行中你的消息下有 ⏹，点一下就停止。",
         "`!new [pi|codex|claude|grok]` 下一条消息开新会话（默认沿用上次的 agent）",
         "`!stop` 停止当前 turn　`!status` 查看绑定　`!bind <scope> [机器:/路径]` 把房间绑定到记忆作用域",
+        "`!model` 查看可用模型　`!model <provider/模型>` 从下一个 turn 起换模型（`!model default` 换回默认）",
         "主时间线里 @我 会开一个并行会话，在线程里回复；线程里的消息只发给该线程的会话。",
         "先发图片/文件再发文字，附件会随这条文字一起提交。审批和提问：回复对应消息或添加提示中的反应。",
       ].join("\n"));
@@ -297,6 +318,7 @@ export class MatrixConnector {
       const agent = cmd.args[0];
       const conversation = await this.control.call("PUT", room, { threadId: place.threadId, sessionId: null, ...(agent ? { agent } : {}) });
       for (const [sessionId, bound] of this.places) if (key(bound) === key(place)) this.places.delete(sessionId);
+      this.forgetModel(place);
       this.say(place, `好的，下一条消息用 ${conversation.agent} 开新会话。`);
     } else if (cmd.name === "stop") {
       const conversation = await this.conversation(place);
@@ -310,17 +332,61 @@ export class MatrixConnector {
         `会话：${conversation.sessionId ?? "下一条消息时创建"}${session ? `，${session.status}` : ""}`,
         `Worker：${session?.workerId ?? conversation.target?.workerId ?? "—"}　目录：${session?.workspace ?? conversation.target?.workspace ?? "—"}`,
         `新会话 agent：${conversation.agent}`,
+        `模型：${modelText(this.choice(place, conversation.sessionId ?? undefined))}`,
         ...(conversation.problem ? [problemText(conversation)] : []),
       ].join("\n"));
+    } else if (cmd.name === "model") {
+      await this.chooseModel(place, cmd.args[0]);
     } else if (cmd.name === "bind") {
       const [scopeId, location] = cmd.args;
       if (!scopeId) { this.say(place, "用法：`!bind <scope> [机器:/路径]`"); return; }
       const conversation = await this.control.call("POST", `${room}/bind`, { scopeId, ...(location ? { location } : {}) });
       // Binding an unbound room ends its setup sessions; they no longer report here.
-      if (!conversation.sessionId) for (const [sessionId, bound] of this.places) if (bound.roomId === place.roomId) this.places.delete(sessionId);
+      if (!conversation.sessionId) {
+        for (const [sessionId, bound] of this.places) if (bound.roomId === place.roomId) this.places.delete(sessionId);
+        this.forgetModel(place);
+      }
       this.say(place, `已绑定到 ${conversation.scope?.title ?? scopeId}（${scopeId}）。${conversation.problem ? problemText(conversation)
         : conversation.sessionId ? "" : `下一条消息用 ${conversation.agent} 在 ${conversation.target?.workspace} 开新会话。`}`);
     }
+  }
+
+  /**
+   * `!model` lists the worker's models; `!model <id>` picks one (a bare id matching one catalog entry is enough, `default`
+   * names the catalog's default) for the next turn that starts. An offline worker's catalog is unknown, so the id is taken as given.
+   */
+  private async chooseModel(place: Place, wanted?: string): Promise<void> {
+    const conversation = await this.conversation(place);
+    const sessionId = conversation.sessionId ? String(conversation.sessionId) : undefined;
+    const session = sessionId ? await this.control.call("GET", `/sessions/${enc(sessionId)}`).catch(() => undefined) : undefined;
+    const workerId = session?.workerId ?? conversation.target?.workerId;
+    const catalog: CatalogModel[] | undefined = workerId
+      ? await this.control.call("GET", `/workers/${enc(String(workerId))}/models`).then((value) => value.models, () => undefined) : undefined;
+    const current = this.choice(place, sessionId);
+    const listing = catalog?.length ? `\n\n可用模型（${workerId}）：\n${catalog.map((item) => `- \`${item.id}\`${item.isDefault ? "（默认）" : ""}`
+      + (current?.model === item.id ? " ←" : "")).join("\n")}` : "";
+    if (!wanted) { this.say(place, `模型：${modelText(current)}${listing}`); return; }
+    const found = wanted.toLowerCase() === "default" ? catalog?.find((item) => item.isDefault)
+      : catalog?.find((item) => item.id === wanted) ?? only(catalog?.filter((item) => item.model === wanted || item.id.endsWith(`/${wanted}`)));
+    if (catalog && !found) { this.say(place, `没有找到模型 \`${wanted}\`。${listing}`); return; }
+    if (!catalog && wanted.toLowerCase() === "default") { this.say(place, "拿不到这个 worker 的模型列表，不知道默认模型是哪个；请直接写模型 id。"); return; }
+    const model = found?.id ?? wanted;
+    (this.state.models ??= {})[key(place)] = { model, sessionId, pending: true };
+    this.scheduleSave();
+    this.say(place, `好的，${session?.activeTurnId ? "当前 turn 结束后，" : ""}下一条消息起用 ${model}${catalog ? "" : "（拿不到模型列表，未核对）"}。`);
+  }
+
+  /** The model chosen for the conversation's session; a choice made for a session it no longer continues is dropped. */
+  private choice(place: Place, sessionId?: string): ModelChoice | undefined {
+    const choice = this.state.models?.[key(place)];
+    if (choice?.sessionId && choice.sessionId !== sessionId) { this.forgetModel(place); return undefined; }
+    return choice;
+  }
+
+  private forgetModel(place: Place): void {
+    if (!this.state.models?.[key(place)]) return;
+    delete this.state.models[key(place)];
+    this.scheduleSave();
   }
 
   // ---- Agent Bridge → Matrix ------------------------------------------------
@@ -580,7 +646,12 @@ export class MatrixConnector {
 
   /** The footer for a session's reply; a failed lookup only drops the footer, never the reply. */
   private async signed(sessionId: string, started?: number): Promise<string | undefined> {
-    try { return footer(await this.control.call("GET", `/sessions/${enc(sessionId)}`), started); } catch { return undefined; }
+    try {
+      const session = await this.control.call("GET", `/sessions/${enc(sessionId)}`), place = this.places.get(sessionId);
+      const choice = place ? this.state.models?.[key(place)] : undefined;
+      const chosen = choice && !choice.pending && choice.sessionId === sessionId ? choice.model : undefined;
+      return footer({ ...session, model: session.model ?? chosen }, started);
+    } catch { return undefined; }
   }
 
   /** Send in order; `id` makes the Matrix transaction stable, so a retried send is not duplicated. The footer goes on the last piece. */
@@ -641,6 +712,13 @@ function setupInput(roomId: string, text: string): string {
     "", "用户消息：", text,
   ].join("\n");
 }
+
+function modelText(choice?: ModelChoice): string {
+  if (!choice) return "agent 默认";
+  return choice.pending ? `${choice.model}（下一个 turn 起生效）` : choice.model;
+}
+
+function only<T>(items?: T[]): T | undefined { return items?.length === 1 ? items[0] : undefined; }
 
 function problemText(conversation: Json): string {
   if (conversation.problem === "room_unbound" && conversation.setup)

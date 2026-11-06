@@ -82,6 +82,27 @@ test("submitTurnAction does not send set_model when the model is unchanged", asy
   assert.ok(!readCommands().some((c) => c.type === "set_model"));
 });
 
+test("the same model id under another provider is a switch, not unchanged", async () => {
+  const adapter = makeAdapter("model-a");
+  const sessionId = await adapter.startSession("run-1", tmpdir());
+  await adapter.submitTurnAction("turn-2", sessionId, "continue", "start_turn", undefined, "other/model-a");
+  await waitFor(() => emitMessages.some((m) => m.type === "agent.completed"));
+  const setModel = readCommands().find((c) => c.type === "set_model");
+  assert.equal(setModel?.provider, "other");
+  assert.equal(setModel?.modelId, "model-a");
+});
+
+test("a resumed session with no requested model lets pi restore the model its session last used", async () => {
+  const adapter = makeAdapter("model-a");
+  await adapter.startSession("run-2", tmpdir(), undefined, { sessionId: "pi-public", nativeSessionId: "01a0f3d5-73e7-7749-aca6-5582af00e732" });
+  const launch = readCommands().find((c) => c.type === "launch") as Record<string, unknown>;
+  assert.equal(launch.provider, "", "no --provider: the configured default would override the session's own model");
+  assert.equal(launch.model, "");
+  await adapter.resumeSession("pi-asked", tmpdir(), "01a0f3d5-73e7-7749-aca6-5582af00e733", "mock/model-b");
+  const asked = readCommands().filter((c) => c.type === "launch")[1] as Record<string, unknown>;
+  assert.deepEqual([asked.provider, asked.model], ["mock", "model-b"], "a requested model still goes on the command line");
+});
+
 test("startSession with a model launches pi and records the session", async () => {
   const adapter = makeAdapter();
   const sessionId = await adapter.startSession("run-1", tmpdir(), undefined, undefined, "mock/model-b");

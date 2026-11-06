@@ -28,7 +28,8 @@ Matrix 是 Agent Bridge 的一个聊天前端，以独立进程 `apps/matrix-con
 | 点 ⏹ 反应 | turn 运行时，连接器在你的消息下贴一个 ⏹，点一下就停止这个 turn；turn 结束后 ⏹ 撤掉 |
 | `!new [pi\|codex\|claude\|grok]` | 下一条消息开新会话，默认沿用上次的 agent |
 | `!stop` | 停止当前 turn |
-| `!status` | 作用域、会话、worker、目录、新会话 agent |
+| `!status` | 作用域、会话、worker、目录、新会话 agent、模型 |
+| `!model [provider/模型 \| default]` | 不带参数列出 worker 的可用模型；带参数从下一个开始的 turn 起换模型（模型和 provider 一起换），见下 |
 | `!bind <scope> [机器:/路径]` | 把房间（和一个目录）绑定到作用域，写入中央记忆；已被别的作用域占用时拒绝 |
 | `!help` | 帮助 |
 
@@ -36,7 +37,9 @@ Matrix 是 Agent Bridge 的一个聊天前端，以独立进程 `apps/matrix-con
 
 `!` 和 `/` 都可以。图片/文件先发，下一条文字会带上它们一起提交（每条最多 8 个，每个 15 MB；Claude/pi 只收图片）。审批和提问消息：回复数字/选项，或添加提示里的数字反应，审批也可用 ✅/❌。
 
-turn 运行时显示“正在输入”，结束后把最后一条助手消息作为回复，末尾带一行小字页尾：哪个 agent（会话记录了模型时也写模型）、在哪台机器哪个目录、这轮用了多久，例如 `pi · hal:~/agent-bridge · 1m23s`。失败时回复错误。
+`!model` 的模型 id 取自 `GET /api/v1/workers/<worker>/models`（pi 是 `provider/id`，如 `modeldeck/qwen3.8-27b-uncensored`）；只写不带 provider 的 id 时，目录里只有一个匹配就用它，`default` 是目录标的默认模型。worker 离线拿不到目录时按原样采用。选择记在连接器状态里，随下一条开始新 turn 的消息（或下一次开新会话）作为 `model` 发出；消息补充进正在运行的 turn 时不带模型、选择留到下一个 turn。之后由 agent 保持：pi 把切换写进自己的会话文件，进程被回收或 Bridge 重启后不带 `--model` 恢复，接着用这个模型。模型须已在该机器 pi 的 `~/.pi/agent/models.json` 里登记。`!new` 和换会话后回到默认模型。
+
+turn 运行时显示“正在输入”，结束后把最后一条助手消息作为回复，末尾带一行小字页尾：哪个 agent（会话记录了模型、或用 `!model` 换过模型时也写模型）、在哪台机器哪个目录、这轮用了多久，例如 `pi · hal:~/agent-bridge · 1m23s`。失败时回复错误。
 
 房间当前对应的会话由房间提醒：UCTW App 推送对它降为 silent（失败除外），避免两边重复响，见 [MQTT 业务消息 v1](message-events-v1.zh.md)。`!new` 之后的旧会话仍按房间作用域恢复记忆注入（`conversation_sessions` 记录会话来自哪个房间）。
 

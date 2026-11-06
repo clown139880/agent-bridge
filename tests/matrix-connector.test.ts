@@ -34,10 +34,13 @@ function harness() {
       if (session?.[2] === "interrupt") { sessions.get(session[1]!)!.activeTurnId = null; return { status: "succeeded" }; }
       if (session?.[2] === "turns") {
         if (sessions.get(session[1]!)!.activeTurnId && body.delivery === "start_turn") throw new ControlError(409, "turn_already_active", "busy");
+        if (sessions.get(session[1]!)!.activeTurnId && body.model) throw new ControlError(409, "model_not_applicable", "steering");
         if (sessions.get(session[1]!)!.activeTurnId) return { status: "succeeded", resolvedAction: "steer" };
         sessions.get(session[1]!)!.activeTurnId = "t2"; return { status: "succeeded", resolvedAction: "start_turn" };
       }
       if (path === "/attachments") return { id: "att1", size: 3 };
+      if (path === "/workers/pi%40hal/models") return { models: [{ id: "tokensapi/deepseek-v4-flash", model: "deepseek-v4-flash", isDefault: true },
+        { id: "modeldeck/qwen3.8-27b", model: "qwen3.8-27b" }, { id: "modeldeck/qwen3.8-27b-uncensored", model: "qwen3.8-27b-uncensored" }] };
       if (path.startsWith("/notices?")) return { data: notices.filter((row) => path.includes("undelivered=1") ? !row.deliveredAt : row.deliveredAt) };
       return { status: "succeeded" };
     },
@@ -239,4 +242,37 @@ test("an approval comes with its choices as reactions; they are taken back once 
   await tick();
   assert.equal(h.calls.filter((call) => call.path === "/approvals/ap2/decision").length, 0);
   assert.match(h.sent.filter((item) => item.type === "m.room.message").at(-1)!.content.body, /已经失效/);
+});
+
+test("!model picks a model from the worker's catalog; it goes with the next turn that starts, not one the message joins", async () => {
+  assert.deepEqual(command("!model modeldeck/qwen3.8-27b"), { name: "model", args: ["modeldeck/qwen3.8-27b"] });
+  const h = harness();
+  const said = () => h.sent.filter((item) => item.type === "m.room.message").at(-1)!.content.body as string;
+  h.text("!model"); await tick();
+  assert.match(said(), /模型：agent 默认/);
+  assert.match(said(), /`tokensapi\/deepseek-v4-flash`（默认）/);
+
+  h.text("!model qwen3.8-27b-uncensored"); await tick();
+  assert.match(said(), /下一条消息起用 modeldeck\/qwen3\.8-27b-uncensored/, "a bare id matching one entry resolves to it");
+  h.text("!model qwen3.8"); await tick();
+  assert.match(said(), /没有找到模型/);
+
+  h.text("第一条"); await tick();
+  assert.equal(h.calls.find((call) => call.path === "/sessions")!.body.model, "modeldeck/qwen3.8-27b-uncensored", "a new session starts on it");
+  h.text("!model default"); await tick();
+  assert.match(said(), /当前 turn 结束后，下一条消息起用 tokensapi\/deepseek-v4-flash/);
+  h.text("补一句"); await tick();
+  const turns = () => h.calls.filter((call) => call.path === "/sessions/s1/turns");
+  assert.deepEqual(turns().map((call) => call.body.model), ["tokensapi/deepseek-v4-flash", undefined], "joining the running turn drops the model and keeps the choice");
+  h.sessions.get("s1")!.activeTurnId = null;
+  h.text("下一个"); await tick();
+  assert.equal(turns().at(-1)!.body.model, "tokensapi/deepseek-v4-flash");
+  h.sessions.get("s1")!.activeTurnId = null;
+  h.text("再下一个"); await tick();
+  assert.equal(turns().at(-1)!.body.model, undefined, "once applied the agent keeps it");
+  h.text("!status"); await tick();
+  assert.match(said(), /模型：tokensapi\/deepseek-v4-flash$/m);
+  h.text("!new"); await tick();
+  h.text("!status"); await tick();
+  assert.match(said(), /模型：agent 默认/, "a new session starts on the default again");
 });

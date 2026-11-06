@@ -68,9 +68,9 @@ export function split(text: string, limit = 6_000): string[] {
   return pieces;
 }
 
-export interface Command { name: "new" | "stop" | "status" | "help" | "bind"; args: string[] }
+export interface Command { name: "new" | "stop" | "status" | "help" | "bind" | "model"; args: string[] }
 export function command(text: string): Command | undefined {
-  const found = /^[!/](new|stop|status|help|bind)(?:\s+(.*))?$/is.exec(text.trim());
+  const found = /^[!/](new|stop|status|help|bind|model)(?:\s+(.*))?$/is.exec(text.trim());
   return found ? { name: found[1]!.toLowerCase() as Command["name"], args: (found[2] ?? "").trim().split(/\s+/).filter(Boolean) } : undefined;
 }
 
