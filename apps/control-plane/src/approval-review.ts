@@ -6,11 +6,10 @@ import { readFileSync } from "node:fs";
  * and everything behind the boundary, goes to the human exactly as before.
  */
 
-/** Never decided automatically, whatever was learned: pushes and history rewrites, deployments, secrets, other machines. */
+/** Never decided automatically, whatever was learned: pushes and history rewrites, deployments, secrets. */
 const ABSOLUTE: RegExp[] = [
   /\bgit\s+(push|reset\s+--hard|filter-|update-ref)/, /\bdeploy\/hal\/|deploy\.sh|\bsudo\b/,
   /\/etc\/(agent-bridge|openbao|uctw-gateway|ssh)|id_(rsa|ed25519)|openbao|init\.json|\.ssh\//,
-  /\b(ssh|scp|rsync)\s+[^|]*@|powershell\.exe|cmd\.exe|\/mnt\/c\//,
 ];
 
 /** Calls that go to the human unless a rule learned from the human's earlier answers covers them. */
@@ -22,17 +21,51 @@ const HARD: RegExp[] = [
   /\b(apt|apt-get|dnf|yum)\s+(install|remove|purge)|\bpip3?\s+(install|uninstall)|\b(npm|pnpm|yarn)\s+(add|remove|i|install)\s+-g|curl[^|]*\|\s*(ba)?sh/,
   /\/etc\/(agent-bridge|openbao|uctw-gateway|ssh)|\.env\b|id_(rsa|ed25519)|\/proc\/\d+\/environ|\bprintenv\b|(^|\s)env(\s*$|\s*\|)|openbao|init\.json/,
   /\bdeploy\/hal\/|deploy\.sh|\bsudo\b|\bchmod\s+[0-7]*7|\bchown\b|crontab\s+-[er]/,
-  /\b(ssh|scp|rsync)\s+[^|]*@|powershell\.exe|cmd\.exe|\/mnt\/c\//,
 ];
 const HARD_TOOLS = /^(AskUserQuestion|ExitPlanMode)$/;
 
-export interface ApprovalCall { tool: string; summary: string; choices: string[] }
+/** Options of ssh that take a value, so the destination is the first word that is neither an option nor its value. */
+const SSH_VALUE_OPTIONS = new Set("BbcDEeFIiJLlmOoPpQRSWw".split(""));
 
-/** `absolute`: only the human decides. `hard`: the human, unless a learned rule covers it. `false`: the reviewer decides. */
+/**
+ * Where a command reaches beyond its own machine: `ssh:<destination>` for ssh, and scp/rsync to `host:path`;
+ * `windows` for WSL running Windows programs or touching the Windows drives (`/mnt/c/…`, `powershell.exe`).
+ * What runs over there is the rest of the command, judged like any other. A session working in a Windows
+ * directory is on Windows already: its shell is PowerShell, so Windows is not remote to it.
+ */
+export function remoteTargets(summary: string, workspace = ""): string[] {
+  const targets = new Set<string>();
+  for (const match of summary.matchAll(/(?:^|[\s"'(;&|/])ssh(?:\.exe)?\s+([^\n]*)/g)) {
+    const words = match[1]!.split(/\s+/);
+    for (let index = 0; index < words.length; index++) {
+      const word = words[index]!.replace(/^["']+|["']+$/g, "");
+      if (!word) continue;
+      if (word.startsWith("-")) { if (word.length === 2 && SSH_VALUE_OPTIONS.has(word[1]!)) index++; continue; }
+      if (/^[\w.-]+@?[\w.-]*$/.test(word)) targets.add(`ssh:${word}`);
+      break;
+    }
+  }
+  for (const match of summary.matchAll(/\b(?:scp|rsync)(?:\.exe)?\s[^\n|;&]*?(?:^|\s)["']?((?:[\w.-]+@)?[\w.-]+):/g)) targets.add(`ssh:${match[1]}`);
+  if (!/^[A-Za-z]:[\\/]/.test(workspace) && /\/mnt\/[a-z]\/|\b(?:powershell|pwsh|cmd)\.exe\b/i.test(summary)) targets.add("windows");
+  return [...targets];
+}
+
+export interface ApprovalCall {
+  tool: string; summary: string; choices: string[];
+  /** The session's workspace, and the remote targets the human allowed in it. */
+  workspace?: string; remotes?: string[];
+}
+
+/**
+ * `absolute`: only the human decides. `hard`: the human, unless a learned rule covers it. `false`: the reviewer decides.
+ * Reaching another machine is hard until the human allows that target in the workspace (“允许类似的操作”);
+ * from then on only what runs there counts.
+ */
 export function boundary(call: ApprovalCall): "absolute" | "hard" | false {
   if (HARD_TOOLS.test(call.tool) || !call.choices.includes("allow")) return "absolute";
   if (ABSOLUTE.some((pattern) => pattern.test(call.summary))) return "absolute";
-  return HARD.some((pattern) => pattern.test(call.summary)) ? "hard" : false;
+  if (HARD.some((pattern) => pattern.test(call.summary))) return "hard";
+  return remoteTargets(call.summary, call.workspace).some((target) => !call.remotes?.includes(target)) ? "hard" : false;
 }
 
 /** Whether a call must go to the human whatever the reviewer would say. */

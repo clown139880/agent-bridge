@@ -113,7 +113,7 @@ claude 进程还会读取所在机器的 `~/.claude/settings.json`（Bridge 没�
 
 Bridge 报上来的审批（Claude 的 Bash、MCP 工具等），在通知任何人之前先过一道：
 
-1. 硬边界（`apps/control-plane/src/approval-review.ts`）：删除、`git push`/`reset --hard`、改服务和进程、装包、`curl | sh`、读写密钥位置（`/etc/agent-bridge`、`.env`、OpenBao、`/proc/*/environ`、`env`）、部署脚本、`sudo`/`chown`、跨机 ssh/Windows，以及没有 `allow` 选项的请求，直接交给人。
+1. 硬边界（`apps/control-plane/src/approval-review.ts`）：删除、`git push`/`reset --hard`、改服务和进程、装包、`curl | sh`、读写密钥位置（`/etc/agent-bridge`、`.env`、OpenBao、`/proc/*/environ`、`env`）、部署脚本、`sudo`/`chown`、跨机 ssh/Windows（0.7.74 起见下文“跨机命令”），以及没有 `allow` 选项的请求，直接交给人。
 2. 其余交给审核员（TokensAPI `deepseek-v4-flash`，失败时 `qwen3.8-flash-next`，`TOOL_REVIEW=off` 关闭）：`allow` 由 Control Plane 以 `system:review` 身份答复 Bridge，这条审批不进 pending 列表，不推 Matrix 和手机，不发任何通知（0.7.65 起，之前会发一条 silent notice），只记日志；其余（含它建议拒绝的，0.7.57 起模型不再自己拒绝）、超时或出错照常交给人，附上它的分析。
 3. 审核在 Bridge 的消息链之外进行，不阻塞该 Bridge 的其他事件。
 
@@ -121,8 +121,19 @@ Bridge 报上来的审批（Claude 的 Bash、MCP 工具等），在通知任何
 
 ## 分析与“允许类似的操作”（0.7.54）
 
-- 边界分两级：**绝对边界**（push、部署、sudo、密钥位置、跨机）只有人能决定；**硬边界**（删除、结束进程、改服务、装包等）默认交给人，但审核员读到的已学规则覆盖这一类时可以放行。其余由审核员直接放行或拒绝。
+- 边界分两级：**绝对边界**（push、部署、sudo、密钥位置）只有人能决定；**硬边界**（删除、结束进程、改服务、装包等）默认交给人，但审核员读到的已学规则覆盖这一类时可以放行。其余由审核员直接放行或拒绝。
 - 所有交给人的审批都先过审核员：Matrix 和控制中心里会附上“在干什么、风险高低、理由”。
 - 有放行选项时多一个“允许类似的操作”：这一条按 allow 放行，同时审核员把它概括成一条规则，写进技能 `_global/agent-bridge/approval-review` 的 `references/learned.md`（Control Plane 以 `control-plane` 身份提交），以后同类操作自动放行，并推一条 silent 通知“📚 审核员记住了一条规则”。绝对边界的操作不会被学成规则。
 - 0.7.64 起，“允许类似的操作”只在能学成规则时出现：命中绝对边界的审批不再显示它（之前显示了但点了什么也学不到）。
 - **本会话全部允许**（0.7.64）：每条有放行选项、交给人的审批都多这一项，只有人的 token 能选（Control Center、Matrix）。它放行这一条，把这个会话记为“已信任”（表 `session_trust`），同时放行这个会话正在等的其他审批；之后这个会话的审批，包括绝对边界内的，都不经审核员直接放行，只记日志。适合你明确允许某个 agent 在某个作用域里越界干活的情况。会话页显示“本会话已全部允许 · 撤销”，撤销走 `POST /api/v1/sessions/{id}/untrust`。只影响这一个会话，新开的会话照常审批。
+
+## 跨机命令（0.7.74）
+
+之前 ssh、scp/rsync 到 `host:`、WSL 里的 `/mnt/c/…`、`powershell.exe`、`cmd.exe` 一律算绝对边界：审核员只分析，“允许类似的操作”也不出现，所以像 silas-grey 这样每条命令都 ssh 到线上机器的项目每次都问人，永远学不会。现在：
+
+- `remoteTargets()` 从命令里解析出连的目标：`ssh:<目的地>`（跳过 `-o`、`-p`、`-i` 这类带值的选项；`/mnt/c/…/ssh.exe` 也算）、scp/rsync 的 `user@host:`，以及 `windows`（`/mnt/<盘>/`、`powershell.exe`、`pwsh.exe`、`cmd.exe`）。工作目录本身是 Windows 路径的会话（Windows 原生 Bridge，shell 就是 PowerShell）不把 `windows` 当远端。
+- 跨机本身降为**硬边界**：没允许过的目标交给人，审核员读到的已学规则覆盖时可以放行；“允许类似的操作”会出现。
+- 人对这样一条审批点“允许类似的操作”（只认人的 token）：这台机器上的这个工作目录以后可以连这些目标（表 `approval_remotes`，按机器 + 工作目录 + 目标），推一条 silent 通知“🔓 … 以后可以连 …”。同时照旧学一条规则，学规则时会带上工作目录和目标机器。
+- 已允许的目标不再单独构成边界：只按在那边执行的命令判断。远端命令里的 `rm -rf`、`systemctl restart` 仍是硬边界，`git push`、部署、密钥仍是绝对边界。审核员收到 `remote: ssh:root@host（allowed=yes|no）`。
+- 查看：`GET /api/v1/approval-remotes`；撤回（只有人的 token）：`DELETE /api/v1/approval-remotes?machineId=…&workspace=…&target=…`。
+

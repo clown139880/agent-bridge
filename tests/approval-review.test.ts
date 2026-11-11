@@ -92,3 +92,77 @@ test("pushes, deploys and secrets stay absolute; process and temp-dir cleanup ca
   assert.equal(b('$ pkill -f "GO_HIKARU_PORT=8797"; rm -rf "$(cat /tmp/hw/tmpws)"'), "hard");
   assert.equal(b("Bash ls"), false);
 });
+
+test("ssh and Windows interop are found in real commands, and Windows is not remote to a Windows session", async () => {
+  const { remoteTargets } = await import("../apps/control-plane/src/approval-review.js");
+  assert.deepEqual(remoteTargets(`Command approval required\nCommand: /usr/bin/zsh -lc "ssh -o BatchMode=yes -o ConnectTimeout=10 root@silas.local 'cd /root/silas-grey && .venv/bin/python -B -c x'"\nDirectory: /root/silas-grey`),
+    ["ssh:root@silas.local"]);
+  assert.deepEqual(remoteTargets("$ /mnt/c/Windows/System32/OpenSSH/ssh.exe -o ConnectTimeout=5 root@192.168.5.44 'bash -s' <<'EOF'\nls\nEOF").sort(),
+    ["ssh:root@192.168.5.44", "windows"]);
+  assert.deepEqual(remoteTargets("$ ssh -p 2222 -i key gpu 'nvidia-smi'"), ["ssh:gpu"]);
+  assert.deepEqual(remoteTargets("$ scp -r dist root@hal:/srv/x"), ["ssh:root@hal"]);
+  assert.deepEqual(remoteTargets(`$ powershell.exe -NoProfile -Command "Get-CimInstance Win32_ComputerSystem"`), ["windows"]);
+  assert.deepEqual(remoteTargets("$ ls /mnt/c/Tools/ComfyUI"), ["windows"]);
+  assert.deepEqual(remoteTargets(`Command: "C:\\Program Files\\PowerShell\\7\\pwsh.exe" -Command 'git status'`, "C:\\Users\\clown\\Workspace\\x"), []);
+  assert.deepEqual(remoteTargets("$ ssh-keygen -l -f k; git log; rsync -a a/ b/"), []);
+});
+
+test("reaching another machine is learnable; once allowed in a workspace only what runs there counts", () => {
+  const b = (summary: string, remotes: string[] = []) => boundary({ tool: toolOf("command", summary), summary, choices: ["allow", "deny"], workspace: "/root/silas-grey", remotes });
+  const query = "$ ssh -o BatchMode=yes root@silas.local 'cd /root/silas-grey && .venv/bin/python -B -c \"print(1)\"'";
+  assert.equal(b(query), "hard", "not yet allowed: the human, or a learned rule");
+  assert.equal(b(query, ["ssh:root@silas.local"]), false, "allowed: the reviewer judges the remote command");
+  assert.equal(b(query.replace("silas.local", "other.local"), ["ssh:root@silas.local"]), "hard", "another host is not allowed by it");
+  assert.equal(b("$ ssh root@silas.local 'rm -rf /root/silas-grey/data'", ["ssh:root@silas.local"]), "hard", "what runs there still meets the boundary");
+  assert.equal(b("$ ssh root@silas.local 'git push origin main'", ["ssh:root@silas.local"]), "absolute");
+  assert.equal(b("$ cat ~/.ssh/id_ed25519"), "absolute", "keys stay absolute");
+});
+
+test("“允许类似的操作” on an ssh call lets the workspace reach that host from then on", async () => {
+  const { randomUUID } = await import("node:crypto");
+  const { rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { WebSocket } = await import("ws");
+  const { Store } = await import("../packages/database/src/index.js");
+  const { ControlPlane } = await import("../apps/control-plane/src/server.js");
+  const path = join(tmpdir(), `review-${randomUUID()}.sqlite`), store = new Store(path);
+  store.upsertMachine({ id: "hal", name: "HAL", platform: "linux", hostname: "hal", capabilities: ["codex"] });
+  store.createSession({ id: "s", machineId: "hal", agentType: "codex", projectName: "silas-grey", projectPath: "/root/silas-grey", matrixRoomId: "", matrixThreadId: null,
+    nativeSessionId: "n", status: "working", createdAt: 1, updatedAt: 1 });
+  const sent: any[] = [];
+  const socket = { readyState: WebSocket.OPEN, OPEN: WebSocket.OPEN, send(value: string) { sent.push(JSON.parse(value)); }, close() {} };
+  const control = new ControlPlane(store, { host: "127.0.0.1", port: 0, controlApiWriteToken: "w", sse: { keepaliveMs: 50, pollMs: 5, maxBackpressure: 3 } }) as any;
+  control.bridges.set("hal", { machineId: "hal", name: "HAL", capabilities: ["codex"], features: ["session-actions"], bridgeVersion: "9", socket });
+  const seen: any[] = [];
+  control.approvalReviewer = async (request: any) => { seen.push(request);
+    return request.boundary === false ? { decision: "allow", what: "远端只读查询", risk: "low", reason: "只读" } : { decision: "human", what: "远端查询", risk: "medium", reason: "跨机" }; };
+  const learned: string[] = [];
+  control.approvalLessons = { text: () => "", add(rule: string) { learned.push(rule); } };
+  control.learnRule = async (_summary: string, _what: string, where: string) => `在 ${where} 经 ssh 跑只读查询`;
+  await control.start();
+  const summary = (n: number) => `Command approval required\nCommand: /usr/bin/zsh -lc "ssh -o BatchMode=yes root@silas.local 'journalctl -u silas -n ${n}'"\nDirectory: /root/silas-grey`;
+  try {
+    await control.handleBridgeMessage("hal", { type: "approval_request", sessionId: "s", approvalId: "r1", kind: "command", summary: summary(1), choices: ["allow", "deny"] });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(seen[0].boundary, "hard");
+    assert.deepEqual(seen[0].remotes, [{ target: "ssh:root@silas.local", allowed: false }]);
+    assert.equal(control.controlStore.pending("r1")?.request.similar, true, "learnable now, no longer absolute");
+    const base = `http://127.0.0.1:${control.http.address().port}/api/v1`;
+    const call = (method: string, path: string, body?: unknown) => fetch(`${base}${path}`, { method, headers: { authorization: "Bearer w",
+      "content-type": "application/json", "idempotency-key": randomUUID() }, ...(body ? { body: JSON.stringify(body) } : {}) });
+    assert.equal((await call("POST", "/approvals/r1/decision", { choice: "allow-similar" })).status, 202);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.deepEqual(control.controlStore.approvalRemotes("hal", "/root/silas-grey"), ["ssh:root@silas.local"]);
+    assert.deepEqual(learned, ["在 codex@hal:/root/silas-grey 经 ssh 跑只读查询"], "the rule names the workspace");
+    await control.handleBridgeMessage("hal", { type: "approval_request", sessionId: "s", approvalId: "r2", kind: "command", summary: summary(2), choices: ["allow", "deny"] });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(seen[1].boundary, false);
+    assert.deepEqual(sent.filter((m) => m.type === "action.resolve_approval").map((m) => [m.approvalId, m.choice]).at(-1), ["r2", "allow"]);
+    const list = await (await call("GET", "/approval-remotes")).json() as any;
+    assert.deepEqual(list.data.map((row: any) => [row.workspace, row.target]), [["/root/silas-grey", "ssh:root@silas.local"]]);
+    const query = new URLSearchParams({ machineId: "hal", workspace: "/root/silas-grey", target: "ssh:root@silas.local" });
+    assert.equal((await call("DELETE", `/approval-remotes?${query}`)).status, 200);
+    assert.deepEqual(control.controlStore.approvalRemotes("hal", "/root/silas-grey"), []);
+  } finally { await control.stop(); store.db.close(); rmSync(path, { force: true }); }
+});

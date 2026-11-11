@@ -40,7 +40,7 @@ interface ApiOptions {
   /** The central tool library's pending approvals (/api/v1/tool-approvals). */
   toolHub?: ToolHub;
   /** A human answered “allow similar”: learn the class of call so the reviewer allows it next time. */
-  onAllowSimilar?: (pending: PendingRow) => void;
+  onAllowSimilar?: (pending: PendingRow, by: string) => void;
   /** A human let the session do anything: its other pending approvals are allowed too. */
   onTrustSession?: (pending: PendingRow, by: string) => void;
   /** Schedules, webhooks and their proposals (/api/v1/automations). */
@@ -140,6 +140,13 @@ export class AgentControlApi {
       if(request.method==="GET"&&view){this.sessionView(url,response,decodeURIComponent(view[1]!),view[2]!);return true;}
       const session=url.pathname.match(/^\/api\/v1\/sessions\/([^/]+)(?:\/(runs|events|turns|interrupt|untrust))?$/);
       if(session){await this.sessionRoute(request,response,url,principal,decodeURIComponent(session[1]!),session[2]);return true;}
+      // Remote targets a workspace may reach (granted by “允许类似的操作” on a call that reached them); the human takes one back with DELETE.
+      if(url.pathname==="/api/v1/approval-remotes"&&request.method==="GET"){this.ok(response,{data:this.store.allApprovalRemotes()});return true;}
+      if(url.pathname==="/api/v1/approval-remotes"&&request.method==="DELETE"){
+        if(!principal.write||!principal.id.startsWith("control:"))throw new ApiProblem(403,"forbidden","only the human changes what a workspace may reach");
+        const [machineId,workspace,target]=["machineId","workspace","target"].map(name=>string(url.searchParams.get(name),name,true)!);
+        this.store.setApprovalRemote(machineId!,workspace!,target!,null);this.ok(response,{machineId,workspace,target,allowed:false});return true;
+      }
       const approval=url.pathname.match(/^\/api\/v1\/approvals\/([^/]+)(?:\/(decision))?$/);
       if(approval){await this.pendingRoute("approval",request,response,principal,decodeURIComponent(approval[1]!),approval[2]);return true;}
       const review=url.pathname.match(/^\/api\/v1\/memory-reviews(?:\/([^/]+)(?:\/(decision))?)?$/);
@@ -588,7 +595,7 @@ export class AgentControlApi {
     this.requireActionBridge(pending.machineId);
     if(kind==="approval"){
       let choice=string(body.choice,"choice",true)!;const choices=pending.request.choices;
-      if(choice==="allow-similar"&&pending.request.similar){this.options.onAllowSimilar?.(pending);choice="allow";}
+      if(choice==="allow-similar"&&pending.request.similar){this.options.onAllowSimilar?.(pending,principal.id);choice="allow";}
       if(choice==="allow-session-all"){
         if(!principal.id.startsWith("control:"))throw new ApiProblem(403,"forbidden","only the human lets a session do anything");
         this.store.setSessionTrust(pending.sessionId,principal.id);this.options.onTrustSession?.(pending,principal.id);choice="allow";

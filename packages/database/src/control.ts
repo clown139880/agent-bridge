@@ -279,6 +279,25 @@ export class AgentControlStore {
     markChanged(this.db, "session", sessionId);
   }
 
+  /** The remote targets the human let a workspace reach (`ssh:root@host`, `windows`). */
+  approvalRemotes(machineId: string, workspace: string): string[] {
+    return (this.db.prepare("SELECT target FROM approval_remotes WHERE machine_id=? AND workspace=? ORDER BY target")
+      .all(machineId, workspace) as Array<{ target: string }>).map((row) => row.target);
+  }
+
+  allApprovalRemotes(): Array<{ machineId: string; workspace: string; target: string; grantedBy: string; grantedAt: number }> {
+    return (this.db.prepare("SELECT machine_id,workspace,target,granted_by,granted_at FROM approval_remotes ORDER BY machine_id,workspace,target").all() as
+      Array<Record<string, unknown>>).map((row) => ({ machineId: String(row.machine_id), workspace: String(row.workspace), target: String(row.target),
+      grantedBy: String(row.granted_by), grantedAt: Number(row.granted_at) }));
+  }
+
+  /** Let a workspace reach a remote target (`by` is the human principal), or take that back. */
+  setApprovalRemote(machineId: string, workspace: string, target: string, by: string | null): void {
+    if (by) this.db.prepare("INSERT OR IGNORE INTO approval_remotes(machine_id,workspace,target,granted_by,granted_at) VALUES(?,?,?,?,?)")
+      .run(machineId, workspace, target, by, Date.now());
+    else this.db.prepare("DELETE FROM approval_remotes WHERE machine_id=? AND workspace=? AND target=?").run(machineId, workspace, target);
+  }
+
   /** The Bridge version a machine last registered with. */
   machineBridgeVersion(machineId: string): string | undefined {
     const row = this.db.prepare("SELECT bridge_version FROM machines WHERE id=?").get(machineId) as { bridge_version: string | null } | undefined;

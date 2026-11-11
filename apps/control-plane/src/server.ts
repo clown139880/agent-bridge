@@ -32,7 +32,7 @@ import { Automations, type AutomationOptions } from "./automations.js";
 import { SecretStore, type SecretStoreOptions } from "./secrets.js";
 import { approvalReviewer, automationReviewer, learnRule, ToolHub, toolReviewer, type ApprovalReviewer, type ToolReviewer } from "./tools.js";
 import { reviewModel } from "./review-model.js";
-import { alreadyGated, ApprovalLessons, boundary, toolOf, type ApprovalAnalysis } from "./approval-review.js";
+import { alreadyGated, ApprovalLessons, boundary, remoteTargets, toolOf, type ApprovalAnalysis } from "./approval-review.js";
 import { toolsEndpoint } from "./mcp/tools.js";
 import { NtfyNotifier, type NtfyOptions, type SessionNotificationKind } from "./ntfy.js";
 import { AgentMessagePublisher, type MessageMqttOptions } from "./message-publisher.js";
@@ -87,7 +87,7 @@ export class ControlPlane {
   /** Notices addressed `call:<who>`: call-bridge rings and reads them out. */
   private calls?: CallNotices;
   private approvalReviewer?: ApprovalReviewer;
-  private learnRule?: (summary: string, what: string) => Promise<string>;
+  private learnRule?: (summary: string, what: string, where: string) => Promise<string>;
   private approvalLessons?: ApprovalLessons;
   /** The reviewer's explanation of approvals it handed to the human, kept across Bridge replays. */
   private readonly approvalAnalyses = new Map<string, ApprovalAnalysis>();
@@ -197,7 +197,7 @@ export class ControlPlane {
     const tools = this.toolReviewer = model && options.review?.tools ? toolReviewer(model) : undefined;
     if (tools && model) {
       this.approvalReviewer = approvalReviewer(model);
-      this.learnRule = (summary, what) => learnRule(model, summary, what);
+      this.learnRule = (summary, what, where) => learnRule(model, summary, what, where);
       if (agentSkills && options.agentMemory?.skills) {
         const skills = agentSkills, repo = options.agentMemory.skills.repo;
         this.approvalLessons = new ApprovalLessons({ file: join(repo, "scopes/_global/agent-bridge/approval-review/references/learned.md"),
@@ -232,7 +232,7 @@ export class ControlPlane {
     this.controlApi = new AgentControlApi(store, this.controlStore, this.registry, {
       readToken: options.controlApiReadToken, writeToken: options.controlApiWriteToken, bridgeToken: options.bridgeToken,
       agents, memoryReviews: this.memoryReviews, conversations: this.conversations, automations: this.automations, toolHub: this.toolHub,
-      onAllowSimilar: (pending) => this.learnFrom(pending),
+      onAllowSimilar: (pending, by) => this.learnFrom(pending, by),
       onTrustSession: (pending) => this.allowWaiting(pending.sessionId, pending.id),
       callees: async () => {
         const tool = (await this.toolHub?.search("call_place", 3))?.tools.find((item) => item.name === "call-bridge.call_place");
@@ -865,7 +865,6 @@ export class ControlPlane {
     }
   }
 
-  /** “允许类似的操作”: turn the allowed call into a rule the reviewer applies from now on. Absolute-boundary calls never become rules. */
   /**
    * The session an agent's MCP call comes from. The token names the agent and its machine (`codex@dev-windows`),
    * not the session; but the session's Bridge reports the tool call as it starts, so the one session of that machine
@@ -931,15 +930,34 @@ export class ControlPlane {
     }
   }
 
-  private learnFrom(pending: PendingRow): void {
+  /** What the boundary needs to know about where a session works: its workspace and the remote targets allowed there. */
+  private approvalPlace(sessionId: string): { workspace: string; remotes: string[]; caller: string } {
+    const session = this.store.getSession(sessionId), workspace = session?.projectPath ?? "";
+    return { workspace, remotes: session ? this.controlStore.approvalRemotes(session.machineId, workspace) : [],
+      caller: session ? `${session.agentType}@${session.machineId}:${workspace}` : "" };
+  }
+
+  /**
+   * “允许类似的操作”: the human (`by`) lets this workspace reach the call's remote targets from now on, and the reviewer
+   * turns the call into a rule. Absolute-boundary calls teach nothing.
+   */
+  private learnFrom(pending: PendingRow, by: string): void {
     const summary = String(pending.request.summary ?? ""), what = String((pending.request.analysis as { what?: string } | undefined)?.what ?? "");
-    const tool = toolOf(pending.request.kind, summary);
-    if (!this.learnRule || !this.approvalLessons || boundary({ tool, summary, choices: ["allow"] }) === "absolute") return;
+    const tool = toolOf(pending.request.kind, summary), place = this.approvalPlace(pending.sessionId);
+    if (boundary({ tool, summary, choices: ["allow"], workspace: place.workspace }) === "absolute") return;
+    const operator = this.options.noticeTarget ?? { connector: "app", roomId: "operator", threadId: "" };
+    const reached = by.startsWith("control:") && place.workspace ? remoteTargets(summary, place.workspace).filter((target) => !place.remotes.includes(target)) : [];
+    for (const target of reached) this.controlStore.setApprovalRemote(pending.machineId, place.workspace, target, by);
+    if (reached.length) {
+      log.info({ machineId: pending.machineId, workspace: place.workspace, targets: reached, by }, "Workspace may reach remote targets");
+      this.controlStore.createNotice({ id: `remote:${pending.id}`, ...operator, level: "silent", source: "review", sessionId: pending.sessionId,
+        text: `🔓 ${pending.machineId}:${place.workspace} 以后可以连 ${reached.map((target) => target === "windows" ? "Windows" : target.slice(4)).join("、")}，只按在那边执行的命令审核` });
+    }
+    if (!this.learnRule || !this.approvalLessons) return;
     const lessons = this.approvalLessons;
-    void this.learnRule(summary, what).then((rule) => {
+    void this.learnRule(summary, what, place.caller).then((rule) => {
       lessons.add(rule, summary);
       log.info({ rule, approvalId: pending.id }, "Reviewer learned a rule from the human");
-      const operator = this.options.noticeTarget ?? { connector: "app", roomId: "operator", threadId: "" };
       this.controlStore.createNotice({ id: `learn:${pending.id}`, ...operator, level: "silent", source: "review", sessionId: pending.sessionId,
         text: `📚 审核员记住了一条规则\n${rule}` });
     }).catch((error) => log.warn({ error: String(error), approvalId: pending.id }, "Could not learn a rule from this approval"));
@@ -970,6 +988,7 @@ export class ControlPlane {
     // that case: there is no pending approval for the API caller to resolve.
     if (this.resolvedApprovalIds.delete(message.approvalId)) return;
     const first = !this.controlStore.pending(message.approvalId);
+    const place = this.approvalPlace(message.sessionId), remotes = remoteTargets(message.summary, place.workspace);
     // Every first request is reviewed before anyone is asked. Allowed or denied, it never reaches the human;
     // otherwise the human sees it with the reviewer's analysis and may let similar ones through from now on.
     // The human let this session do anything (“本会话全部允许”): nothing it asks reaches anyone.
@@ -979,20 +998,21 @@ export class ControlPlane {
       const tool = toolOf(message.kind, message.summary);
       if (alreadyGated(tool) && this.resolveByReview(machineId, message, "allow", "中央工具库和记忆的调用由 Control Plane 自己按档位把关，不再重复确认")) return;
       // Answering another session's approval is judged by what that approval asks.
-      let answering: string | undefined, level = boundary({ tool, summary: message.summary, choices: message.choices });
+      let answering: string | undefined, level = boundary({ tool, summary: message.summary, choices: message.choices, ...place });
       if (/^mcp__bridge__(approve|answer)$/.test(tool)) {
         const id = /"(?:approval_id|request_id)"\s*:\s*"([^"]+)"/.exec(message.summary)?.[1];
         const pending = id ? this.controlStore.pending(id) : undefined;
         answering = pending ? String(pending.request.summary ?? "") : "";
         const targetTool = toolOf(pending?.request.kind, answering);
         if (pending && alreadyGated(targetTool) && this.resolveByReview(machineId, message, "allow", "被答复的是中央工具库/记忆的调用，本来就免确认")) return;
-        const targetLevel = pending ? boundary({ tool: targetTool, summary: answering, choices: (pending.request.choices as string[] | undefined) ?? ["allow"] }) : "absolute";
+        const targetLevel = pending ? boundary({ tool: targetTool, summary: answering, choices: (pending.request.choices as string[] | undefined) ?? ["allow"],
+          ...this.approvalPlace(pending.sessionId) }) : "absolute";
         if (targetLevel === "absolute" || (targetLevel === "hard" && level !== "absolute")) level = targetLevel;
       }
       // Off the Bridge's message chain: its other events keep flowing while the reviewer thinks.
       this.approvalsById.set(message.approvalId, { approvalId: message.approvalId, sessionId: message.sessionId });
       void this.approvalReviewer({ summary: message.summary, tool, boundary: level, learned: this.approvalLessons?.text() ?? "", answering,
-        caller: `${session.agentType}@${machineId}:${session.projectPath}` })
+        caller: place.caller, remotes: remotes.map((target) => ({ target, allowed: place.remotes.includes(target) })) })
         .catch((error: unknown) => ({ decision: "human" as const, what: "", risk: "medium" as const, reason: `审核失败：${error instanceof Error ? error.message : String(error)}` }))
         .then((verdict) => {
           if (verdict.decision !== "human" && this.resolveByReview(machineId, message, verdict.decision, verdict.reason)) return;
@@ -1005,8 +1025,9 @@ export class ControlPlane {
     }
     const analysis = this.approvalAnalyses.get(message.approvalId);
     // “Allow similar” is offered only where a rule can be learned: never behind the absolute boundary.
-    const learnable = Boolean(this.approvalLessons && message.choices.includes("allow")
-      && boundary({ tool: toolOf(message.kind, message.summary), summary: message.summary, choices: message.choices }) !== "absolute");
+    const reaches = remotes.some((target) => !place.remotes.includes(target));
+    const learnable = Boolean((this.approvalLessons || reaches) && message.choices.includes("allow")
+      && boundary({ tool: toolOf(message.kind, message.summary), summary: message.summary, choices: message.choices, ...place }) !== "absolute");
     if (analysis || learnable) message = { ...message, ...(analysis ? { analysis } : {}), ...(learnable ? { similar: true } : {}) } as typeof message;
     this.controlStore.upsertApproval(machineId, message);
     if (first) this.notifySession("approval", message.sessionId, message.summary);
