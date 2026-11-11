@@ -39,6 +39,7 @@ function harness() {
         sessions.get(session[1]!)!.activeTurnId = "t2"; return { status: "succeeded", resolvedAction: "start_turn" };
       }
       if (path === "/attachments") return { id: "att1", size: 3 };
+      if (path === "/transcriptions") return { text: body.content === Buffer.from("png").toString("base64") ? "帮我看看日志" : "" };
       if (path === "/workers/pi%40hal/models") return { models: [{ id: "tokensapi/deepseek-v4-flash", model: "deepseek-v4-flash", isDefault: true },
         { id: "modeldeck/qwen3.8-27b", model: "qwen3.8-27b" }, { id: "modeldeck/qwen3.8-27b-uncensored", model: "qwen3.8-27b-uncensored" }] };
       if (path.startsWith("/notices?")) return { data: notices.filter((row) => path.includes("undelivered=1") ? !row.deliveredAt : row.deliveredAt) };
@@ -159,6 +160,18 @@ test("attachments wait for the next text and go with it", async () => {
   assert.equal(h.calls.filter((call) => call.path === "/sessions").length, 0);
   h.text("看看这张图"); await tick();
   assert.deepEqual(h.calls.find((call) => call.path === "/sessions")!.body.attachments, [{ id: "att1", filename: "a.png", mimeType: "image/png", size: 3 }]);
+});
+
+test("a voice message is transcribed, shown, and goes on as the words said", async () => {
+  const h = harness();
+  h.connector.receive("!room:example.org", { event_id: "$voice", sender: "@me:example.org", type: "m.room.message",
+    content: { msgtype: "m.audio", body: "Voice message.ogg", url: "mxc://example.org/v", info: { mimetype: "audio/ogg; codecs=opus" } } });
+  h.text("再补一句"); await tick();
+  const asr = h.calls.find((call) => call.path === "/transcriptions")!;
+  assert.deepEqual([asr.body.mimeType, asr.body.filename], ["audio/ogg", "Voice message.ogg"]);
+  assert.ok(h.sent.some((item) => item.content.body === "🎙️ 帮我看看日志"), "the room sees what was heard");
+  assert.equal(h.calls.find((call) => call.path === "/sessions")!.body.input, "（语音转写，可能有听错的字）帮我看看日志");
+  assert.equal(h.calls.find((call) => call.path === "/sessions/s1/turns")!.body.input, "再补一句", "the text after it keeps its place");
 });
 
 test("invites from allowed people are accepted even on the baseline sync; a joined room's history is skipped", async () => {

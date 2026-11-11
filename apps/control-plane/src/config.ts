@@ -59,6 +59,13 @@ export const config = {
   agentMemory: agentMemoryConfig(),
   conversationSetup: conversationSetupConfig(),
   review: reviewConfig(),
+  // Voice messages: TokensAPI qwen3-asr (needs secrets), then an OpenAI-compatible fallback when ASR_FALLBACK_URL names one.
+  transcribe: {
+    model: process.env.ASR_MODEL ?? "qwen3-asr",
+    fallbackUrl: process.env.ASR_FALLBACK_URL || undefined,
+    fallbackModel: process.env.ASR_FALLBACK_MODEL ?? "sensevoice-small",
+    timeoutMs: duration("ASR_TIMEOUT_MS", 60_000),
+  },
   retention: {
     actionsMs: duration("CONTROL_ACTION_RETENTION_MS", 86_400_000),
     attachmentsMs: duration("CONTROL_ATTACHMENT_RETENTION_MS", 7 * 86_400_000),

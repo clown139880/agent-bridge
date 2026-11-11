@@ -136,4 +136,4 @@ Bridge 报上来的审批（Claude 的 Bash、MCP 工具等），在通知任何
 - 人对这样一条审批点“允许类似的操作”（只认人的 token）：这台机器上的这个工作目录以后可以连这些目标（表 `approval_remotes`，按机器 + 工作目录 + 目标），推一条 silent 通知“🔓 … 以后可以连 …”。同时照旧学一条规则，学规则时会带上工作目录和目标机器。
 - 已允许的目标不再单独构成边界：只按在那边执行的命令判断。远端命令里的 `rm -rf`、`systemctl restart` 仍是硬边界，`git push`、部署、密钥仍是绝对边界。审核员收到 `remote: ssh:root@host（allowed=yes|no）`。
 - 查看：`GET /api/v1/approval-remotes`；撤回（只有人的 token）：`DELETE /api/v1/approval-remotes?machineId=…&workspace=…&target=…`。
-
+- 会话页里的审批记录（0.7.75）：“请求审批”默认折叠成一行，点开看全文；审核员（或“本会话全部允许”、免确认的工具）放行的，“审批已处理”显示为“审核员通过”，附上它在干什么和理由（表 `approval_reviews`，留 30 天，控制面收到 Bridge 的 `approval.resolved` 时写进事件的 `review`）。

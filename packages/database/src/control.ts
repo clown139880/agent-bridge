@@ -79,6 +79,8 @@ export interface SessionListQuery {
   taskId?: string;
   conversationId?: string;
   active?: boolean;
+  /** `false` leaves out the sessions automations started; their runs list them (docs/automations-design.zh.md). */
+  automations?: boolean;
   updatedAfter?: number;
   dayStart?: number;
   segment?: "recent" | "history" | "all";
@@ -277,6 +279,19 @@ export class AgentControlStore {
     if (by) this.db.prepare("INSERT OR IGNORE INTO session_trust(session_id,granted_by,granted_at) VALUES(?,?,?)").run(sessionId, by, Date.now());
     else this.db.prepare("DELETE FROM session_trust WHERE session_id=?").run(sessionId);
     markChanged(this.db, "session", sessionId);
+  }
+
+  /** Remember why an approval was answered without the human; kept 30 days. */
+  recordApprovalReview(approvalId: string, choice: string, what: string, reason: string): void {
+    const now = Date.now();
+    this.db.prepare("DELETE FROM approval_reviews WHERE created_at<?").run(now - 30 * 86_400_000);
+    this.db.prepare("INSERT OR REPLACE INTO approval_reviews(approval_id,choice,what,reason,created_at) VALUES(?,?,?,?,?)").run(approvalId, choice, what, reason, now);
+  }
+
+  approvalReview(approvalId: string): { choice: string; what: string; reason: string } | undefined {
+    const row = this.db.prepare("SELECT choice,what,reason FROM approval_reviews WHERE approval_id=?").get(approvalId) as
+      { choice: string; what: string; reason: string } | undefined;
+    return row && { choice: row.choice, what: row.what, reason: row.reason };
   }
 
   /** The remote targets the human let a workspace reach (`ssh:root@host`, `windows`). */
@@ -697,6 +712,7 @@ export class AgentControlStore {
     if (input.q) { where.push("(LOWER(COALESCE(title,'')) LIKE ? OR LOWER(COALESCE(prompt_summary,'')) LIKE ? OR LOWER(project_name) LIKE ?)"); const q=`%${input.q.toLowerCase()}%`; params.push(q,q,q); }
     if (input.taskId) { where.push("EXISTS(SELECT 1 FROM worker_runs r WHERE r.session_id=sessions.id AND r.task_id=?)"); params.push(input.taskId); }
     if (input.conversationId) { where.push("EXISTS(SELECT 1 FROM worker_runs r WHERE r.session_id=sessions.id AND r.conversation_id=?)"); params.push(input.conversationId); }
+    if (input.automations === false && this.automationRuns()) where.push("NOT EXISTS(SELECT 1 FROM automation_runs a WHERE a.session_id=sessions.id)");
     if (input.cursor) { const [value,id] = decodeCursor(input.cursor, scope); where.push(`(${column}${comparator}? OR (${column}=? AND id${comparator}?))`); params.push(value,value,id); }
     const sql=`SELECT * FROM sessions ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
       ORDER BY ${column} ${direction},id ${direction} LIMIT ?`;
@@ -946,6 +962,12 @@ export class AgentControlStore {
       size: Number(row.size), bytes: row.bytes as Uint8Array };
   }
 
+  private automationRunsTable = false;
+  /** Whether automations keep their runs here (the table exists once Automations has started). */
+  private automationRuns(): boolean {
+    return this.automationRunsTable ||= Boolean(this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='automation_runs'").get());
+  }
+
   private mapSession(row: Record<string, unknown>, detail: boolean): Record<string, unknown> {
     const latest = this.db.prepare("SELECT * FROM worker_runs WHERE session_id=? ORDER BY created_at DESC,id DESC LIMIT 1")
       .get(String(row.id)) as Record<string, unknown> | undefined;
@@ -988,6 +1010,10 @@ export class AgentControlStore {
     // A chat room that relays this session answers it there; the list marks it instead of counting unread replies.
     const relay=this.relayRoom?.(String(row.id));
     if(relay)Object.assign(result,{room:relay});
+    // A session an automation started for one run: the list hides it by default, the task's runs link to it.
+    const automation=this.automationRuns()?this.db.prepare("SELECT automation_id FROM automation_runs WHERE session_id=? LIMIT 1")
+      .get(String(row.id)) as {automation_id:string}|undefined:undefined;
+    if(automation)Object.assign(result,{automation:automation.automation_id});
     if(detail){const runs=this.db.prepare("SELECT * FROM worker_runs WHERE session_id=? ORDER BY created_at DESC,id DESC LIMIT 20")
       .all(String(row.id)) as Record<string,unknown>[];
       const contextRow=this.db.prepare("SELECT body FROM events WHERE session_id=? AND type='context.updated' ORDER BY id DESC LIMIT 1")

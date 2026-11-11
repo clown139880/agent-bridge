@@ -17,6 +17,8 @@ export interface Session {
   pendingApprovalCount: number; pendingUserInputCount: number;
   /** The chat room that relays this session; its replies are read there, so the list shows no unread count. */
   room?: { connector: string; roomId: string; name: string };
+  /** The automation whose run started it; the list hides these unless asked, the task's runs link to them. */
+  automation?: string;
   capabilities?: string[]; historyCompleteness?: string; source?: string;
   error?: { error: { message: string } } | null;
 }

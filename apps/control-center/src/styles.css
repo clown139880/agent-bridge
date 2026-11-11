@@ -136,6 +136,12 @@
 .event-note, .progress-note { margin: 12px 0; color: var(--muted); font-size: .72rem; }
 .event-note span { display: inline-block; border-bottom: 1px solid var(--line); padding-bottom: 3px; }
 .event-note p { white-space: pre-wrap; overflow-wrap: anywhere; }
+.approval-note summary { display: flex; gap: 8px; align-items: baseline; cursor: pointer; list-style: none; min-width: 0; }
+.approval-note summary::-webkit-details-marker { display: none; }
+.approval-note summary span { flex: none; }
+.approval-note .approval-head { flex: 1; min-width: 0; border: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, monospace; }
+.approval-note p { max-height: 40vh; overflow: auto; }
+.approval-note small { opacity: .8; }
 .new-form { display: flex; flex-direction: column; gap: 12px; }
 .new-form label:not(:first-child) { margin-top: 10px; }
 .workspace-choices { display: flex; flex-wrap: wrap; gap: 6px; }

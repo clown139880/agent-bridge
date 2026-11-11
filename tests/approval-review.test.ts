@@ -159,6 +159,11 @@ test("“允许类似的操作” on an ssh call lets the workspace reach that h
     await new Promise((resolve) => setTimeout(resolve, 50));
     assert.equal(seen[1].boundary, false);
     assert.deepEqual(sent.filter((m) => m.type === "action.resolve_approval").map((m) => [m.approvalId, m.choice]).at(-1), ["r2", "allow"]);
+    // The Bridge reports the outcome; the session's note says the reviewer let it through, and what it was.
+    await control.handleBridgeMessage("hal", { type: "session.event", sessionId: "s", eventId: "e-r2", eventType: "approval.resolved", turnId: null,
+      timestamp: Date.now(), payload: { approvalId: "r2", choice: "allow" } });
+    const note = control.controlStore.sessionEvents("s", undefined, 10, ["approval.resolved"]).data.at(-1) as any;
+    assert.deepEqual(note.payload.review, { choice: "allow", what: "远端只读查询", reason: "只读" });
     const list = await (await call("GET", "/approval-remotes")).json() as any;
     assert.deepEqual(list.data.map((row: any) => [row.workspace, row.target]), [["/root/silas-grey", "ssh:root@silas.local"]]);
     const query = new URLSearchParams({ machineId: "hal", workspace: "/root/silas-grey", target: "ssh:root@silas.local" });

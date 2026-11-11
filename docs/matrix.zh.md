@@ -54,6 +54,12 @@ turn 运行时显示“正在输入”，结束后把最后一条助手消息作
 - `CONTROL_NOTICE_TARGET` 指向房间（`matrix:!room:server`）时，生命周期通知发到该房间：每 60 秒窗口内只立即发第一条，其余合并到下一条里；部署和更新结果（`🟢 控制面已启动 · 版本 …`、`🔄 更新完成：…`）、记忆审核结果从不合并。
 - `CONTROL_FLEET_NOTICE_TARGET`（0.7.65）设了时，worker 上线、离线和 Bridge 更新（`bridge.*`、`bridge_update.*`）发到这里（比如运维群），其余生命周期通知照旧发 `CONTROL_NOTICE_TARGET`。“🔄 更新完成”也随之在这里。
 
+## 语音消息（0.7.75）
+
+- 房间里的语音（`m.audio`）先转成文字再交给 agent：连接器下载语音，调 `POST /api/v1/transcriptions`（`{filename, mimeType, content(base64), language?}` → `{text}`），在房间里回一条 `🎙️ <听到的内容>`，再把 `（语音转写，可能有听错的字）<内容>` 当作这条消息提交。转写在这个对话的队列里进行，所以语音后面紧跟的文字不会插到它前面。
+- 控制面的转写先走 TokensAPI `qwen3-asr`（`ASR_MODEL`，密钥取 OpenBao `shared/tokensapi`），Matrix 的 ogg/opus 直接收、不转码；失败时走 `ASR_FALLBACK_URL` 指向的 OpenAI 兼容服务（`/audio/transcriptions`，模型 `ASR_FALLBACK_MODEL`，默认 `sensevoice-small`）。两者都没配时接口返回 503。
+- 没听出内容时只回“没听清”，不提交；加密语音暂不支持。
+
 ## 状态与可靠性
 
 连接器本地只有一个状态文件（`MATRIX_CONNECTOR_STATE`，0600）：sync 位置、SSE 游标、设备 token 和尚未回答的提示。首次启动只建立 sync 基线，不处理历史消息。创建会话和发 turn 用 Matrix 事件 ID 派生的幂等键，出站消息用稳定的事务 ID，所以重放不会重复执行或重复发送。崩溃时正在攒的附件会丢失，需要重发。

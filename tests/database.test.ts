@@ -392,3 +392,22 @@ test("non-blocking questions are listed without holding the session", () => {
   assert.equal(control.session("s")?.pendingUserInputCount, 1);
   store.db.close();
 });
+
+test("sessions an automation run started are marked, and left out when the list asks", () => {
+  const path = join(tmpdir(), `agent-bridge-${randomUUID()}.sqlite`);
+  const store = new Store(path);
+  store.upsertMachine({ id: "dev", name: "dev", platform: "linux", hostname: "dev", capabilities: [] });
+  for (const id of ["chat", "run"]) store.createSession({ id, machineId: "dev", agentType: "pi", projectName: "p", projectPath: "/p",
+    matrixRoomId: "", matrixThreadId: null, nativeSessionId: id, status: "waiting", createdAt: 1, updatedAt: 1 });
+  const control = new AgentControlStore(store.db, { actionsMs: 1_000, attachmentsMs: 1_000 });
+  const ids = (automations?: boolean) => control.listSessions({ sort: "updatedAt", order: "desc", limit: 10, automations }).data.map((s) => s.sessionId).sort();
+  assert.deepEqual(ids(false), ["chat", "run"], "no automations table yet: nothing to leave out");
+  store.db.exec(`CREATE TABLE automation_runs (id TEXT PRIMARY KEY, automation_id TEXT NOT NULL, trigger TEXT NOT NULL, trigger_at INTEGER NOT NULL,
+    started_at INTEGER, finished_at INTEGER, status TEXT NOT NULL, session_id TEXT, output TEXT, error TEXT)`);
+  store.db.prepare("INSERT INTO automation_runs(id,automation_id,trigger,trigger_at,status,session_id) VALUES('r','daily-report','schedule',1,'ok','run')").run();
+  assert.deepEqual(ids(false), ["chat"]);
+  assert.deepEqual(ids(), ["chat", "run"]);
+  assert.equal(control.session("run")?.automation, "daily-report");
+  assert.equal(control.session("chat")?.automation, undefined);
+  store.db.close(); rmSync(path, { force: true });
+});

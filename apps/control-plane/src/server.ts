@@ -32,6 +32,7 @@ import { Automations, type AutomationOptions } from "./automations.js";
 import { SecretStore, type SecretStoreOptions } from "./secrets.js";
 import { approvalReviewer, automationReviewer, learnRule, ToolHub, toolReviewer, type ApprovalReviewer, type ToolReviewer } from "./tools.js";
 import { reviewModel } from "./review-model.js";
+import { transcriber, type TranscribeOptions } from "./transcribe.js";
 import { alreadyGated, ApprovalLessons, boundary, remoteTargets, toolOf, type ApprovalAnalysis } from "./approval-review.js";
 import { toolsEndpoint } from "./mcp/tools.js";
 import { NtfyNotifier, type NtfyOptions, type SessionNotificationKind } from "./ntfy.js";
@@ -141,6 +142,8 @@ export class ControlPlane {
       /** Schedules and webhooks; failures and proposals go to `noticeTarget`, else the App. */
       automations?: Omit<AutomationOptions, "operatorTarget">;
       secrets?: SecretStoreOptions;
+      /** Speech to text for voice messages; TokensAPI needs `secrets`. */
+      transcribe?: Omit<TranscribeOptions, "secrets">;
       /** The central tool registry (YAML), served at /mcp/tools. */
       toolsRegistry?: string;
       ntfy?: NtfyOptions;
@@ -232,6 +235,7 @@ export class ControlPlane {
     this.controlApi = new AgentControlApi(store, this.controlStore, this.registry, {
       readToken: options.controlApiReadToken, writeToken: options.controlApiWriteToken, bridgeToken: options.bridgeToken,
       agents, memoryReviews: this.memoryReviews, conversations: this.conversations, automations: this.automations, toolHub: this.toolHub,
+      transcribe: options.transcribe && (secrets || options.transcribe.fallbackUrl) ? transcriber({ ...options.transcribe, secrets }) : undefined,
       onAllowSimilar: (pending, by) => this.learnFrom(pending, by),
       onTrustSession: (pending) => this.allowWaiting(pending.sessionId, pending.id),
       callees: async () => {
@@ -545,6 +549,10 @@ export class ControlPlane {
         message = { ...message, sessionId: canonical.id,
           eventId: message.eventId === `claude:${oldId}:first:user` ? `claude:${canonical.id}:first:user` : message.eventId };
       }
+      // An approval the reviewer answered says so, with what it let through: the session shows that instead of the bare outcome.
+      const review = message.eventType === "approval.resolved" && typeof message.payload.approvalId === "string"
+        ? this.controlStore.approvalReview(message.payload.approvalId) : undefined;
+      if (review) message = { ...message, payload: { ...message.payload, review } };
       const inserted = this.controlStore.appendSessionEvent(message);
       if (inserted === false) {
         const conflict = this.controlStore.reconcileReplayedEvent(message);
@@ -965,8 +973,9 @@ export class ControlPlane {
 
   /** Answer an approval for the reviewer, as the human would through /api/v1, and say so quietly. */
   /** Answer an approval for the agent. Automatic allows are only logged: the human is told about what needs them (clown 2026-11-02). */
-  private resolveByReview(machineId: string, message: ApprovalRequestMessage, choice: "allow" | "deny", reason: string): boolean {
+  private resolveByReview(machineId: string, message: ApprovalRequestMessage, choice: "allow" | "deny", reason: string, what = ""): boolean {
     try {
+      this.controlStore.recordApprovalReview(message.approvalId, choice, what || approvalHead(message.summary), reason);
       const created = this.controlStore.createAction({ principal: "system:review", key: `review:${message.approvalId}`, method: "POST",
         path: `/api/v1/approvals/${message.approvalId}/decision`, body: { choice }, kind: "resolve_approval", machineId, sessionId: message.sessionId });
       if (!created.existing) this.controlApi.actionsForBridge().dispatch(created.action, { type: "action.resolve_approval", actionId: created.action.actionId,
@@ -1015,7 +1024,7 @@ export class ControlPlane {
         caller: place.caller, remotes: remotes.map((target) => ({ target, allowed: place.remotes.includes(target) })) })
         .catch((error: unknown) => ({ decision: "human" as const, what: "", risk: "medium" as const, reason: `审核失败：${error instanceof Error ? error.message : String(error)}` }))
         .then((verdict) => {
-          if (verdict.decision !== "human" && this.resolveByReview(machineId, message, verdict.decision, verdict.reason)) return;
+          if (verdict.decision !== "human" && this.resolveByReview(machineId, message, verdict.decision, verdict.reason, verdict.what)) return;
           log.info({ approvalId: message.approvalId, tool, boundary: level, reason: verdict.reason }, "Reviewer handed an approval to the human");
           if (verdict.what) this.approvalAnalyses.set(message.approvalId, { what: verdict.what, risk: verdict.risk, reason: verdict.reason });
           this.approvalsById.delete(message.approvalId);
@@ -1143,4 +1152,10 @@ function activityForStructuredEvent(type: string):
   if (type === "turn.failed") return { activity: "idle", active: false, lastTurn: "failed" };
   if (type === "turn.interrupted") return { activity: "idle", active: false, lastTurn: "interrupted" };
   return undefined;
+}
+
+/** The first line of what an approval asks, without Codex's “… approval required” heading, for a note that has no reviewer analysis. */
+function approvalHead(summary: string): string {
+  const line = summary.split("\n").map((part) => part.trim()).find((part) => part && !/approval required$/i.test(part)) ?? summary.trim();
+  return line.replace(/^Command:\s*/, "").slice(0, 160);
 }

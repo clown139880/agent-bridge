@@ -646,20 +646,25 @@ function Sessions({ control, state, banners }: { control: ControlState; state: V
   useRememberScroll("sessions");
   useLayoutEffect(() => { const saved = scrollMemory.get("sessions"); if (saved) window.scrollTo({ top: saved.y }); }, []);
   const worker = state.workers.find(w => w.id === state.workerFilter);
+  // Sessions an automation run started are read from the task's runs; a live update may still bring one in.
+  const sessions = state.showAutomations ? state.sessions : state.sessions.filter(s => !s.automation);
   return <section className="page">
-    <TopBar title="最近会话" sub={state.loading ? "正在读取…" : `${state.sessions.length} 个会话${worker ? ` · ${worker.name}` : ""}`} menu={close => <>
+    <TopBar title="最近会话" sub={state.loading ? "正在读取…" : `${sessions.length} 个会话${worker ? ` · ${worker.name}` : ""}`} menu={close => <>
       <button type="button" className="sheet-item" disabled={state.loading} onClick={() => { close(); void control.refresh(); }}>↻ 刷新列表</button>
       <label className="sheet-field" htmlFor="worker-filter">只看这台机器 / Agent<select id="worker-filter" value={state.workerFilter}
         onChange={e => { control.setFilters(state.query, e.target.value); close(); void control.refresh(); }}><option value="">所有机器与 Agent</option>
         {state.workers.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}</select></label>
+      <button type="button" className="sheet-item" onClick={() => { control.setFilters(state.query, state.workerFilter, !state.showAutomations); close(); void control.refresh(); }}>
+        {state.showAutomations ? "隐藏定时任务开的会话" : "显示定时任务开的会话"}</button>
     </>} />
     {banners}
     <MemoryReviewPanel writable={state.writable} />
     <ToolApprovalPanel writable={state.writable} />
     <AutomationPanel writable={state.writable} />
-    <div className="session-list">{state.sessions.map(s => { const unread = s.room ? 0 : unreadCount(state, s); return <Link key={s.sessionId} to={`/control/sessions/${segment(s.sessionId)}`} className="session-row">
+    <div className="session-list">{sessions.map(s => { const unread = s.room ? 0 : unreadCount(state, s); return <Link key={s.sessionId} to={`/control/sessions/${segment(s.sessionId)}`} className="session-row">
       <span className="machine-stripe" style={machineStyle(s.machineId)} aria-hidden="true" />
       <div className="session-row-top"><Status status={s.status} /><span className="row-end">
+        {s.automation && <span className="room-badge" title={`定时任务 ${s.automation} 开的会话`}>⏱ {s.automation}</span>}
         {s.room && <span className="room-badge" title={`回复发在 ${s.room.connector === "matrix" ? "Matrix" : s.room.connector} 房间「${s.room.name}」`}>#{s.room.name}</span>}
         {unread > 0 && <span className="unread-badge" aria-label={`${unread} 条未读回复`}>{unread > 99 ? "99+" : unread}</span>}
         <time title="最后一条消息">{time(promptTime(s))}</time></span></div>
@@ -667,8 +672,8 @@ function Sessions({ control, state, banners }: { control: ControlState; state: V
       {(s.pendingApprovalCount > 0 || s.pendingUserInputCount > 0) && <small className="pending-count">{s.pendingApprovalCount} 项审批 · {s.pendingUserInputCount} 项待答</small>}
       <span className="row-arrow" aria-hidden="true">↗</span>
     </Link>; })}</div>
-    {state.loading && !state.sessions.length && <Skeleton rows={4} kind="session" />}
-    {!state.loading && !state.sessions.length && <div className="empty">还没有匹配的会话。<p>换个关键词，或发起一段新对话。</p></div>}
+    {state.loading && !sessions.length && <Skeleton rows={4} kind="session" />}
+    {!state.loading && !sessions.length && <div className="empty">还没有匹配的会话。<p>换个关键词，或发起一段新对话。</p></div>}
     {state.hasMore && <button className="load-more" disabled={state.moreLoading || state.loading} onClick={() => void control.loadList(true)}>{state.moreLoading ? "加载中…" : "加载更多会话"}</button>}
     <p className="hint refresh-note">{time(state.updatedAt)} 更新 · <button type="button" className="quiet inline" disabled={state.loading} onClick={() => void control.refresh()}>刷新</button></p>
     <form className="dock filters" ref={dockRef} role="search" onSubmit={e => { e.preventDefault(); (document.activeElement as HTMLElement | null)?.blur(); void control.refresh(); }}>
@@ -734,6 +739,13 @@ function ToolLine({ event: shown, expanded = false, load }: { event: SessionEven
       <pre>{JSON.stringify(p, null, 2)}</pre></>}</details>;
 }
 
+const APPROVAL_OUTCOMES: Record<string, string> = { allow: "已允许", "allow-session": "已允许（本会话）", "allow-always": "已永久允许", deny: "已拒绝",
+  cancelled: "审批已取消", closed: "审批已关闭" };
+/** What an approval asks, in one line: the command or the tool, without the “… approval required” heading. */
+function approvalHead(summary: string): string {
+  return (summary.split("\n").map(line => line.trim()).find(line => line && !/approval required$/i.test(line)) ?? "").replace(/^Command:\s*/, "");
+}
+
 function EventView({ event, expanded = false, load }: { event: SessionEvent; expanded?: boolean; load?: () => Promise<SessionEvent> }) {
   const p = event.payload;
   if (event.type === "message.completed") return <article className={`message ${p.role === "user" ? "user" : "assistant"}`}>
@@ -742,6 +754,14 @@ function EventView({ event, expanded = false, load }: { event: SessionEvent; exp
   </article>;
   if (TOOL_TYPES.has(event.type)) return <ToolLine event={event} expanded={expanded} load={load} />;
   if (event.type === "progress") return <p className="progress-note">{String(p.summary ?? "正在思考…")}</p>;
+  // A request is answered in the pending panel; here it stays one line until opened.
+  if (event.type === "approval.requested") { const summary = String(p.summary ?? "");
+    return <details className="event-note approval-note"><summary><span>请求审批</span><span className="approval-head">{approvalHead(summary)}</span></summary>
+      <p>{summary}</p></details>; }
+  if (event.type === "approval.resolved") { const review = p.review as { choice: string; what: string; reason: string } | undefined;
+    const choice = String(review?.choice ?? p.choice ?? p.resolution ?? "");
+    const outcome = review ? `审核员${choice === "deny" ? "拒绝" : "通过"}` : APPROVAL_OUTCOMES[choice] ?? "审批已处理";
+    return <div className="event-note approval-note"><span>{outcome}</span>{review && <p>{review.what}<small> · {review.reason}</small></p>}</div>; }
   const label: Record<string, string> = { "turn.started": "开始执行", "turn.completed": "本轮完成", "turn.failed": "本轮失败", "turn.interrupted": "本轮已打断",
     "approval.requested": "请求审批", "approval.resolved": "审批已处理", "user_input.requested": "等待回答", "user_input.resolved": "问题已回答", error: "执行异常" };
   return label[event.type] ? <div className="event-note"><span>{label[event.type]}</span>{Boolean(p.error || p.summary && event.type !== "turn.completed") && <p>{String(p.error ?? p.summary)}</p>}</div> : null;

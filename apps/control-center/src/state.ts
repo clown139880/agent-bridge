@@ -26,7 +26,7 @@ export interface ViewState {
   historyMore: boolean; error: string;
   /** A cached detail is on screen while the GETs catch up; actions wait for the fresh baseline. */
   syncing: boolean; connection: string; updatedAt: number; query: string;
-  workerFilter: string; intent?: Intent; drafts: Record<string, string>; writable: boolean;
+  workerFilter: string; showAutomations: boolean; intent?: Intent; drafts: Record<string, string>; writable: boolean;
   uploads: Record<string, Upload[]>; models: Record<string, ModelCatalog>;
   /** Partly answered questions by pending id, then question id; survives detail reloads. */
   answers: Record<string, Record<string, AnswerDraft>>;
@@ -116,7 +116,7 @@ export class ControlState {
     this.state = { route: { page: "sessions" }, sessions: byPrompt(snapshot.sessions), workers: snapshot.workers,
       entries: [], rawAdded: 0, approvals: [], inputs: [], loading: false, moreLoading: false,
       hasMore: snapshot.truncated.sessions, historyMore: false, error: "", syncing: false, connection: "按需更新",
-      updatedAt: Date.now(), query: "", workerFilter: "", writable, drafts: {}, uploads: {}, models: {}, answers: {}, reads: store?.reads ?? {} };
+      updatedAt: Date.now(), query: "", workerFilter: "", showAutomations: false, writable, drafts: {}, uploads: {}, models: {}, answers: {}, reads: store?.reads ?? {} };
   }
   snapshot = () => this.state;
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => this.listeners.delete(listener); };
@@ -169,7 +169,7 @@ export class ControlState {
   setAnswer(pendingId: string, questionId: string, value: AnswerDraft) {
     this.patch({ answers: { ...this.state.answers, [pendingId]: { ...this.state.answers[pendingId], [questionId]: value } } }, true);
   }
-  setFilters(query: string, workerFilter: string) { this.patch({ query, workerFilter }, true); }
+  setFilters(query: string, workerFilter: string, showAutomations = this.state.showAutomations) { this.patch({ query, workerFilter, showAutomations }, true); }
   /** One catalog request per worker per tab; a failed one may be retried. */
   async loadModels(workerId: string) {
     if (!workerId || this.state.models[workerId] && this.state.models[workerId].status !== "error") return;
@@ -481,16 +481,17 @@ export class ControlState {
   }
   async loadList(more: boolean, generation = this.generation) {
     if (more && this.state.moreLoading) return;
-    const queryKey = JSON.stringify([this.state.query, this.state.workerFilter]);
+    const queryKey = JSON.stringify([this.state.query, this.state.workerFilter, this.state.showAutomations]);
     more = more && Boolean(this.listCursor) && queryKey === this.listQueryKey;
     this.patch({ moreLoading: more, error: "" });
     const signal = this.scope.signal;
     try {
-      const { query, workerFilter } = this.state;
+      const { query, workerFilter, showAutomations } = this.state;
       // A prompt moves a session up; agent output and tool calls never reorder the list.
       const params = new URLSearchParams({ sort: "lastPromptAt", order: "desc", limit: "50" });
       if (query) params.set("q", query);
       if (workerFilter) params.set("workerId", workerFilter);
+      if (!showAutomations) params.set("automations", "false");
       if (more && this.listCursor) params.set("cursor", this.listCursor);
       const [page, workers] = await Promise.all([
         this.api.request<Page<Session>>(`/sessions?${params}`, { signal }),

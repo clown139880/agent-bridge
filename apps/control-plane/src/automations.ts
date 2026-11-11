@@ -187,6 +187,7 @@ export class Automations {
         trigger_at INTEGER NOT NULL, started_at INTEGER, finished_at INTEGER, status TEXT NOT NULL, session_id TEXT,
         output TEXT, error TEXT);
       CREATE INDEX IF NOT EXISTS automation_runs_task ON automation_runs(automation_id, trigger_at);
+      CREATE INDEX IF NOT EXISTS automation_runs_session ON automation_runs(session_id) WHERE session_id IS NOT NULL;
       CREATE TABLE IF NOT EXISTS automation_proposals (id TEXT PRIMARY KEY, action TEXT NOT NULL, automation_id TEXT NOT NULL,
         scope TEXT NOT NULL, definition TEXT, previous TEXT, reason TEXT, proposed_by TEXT NOT NULL, status TEXT NOT NULL,
         error TEXT, created_at INTEGER NOT NULL, decided_at INTEGER, decided_by TEXT);

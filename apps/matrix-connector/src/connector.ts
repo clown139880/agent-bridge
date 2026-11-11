@@ -151,6 +151,7 @@ export class MatrixConnector {
     if (event.type !== "m.room.message" || relation?.rel_type === "m.replace") return;
     let place: Place = { roomId, threadId: threadOf(content) };
     if (["m.image", "m.file"].includes(content.msgtype)) { this.stage(place, event); return; }
+    if (content.msgtype === "m.audio") { this.enqueue(place, () => this.voice(place, event)); return; }
     if (content.msgtype !== "m.text") return;
     const prompt = this.prompt(relation?.["m.in_reply_to"]?.event_id);
     let text = plainBody(content);
@@ -187,6 +188,25 @@ export class MatrixConnector {
         return undefined;
       }
     })());
+  }
+
+  /**
+   * A voice message is transcribed by the Control Plane and goes on as the words said, after the room
+   * sees what was heard. It runs in the conversation's queue, so it keeps its place among the messages.
+   */
+  private async voice(place: Place, event: MatrixEvent): Promise<void> {
+    const content = event.content;
+    if (content.file) { this.say(place, "加密语音暂不支持", `voice-error:${event.event_id}`); return; }
+    void this.react(place.roomId, event.event_id, "👂");
+    const bytes = await this.matrix.download(String(content.url ?? ""), MAX_BYTES);
+    const mimeType = String(content.info?.mimetype ?? "audio/ogg").split(";", 1)[0]!;
+    const result = await this.control.call("POST", "/transcriptions", { filename: String(content.body ?? "voice.ogg").slice(0, 255), mimeType,
+      content: bytes.toString("base64") }).catch((error) => { throw new Error(`语音没转成文字：${describe(error)}`); });
+    const text = String(result.text ?? "").trim();
+    if (!text) { this.say(place, "🎙️ 没听清这段语音", `voice:${event.event_id}`); return; }
+    this.say(place, `🎙️ ${text}`, `voice:${event.event_id}`);
+    const cmd = command(text);
+    await (cmd ? this.runCommand(place, cmd, event) : this.submit(place, `（语音转写，可能有听错的字）${text}`, event));
   }
 
   private enqueue(place: Place, task: () => Promise<void>): void {

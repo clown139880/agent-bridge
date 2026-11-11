@@ -25,6 +25,7 @@ const control = new ControlPlane(store, {
   fleetNoticeTarget: config.fleetNoticeTarget,
   automations: config.automations,
   secrets: config.secrets,
+  transcribe: config.transcribe,
   toolsRegistry: config.toolsRegistry,
   ntfy: config.ntfy,
   messages: config.messages,

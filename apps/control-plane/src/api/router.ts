@@ -10,6 +10,7 @@ import { AutomationError, type Automations } from "../automations.js";
 import type { ToolHub } from "../tools.js";
 import { AgentControlSse, SseCursorError } from "./sse.js";
 import { ActionServiceError, SessionActionService } from "./session-actions.js";
+import type { Transcribe } from "../transcribe.js";
 import { ApiProblem, integerParam as integer, jsonBody, stringField as string, attachmentsField, uploadRequest } from "./validation.js";
 
 /** Longer notices are split by the connector; this only bounds what one request may queue. */
@@ -47,6 +48,8 @@ interface ApiOptions {
   automations?: Automations;
   /** Whom a notice can ring (call-bridge aliases), for the target picker. */
   callees?: () => Promise<string[]>;
+  /** Speech to text for connectors' voice messages (/api/v1/transcriptions). */
+  transcribe?: Transcribe;
   /** Chat connectors' room/thread → session bindings (/api/v1/conversations). */
   conversations?: Conversations;
   sseKeepaliveMs: number; ssePollMs: number; sseMaxBackpressure: number; actionTimeoutMs: number; }
@@ -129,6 +132,7 @@ export class AgentControlApi {
       if(request.method==="GET"&&url.pathname==="/api/v1/user-input"){this.pendingList("user_input",url,response);return true;}
       if(request.method==="GET"&&url.pathname==="/api/v1/stream"){this.sse.open(request,response,url);return true;}
       if(request.method==="POST"&&url.pathname==="/api/v1/attachments"){await this.createAttachment(request,response);return true;}
+      if(request.method==="POST"&&url.pathname==="/api/v1/transcriptions"){await this.transcription(request,response);return true;}
       const attachment=url.pathname.match(/^\/api\/v1\/attachments\/([^/]+)$/);
       if(request.method==="GET"&&attachment){this.getAttachment(decodeURIComponent(attachment[1]!),response);return true;}
       const action=url.pathname.match(/^\/api\/v1\/actions\/([^/]+)$/);
@@ -362,6 +366,7 @@ export class AgentControlApi {
     const sort=url.searchParams.get("sort")??"updatedAt";if(!["updatedAt","createdAt","lastPromptAt"].includes(sort))throw new ApiProblem(400,"invalid_parameter","invalid sort");
     const order=url.searchParams.get("order")??"desc";if(!["asc","desc"].includes(order))throw new ApiProblem(400,"invalid_parameter","invalid order");
     const active=url.searchParams.get("active");if(active!==null&&!['true','false'].includes(active))throw new ApiProblem(400,"invalid_parameter","active must be boolean");
+    const automations=url.searchParams.get("automations");if(automations!==null&&!['true','false'].includes(automations))throw new ApiProblem(400,"invalid_parameter","automations must be boolean");
     const statuses=url.searchParams.getAll("status"),validStatuses=new Set(["creating","active","waiting_for_approval","waiting_for_input","idle","offline","error","unknown"]);
     if(statuses.some(value=>!validStatuses.has(value)))throw new ApiProblem(400,"invalid_parameter","invalid session status");
     const updatedAfter=url.searchParams.get("updatedAfter");if(updatedAfter!==null&&!Number.isFinite(Number(updatedAfter)))throw new ApiProblem(400,"invalid_parameter","updatedAfter must be epoch milliseconds");
@@ -371,6 +376,7 @@ export class AgentControlApi {
     try{const page=this.store.listSessions({statuses,agents:url.searchParams.getAll("agent"),workerId,machineId,
       workspace:url.searchParams.get("workspace")??undefined,taskId:url.searchParams.get("taskId")??undefined,
       conversationId:url.searchParams.get("conversationId")??undefined,active:active===null?undefined:active==="true",
+      automations:automations===null?undefined:automations==="true",
       updatedAfter:updatedAfter!==null?Number(updatedAfter):undefined,
       dayStart:dayStart!==null?Number(dayStart):undefined,segment:segment as "recent"|"history"|"all",
       q:url.searchParams.get("q")??undefined,sort:sort as "updatedAt"|"createdAt"|"lastPromptAt",order:order as "asc"|"desc",
@@ -437,6 +443,18 @@ export class AgentControlApi {
     const {filename,mimeType,bytes}=uploadRequest(body);
     const ref=this.store.putAttachment(bytes,mimeType,filename);
     this.ok(response,{...ref,previewUrl:`/api/v1/attachments/${ref.id}`},201);
+  }
+
+  /** A voice message's words: `{filename, mimeType, content(base64), language?}` → `{text}`, empty when nothing was said. */
+  private async transcription(request:IncomingMessage,response:ServerResponse):Promise<void>{
+    if(!this.options.transcribe)throw new ApiProblem(503,"transcription_unavailable","speech to text is not configured");
+    const body=await jsonBody(request),content=string(body.content,"content",true)!,mimeType=string(body.mimeType,"mimeType",true)!;
+    if(!/^audio\/[\w.+-]+$/.test(mimeType))throw new ApiProblem(400,"invalid_parameter","mimeType must be audio/*");
+    const bytes=Buffer.from(content,"base64");if(!bytes.length)throw new ApiProblem(400,"invalid_parameter","content is empty");
+    try{
+      const text=await this.options.transcribe({bytes,mimeType,filename:string(body.filename,"filename")??"voice",language:string(body.language,"language")});
+      this.ok(response,{text});
+    }catch(error){throw new ApiProblem(502,"transcription_failed",error instanceof Error?error.message:String(error),true);}
   }
 
   private getAttachment(id:string,response:ServerResponse):void{

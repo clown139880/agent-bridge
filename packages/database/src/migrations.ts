@@ -41,6 +41,10 @@ export function migrateDatabase(db: DatabaseSync): void {
     CREATE TABLE IF NOT EXISTS session_trust (
       session_id TEXT PRIMARY KEY, granted_by TEXT NOT NULL, granted_at INTEGER NOT NULL
     );
+    -- Approvals the reviewer answered: the session's “审批已处理” note says what it let through and why.
+    CREATE TABLE IF NOT EXISTS approval_reviews (
+      approval_id TEXT PRIMARY KEY, choice TEXT NOT NULL, what TEXT NOT NULL, reason TEXT NOT NULL, created_at INTEGER NOT NULL
+    );
     -- Other machines a workspace may reach without that alone asking the human: ssh:<destination> or windows.
     CREATE TABLE IF NOT EXISTS approval_remotes (
       machine_id TEXT NOT NULL, workspace TEXT NOT NULL, target TEXT NOT NULL, granted_by TEXT NOT NULL, granted_at INTEGER NOT NULL,

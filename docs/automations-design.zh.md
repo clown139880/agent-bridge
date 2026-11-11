@@ -78,6 +78,7 @@ enabled: true
 
 - 部署默认值：`AUTOMATION_DEFAULT_AGENT=pi`，`AUTOMATION_DEFAULT_MODEL` 由部署填写（HAL 上为 deepseek-v4-flash）。代码里不写死某个模型。
 - 执行历史 `automation_runs`：`id, automation, trigger_at, started_at, finished_at, status (ok|silent|failed|skipped|missed), session_id?, output (≤64 KiB), error`。
+- 定时任务为一次运行开的会话（`automation_runs.session_id`）在控制中心的会话列表里默认隐藏（`GET /api/v1/sessions?automations=false`，会话带 `automation: <任务 id>`），在任务页“最近运行”里打开；列表菜单里可以切换成显示。
 
 ## 5. 执行语义
 
