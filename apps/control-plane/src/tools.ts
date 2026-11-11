@@ -308,6 +308,17 @@ export async function learnRule(model: ReviewModel, summary: string, what: strin
   return rule;
 }
 
+/** A short name for a session whose agent does not name it, from how it began. */
+export async function titleSession(model: ReviewModel, prompts: string[], replies: string[]): Promise<string> {
+  const value = await model(
+    "给下面这段 agent 会话起一个简短的中文标题（不超过 20 个字），说清它在做什么，像任务名一样，不要标点结尾、不要引号。" +
+    "用户消息前面可能有系统附加的前缀（如“[房间里新近的通知]”“[Agent Bridge 会话消息]”“[脚本输出]”），以真正的请求为准。只输出 JSON：{\"title\":\"标题\"}",
+    `<用户>\n${prompts.join("\n---\n").slice(0, 3000)}\n</用户>\n<agent>\n${replies.join("\n---\n").slice(0, 1500)}\n</agent>`, 100);
+  const title = String(value.title ?? "").replace(/^["'“「]+|["'”」。.]+$/g, "").replace(/\s+/g, " ").trim().slice(0, 40);
+  if (!title) throw new Error("no title");
+  return title;
+}
+
 /** Reviews a call of a `review` tool in the library. */
 export function toolReviewer(model: ReviewModel): ToolReviewer {
   return async (request) => {

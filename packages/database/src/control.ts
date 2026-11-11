@@ -281,6 +281,27 @@ export class AgentControlStore {
     markChanged(this.db, "session", sessionId);
   }
 
+  /**
+   * What a session needs a title for: its agent gave none, or only its first prompt (Pi names a session
+   * after it). `undefined` once it has a real name or a given one.
+   */
+  untitled(sessionId: string): { agent: string; prompts: string[]; replies: string[] } | undefined {
+    const row = this.db.prepare("SELECT agent_type,title,prompt_summary,auto_title FROM sessions WHERE id=?").get(sessionId) as Record<string, unknown> | undefined;
+    if (!row || row.auto_title) return undefined;
+    const messages = (this.db.prepare("SELECT body FROM events WHERE session_id=? AND type='message.completed' ORDER BY id LIMIT 12").all(sessionId) as Array<{ body: unknown }>)
+      .map((message) => decodeEventBody(message.body)).filter((payload) => typeof payload.text === "string");
+    const prompts = messages.filter((payload) => payload.role === "user").map((payload) => String(payload.text));
+    if (row.title && !promptLike(String(row.title), String(row.prompt_summary ?? prompts[0] ?? ""))) return undefined;
+    if (!row.title && !prompts.length) return undefined;
+    if (!prompts.length && row.prompt_summary) prompts.push(String(row.prompt_summary));
+    return { agent: String(row.agent_type), prompts, replies: messages.filter((payload) => payload.role === "assistant").map((payload) => String(payload.text)) };
+  }
+
+  setAutoTitle(sessionId: string, title: string): void {
+    this.db.prepare("UPDATE sessions SET auto_title=? WHERE id=?").run(title, sessionId);
+    markChanged(this.db, "session", sessionId);
+  }
+
   /** Remember why an approval was answered without the human; kept 30 days. */
   recordApprovalReview(approvalId: string, choice: string, what: string, reason: string): void {
     const now = Date.now();
@@ -709,7 +730,7 @@ export class AgentControlStore {
     if (input.active != null) { where.push(input.active
       ? "activity_status IN ('active','waiting_for_approval','waiting_for_input')"
       : "activity_status NOT IN ('active','waiting_for_approval','waiting_for_input')"); }
-    if (input.q) { where.push("(LOWER(COALESCE(title,'')) LIKE ? OR LOWER(COALESCE(prompt_summary,'')) LIKE ? OR LOWER(project_name) LIKE ?)"); const q=`%${input.q.toLowerCase()}%`; params.push(q,q,q); }
+    if (input.q) { where.push("(LOWER(COALESCE(title,'')) LIKE ? OR LOWER(COALESCE(auto_title,'')) LIKE ? OR LOWER(COALESCE(prompt_summary,'')) LIKE ? OR LOWER(project_name) LIKE ?)"); const q=`%${input.q.toLowerCase()}%`; params.push(q,q,q,q); }
     if (input.taskId) { where.push("EXISTS(SELECT 1 FROM worker_runs r WHERE r.session_id=sessions.id AND r.task_id=?)"); params.push(input.taskId); }
     if (input.conversationId) { where.push("EXISTS(SELECT 1 FROM worker_runs r WHERE r.session_id=sessions.id AND r.conversation_id=?)"); params.push(input.conversationId); }
     if (input.automations === false && this.automationRuns()) where.push("NOT EXISTS(SELECT 1 FROM automation_runs a WHERE a.session_id=sessions.id)");
@@ -997,7 +1018,7 @@ export class AgentControlStore {
       ?String(inheritedProjectIdentities[0]!.project_identity):undefined);
     const result:Record<string,unknown>={sessionId:String(row.id),nativeSessionId:row.native_session_id?String(row.native_session_id):null,
       workerId:buildWorkerId(String(row.agent_type) as AgentType,String(row.machine_id)),machineId:String(row.machine_id),agent:String(row.agent_type),
-      title:row.title?String(row.title):null,promptSummary,
+      title:sessionTitle(row,promptSummary),promptSummary,
       projectName:String(row.project_name),workspace:String(row.project_path),status:String(row.activity_status??"unknown"),
       ...(projectIdentity?{projectIdentity}:{}),
       ...(this.sessionTrusted(String(row.id))?{trusted:true}:{}),
@@ -1080,3 +1101,18 @@ export function pendingWire(row: PendingRow): Record<string,unknown> {
   }
   return {requestId:row.id,...common,questions:row.request.questions,blocking:row.request.blocking!==false,answers:row.decision?.answers??null};
 }
+
+/** Whether a title is just the session's first prompt cut short (how Pi names a session), not a name. */
+function promptLike(title: string, prompt: string): boolean {
+  const squash = (text: string) => text.replace(/\s+/g, " ").replace(/[…\.]+$/, "").trim();
+  const name = squash(title), first = squash(prompt);
+  return Boolean(name) && Boolean(first) && (first.startsWith(name) || name.startsWith(first));
+}
+
+/** The agent's own name for a session wins; a given title replaces none, or one that only repeats the first prompt. */
+function sessionTitle(row: Record<string, unknown>, promptSummary: string | null): string | null {
+  const own = row.title ? String(row.title) : null, given = row.auto_title ? String(row.auto_title) : null;
+  if (!given) return own;
+  return own && !promptLike(own, String(row.prompt_summary ?? promptSummary ?? "")) ? own : given;
+}
+

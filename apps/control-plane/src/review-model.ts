@@ -51,7 +51,7 @@ export function verdictOf(text: string): Record<string, unknown> {
   const match = text.match(/\{[\s\S]*\}/);
   if (!match) throw new Error("reviewer gave no verdict");
   const value = JSON.parse(match[0]) as Record<string, unknown>;
-  if (typeof value.decision !== "string" && typeof value.rule !== "string") throw new Error("reviewer gave no verdict");
+  if (typeof value.decision !== "string" && typeof value.rule !== "string" && typeof value.title !== "string") throw new Error("reviewer gave no verdict");
   return value;
 }
 

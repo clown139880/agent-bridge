@@ -188,7 +188,7 @@ test("a 0.4.2 database upgrades transactionally to the Agent Control schema", ()
   `);legacy.close();
   const store=new Store(path);
   const version=store.db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get() as {version:number};
-  assert.equal(version.version,16);
+  assert.equal(version.version,17);
   const tables=(store.db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{name:string}>).map(row=>row.name);
   for(const table of ["pending_requests","actions","idempotency_keys","stream_changes","event_search","deleted_sessions","attachments",
     "deleted_workers","conversation_collection_gaps","notices"])
@@ -199,7 +199,7 @@ test("a 0.4.2 database upgrades transactionally to the Agent Control schema", ()
   assert.equal(session.activity_status,"idle");assert.equal(session.source,"app-server");
   assert.equal(session.last_response_at,null);assert.equal(session.updated_at,1);
   // Reopening proves the versioned migration is idempotent.
-  store.db.close();const reopened=new Store(path);assert.equal((reopened.db.prepare("SELECT COUNT(*) AS n FROM schema_migrations").get() as any).n,17);
+  store.db.close();const reopened=new Store(path);assert.equal((reopened.db.prepare("SELECT COUNT(*) AS n FROM schema_migrations").get() as any).n,18);
   reopened.db.close();rmSync(path,{force:true});
 });
 
@@ -409,5 +409,30 @@ test("sessions an automation run started are marked, and left out when the list 
   assert.deepEqual(ids(), ["chat", "run"]);
   assert.equal(control.session("run")?.automation, "daily-report");
   assert.equal(control.session("chat")?.automation, undefined);
+  store.db.close(); rmSync(path, { force: true });
+});
+
+test("a session its agent did not name gets a given title; the agent's own name still wins", async () => {
+  const path = join(tmpdir(), `agent-bridge-${randomUUID()}.sqlite`);
+  const store = new Store(path);
+  store.upsertMachine({ id: "dev", name: "dev", platform: "linux", hostname: "dev", capabilities: [] });
+  for (const [id, agentType] of [["pi", "pi"], ["cx", "codex-cli"], ["cl", "claude-code"]] as const) store.createSession({ id, machineId: "dev", agentType,
+    projectName: "p", projectPath: "/p", matrixRoomId: "", matrixThreadId: null, nativeSessionId: id, status: "waiting", createdAt: 1, updatedAt: 1 });
+  const control = new AgentControlStore(store.db, { actionsMs: 1_000, attachmentsMs: 1_000 });
+  const say = (sessionId: string, role: string, text: string, n: number) => control.appendSessionEvent({ type: "session.event", eventType: "message.completed",
+    eventId: `${sessionId}-${n}`, sessionId, turnId: "t", timestamp: n, payload: { role, text } });
+  say("pi", "user", "帮我看看厨房水龙头哪个牌子好，预算五百", 1); say("pi", "assistant", "推荐几款……", 2);
+  say("cx", "user", "续写故事", 3);
+  // Pi names a session after its first prompt: that is not a name.
+  store.db.prepare("UPDATE sessions SET title='帮我看看厨房水龙头哪个牌子好' WHERE id='pi'").run();
+  assert.deepEqual(control.untitled("pi")?.prompts, ["帮我看看厨房水龙头哪个牌子好，预算五百"]);
+  assert.ok(control.untitled("cx"), "no title at all");
+  control.setAutoTitle("pi", "厨房水龙头选购");
+  assert.equal(control.session("pi")?.title, "厨房水龙头选购");
+  assert.equal(control.untitled("pi"), undefined, "titled once");
+  control.setAutoTitle("cx", "续写故事");
+  store.db.prepare("UPDATE sessions SET title='给孩子写的故事' WHERE id='cx'").run();
+  assert.equal(control.session("cx")?.title, "给孩子写的故事", "a name the agent gives later wins");
+  assert.deepEqual(control.listSessions({ sort: "updatedAt", order: "desc", limit: 5, q: "水龙头选购" }).data.map((s) => s.sessionId), ["pi"]);
   store.db.close(); rmSync(path, { force: true });
 });

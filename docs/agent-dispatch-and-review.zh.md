@@ -68,3 +68,9 @@ project agent 写 _global / _assistants / _agent-* 或这些作用域里的技�
 ## 4. 以后：工具审批
 
 一期不动工具审批，也不做 shadow。以后要做时沿用同一个思路（硬规则在前，不可逆和高风险的一律交给人；灰色地带交给无工具的审核员；任何故障退回给人），它取代 [jev-approval-triage-design.zh.md](jev-approval-triage-design.zh.md) 的分类器方案。
+
+## 6. 会话标题（0.7.76）
+
+Claude 自己给会话起名（`/rename` 的 `custom-title`，否则 `ai-title`），Bridge 读到后更新过来。Codex 经 app-server 开的会话没人起名（Codex 的标题是 Desktop 客户端另起线程生成的，app-server 只转发 `thread/name/updated`），Pi 只拿第一句提示当名字。
+
+所以非 Claude 会话的一轮完成后，如果它还没有名字，或者名字只是第一句提示的开头，Control Plane 用审核员模型（`deepseek-v4-flash`，失败用 `qwen3.8-flash-next`）根据开头的几条消息起一个 20 字以内的标题，写进 `sessions.auto_title`，只起一次，失败就等下一轮完成再试。显示时 agent 自己的名字优先：之后 Codex Desktop 或 agent 起了真正的名字，就改用那个。这个标题只存在 Control Plane，不会写回 Codex 或 Pi；会话搜索也匹配它。旧会话要等下一轮完成后才有标题。

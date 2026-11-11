@@ -451,6 +451,16 @@ export function migrateDatabase(db: DatabaseSync): void {
       db.exec("COMMIT");
     } catch (error) { try { db.exec("ROLLBACK"); } catch {} throw error; }
   }
+
+  // A title the Control Plane gave a session whose agent does not name it (Codex via app-server, Pi).
+  if (!db.prepare("SELECT 1 FROM schema_migrations WHERE version=17").get()) {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      addColumn(db, "sessions", "auto_title", "TEXT");
+      db.prepare("INSERT INTO schema_migrations(version,applied_at) VALUES (17,?)").run(Date.now());
+      db.exec("COMMIT");
+    } catch (error) { try { db.exec("ROLLBACK"); } catch {} throw error; }
+  }
 }
 
 /**

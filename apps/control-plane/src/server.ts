@@ -30,7 +30,7 @@ import { WebhookNotifier, type WebhookOptions } from "./webhook.js";
 import { OperatorNotices, type NoticeTarget, type OperatorEvent } from "./notices.js";
 import { Automations, type AutomationOptions } from "./automations.js";
 import { SecretStore, type SecretStoreOptions } from "./secrets.js";
-import { approvalReviewer, automationReviewer, learnRule, ToolHub, toolReviewer, type ApprovalReviewer, type ToolReviewer } from "./tools.js";
+import { approvalReviewer, automationReviewer, learnRule, titleSession, ToolHub, toolReviewer, type ApprovalReviewer, type ToolReviewer } from "./tools.js";
 import { reviewModel } from "./review-model.js";
 import { transcriber, type TranscribeOptions } from "./transcribe.js";
 import { alreadyGated, ApprovalLessons, boundary, remoteTargets, toolOf, type ApprovalAnalysis } from "./approval-review.js";
@@ -90,6 +90,9 @@ export class ControlPlane {
   private approvalReviewer?: ApprovalReviewer;
   private learnRule?: (summary: string, what: string, where: string) => Promise<string>;
   private approvalLessons?: ApprovalLessons;
+  /** Names a session whose agent does not (Codex via app-server, Pi); absent without the reviewer model. */
+  private titler?: (prompts: string[], replies: string[]) => Promise<string>;
+  private readonly titling = new Set<string>();
   /** The reviewer's explanation of approvals it handed to the human, kept across Bridge replays. */
   private readonly approvalAnalyses = new Map<string, ApprovalAnalysis>();
   private readonly ntfy: NtfyNotifier;
@@ -201,6 +204,7 @@ export class ControlPlane {
     if (tools && model) {
       this.approvalReviewer = approvalReviewer(model);
       this.learnRule = (summary, what, where) => learnRule(model, summary, what, where);
+      this.titler = (prompts, replies) => titleSession(model, prompts, replies);
       if (agentSkills && options.agentMemory?.skills) {
         const skills = agentSkills, repo = options.agentMemory.skills.repo;
         this.approvalLessons = new ApprovalLessons({ file: join(repo, "scopes/_global/agent-bridge/approval-review/references/learned.md"),
@@ -570,6 +574,7 @@ export class ControlPlane {
         const status = activityForStructuredEvent(message.eventType);
         if (status) this.controlStore.updateSessionActivity(message.sessionId, status.activity,
           status.active ? message.turnId : undefined, status.lastTurn);
+        if (message.eventType === "turn.completed") this.giveTitle(message.sessionId);
         if (message.eventType === "turn.completed" || message.eventType === "turn.failed") {
           this.notifySession(message.eventType === "turn.completed" ? "completed" : "failed", message.sessionId,
             message.payload.summary ?? message.payload.error);
@@ -936,6 +941,24 @@ export class ControlPlane {
       const request = JSON.parse(row.request_json) as ApprovalRequestMessage;
       if (request.choices?.includes("allow")) this.resolveByReview(row.machine_id, { ...request, approvalId: row.id, sessionId }, "allow", "本会话已由你授权全部允许");
     }
+  }
+
+  /**
+   * Claude names its sessions itself; Codex through the app-server and Pi do not (Pi only repeats the first
+   * prompt). After a turn of such a session completes, the reviewer model names it once; the agent's own
+   * name, should it give one later, still wins (sessionTitle in the store).
+   */
+  private giveTitle(sessionId: string): void {
+    if (!this.titler || this.titling.has(sessionId)) return;
+    const session = this.store.getSession(sessionId);
+    if (!session || session.agentType === "claude-code") return;
+    const untitled = this.controlStore.untitled(sessionId);
+    if (!untitled) return;
+    this.titling.add(sessionId);
+    void this.titler(untitled.prompts, untitled.replies)
+      .then((title) => { this.controlStore.setAutoTitle(sessionId, title); log.info({ sessionId, title }, "Gave a session a title"); })
+      .catch((error) => log.warn({ sessionId, error: error instanceof Error ? error.message : String(error) }, "Could not title a session"))
+      .finally(() => this.titling.delete(sessionId));
   }
 
   /** What the boundary needs to know about where a session works: its workspace and the remote targets allowed there. */
