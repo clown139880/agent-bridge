@@ -137,3 +137,4 @@ Bridge 报上来的审批（Claude 的 Bash、MCP 工具等），在通知任何
 - 已允许的目标不再单独构成边界：只按在那边执行的命令判断。远端命令里的 `rm -rf`、`systemctl restart` 仍是硬边界，`git push`、部署、密钥仍是绝对边界。审核员收到 `remote: ssh:root@host（allowed=yes|no）`。
 - 查看：`GET /api/v1/approval-remotes`；撤回（只有人的 token）：`DELETE /api/v1/approval-remotes?machineId=…&workspace=…&target=…`。
 - 会话页里的审批记录（0.7.75）：“请求审批”默认折叠成一行，点开看全文；审核员（或“本会话全部允许”、免确认的工具）放行的，“审批已处理”显示为“审核员通过”，附上它在干什么和理由（表 `approval_reviews`，留 30 天，控制面收到 Bridge 的 `approval.resolved` 时写进事件的 `review`）。
+- 会话在 Bridge 那边已经没了（比如在本机删掉了），或者审批在 Bridge 那边已经结束（0.7.77）：作答时 Bridge 回 “No adapter owns session …” 或 “… no longer pending”。之前控制面只放开锁，审批一直挂着，点多少次都失败，要等那台 Bridge 重连上报完整清单才清掉。现在收到这两种失败，就把这条审批记为 `expired`；会话没了时，该会话所有待处理一起过期。

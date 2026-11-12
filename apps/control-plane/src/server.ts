@@ -599,7 +599,10 @@ export class ControlPlane {
       return;
     }
     if (message.type === "action.result") {
+      const answering = message.status === "failed" ? this.store.db.prepare("SELECT id FROM pending_requests WHERE resolving_action_id=?")
+        .get(message.actionId) as { id: string } | undefined : undefined;
       this.controlApi.actionsForBridge().complete(message);
+      if (message.status === "failed") this.dropDeadPending(message, answering?.id);
       if (message.kind === "delete_session" && message.status === "succeeded" && message.sessionId)
         this.deleteSessionRecord(message.sessionId);
       return;
@@ -1006,6 +1009,23 @@ export class ControlPlane {
     } catch (error) { log.warn({ error, approvalId: message.approvalId }, "Reviewed approval could not be sent; asking the human"); return false; }
     log.info({ approvalId: message.approvalId, choice, reason, summary: message.summary.slice(0, 200) }, "Approval decided by the reviewer");
     return true;
+  }
+
+  /**
+   * The Bridge no longer has what an answer was for: the session is gone from it (deleted there) or the request
+   * was already settled. Waiting would only fail again on every click, so the request ends as expired; a gone
+   * session's other requests end with it. A complete snapshot does the same on reconnect.
+   */
+  private dropDeadPending(message: { sessionId?: string | null; error?: { message?: string } | null }, pendingId?: string): void {
+    const text = message.error?.message ?? "";
+    if (message.sessionId && /No adapter owns session/.test(text)) {
+      const rows = this.store.db.prepare("SELECT id FROM pending_requests WHERE session_id=? AND status='pending'").all(message.sessionId) as Array<{ id: string }>;
+      for (const row of rows) this.controlStore.resolvePending(row.id, "expired");
+      if (rows.length) log.info({ sessionId: message.sessionId, expired: rows.length }, "The Bridge no longer has this session; its requests expired");
+    } else if (pendingId && /no longer pending/i.test(text)) {
+      this.controlStore.resolvePending(pendingId, "expired");
+      log.info({ pendingId }, "The Bridge had already settled this request; it expired here");
+    }
   }
 
   private async handleApprovalRequest(machineId: string, message: ApprovalRequestMessage, reviewed = false): Promise<void> {

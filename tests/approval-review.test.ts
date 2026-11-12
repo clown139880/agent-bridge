@@ -171,3 +171,37 @@ test("“允许类似的操作” on an ssh call lets the workspace reach that h
     assert.deepEqual(control.controlStore.approvalRemotes("hal", "/root/silas-grey"), []);
   } finally { await control.stop(); store.db.close(); rmSync(path, { force: true }); }
 });
+
+test("an approval whose session the Bridge no longer has, or already settled, expires instead of waiting forever", async () => {
+  const { randomUUID } = await import("node:crypto");
+  const { rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { WebSocket } = await import("ws");
+  const { Store } = await import("../packages/database/src/index.js");
+  const { ControlPlane } = await import("../apps/control-plane/src/server.js");
+  const path = join(tmpdir(), `dead-${randomUUID()}.sqlite`), store = new Store(path);
+  store.upsertMachine({ id: "wsl", name: "WSL", platform: "linux", hostname: "wsl", capabilities: ["claude-code"] });
+  store.createSession({ id: "s", machineId: "wsl", agentType: "claude-code", projectName: "p", projectPath: "/p", matrixRoomId: "", matrixThreadId: null,
+    nativeSessionId: "n", status: "working", createdAt: 1, updatedAt: 1 });
+  const sent: any[] = [];
+  const socket = { readyState: WebSocket.OPEN, OPEN: WebSocket.OPEN, send(value: string) { sent.push(JSON.parse(value)); }, close() {} };
+  const control = new ControlPlane(store, { host: "127.0.0.1", port: 0, controlApiWriteToken: "w", sse: { keepaliveMs: 50, pollMs: 5, maxBackpressure: 3 } }) as any;
+  control.bridges.set("wsl", { machineId: "wsl", name: "WSL", capabilities: ["claude-code"], features: ["session-actions"], bridgeVersion: "9", socket });
+  await control.start();
+  const post = (id: string) => fetch(`http://127.0.0.1:${control.http.address().port}/api/v1/approvals/${id}/decision`, { method: "POST",
+    headers: { authorization: "Bearer w", "content-type": "application/json", "idempotency-key": randomUUID() }, body: JSON.stringify({ choice: "allow" }) });
+  const fail = (message: string) => { const action = sent.filter((m) => m.type === "action.resolve_approval").at(-1);
+    return control.handleBridgeMessage("wsl", { type: "action.result", actionId: action.actionId, kind: "resolve_approval", status: "failed", sessionId: "s",
+      error: { code: "app_server_error", message, retryable: true }, timestamp: Date.now() }); };
+  try {
+    for (const id of ["a1", "a2", "a3"]) await control.handleBridgeMessage("wsl", { type: "approval_request", sessionId: "s", approvalId: id, kind: "command", summary: `Bash ls ${id}`, choices: ["allow", "deny"] });
+    assert.equal((await post("a1")).status, 202);
+    await fail("This approval request is no longer pending");
+    assert.deepEqual(["a1", "a2"].map((id) => control.controlStore.pending(id)?.status), ["expired", "pending"], "only the settled one");
+    assert.equal((await post("a2")).status, 202);
+    await fail("No adapter owns session s");
+    assert.deepEqual(["a2", "a3"].map((id) => control.controlStore.pending(id)?.status), ["expired", "expired"], "the session is gone: all of its requests");
+    assert.notEqual(control.controlStore.session("s").status, "waiting_for_approval");
+  } finally { await control.stop(); store.db.close(); rmSync(path, { force: true }); }
+});
