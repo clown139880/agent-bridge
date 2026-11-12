@@ -523,7 +523,8 @@ lastSeenAt}`，其中 `workspaces` 是路径字符串数组。当前工作树已
 会话目录的权威展示接口。仅接受 `limit`（默认 50，最大 200）和 opaque `cursor`，返回
 `Page<SessionPresentationGroup>`。分组以中央记忆 scope 为准：用会话的工作位置解析 scope，只走“仓库 → 位置”两步
 （不看房间和 hint，所以房间里开的会话按它实际工作的项目归组，记忆 bootstrap 仍按房间优先）。位置绑定覆盖子目录和
-worktree，最长的绑定优先。没有 origin 的会话继承同一 machine + path 下其他会话一致的仓库标识，再拿去匹配。
+worktree，最长的绑定优先；文件系统根和家目录（`/`、`/root`、`/home/<user>`、`C:/Users/<user>` 等）的绑定只匹配
+自身，以免吞下其下所有未绑定的目录。scope.md 的单个 location 可写 `match: exact` 或 `match: prefix` 覆盖默认。没有 origin 的会话继承同一 machine + path 下其他会话一致的仓库标识，再拿去匹配。
 `_global`、`_` 开头的和 `card-*` 角色卡 scope 不作分组；解析不到 scope（未绑定、已归档、两个 scope 冲突）时，
 repository identity 优先，没有 identity 时以 `machineId + physical workspace` 分组。分组在会话写入时确定并存下；
 scope.md 被编辑、新建、改名或归档后，Control Plane 在约 15 秒内重算受影响的会话并逐个推送 `session.updated`。group 按 `updatedAt DESC, groupId ASC`，组内 session 按 `updatedAt DESC, sessionId ASC`。cursor 位于组

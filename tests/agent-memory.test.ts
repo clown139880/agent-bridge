@@ -365,3 +365,20 @@ test("the work index resolves repository then location, never a room or hint, an
   assert.notEqual(next.signature, index.signature);
   assert.equal(next.resolve({ machineId: "hal", cwd: "/root/projects/hui-radio-v2" }), undefined);
 });
+
+test("a root or home directory binding matches only itself unless it declares prefix; any binding may declare exact", () => {
+  const { memory, root } = fixture();
+  mkdirSync(join(root, "scopes", "ops"));
+  writeFileSync(join(root, "scopes", "ops", "scope.md"), scopeFile("ops", "运维",
+    "  matrix_rooms: []\n  repositories: []\n  locations:\n    - {machine: hal, path: /root}\n    - {machine: win, path: 'C:/Users/me'}\n    - {machine: dev, path: /home/me, match: prefix}\n    - {machine: hal, path: /srv/exact, match: exact}"));
+  assert.equal(memory.resolveScope({ machineId: "hal", cwd: "/root" }).scope, "ops");
+  assert.equal(memory.resolveScope({ machineId: "hal", cwd: "/root/projects/lunzi" }).scope, "_global");
+  assert.equal(memory.resolveScope({ machineId: "hal", cwd: "/root/projects/hui-radio-v2/sub" }).scope, "hui-radio", "a deeper prefix binding still covers its tree");
+  assert.equal(memory.resolveScope({ machineId: "win", cwd: "C:\\Users\\me\\Documents\\x" }).scope, "_global");
+  assert.equal(memory.resolveScope({ machineId: "dev", cwd: "/home/me/work" }).scope, "ops");
+  assert.equal(memory.resolveScope({ machineId: "hal", cwd: "/srv/exact/sub" }).scope, "_global");
+  memory.bind(hermes, "ops", { location: { machine: "gqx", path: "/data" } });
+  const text = readFileSync(join(root, "scopes", "ops", "scope.md"), "utf8");
+  assert.match(text, /path: \/home\/me\n\s+match: prefix/);
+  assert.doesNotMatch(text, /path: \/root\n\s+match/, "the default is not written out");
+});

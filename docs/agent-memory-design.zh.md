@@ -109,7 +109,7 @@ discoverable: true              # false 时：别的房间搜不到，只能显�
 bindings:
   matrix_rooms: ["!xqSJrhoDJmGaVCdYA5:uniclown.com"]
   repositories: []              # 与 sessions.project_identity 同一归一化规则
-  locations: []                 # [{machine, path}]
+  locations: []                 # [{machine, path, match?}]：默认前缀匹配（含子目录、worktree，最长优先）；根和家目录默认只精确匹配；match: exact/prefix 覆盖
 para_note: ""                   # 可选：指向 PARA 项目笔记的 wikilink
 bootstrap_budget: 1500          # _global 用 3600
 ---

@@ -39,7 +39,8 @@ export interface ScopeInfo {
   /** The Matrix entries of `rooms` without their prefix (older readers). */
   matrixRooms: string[];
   repositories: string[];
-  locations: Array<{ machine: string; path: string }>;
+  /** `match: prefix` also covers subdirectories and worktrees; see locationMatch for the default. */
+  locations: Array<{ machine: string; path: string; match: "exact" | "prefix" }>;
   bootstrapBudget: number;
   prefetch: boolean;
   description: string;
@@ -183,7 +184,7 @@ export class AgentMemory {
       repositories: strings(bindings.repositories).map(normalizeRepository),
       locations: (Array.isArray(bindings.locations) ? bindings.locations : [])
         .filter((item): item is Record<string, unknown> => !!item && typeof item === "object")
-        .map((item) => ({ machine: str(item.machine), path: normalizePath(str(item.path)) }))
+        .map((item) => { const path = normalizePath(str(item.path)); return { machine: str(item.machine), path, match: locationMatch(path, item.match) }; })
         .filter((item) => item.machine && item.path),
       bootstrapBudget: typeof data.bootstrap_budget === "number" ? data.bootstrap_budget : id === GLOBAL ? GLOBAL_BUDGET : DEFAULT_BUDGET,
       prefetch: data.prefetch === true,
@@ -276,7 +277,13 @@ export class AgentMemory {
       ? [...current.locations, location] : current.locations;
     if (rooms === current.rooms && locations === current.locations && !("matrix_rooms" in bindings)) return current;
     delete bindings.matrix_rooms;
-    doc.data.bindings = { ...bindings, rooms, repositories: bindings.repositories ?? [], locations };
+    // A location keeps the `match` its scope.md declared; the default is not written out.
+    const declared = new Map((Array.isArray(bindings.locations) ? bindings.locations as Array<Record<string, unknown>> : [])
+      .filter((item) => item && typeof item === "object" && item.match).map((item) => [`${str(item.machine)}\0${normalizePath(str(item.path))}`, item.match]));
+    doc.data.bindings = { ...bindings, rooms, repositories: bindings.repositories ?? [], locations: locations.map(({ machine, path }) => {
+      const match = declared.get(`${machine}\0${path}`);
+      return match ? { machine, path, match } : { machine, path };
+    }) };
     writeAtomic(file, renderDocument(doc));
     this.commit(scope, writer, `memory(${scope}): bind ${[room, location && `${location.machine}:${location.path}`].filter(Boolean).join(", ")}`);
     return this.scope(scope);
@@ -713,8 +720,17 @@ export function normalizeRepository(remote: string): string {
 }
 
 /**
- * The scopes binding a machine path: a location covers its subdirectories and worktrees, and the longest
- * binding wins. Windows paths compare without case, as the file system does.
+ * How a location binding matches: as scope.md says (`match: exact` or `prefix`), else by prefix, except a
+ * file-system root or home directory, which would claim every unbound directory under it (`hal:/root`).
+ */
+function locationMatch(path: string, declared: unknown): "exact" | "prefix" {
+  if (declared === "exact" || declared === "prefix") return declared;
+  return /^(?:[A-Za-z]:)?(?:\/|\/root|\/home\/[^/]+|\/Users\/[^/]+)?$/i.test(path) ? "exact" : "prefix";
+}
+
+/**
+ * The scopes binding a machine path: an exact binding, or a prefix binding over its subdirectories and
+ * worktrees; the longest binding wins. Windows paths compare without case, as the file system does.
  */
 function locationHits(scopes: ScopeInfo[], machine: string, path: string): ScopeInfo[] {
   const caseless = (value: string) => /^[A-Za-z]:\//.test(value) ? value.toLowerCase() : value;
@@ -722,7 +738,8 @@ function locationHits(scopes: ScopeInfo[], machine: string, path: string): Scope
   let best = -1, hits: ScopeInfo[] = [];
   for (const scope of scopes) {
     const length = Math.max(-1, ...scope.locations.filter((item) => item.machine === machine)
-      .map((item) => caseless(item.path)).filter((bound) => target === bound || target.startsWith(`${bound}/`)).map((bound) => bound.length));
+      .map((item) => ({ bound: caseless(item.path), prefix: item.match === "prefix" }))
+      .filter(({ bound, prefix }) => target === bound || (prefix && target.startsWith(`${bound}/`))).map(({ bound }) => bound.length));
     if (length < 0 || length < best) continue;
     if (length > best) { best = length; hits = []; }
     hits.push(scope);
