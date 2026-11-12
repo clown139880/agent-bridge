@@ -41,13 +41,15 @@ const FULL_SYNC_MS = 60_000
 const HOT_MS = 24 * 60 * 60 * 1000
 const HOT_LIMIT = 20
 /** Catalog fields that follow the whole page rather than the session's own version. */
-const PLACEMENT_FIELDS = ['presentationOrder', 'groupId', 'groupTitle', 'groupUpdatedAt', 'executionLocations', 'updatedAt', 'lastResponseAt'] as const
+const PLACEMENT_FIELDS = ['presentationOrder', 'groupId', 'groupTitle', 'groupUpdatedAt', 'executionLocations', 'updatedAt', 'lastPromptAt'] as const
 const VOLATILE_BINDING_FIELDS = new Set<string>([...PLACEMENT_FIELDS, 'status'])
 const durableBinding = (binding: JsonObject): JsonObject => Object.fromEntries(Object.entries(binding).filter(([key]) => !VOLATILE_BINDING_FIELDS.has(key)))
-/** Sidebar recency: the agent's last reply. Tool progress and status changes do
- * not reorder the list; a session without a reply yet ranks by its creation. */
+/** Sidebar recency: the user's last prompt, as in the Control Center. Agent replies,
+ * tool progress and status changes do not reorder the list (a reply clock moved
+ * every running session on each assistant message); a session without a prompt
+ * yet ranks by its creation. */
 export function activityAt(binding: JsonObject): number {
-  return Number(binding['lastResponseAt']) || Number(binding['createdAt']) || Number(binding['updatedAt']) || 0
+  return Number(binding['lastPromptAt']) || Number(binding['createdAt']) || Number(binding['updatedAt']) || 0
 }
 export function nativeSessionId(origin: string, sessionId: string): string {
   return 'agent-bridge-' + hash(new URL(origin).origin + '\0' + sessionId)

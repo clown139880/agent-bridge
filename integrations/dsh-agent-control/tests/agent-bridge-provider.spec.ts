@@ -334,9 +334,9 @@ describe('native session catalog', () => {
     expect(f.bridge.call.mock.calls.filter(([request]) => request.operation === 'delete_session').map(([request]) => request.args?.['sessionId'])).toEqual(['remote-1', 'remote-2'])
     expect(f.host.workspaceRegistry.archiveSession).toHaveBeenCalledTimes(2)
   })
-  it('moves unchanged sessions in the catalog when a sibling replies', async () => {
+  it('moves unchanged sessions in the catalog when a sibling is prompted', async () => {
     const f = await fixture()
-    let summaries = [{ ...summary, sessionId: 'remote-a', updatedAt: 20, lastResponseAt: 20 }, { ...summary, sessionId: 'remote-b', updatedAt: 10, lastResponseAt: 10 }]
+    let summaries: JsonObject[] = [{ ...summary, sessionId: 'remote-a', updatedAt: 20, lastPromptAt: 20 }, { ...summary, sessionId: 'remote-b', updatedAt: 10, lastPromptAt: 10 }]
     f.bridge.call.mockImplementation(async request => {
       if (request.operation === 'workers') return { workers: [{ id: 'w', machineId: 'dev-wsl', name: 'Codex', status: 'online' }] }
       if (request.operation === 'session_groups') return groupPage(summaries)
@@ -348,13 +348,13 @@ describe('native session catalog', () => {
     await f.target.refresh()
     expect(sessions().map(item => item['nativeId'])).toEqual([a, b])
     // Only B changed; A keeps its version and is not re-materialized, yet its position and group moved.
-    summaries = [{ ...summaries[1]!, updatedAt: 30, lastResponseAt: 30 }, summaries[0]!]
+    summaries = [{ ...summaries[1]!, updatedAt: 30, lastPromptAt: 30 }, summaries[0]!]
     await f.target.refresh()
     expect(sessions().map(item => item['nativeId'])).toEqual([b, a])
     expect(sessions().map(item => item['activityAt'])).toEqual([30, 20])
     expect(sessions().find(item => item['nativeId'] === a)).toMatchObject({ groupUpdatedAt: 30 })
-    // Tool progress bumps updatedAt, not the reply clock the sidebar ranks by.
-    summaries = [{ ...summaries[1]!, updatedAt: 40 }, summaries[0]!]
+    // Agent replies and tool progress bump updatedAt, not the prompt clock the sidebar ranks by.
+    summaries = [{ ...summaries[1]!, updatedAt: 40, lastResponseAt: 40 }, summaries[0]!]
     await f.target.refresh()
     expect(sessions().find(item => item['nativeId'] === a)).toMatchObject({ activityAt: 20 })
   })

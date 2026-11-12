@@ -78,8 +78,9 @@ server-declared local execution location. Unmatched native sessions remain in th
 DSH groups. Every poll refreshes the catalog position and group fields of all known bindings,
 not only of sessions whose own version changed.
 
-Recency uses one clock everywhere: a Bridge session's `activityAt` is its last prompt or agent reply
-(`lastResponseAt`, else `createdAt`); tool progress and status changes do not reorder it. DSH
+Recency uses one clock everywhere: a Bridge session's `activityAt` is the user's last prompt
+(`lastPromptAt`, else `createdAt`), the same order as the Control Center; agent replies, tool
+progress and status changes do not reorder it. DSH
 stamps imported prompts with their sync time, so the sidebar wrapper substitutes `activityAt`
 for Bridge rows' `updatedAt` in the Session list DSH sorts by, while native DSH sessions keep
 their own `updatedAt`. Rows within a group, groups (by their newest row) and the flat list all
