@@ -77,6 +77,17 @@ test("a key bound by two scopes is reported as a conflict, not guessed", () => {
   assert.ok(memory.lint().some((line) => line.startsWith("binding conflict: room matrix:!travel:example.org")));
 });
 
+test("a parsed scope is reused until its scope.md changes, and callers cannot alter the kept copy", () => {
+  const { memory, root } = fixture();
+  const first = memory.scope("travel");
+  first.rooms.push("matrix:!mutated:example.org");
+  assert.deepEqual(memory.scope("travel").rooms, ["matrix:!travel:example.org"]);
+  writeFileSync(join(root, "scopes/travel/scope.md"),
+    scopeFile("travel", "旅行", "  matrix_rooms: [\"!trip:example.org\"]\n  repositories: []\n  locations: []"));
+  assert.equal(memory.scope("travel").title, "旅行");
+  assert.equal(memory.resolveScope({ roomId: "!trip:example.org" }).scope, "travel");
+});
+
 test("writes declare topics, supersede with history, answer as-of queries and tombstone retractions", () => {
   const { memory, root, tick } = fixture();
   memory.write(hermes, { scope: "_global", topic: "reply-style", topicDisplay: "回复风格", aliases: ["说话方式"],

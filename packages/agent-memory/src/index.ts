@@ -9,8 +9,8 @@ export { AgentSkills, type AgentSkillsOptions, type SkillEntry, type SkillView, 
 
 /**
  * Cross-agent memory: one OMA v4.1-style Markdown vault per scope (room/project) under
- * `<vault>/<root>/scopes/<slug>/`. Markdown/YAML in Git is the only canonical state; nothing
- * here is cached across calls, so edits made in Obsidian take effect on the next read.
+ * `<vault>/<root>/scopes/<slug>/`. Markdown/YAML in Git is the only canonical state. Only a
+ * parsed scope.md is kept, keyed by the file's stat, so edits made in Obsidian take effect on the next read.
  * Design: docs/agent-memory-design.zh.md.
  */
 export interface AgentMemoryOptions {
@@ -119,6 +119,8 @@ export class AgentMemory {
   private readonly root: string;
   private readonly scopesDir: string;
   private readonly now: () => Date;
+  /** Parsed scope.md by id; the session list resolves every row's relay room, so re-parsing YAML per read pinned the CPU. */
+  private readonly parsedScopes = new Map<string, { stamp: string; info: ScopeInfo }>();
 
   constructor(private readonly options: AgentMemoryOptions) {
     this.root = join(options.vault, options.root ?? "agent-memory");
@@ -142,7 +144,16 @@ export class AgentMemory {
     if (!SCOPE_SLUG.test(id)) throw new MemoryError("invalid_scope", id);
     const file = join(this.scopesDir, id, "scope.md");
     if (!existsSync(file)) throw new MemoryError("unknown_scope", id);
-    const text = readFileSync(file, "utf8");
+    const stat = statSync(file, { bigint: true });
+    const stamp = `${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`;
+    const cached = this.parsedScopes.get(id);
+    if (cached?.stamp === stamp) return structuredClone(cached.info);
+    const info = this.readScope(id, readFileSync(file, "utf8"));
+    this.parsedScopes.set(id, { stamp, info });
+    return structuredClone(info);
+  }
+
+  private readScope(id: string, text: string): ScopeInfo {
     const { data, body } = parseDocument(text);
     const bindings = (data.bindings ?? {}) as Record<string, unknown>;
     const rooms = [...new Set([...strings(bindings.rooms), ...strings(bindings.matrix_rooms)].map(roomRef))];
