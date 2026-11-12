@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { gunzipSync } from "node:zlib";
-import { AgentControlStore, Store } from "../packages/database/src/index.js";
+import { AgentControlStore, ConversationMemoryStore, Store } from "../packages/database/src/index.js";
 
 test("sessions can be resolved by machine and native Codex thread", () => {
   const path = join(tmpdir(), `agent-bridge-${randomUUID()}.sqlite`);
@@ -153,6 +153,26 @@ test("existing databases gain the upstream event ID column and unique index", ()
   rmSync(path, { force: true });
 });
 
+test("a session's repository identity keeps its port, and version 18 repairs the ones that lost it", () => {
+  const path = join(tmpdir(), `agent-bridge-identity-port-${randomUUID()}.sqlite`);
+  let store = new Store(path);
+  store.upsertMachine({ id: "dev", name: "dev", platform: "linux", hostname: "dev", capabilities: [] });
+  for (const id of ["mangled", "owner", "fresh"]) store.createSession({ id, machineId: "dev", agentType: "codex-cli", projectName: id,
+    projectPath: `/work/${id}`, matrixRoomId: "", matrixThreadId: null, nativeSessionId: id, status: "completed", createdAt: 1, updatedAt: 1 });
+  new ConversationMemoryStore(store.db).upsertSessionProject("fresh", "gitea.example.org:8443/me/radio");
+  store.db.prepare("UPDATE sessions SET project_identity=? WHERE id=?").run("gitea.example.org/8443/me/radio", "mangled");
+  store.db.prepare("UPDATE sessions SET project_identity=? WHERE id=?").run("github.com/1234/repo", "owner");
+  store.db.prepare("DELETE FROM schema_migrations WHERE version=18").run();
+  store.db.close();
+  store = new Store(path);
+  const identity = (id: string) => (store.db.prepare("SELECT project_identity FROM sessions WHERE id=?").get(id) as { project_identity: string }).project_identity;
+  assert.equal(identity("fresh"), "gitea.example.org:8443/me/radio");
+  assert.equal(identity("mangled"), "gitea.example.org:8443/me/radio");
+  assert.equal(identity("owner"), "github.com/1234/repo");
+  store.db.close();
+  rmSync(path, { force: true });
+});
+
 test("sequential worker runs can share one Codex session", () => {
   const path = join(tmpdir(), `agent-bridge-${randomUUID()}.sqlite`);
   const store = new Store(path);
@@ -188,7 +208,7 @@ test("a 0.4.2 database upgrades transactionally to the Agent Control schema", ()
   `);legacy.close();
   const store=new Store(path);
   const version=store.db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get() as {version:number};
-  assert.equal(version.version,17);
+  assert.equal(version.version,18);
   const tables=(store.db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{name:string}>).map(row=>row.name);
   for(const table of ["pending_requests","actions","idempotency_keys","stream_changes","event_search","deleted_sessions","attachments",
     "deleted_workers","conversation_collection_gaps","notices"])
@@ -199,7 +219,7 @@ test("a 0.4.2 database upgrades transactionally to the Agent Control schema", ()
   assert.equal(session.activity_status,"idle");assert.equal(session.source,"app-server");
   assert.equal(session.last_response_at,null);assert.equal(session.updated_at,1);
   // Reopening proves the versioned migration is idempotent.
-  store.db.close();const reopened=new Store(path);assert.equal((reopened.db.prepare("SELECT COUNT(*) AS n FROM schema_migrations").get() as any).n,18);
+  store.db.close();const reopened=new Store(path);assert.equal((reopened.db.prepare("SELECT COUNT(*) AS n FROM schema_migrations").get() as any).n,19);
   reopened.db.close();rmSync(path,{force:true});
 });
 

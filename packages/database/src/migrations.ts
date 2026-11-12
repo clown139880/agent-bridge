@@ -10,6 +10,8 @@ function addColumn(db: DatabaseSync, table: string, name: string, definition: st
   if (!columns(db, table).has(name)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${definition}`);
 }
 
+const PUBLIC_FORGES = new Set(["github.com", "gitlab.com", "bitbucket.org", "codeberg.org", "gitee.com"]);
+
 export function migrateDatabase(db: DatabaseSync): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS machines (
@@ -458,6 +460,24 @@ export function migrateDatabase(db: DatabaseSync): void {
     try {
       addColumn(db, "sessions", "auto_title", "TEXT");
       db.prepare("INSERT INTO schema_migrations(version,applied_at) VALUES (17,?)").run(Date.now());
+      db.exec("COMMIT");
+    } catch (error) { try { db.exec("ROLLBACK"); } catch {} throw error; }
+  }
+
+  // Before 0.7.82 the Control Plane normalized the Bridge's `host:8443/owner/repo` a second time and read the
+  // port as an scp path (`host/8443/owner/repo`), so no scope's repository binding matched. Public forges have
+  // no port; a numeric first segment there is an owner.
+  if (!db.prepare("SELECT 1 FROM schema_migrations WHERE version=18").get()) {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      const rows = db.prepare("SELECT id,project_identity FROM sessions WHERE project_identity GLOB '*/[0-9]*/*'").all() as Array<{ id: string; project_identity: string }>;
+      const update = db.prepare("UPDATE sessions SET project_identity=? WHERE id=?");
+      for (const row of rows) {
+        const match = /^([^/:@]+\.[^/:@]+)\/(\d{1,5})\/(.+)$/.exec(row.project_identity);
+        if (!match || PUBLIC_FORGES.has(match[1]!) || Number(match[2]) > 65535) continue;
+        update.run(`${match[1]}:${match[2]}/${match[3]}`, row.id);
+      }
+      db.prepare("INSERT INTO schema_migrations(version,applied_at) VALUES (18,?)").run(Date.now());
       db.exec("COMMIT");
     } catch (error) { try { db.exec("ROLLBACK"); } catch {} throw error; }
   }

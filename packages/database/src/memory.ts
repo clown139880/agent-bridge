@@ -19,10 +19,11 @@ export interface ConversationSearchInput {
   limit?: number;
 }
 
+/** Idempotent: an identity the Bridge already normalized (`host:8443/owner/repo`) keeps its port. */
 function normalizeRepository(value: string): string {
   const remote = value.trim();
   const scp = remote.match(/^(?:[^@/:]+@)?([^:]+):(.+)$/);
-  if (scp && !remote.includes("://")) return `${scp[1]}/${scp[2]}`.replace(/\.git$/, "").replace(/\/+$/, "").toLowerCase();
+  if (scp && !remote.includes("://") && !/^[^@/:]+:\d{1,5}\//.test(remote)) return `${scp[1]}/${scp[2]}`.replace(/\.git$/, "").replace(/\/+$/, "").toLowerCase();
   try {
     const url = new URL(remote.includes("://") ? remote : `https://${remote}`);
     return `${url.host}${url.pathname}`.replace(/\.git$/, "").replace(/\/+$/, "").toLowerCase();

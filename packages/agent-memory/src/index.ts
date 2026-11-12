@@ -686,16 +686,22 @@ export function roomRef(chatId: string): string {
   return prefixed && !id.startsWith("!") ? `${prefixed[1]}:${prefixed[1] === "matrix" ? roomKey(prefixed[2]!) : prefixed[2]}` : `matrix:${roomKey(id)}`;
 }
 
-/** Same credential-free form as apps/bridge deriveProjectIdentity (sessions.project_identity). */
+/**
+ * Same credential-free form as apps/bridge deriveProjectIdentity (sessions.project_identity), and idempotent:
+ * an identity already in that form (`host:8443/owner/repo`) is read as host and port, not as scp `host:path`.
+ */
 export function normalizeRepository(remote: string): string {
   const value = remote.trim();
   const scp = value.match(/^(?:[^@/:]+@)?([^:]+):(.+)$/);
-  if (scp && !value.includes("://")) return `${scp[1]}/${scp[2]}`.replace(/\.git$/, "").replace(/\/+$/, "").toLowerCase();
+  if (scp && !value.includes("://") && !HOST_PORT.test(value)) return `${scp[1]}/${scp[2]}`.replace(/\.git$/, "").replace(/\/+$/, "").toLowerCase();
   try {
     const url = new URL(value.includes("://") ? value : `https://${value}`);
     return `${url.host}${url.pathname}`.replace(/\.git$/, "").replace(/\/+$/, "").toLowerCase();
   } catch { return value.toLowerCase(); }
 }
+
+/** A normalized identity of a remote with a port: no user, digits after the colon, then the path. */
+const HOST_PORT = /^[^@/:]+:\d{1,5}\//;
 
 function normalizePath(path: string): string {
   return path.replace(/\\/g, "/").replace(/\/+$/, "");

@@ -329,3 +329,14 @@ test("a new scope takes the id the caller asked for, and a rename carries its me
     assert.throws(() => memory.renameScope(writer, "_global", "x"), /forbidden/);
   } finally { rmSync(vault, { recursive: true, force: true }); }
 });
+
+test("a repository identity with a port resolves its scope however often it is normalized", () => {
+  const { memory, root } = fixture();
+  mkdirSync(join(root, "scopes", "radio"));
+  writeFileSync(join(root, "scopes", "radio", "scope.md"), scopeFile("radio", "电台",
+    "  matrix_rooms: []\n  repositories: [\"https://gitea.example.org:8443/me/Radio.git\"]\n  locations: []"));
+  // The Bridge sends `host:8443/me/radio`; the scp reading once turned the port into a path segment.
+  for (const remote of ["gitea.example.org:8443/me/radio", "https://gitea.example.org:8443/me/radio.git", "ssh://git@gitea.example.org:8443/me/radio"])
+    assert.equal(memory.resolveScope({ repository: remote }).scope, "radio", remote);
+  assert.equal(memory.resolveScope({ repository: "git@gitea.example.org:me/radio.git" }).scope, "_global", "scp syntax has no port");
+});
