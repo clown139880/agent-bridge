@@ -700,7 +700,8 @@ export class AgentControlStore {
     const rows=this.db.prepare(`${inferred} SELECT * FROM inferred WHERE ${identity?"resolved_identity=?":"resolved_identity IS NULL AND machine_id=? AND project_path=?"}
       ORDER BY updated_at DESC,id ASC`).all(...(identity?[identity]:[String(row.machine_id),String(row.project_path)])) as Record<string,unknown>[];
     const key=identity?`repository\u001f${identity}`:`location\u001f${String(row.machine_id)}\u001f${String(row.project_path)}`;
-    const group=this.mapPresentationGroup(key,Math.max(...rows.map(value=>Number(value.updated_at))),rows);
+    // Only the group's header: mapping its every session here ran on each SSE change and pinned the CPU.
+    const group=this.presentationGroupHeader(key,Math.max(...rows.map(value=>Number(value.updated_at))),rows);
     return{...result,groupId:group.groupId,groupTitle:group.title,groupUpdatedAt:group.updatedAt,
       executionLocations:group.executionLocations,presentationGroup:{groupId:group.groupId,kind:group.kind,title:group.title,
         updatedAt:group.updatedAt,executionLocations:group.executionLocations,...(group.projectIdentity?{projectIdentity:group.projectIdentity}:{})}};
@@ -781,6 +782,10 @@ export class AgentControlStore {
   }
 
   private mapPresentationGroup(groupKey:string,updatedAt:number,rows:Record<string,unknown>[]):Record<string,unknown>{
+    return{...this.presentationGroupHeader(groupKey,updatedAt,rows),sessions:rows.map(row=>this.mapSession(row,false))};
+  }
+
+  private presentationGroupHeader(groupKey:string,updatedAt:number,rows:Record<string,unknown>[]){
     const first=rows[0]!;const repository=groupKey.startsWith("repository\u001f");
     const projectIdentity=repository?groupKey.slice("repository\u001f".length):undefined;
     const groupId=(repository?"repo:":"loc:")+createHash("sha256").update(groupKey).digest("base64url").slice(0,22);
@@ -789,7 +794,7 @@ export class AgentControlStore {
       locations.set(key,{workerId,agent:String(row.agent_type),machineId:String(row.machine_id),workspace:String(row.project_path)});}
     const title=String(first.project_name)||(String(first.project_path).replace(/\\/g,"/").split("/").filter(Boolean).at(-1)??"Sessions");
     return{groupId,kind:repository?"repository":"location",title:repository?title:`${title} @ ${String(first.machine_id)}`,
-      ...(projectIdentity?{projectIdentity}:{}),updatedAt,executionLocations:[...locations.values()],sessions:rows.map(row=>this.mapSession(row,false))};
+      ...(projectIdentity?{projectIdentity}:{}),updatedAt,executionLocations:[...locations.values()]};
   }
 
   sessionEvents(sessionId: string, after: string | undefined, limit: number, types: string[]):
