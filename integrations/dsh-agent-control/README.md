@@ -12,23 +12,24 @@ not runtime compatibility proof; the installed-runtime verifier is required.
 
 ## What it provides
 
-- Bridge conversations automatically join the existing native DSH Sessions tree.
-- Stable identities, paginated retained-history projection, workspace grouping,
-  persistence/resume and incremental reconciliation.
-- Native conversation/composer backed by the agent-bridge execution provider;
-  remote tool activities are displayed without executing them locally.
+- Bridge sessions appear in the existing native DSH Sessions tree as client-side
+  virtual sessions (`bridge-remote-*`), read from Bridge on demand: paginated
+  retained history, workspace grouping and incremental polling. They are never
+  stored as native DSH sessions.
+- A native composer for new sessions in a Bridge project: a local draft whose
+  first message creates the Bridge session; remote tool activities are displayed
+  without executing them locally.
 - Native pending approvals/questions, guarded turn submission and interruption.
 - Additive Agent Control management overlay and model tools.
 
 Bridge remains authoritative for remote execution. DSH owns its presentation
-projection; there is no second session browser or composer. Initial history
-hydration is eager and bounded to four concurrent jobs. Bridge conversations
+projection; there is no second session browser or composer. Bridge conversations
 reuse DSH's native model-control UI but load the catalog from their bound worker;
 the selected model and reasoning effort are sent explicitly on the next new turn.
 Native DSH conversations retain the ordinary shared-provider catalog. Images use native attachment storage and
 Bridge uploads. Directory creation offers local DSH and machine-specific Bridge
 sources. Workspaces with the same normalized repository identity are merged in
-the native catalog across workers and machines without rewriting stored session
+the native catalog across workers and machines without rewriting session
 identities or execution bindings.
 
 See [the session-provider design](docs/bridge-conversation-provider.md) for the
@@ -59,96 +60,14 @@ The checked-in bundle defaults target Hal. Override the row in the profile's
 `cordis.patch.yml` for another installation. A patch replaces the complete
 config, so restate the full `bridge` object.
 
-### Session V4 plugin records and retained V3 history
-
-Plugin 0.2.4 uses the V4 `appendPluginRecord` API and recognizes both legacy
-`agent-bridge/*` and migrated `plugin:agent-bridge/*` metadata. New seeds mark
-Bridge records `ignorable`. Older runtimes retain their legacy append behavior.
-
-V4's fixed V3 migration vocabulary does not use the live event registry. V3
-files written without `ignorable` therefore require a one-time envelope repair.
-Stop Desktop and all writers, then run (substitute the active Desktop's dependencies):
-
-```powershell
-node scripts/repair-v3-plugin-records.cjs --runtime C:/path/to/desktop/node_modules
-node scripts/repair-v3-plugin-records.cjs --runtime C:/path/to/desktop/node_modules --apply
-node scripts/verify-v4-records.cjs C:/path/to/desktop/node_modules
-```
-
-The repair only adds `ignorable: true` to the two Bridge record types in V3
-files without an existing V4 successor. It preserves every payload, sequence,
-timestamp and reference. Each candidate must pass the installed V4 catalog's
-strict migration validation before replacement; unrelated structural failures
-are reported and left unchanged. Desktop still owns actual V4 migration and
-child discovery. Original compressed bytes are backed up under
-`~/.dsh/backups/bridge-v3-records`, verified by SHA256, and replaced atomically
-only if the source hash is unchanged. Windows apply refuses a running Desktop.
-To roll back, stop writers and restore the matching backup; retain any later
-activity and V4 successor before rollback, since Desktop prefers newer formats.
-
-For old live turns whose final Bridge answer and immediately following step/end
-retain a previously closed step number, 0.2.5 adds `--repair-stale-step`.
-Use `--sessions <affected-session-directory>` to preview that session first.
-It corrects only that pair to the empty currently open step, requires an immediate
-matching turn/end and a text-only Bridge model answer, and refuses ambiguous
-cases. All other fields and event coordinates remain unchanged; the same native
-validation, backup and stopped-writer requirements apply.
-
-### Upgrading retained Bridge history to Session V3
-
-Version 0.2.8 also provides `--repair-v4-head` for V4 histories created before
-the protected system head fix. It scans histories whose first surface is not a
-system message, adds an empty head and remaps references, refusing lifecycle
-changes. Preview before `--apply`; stop Desktop writers before applying. This
-mode backs up and atomically replaces the V4 file after native strict validation,
-preserving every original message payload. The backup includes the source hash
-and sequence mapping, in the same backup directory described below.
-
-For the remaining pre-V4 structural defects, 0.2.7 provides
-`repair-v3-plugin-records.cjs --runtime <Desktop/node_modules> --repair-structure`
-(preview first, then add `--apply` with all writers stopped). It adds an empty
-protected system head before imported messages, repairs unambiguous stale final
-steps, normalizes physical turn numbering, and closes a missing turn/end only
-when the prior step is already closed and the next source turn is consecutive.
-Unknown events/references, forks and ambiguous overlaps are refused.
-
-This mode publishes a **V4 successor without modifying V3**, using the installed
-native codec and strict migration/current-format validation. Originals, source
-hashes, changes and the V3-to-repaired sequence map are retained under
-`~/.dsh/backups/bridge-v3-records` in `repair-report.json`. Original message
-payloads are checked for exact equality before native V4 conversion. An existing
-V4 successor is never overwritten. The Bridge writer now seeds the empty system
-head on V4 so a later native turn can append its system prompt safely.
-
-DSH Session V3 deliberately refuses unclassified V2 events. Agent Bridge V2
-logs contain audited `agent-bridge/binding` and `agent-bridge/event` records, so
-run the compatibility migration once after upgrading DSH and before reopening
-those conversations. Stop TokensCowork first, preview every candidate, and then
-publish immutable V3 successors:
-
-```powershell
-node scripts/migrate-v2-history.cjs
-node scripts/migrate-v2-history.cjs --apply
-```
-
-The migration never changes or deletes `session.v2.jsonl[.zstd]`. It validates
-the Bridge event payloads, applies DSH V3 system-message promotion and sequence
-reference remapping, and creates `session.v3.jsonl[.zstd]` only when no V3
-artifact already exists. An unfamiliar event or seeded log is rejected without
-publishing a successor.
-
-### Preserving live commentary in Desktop
+### Live commentary in Desktop
 
 Live Bridge replies use a separate native step for each message and tool card.
 DSH renders one assistant message per step, so sharing a step hides earlier
-commentary when a tool or the final answer arrives. Version 0.2.2 also translates
-the native loop's cached step number after imported output advances the log.
-The regression checks run the actual DSH Chat reducer while a turn runs, after
-it finishes or stops, and after replay. `scripts/verify-runtime.cjs` repeats the
-live/replay check against the installed Desktop runtime.
-
-Previously stored messages are retained; this change does not rewrite older
-Desktop logs that already contain several assistant messages in one step.
+commentary when a tool or the final answer arrives. The regression checks run the
+actual DSH Chat reducer while a turn runs, after it finishes or stops, and after
+replay. `scripts/verify-runtime.cjs` repeats the live/replay check against the
+installed Desktop runtime.
 
 ## Configuration
 
@@ -238,21 +157,18 @@ by DSH, with Bridge catalog projection supplying merged repository membership
 and activity timestamps. Installing files alone is not activation: check the
 Desktop plugin manager and Host registration after upgrading.
 
-For old commentary hidden by shared steps, see the
-[read-only recovery dry run](docs/commentary-recovery.md). It validates candidates
-with the installed Session and Chat code; it does not rewrite Desktop logs.
-
 The [Bridge conversation provider](docs/bridge-conversation-provider.md) is the
 current design. The earlier session-hub evaluation and UI-shadow implementation
-are historical. Bridge remains authoritative for remote sessions; DSH stores a
-native presentation projection and uses its original tree and conversation.
+are historical. Bridge remains authoritative for remote sessions; DSH shows a
+client-side projection in its original tree and conversation.
 
 Host-only credentials stay in the Bridge client.
 
 ## Repository layout
 
 - src/index.ts: Host plugin, schema, RPC, prompt and approval policy.
-- src/agent-bridge-provider/: catalog synchronization, native projection and execution.
+- src/agent-bridge-provider/: catalog bindings, drafts and execution.
+- src/remote-sessions/: virtual session history and pending approvals/questions.
 - src/bridge-client.ts: Agent Control v1 client and mock transport.
 - src/tools.ts: model-facing DSH tool definitions.
 - src/client/: additive Agent Control overlay.
@@ -273,12 +189,3 @@ component and recognizes the native rename/fork/archive menu by its item IDs.
 It preserves the original slot identity, store, locale, callbacks, and directory
 picker. Unloading restores the original component. Tests exercise the published
 DSH row implementation; changes to that upstream contract need revalidation.
-
-### 远端轮次展示（0.2.13）
-
-历史首次导入按远端 `turnId` 分组，每条正文或工具结果仍占独立 step。
-后台增量同步保留当前展示轮次，收到明确结束事件、不同远端轮次或本地新回合时关闭。
-外部客户端可能在继续产出工具结果时报告 `idle`，因此该状态不能单独作为结束依据。
-缺少结束事件时不伪造完成；下一轮会关闭前一轮。无 `turnId` 的记录仍独立展示。
-DSH 原生恢复流程会将重启时未结束的轮次标记为中断；重启后的追加形成新片段。
-离线整理工具应同步映射 Bridge 元数据的 `presentationTurn`，不能把 ACK 的文本 `step` 摘要当作原生步骤编号。

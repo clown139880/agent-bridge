@@ -1,6 +1,6 @@
 # Bridge conversations in the native DSH session tree
 
-Date: 2026-09-11; fact update: 2026-09-18 (live native stream projection).
+Date: 2026-09-11; rewritten for 0.7.3 (virtual sessions, no stored copies).
 Target: TokensCowork DSH 0.1.3-alpha.1; development dependencies 0.1.2-rc.1.
 
 ## Product contract
@@ -11,18 +11,18 @@ or use a replacement composer. Agent Control remains management overlays.
 
 Two responsibilities must not be confused:
 
-1. **Session data integration:** discover and organize Bridge sessions, maintain
-   stable native identities, project history, attach workspaces, and reconcile
-   remote updates into the same native registry that DSH Sessions queries.
+1. **Catalog and virtual sessions:** `AgentBridgeImportTarget` reads the Control
+   Plane's presentation groups and keeps one catalog binding per Bridge session.
+   The client projects them into the native Sessions tree as virtual
+   `bridge-remote-*` sessions whose history is read from Bridge on demand
+   (`remote-sessions.md`). A remote session is never stored as a native DSH
+   session.
 2. **Execution provider:** an agent-bridge LlmAdapter routes a bound native
-   conversation's prompt and output to its owning Bridge worker.
-
-Registering an LlmAdapter alone does not add anything to the session list.
-This was the missing layer in the original implementation.
+   conversation's prompt and output to its owning Bridge worker. Only a draft
+   (below) has a native agent.
 
 Bridge owns remote sessions, execution and pending decisions. DSH owns the
-presentation projection, native conversation UI and composer. Internal
-materialization is an implementation detail, not another user entry point.
+presentation, native conversation UI and composer.
 
 ## Data path
 
@@ -37,19 +37,20 @@ Native composer (a draft created in a Bridge project)
   -> submit_turn + ephemeral live deltas + retained event cursors + action/turn settlement
   -> DSH stream chunks / native session history
 
-Since 0.7.3 a remote Bridge session is never stored as a native DSH session: the
-catalog only records its binding and the virtual session reads its history on
-demand. Reconciliation runs every five seconds and is abortable. Only a draft
-keeps a native agent, from its creation until its first message makes it a Bridge
-session. The older text below still describes materialized `agent-bridge-*`
-sessions in places; it is historical.
+Catalog reconciliation runs every five seconds and is abortable; it is skipped
+while the Control Plane stream cursor has not moved (with a one-minute backstop).
+It only records bindings. A draft is the one native Bridge agent: it lives from
+its creation until its first message creates the Bridge session, which the
+catalog and the virtual session then show like any other.
 
 ## Identity and workspaces
 
-Native IDs hash the control-plane origin and Bridge sessionId and use an
-agent-bridge- namespace. They cannot collide with a raw DSH/Codex ID. The binding
-and acknowledged Bridge event IDs live in the native session log, so restart and
-repeat reconciliation do not copy the same transcript again.
+Catalog ids hash the control-plane origin and Bridge sessionId under an
+`agent-bridge-` namespace, so they cannot collide with a raw DSH/Codex ID. A
+draft gets a random id in the same namespace. Its Bridge binding lives in the
+draft's native log; when the first message creates the Bridge session, the
+binding gains the session id and a `draft-aliases` sidecar maps the remote id to
+the draft's id, so a restart or a later reconciliation never records it twice.
 
 A directory on a worker whose hostname and platform match the Host can share the existing
 native workspace when the directory exists locally. Otherwise DSH's workspace contract is
@@ -57,16 +58,16 @@ satisfied by an isolated adapter directory under `~/.dsh/agent-bridge/groups`, k
 the Control Plane's stable `groupId`. It contains no copied project source and is not a second
 grouping state source. The authoritative group title, aggregate activity, session order and
 all physical execution locations come from `GET /session-groups`. The original worker/path
-remain in every durable binding. The one-time cleanup removes obsolete 0.1.41
-`projects`/`workspaces` presentation containers after their sessions converge.
+remain in every durable binding. Group workspaces that no catalog group uses any
+more, and duplicate presentation workspaces of a group, are deleted.
 
 The original directory New Session action now opens a source picker through a
 narrow, disposable wrapper around the client Sessions.create method. The Host
 resolves the directory's binding and advertises only workers on its machine.
 DSH is offered only for a real Host directory, never a remote presentation folder.
-The Host revalidates the selected source, creates the remote session, materializes
-it, and the client refreshes its native list before returning the new identity.
-Cancel creates nothing. Offline sources remain visible but cannot be selected.
+The Host revalidates the selected source and creates only a local draft with its
+Bridge binding; the Bridge session is created by the first message, so cancel or
+an abandoned draft leaves nothing remote. Offline sources remain visible but cannot be selected.
 
 The client catalog does not infer Bridge groups. It projects the server's `groupId`, and only
 fuses native DSH sessions from a real local workspace whose canonical path matches a
@@ -76,9 +77,8 @@ not only of sessions whose own version changed.
 
 Recency uses one clock everywhere: a Bridge session's `activityAt` is the user's last prompt
 (`lastPromptAt`, else `createdAt`), the same order as the Control Center; agent replies, tool
-progress and status changes do not reorder it. DSH
-stamps imported prompts with their sync time, so the sidebar wrapper substitutes `activityAt`
-for Bridge rows' `updatedAt` in the Session list DSH sorts by, while native DSH sessions keep
+progress and status changes do not reorder it. The
+sidebar wrapper substitutes `activityAt` for Bridge rows' `updatedAt` in the Session list DSH sorts by, while native DSH sessions keep
 their own `updatedAt`. Rows within a group, groups (by their newest row) and the flat list all
 rank on that clock. In DSH's `updated` view, the projected order also supersedes DSH 0.1.5's
 persisted promotion order (per workspace and `__flat_session_order__`); the `manual` view
@@ -95,15 +95,15 @@ it does not silently create a remote session or send to a default local provider
 
 ## Titles and deletion
 
-An imported conversation uses a useful remote title when available, otherwise
-the first user message/prompt summary, and finally a short Bridge id. Background
-reconciliation may improve an importer-owned placeholder, but preserves an
-explicit title written through DSH's native rename action.
+A conversation uses a useful remote title when available, otherwise the first
+user message/prompt summary, and finally a short Bridge id. A draft's local log
+keeps an explicit title written through DSH's native rename action.
 
 The native sidebar menu retains rename, fork and archive and adds deletion for
 the clicked row. A Bridge-bound row waits for the reliable Control Plane action
-and owning adapter confirmation before archiving the native projection (Codex
-uses App Server `thread/delete`; Claude forgets the Bridge session). A local DSH
+and owning adapter confirmation before it leaves the catalog (Codex uses App
+Server `thread/delete`; Claude forgets the Bridge session). A draft is only
+removed locally. A local DSH
 row is logically deleted through a durable marker plus native archive; its JSONL
 history remains available for recovery and fork lineage. Neither path deletes
 project files, and active or pending-interaction sessions must settle first.
@@ -113,17 +113,15 @@ project files, and active or pending-interaction sessions must settle first.
 Session.append(type, data, {surfaceOp: 'append'}) is the native surface API.
 Passing a raw Bridge envelope to append(event) is incorrect.
 
-Completed user/assistant messages and command/file activities become native
-user/message, assistant/message, tool/call, and tool/result events.
-Imported activity batches use balanced presentation turn/step boundaries and
-stable message/tool identities. Native tool results retain actual command/output
+A draft's turns, once it is bound, run through the native loop. Completed
+user/assistant messages and command/file activities become native
+user/message, assistant/message, tool/call, and tool/result events with balanced
+presentation turn/step boundaries and stable message/tool identities. Native tool results retain actual command/output
 fields. The remote tool already ran: its tool call is never yielded to the local
 loop as executable work.
 
-Native loop output owns the active local turn. Background history synchronization
-pauses while it runs. Message acknowledgements are committed after the native
-turn closes, outside Session's non-reentrant append publication. Remaining remote
-activity is reconciled after the loop returns idle.
+Message acknowledgements are committed after the native turn closes, outside
+Session's non-reentrant append publication.
 
 Codex App Server agent-message, reasoning-summary, and plan deltas travel through
 a bounded in-memory Control Plane relay and become native DSH text/reasoning
@@ -185,7 +183,7 @@ diagnostic rather than relayed through a non-secret UI.
 
 - Run the package's typecheck, lint, tests and build.
 - Test real Session replay, catalog discovery, paging, identity collisions,
-  repeat opens, resume, active-turn synchronization, turn completion and errors.
+  drafts, active-turn synchronization, turn completion and errors.
 - Verify the bundled running DSH runtime separately from the development pin.
 - Bump only the plugin version, commit and push, then install compiled Host and
   browser artifacts using the repository deployment script.
@@ -207,7 +205,7 @@ to an already-running Desktop Host, or restart Desktop to hide this distinction.
 
 ## Current limits
 
-The native model-control seat is session-aware. For imported Bridge sessions it
+The native model-control seat is session-aware. For Bridge sessions it
 loads the bound worker's model catalog and persists the choice as an
 `agent-bridge` selection, so the adapter sends that model and reasoning effort
 on the next new remote turn. The relay catalog carries no reasoning metadata, so
@@ -226,22 +224,16 @@ by that worker's adapter. Codex workers currently expose Codex App Server's
 `model/list` (primarily GPT models), while Claude and Pi adapters do not yet
 publish a model catalog. GPT-prefixed models are therefore filtered out for
 non-Codex workers, but other models remain eligible for every Agent. The
-`agent-bridge` adapter is also the execution provider for imported sessions.
+`agent-bridge` adapter is also the execution provider for a bound draft.
 Pi workers can now expose provider-qualified ids (for example
 `deepseek/deepseek-chat`) and switch them on a fresh turn; the selector must
 preserve that qualified id. Codex workers still accept the model id from Codex
-App Server and cannot switch an imported session to an unrelated native DSH
+App Server and cannot switch a Bridge session to an unrelated native DSH
 provider through this interception contract.
-Claude transcript discovery recovers original first-user text, including content
-block arrays, using a stable event id and canonical public session identity.
-For already-materialized conversations, recovered prompts are appended with a
-recovery label; existing native logs are not destructively rewritten. Cold imports
-order the recovered prompt by its original timestamp.
 History completeness is bounded by what Bridge retains. This plugin cannot
 reconstruct events the control plane no longer has.
 
-Native catalog discovery and retained-history reconciliation currently poll at
-five-second intervals. An active native turn separately follows its reliable
+Catalog discovery polls at five-second intervals. An active native turn separately follows its reliable
 action receipt, consumes the bounded live-delta relay, and checks its opaque
 retained-history cursor for authoritative completion. The removed Client
 `SessionStore` SSE surface is not the current provider synchronization path.

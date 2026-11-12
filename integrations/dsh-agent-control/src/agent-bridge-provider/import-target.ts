@@ -542,8 +542,6 @@ export class AgentBridgeImportTarget {
   private async reconcilePresentationWorkspaces(groups: readonly JsonObject[]): Promise<void> {
     const registry = this.host.workspaceRegistry
     if (!registry.list || !registry.delete) return
-    const legacyRoot = await realpath(join(this.dataRoot, 'workspaces')).catch(() => join(this.dataRoot, 'workspaces'))
-    const projectRoot = await realpath(join(this.dataRoot, 'projects')).catch(() => join(this.dataRoot, 'projects'))
     const groupRoot = await realpath(join(this.dataRoot, 'groups')).catch(() => join(this.dataRoot, 'groups'))
     for (const group of groups) {
       const groupId = str(group['groupId']); const key = 'group\0' + groupId
@@ -571,10 +569,7 @@ export class AgentBridgeImportTarget {
     const activePresentationPaths = new Set(this.presentationPlacements.values())
     for (const workspace of registry.list()) {
       if (!workspace.id || !workspace.path) continue
-      const obsoleteLegacy = inside(legacyRoot, workspace.path) && !activePresentationPaths.has(workspace.path)
-      const obsoleteProject = inside(projectRoot, workspace.path) && !activePresentationPaths.has(workspace.path)
-      const obsoleteGroup = inside(groupRoot, workspace.path) && !activePresentationPaths.has(workspace.path)
-      if (obsoleteLegacy || obsoleteProject || obsoleteGroup) await registry.delete(workspace.id)
+      if (inside(groupRoot, workspace.path) && !activePresentationPaths.has(workspace.path)) await registry.delete(workspace.id)
     }
   }
 }

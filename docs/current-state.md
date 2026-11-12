@@ -13,7 +13,7 @@
 Agent Bridge 由三条协作路径组成：
 
 1. **Bridge / Control Plane**：每台 Bridge 连接本机 Codex App Server，并可管理 Claude Code adapter；Control Plane 提供认证的 REST、SSE、可靠 action 和 SQLite 投影，由一个 Hono 应用作为唯一 HTTP 入口（`/api/v1`、`/control`、`/health` 和 MCP 端点 `/mcp/memory`、`/mcp/bridge`），不再对接 Matrix。
-2. **DSH 原生会话接入**：DSH Host 将 Bridge conversation 物化为原生 Agent、Session 和 Workspace 记录；原生 Sessions 树、Conversation、Composer、审批和问题界面负责展示与交互。
+2. **DSH 原生会话接入**：Bridge conversation 不再存为原生 DSH session：Host 只维护目录绑定，客户端把它们作为虚拟会话（`bridge-remote-*`）按需读取历史并放入原生 Sessions 树；只有在 Bridge 项目中新建、尚未发送首条消息的草稿是原生 Agent。原生 Conversation、Composer、审批和问题界面负责展示与交互。
 3. **Hermes 驱动**：Hermes 用 `/ab` 列出 session，经 `/mcp/bridge`（工具 `create/turn/wait/pending/approve/answer` 等）新建 session、发送 turn、等待结束并处理审批和问题。0.6.96 移除了 Hermes Kanban 插件、`/runs` Worker API 与 DSH 里的 Kanban 视图。
 
 Windows Bridge 把 `CODEX_COMMAND` 视为 Codex Desktop 内容寻址安装目录的提示。它在新 conversation 和空闲 session 的新 turn 前选择语义版本最高且包含 `codex.exe`、`codex-code-mode-host.exe`、`codex-command-runner.exe` 的完整 runtime。若 runtime 变化，Bridge 会让原 action 保持 accepted，等待自己管理的活动 turn、审批、输入和 RPC 清空，只轮换其持有的 App Server 子进程，再恢复 thread inventory 并继续原 action。多个调用共享同一次切换；未知进程占用 App Server 端口时不会被终止。Control Plane 接受有总时限的 `action.progress` lease，避免安全排空期间把 action 提前判为超时。
@@ -25,12 +25,11 @@ DSH 中已经没有第二套 Bridge session browser、conversation renderer 或 
 
 ```text
 Control Plane workers/sessions/events
-  -> AgentBridgeImportTarget（5 秒可中止 reconciliation）
-  -> 稳定 native id、历史投影、workspace attachment
-  -> DSH AgentRegistry + Session persistence
+  -> AgentBridgeImportTarget（5 秒可中止 reconciliation，只记录目录绑定和展示 workspace）
+  -> 客户端虚拟会话（按需读取 Bridge 历史，不写本地 session 文件）
   -> DSH 原生 Sessions 树和 Conversation
 
-DSH 原生 Composer
+在 Bridge 项目中新建的草稿的原生 Composer
   -> AgentBridgeLlmAdapter
   -> Bridge submit_turn / interrupt / approval / user input
   -> 远端 Codex 或 Claude
@@ -38,7 +37,7 @@ DSH 原生 Composer
   -> DSH 原生 stream chunks 与 session history
 ```
 
-首次发现会话时，Host 以最多四个并发任务读取 Control Plane 保留的分页历史；之后依据 session 元数据和事件 cursor 增量补齐。原生 turn 运行时，后台历史同步暂停，避免与 DSH Session 的非重入 append 生命周期竞争。活动 Codex turn 的 assistant/reasoning 增量通过 Control Plane 有界内存 relay 映射为 DSH 原生 stream chunks，不写入 SQLite；完成消息、命令、文件活动和终止状态仍走可恢复的 retained history。目录 reconciliation 仍为定时执行，且不使用旧 Client `SessionStore` 的 snapshot + SSE 展示路径。
+虚拟会话首次打开时分页读取 Control Plane 保留的历史，之后依据 `viewRevision` 和事件 cursor 增量补齐。活动 Codex turn 的 assistant/reasoning 增量通过 Control Plane 有界内存 relay 映射为 DSH 原生 stream chunks，不写入 SQLite；完成消息、命令、文件活动和终止状态仍走可恢复的 retained history。目录 reconciliation 仍为定时执行，且不使用旧 Client `SessionStore` 的 snapshot + SSE 展示路径。
 
 ## 已落地能力
 

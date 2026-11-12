@@ -550,18 +550,14 @@ describe('native session catalog', () => {
     expect(f.host.workspaceRegistry.create).toHaveBeenCalledWith(expect.stringContaining('groups'), 'repo')
     await f.target.dispose()
   })
-  it('replaces legacy per-location presentation workspaces with one durable project workspace', async () => {
+  it('keeps one durable project workspace per group and removes duplicate and obsolete presentation workspaces', async () => {
     const f = await fixture([])
     const summaries = [summary, { ...summary, sessionId: 'remote-2', workerId: 'w2', workspace: 'D:\\repo' }]
     const ids = summaries.map(item => nativeSessionId('http://bridge.test', String(item['sessionId'])))
-    const legacyPaths = [join(roots[0]!, 'workspaces', 'one'), join(roots[0]!, 'workspaces', 'two')]
-    await Promise.all(legacyPaths.map(path => mkdir(path, { recursive: true })))
-    for (let index = 0; index < ids.length; index++) {
-      const session = Session.create(SessionId(ids[index]!), [], { version: SESSION_FORMAT_VERSION, id: ids[index]!, cwd: legacyPaths[index]!, createdAt: 1, isSeeded: false } as never)
-      f.stored.set(ids[index]!, { header: session.header, events: [] })
-    }
-    const legacy = legacyPaths.map((path, index) => ({ id: 'legacy-' + index, path, title: 'repo @ machine-' + index, sessionIds: [ids[index]!], setTitle: vi.fn(async (_next: string) => {}), attachSession: vi.fn(async (_id: string) => {}) }))
-    const registered = [...legacy, { id: 'stale', path: join(roots[0]!, 'workspaces', 'stale'), title: 'stale', sessionIds: [] as string[], setTitle: vi.fn(async (_next: string) => {}), attachSession: vi.fn(async (_id: string) => {}) }]
+    const duplicatePaths = [join(roots[0]!, 'groups', 'one'), join(roots[0]!, 'groups', 'two')]
+    await Promise.all(duplicatePaths.map(path => mkdir(path, { recursive: true })))
+    const duplicates = duplicatePaths.map((path, index) => ({ id: 'duplicate-' + index, path, title: 'repo @ machine-' + index, sessionIds: [ids[index]!], setTitle: vi.fn(async (_next: string) => {}), attachSession: vi.fn(async (_id: string) => {}) }))
+    const registered = [...duplicates, { id: 'stale', path: join(roots[0]!, 'groups', 'stale'), title: 'stale', sessionIds: [] as string[], setTitle: vi.fn(async (_next: string) => {}), attachSession: vi.fn(async (_id: string) => {}) }]
     const createWorkspace = vi.fn(async (path: string, title?: string) => {
       const workspace = { id: 'project', path, title: title ?? 'project', sessionIds: [] as string[], setTitle: vi.fn(async (next: string) => { workspace.title = next }), attachSession: vi.fn(async (id: string) => { workspace.sessionIds.unshift(id) }) }
       registered.unshift(workspace)
@@ -605,15 +601,11 @@ describe('native session catalog', () => {
       { sessionId: 'remote-3', workerId: 'local', machineId: 'dev-wsl', workspace: '/remote/repo', title: 'Local conversation', status: 'idle', createdAt: 1, updatedAt: 10 },
     ]
     const ids = summaries.map(item => nativeSessionId('http://bridge.test', String(item['sessionId'])))
-    const paths = [join(roots[0]!, 'workspaces', 'old-codex'), join(roots[0]!, 'workspaces', 'old-claude')]
+    const paths = [join(roots[0]!, 'groups', 'old-codex'), join(roots[0]!, 'groups', 'old-claude')]
     const realPath = await mkdtemp(join(tmpdir(), 'bridge-real-workspace-')); roots.push(realPath)
     await Promise.all(paths.map(path => mkdir(path, { recursive: true })))
     const registered = [...paths.map((path, index) => ({ id: 'old-' + index, path, title: 'repo · provider', sessionIds: [ids[index]!], setTitle: vi.fn(async (_next: string) => {}), attachSession: vi.fn(async (_id: string) => {}) })),
       { id: 'real', path: realPath, title: 'My repo', sessionIds: [ids[2]!], setTitle: vi.fn(async (_next: string) => {}), attachSession: vi.fn(async (_id: string) => {}) }]
-    for (let index = 0; index < ids.length; index++) {
-      const session = Session.create(SessionId(ids[index]!), [], { version: SESSION_FORMAT_VERSION, id: ids[index]!, cwd: paths[index] ?? realPath, createdAt: 1, isSeeded: false } as never)
-      f.stored.set(ids[index]!, { header: session.header, events: [] })
-    }
     const createWorkspace = vi.fn(async (path: string, title?: string) => {
       const workspace = { id: 'location', path, title: title ?? 'repo', sessionIds: [] as string[], setTitle: vi.fn(async (next: string) => { workspace.title = next }), attachSession: vi.fn(async (id: string) => { workspace.sessionIds.unshift(id) }) }
       registered.unshift(workspace)

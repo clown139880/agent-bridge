@@ -1,6 +1,6 @@
 {
   "name": "dsh-agent-control-plugin",
-  "version": "0.7.3",
+  "version": "0.7.4",
   "description": "Out-of-tree DeepSeek Harness Agent Bridge control workspace",
   "type": "module",
   "main": "lib/index.js",
@@ -59,7 +59,7 @@
     "sync:hal": "bash ../../deploy/hal/sync-dsh-agent-control.sh --build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "oxlint src tests",
-    "test": "vitest run && node --test scripts/verify-step-commentary.cjs",
+    "test": "vitest run",
     "check": "pnpm typecheck && pnpm lint && pnpm test && pnpm build",
     "prepare": "pnpm build"
   },

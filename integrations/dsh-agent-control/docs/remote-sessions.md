@@ -1,9 +1,9 @@
 # Virtual Bridge sessions (0.7.0)
 
 Bridge sessions use `bridge-remote-<sha256(origin + NUL + remoteId)>` identities.
-The existing importer continues in the background. The client catalog hides its
-corresponding imported IDs, synthesizes workspaces if necessary, and contributes
-virtual summaries to the native SessionManager. Existing native DSH sessions keep
+The importer only keeps the catalog (bindings, no stored sessions). The client
+catalog synthesizes workspaces if necessary and contributes virtual summaries to
+the native SessionManager. Existing native DSH sessions keep
 their original transport and behavior.
 
 The client wraps configurable getters on `remote.session`, preserving their
@@ -74,5 +74,4 @@ choices; `user_input` becomes native questions. Before answering it re-reads
 the item and only resolves it while still pending. An item answered elsewhere
 (Control Center) aborts its native request, which withdraws the card. When the
 session leaves the waiting state or the catalog, its requests are aborted, the
-agent is detached and its fiber disposed. The importer no longer relays for its
-hidden imported copies, so nothing is asked twice.
+agent is detached and its fiber disposed. Nothing else relays them, so nothing is asked twice.
