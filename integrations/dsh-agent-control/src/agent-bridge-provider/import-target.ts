@@ -8,7 +8,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { Context } from '@deepseek-ai/cordis'
 import type { BridgeClient } from '../bridge-client.js'
 import { ControlError } from '../errors.js'
-import type { JsonObject } from '../types.js'
+import type { JsonObject, JsonValue } from '../types.js'
 import { appendSessionEvent, nativeSession, sessionEvents, toolResultShape, type NativeHost, type NativeHandle, type NativeEvent } from './dsh-compat.js'
 import { ACK_EVENT, BINDING_EVENT, PROVIDER, openStep, projectNativeEvents, record, str } from './mapping.js'
 import { writeSyncSidecar } from './sync-version-cache.js'
@@ -470,32 +470,42 @@ export class AgentBridgeImportTarget {
     // Every session, worker and pending-interaction change advances the stream cursor. When it has
     // not moved since a clean pass, the catalog is unchanged; skip it, with a periodic full backstop.
     const stream = str(workerPage['streamCursor'])
-    if (stream && this.synced?.cursor === stream && Date.now() - this.synced.at < FULL_SYNC_MS) {
+    const fresh = this.synced && Date.now() - this.synced.at < FULL_SYNC_MS
+    if (stream && fresh && this.synced!.cursor === stream) {
       this.lastSyncAt = Date.now()
       return
     }
+    // Between full passes, read only what changed since the catalog held here: a running session moved the
+    // cursor every few seconds, and each move used to read every group again.
+    const changes = fresh ? record(await this.bridge.call({ operation: 'session_groups', args: { changedAfter: this.synced!.cursor } }, this.abort.signal)
+      .catch(() => ({}))) : {}
+    const incremental = str(changes['changedAfter']) !== '' && Array.isArray(changes['data']) && Array.isArray(changes['deletedSessionIds'])
+    const fullAt = incremental ? this.synced!.at : Date.now()
+    const catalogCursor = incremental ? str(changes['streamCursor']) : stream
     this.synced = undefined
     let deferred = false
+    const groups: JsonObject[] = incremental ? this.mergeChanges(changes) : []
+    if (!incremental) {
+      const cursors = new Set<string>()
+      let cursor = ''
+      do {
+        const page = record(await this.bridge.call({ operation: 'session_groups', args: { limit: 200, ...(cursor ? { cursor } : {}) } }, this.abort.signal))
+        if (!Array.isArray(page['data'])) throw new Error('Invalid Bridge presentation-group page')
+        for (const value of page['data']) {
+          const group = record(value)
+          if (!str(group['groupId']) || !Array.isArray(group['sessions'])) throw new Error('Invalid Bridge presentation group')
+          groups.push(group)
+        }
+        if (!page['hasMore']) break
+        const next = str(page['nextCursor'])
+        if (!next || cursors.has(next)) throw new Error('Bridge session cursor did not advance')
+        cursors.add(next); cursor = next
+      } while (true)
+    }
     const summaries: JsonObject[] = []
-    const groups: JsonObject[] = []
-    const cursors = new Set<string>()
-    let cursor = ''
-    do {
-      const page = record(await this.bridge.call({ operation: 'session_groups', args: { limit: 200, ...(cursor ? { cursor } : {}) } }, this.abort.signal))
-      if (!Array.isArray(page['data'])) throw new Error('Invalid Bridge presentation-group page')
-      for (const value of page['data']) {
-        const group = record(value)
-        if (!str(group['groupId']) || !Array.isArray(group['sessions'])) throw new Error('Invalid Bridge presentation group')
-        groups.push(group)
-        for (const value of group['sessions']) summaries.push({ ...record(value), groupId: str(group['groupId']), groupTitle: str(group['title']),
-          groupUpdatedAt: Number(group['updatedAt']) || 0, presentationOrder: summaries.length,
-          executionLocations: Array.isArray(group['executionLocations']) ? group['executionLocations'] : [] })
-      }
-      if (!page['hasMore']) break
-      const next = str(page['nextCursor'])
-      if (!next || cursors.has(next)) throw new Error('Bridge session cursor did not advance')
-      cursors.add(next); cursor = next
-    } while (true)
+    for (const group of groups) for (const value of group['sessions'] as JsonValue[]) summaries.push({ ...record(value), groupId: str(group['groupId']),
+      groupTitle: str(group['title']), groupUpdatedAt: Number(group['updatedAt']) || 0, presentationOrder: summaries.length,
+      executionLocations: Array.isArray(group['executionLocations']) ? group['executionLocations'] : [] })
     this.presentationPlacements.clear()
     this.presentationGroups.clear()
     for (const group of groups) this.presentationGroups.set(str(group['groupId']), group)
@@ -523,7 +533,32 @@ export class AgentBridgeImportTarget {
     await this.reconcilePresentationWorkspaces(groups)
     this.error = ''
     this.lastSyncAt = Date.now()
-    if (stream && !deferred) this.synced = { cursor: stream, at: this.lastSyncAt }
+    if (catalogCursor && !deferred) this.synced = { cursor: catalogCursor, at: fullAt }
+  }
+  /**
+   * The held catalog with a `changedAfter` answer applied: its groups carry their current headers and only
+   * their changed sessions, which leave whatever group held them before; deleted sessions leave the catalog.
+   * A group that lost its last session goes; one that lost others keeps its header until the next full pass.
+   */
+  private mergeChanges(changes: JsonObject): JsonObject[] {
+    const sessionsOf = (group: JsonObject) => (Array.isArray(group['sessions']) ? group['sessions'] : []).map(record)
+    const changed = (changes['data'] as JsonValue[]).map(record)
+    const leaving = new Set([...(changes['deletedSessionIds'] as JsonValue[]).map(value => str(value)),
+      ...changed.flatMap(group => sessionsOf(group).map(row => str(row['sessionId'])))])
+    const merged = new Map<string, JsonObject>()
+    for (const [id, group] of this.presentationGroups) {
+      const kept = sessionsOf(group).filter(row => !leaving.has(str(row['sessionId'])))
+      if (kept.length) merged.set(id, { ...group, sessions: kept })
+    }
+    for (const group of changed) {
+      const id = str(group['groupId'])
+      if (!id) throw new Error('Invalid Bridge presentation group')
+      const rows = [...sessionsOf(merged.get(id) ?? {}), ...sessionsOf(group)]
+        .sort((left, right) => Number(right['updatedAt']) - Number(left['updatedAt']) || (str(left['sessionId']) < str(right['sessionId']) ? -1 : 1))
+      merged.set(id, { ...group, sessions: rows })
+    }
+    return [...merged.values()].sort((left, right) => Number(right['updatedAt']) - Number(left['updatedAt'])
+      || (str(left['groupId']) < str(right['groupId']) ? -1 : 1))
   }
   private preparePresentationPlacements(groups: readonly JsonObject[]): void {
     const workspaces = this.host.workspaceRegistry.list?.()

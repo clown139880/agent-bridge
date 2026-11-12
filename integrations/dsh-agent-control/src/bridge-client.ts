@@ -54,7 +54,7 @@ export class BridgeClient {
       case 'models': return this.request('GET', `/workers/${this.segment(textArg(args, 'workerId')!)}/models`, undefined, undefined, signal)
       case 'snapshot': return this.request('GET', `/snapshot?${query(args, ['sessionLimit'])}`, undefined, undefined, signal)
       case 'sessions': return this.request('GET', `/sessions?${query(args, ['workerId', 'status', 'workspace', 'taskId', 'runId', 'segment', 'dayStart', 'sort', 'order', 'limit', 'cursor'])}`, undefined, undefined, signal)
-      case 'session_groups': return this.request('GET', `/session-groups?${query(args, ['limit', 'cursor'])}`, undefined, undefined, signal)
+      case 'session_groups': return this.request('GET', `/session-groups?${query(args, ['limit', 'cursor', 'changedAfter'])}`, undefined, undefined, signal)
       case 'session': return this.request('GET', `/sessions/${this.segment(textArg(args, 'sessionId')!)}`, undefined, undefined, signal)
       case 'delete_session': return this.request('DELETE', `/sessions/${this.segment(textArg(args, 'sessionId')!)}`, {}, randomUUID(), signal)
       case 'session_events': {

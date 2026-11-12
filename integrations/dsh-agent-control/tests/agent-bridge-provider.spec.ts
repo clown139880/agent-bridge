@@ -336,25 +336,38 @@ describe('native session catalog', () => {
     await f.target.refresh()
     expect(sessions().find(item => item['nativeId'] === a)).toMatchObject({ activityAt: 20 })
   })
-  it('skips the catalog while the control-plane stream cursor has not moved', async () => {
+  it('skips the catalog while the control-plane stream cursor has not moved, and otherwise reads only its changes', async () => {
     const f = await fixture()
     let cursor = 'c:1:1', current: JsonObject = { ...summary, updatedAt: Date.now() }
+    const other: JsonObject = { ...summary, sessionId: 'remote-2', updatedAt: Date.now() - 1 }
+    let changes: { sessions: JsonObject[]; deleted: string[] } | undefined
     f.bridge.call.mockImplementation(async request => {
       if (request.operation === 'workers') return { workers: [{ id: 'w', machineId: 'dev-wsl', name: 'Codex', status: 'online' }], streamCursor: cursor }
-      if (request.operation === 'session_groups') return groupPage([current])
+      if (request.operation === 'session_groups' && request.args?.['changedAfter'])
+        return changes ? { ...record(groupPage(changes.sessions)), changedAfter: String(request.args['changedAfter']), deletedSessionIds: changes.deleted, streamCursor: cursor } : groupPage([current, other])
+      if (request.operation === 'session_groups') return groupPage([current, other])
       return page([])
     })
-    const groups = () => f.bridge.call.mock.calls.filter(([request]) => request.operation === 'session_groups').length
+    const calls = (incremental: boolean) => f.bridge.call.mock.calls.filter(([request]) => request.operation === 'session_groups' && Boolean(request.args?.['changedAfter']) === incremental).length
     await f.target.refresh(); await f.target.refresh()
-    expect(groups()).toBe(1)
+    expect([calls(false), calls(true)]).toEqual([1, 0])
+    // A server without changedAfter answers with its catalog: read it all.
     cursor = 'c:2:1'; current = { ...current, title: 'renamed', updatedAt: Date.now() + 1 }
     await f.target.refresh()
-    expect(groups()).toBe(2)
+    expect([calls(false), calls(true)]).toEqual([2, 1])
     const id = nativeSessionId('http://bridge.test', 'remote-1')
-    expect((f.target.catalog()['sessions'] as JsonObject[]).find(item => item['nativeId'] === id)?.['title']).toBe('renamed')
-    cursor = 'c:3:1'; current = { ...current, status: 'active', updatedAt: Date.now() + 2 }
+    const sessions = () => f.target.catalog()['sessions'] as JsonObject[]
+    expect(sessions().find(item => item['nativeId'] === id)?.['title']).toBe('renamed')
+    // One changed session moves to another group; the unchanged one stays where it was.
+    cursor = 'c:3:1'; current = { ...current, status: 'active', projectIdentity: 'github.com/example/other', updatedAt: Date.now() + 2 }
+    changes = { sessions: [current], deleted: [] }
     await f.target.refresh()
-    expect(f.target.sessionStatuses()).toEqual([{ sessionId: 'remote-1', status: 'active' }])
+    expect([calls(false), calls(true)]).toEqual([2, 2])
+    expect(f.target.sessionStatuses()).toContainEqual({ sessionId: 'remote-1', status: 'active' })
+    expect(sessions().map(item => [item['sessionId'], item['groupId']])).toEqual([['remote-1', 'repo:github.com/example/other'], ['remote-2', 'repo:github.com/example/repo']])
+    cursor = 'c:4:1'; changes = { sessions: [], deleted: ['remote-2'] }
+    await f.target.refresh()
+    expect(sessions().map(item => item['sessionId'])).toEqual(['remote-1'])
     await f.target.dispose()
   })
   it('does not report remote deletion as failed when stale local cleanup rejects', async () => {
