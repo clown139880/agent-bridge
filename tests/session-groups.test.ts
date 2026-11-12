@@ -113,3 +113,21 @@ test("editing a scope.md regroups the sessions it binds or releases, and announc
     assert.equal(f.control.regroupAll(), 0, "an unchanged index moves nothing");
   } finally { f.close(); rmSync(vault, { recursive: true, force: true }); }
 });
+
+test("the catalog's changes after a stream cursor carry only the changed sessions, their groups' headers and deletions", () => {
+  const f = fixture();
+  try {
+    populate(f.create);
+    const position = f.control.streamPosition();
+    assert.deepEqual(f.control.changedSessionGroups(position), { data: [], deletedSessionIds: [] });
+    f.control.updateSessionActivity("repo-dev", "active", "turn-1");
+    f.control.deleteSession("plain");
+    const changed = f.control.changedSessionGroups(position)!;
+    assert.equal(changed.data.length, 1);
+    assert.deepEqual((changed.data[0]!.sessions as Array<{ sessionId: string; status: string }>).map((row) => [row.sessionId, row.status]), [["repo-dev", "active"]]);
+    assert.equal(changed.data[0]!.updatedAt, 500, "the header is the whole group's");
+    assert.equal((changed.data[0]!.executionLocations as unknown[]).length, 2);
+    assert.deepEqual(changed.deletedSessionIds, ["plain"]);
+    assert.equal(f.control.changedSessionGroups({ events: 0, changes: 0 }, 3), undefined, "too many changes: read the catalog");
+  } finally { f.close(); }
+});

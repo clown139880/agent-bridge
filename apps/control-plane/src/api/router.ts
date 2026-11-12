@@ -387,17 +387,22 @@ export class AgentControlApi {
   private sessionGroups(url:URL,response:ServerResponse):void{
     const limit=integer(url.searchParams.get("limit"),"limit",50,1,200);
     try{
-      const page=this.store.listSessionGroups({limit,cursor:url.searchParams.get("cursor")??undefined});
-      const workers=this.legacy.listMachines().flatMap(machine=>this.machineWorkers(machine));
-      const byId=new Map(workers.map(worker=>[String(worker.id),worker]));
+      // ?changedAfter=<streamCursor>: only what changed since the catalog a client holds (docs/agent-control-api.md).
+      const changedAfter=url.searchParams.get("changedAfter")??undefined;
+      const streamCursor=this.store.streamCursor();
+      const changed=changedAfter?this.store.changedSessionGroups(this.store.parseStreamCursor(changedAfter)):undefined;
+      const page=changed?{data:changed.data,hasMore:false,nextCursor:null}
+        :this.store.listSessionGroups({limit,cursor:url.searchParams.get("cursor")??undefined});
+      const machines=new Map(this.legacy.listMachines().map(machine=>[machine.id,machine]));
+      const byId=new Map([...machines.values()].flatMap(machine=>this.machineWorkers(machine)).map(worker=>[String(worker.id),worker]));
       const data=page.data.map(group=>({...group,executionLocations:(group.executionLocations as Record<string,unknown>[]).map(location=>{
         const worker=byId.get(String(location.workerId));
-        const machine=this.legacy.listMachines().find(value=>value.id===location.machineId);
+        const machine=machines.get(String(location.machineId));
         const online=worker?.status==="online";
         return{...location,workerName:String(worker?.name??location.workerId),machineName:machine?.name??String(location.machineId),
           online,available:online&&Array.isArray(worker?.capabilities)&&worker.capabilities.includes("session-actions")};
       })}));
-      this.ok(response,{...page,data,streamCursor:this.store.streamCursor()});
+      this.ok(response,{...page,data,streamCursor,...(changed?{changedAfter,deletedSessionIds:changed.deletedSessionIds}:{})});
     }catch(error){this.cursorError(error);}
   }
 

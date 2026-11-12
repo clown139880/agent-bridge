@@ -797,13 +797,7 @@ export class AgentControlStore {
     const result=this.mapSession(row,true);
     // Detail reads carry the same authoritative placement identity as catalog pages,
     // so opening a deep link never forces a client to derive a group locally.
-    // Only the group's header, from the group index: its newest session, and where its sessions ran.
-    const key=String(row.group_key);
-    const latest=this.sql("SELECT project_name,project_path,machine_id,group_title,updated_at FROM sessions WHERE group_key=? ORDER BY updated_at DESC,id ASC LIMIT 1")
-      .get(key) as Record<string,unknown>;
-    const locations=this.sql(`SELECT agent_type,machine_id,project_path,MAX(updated_at) AS at FROM sessions WHERE group_key=?
-      GROUP BY agent_type,machine_id,project_path ORDER BY at DESC`).all(key) as Record<string,unknown>[];
-    const group=this.presentationGroupHeader(key,Number(latest.updated_at),latest,locations);
+    const group=this.indexedGroupHeader(String(row.group_key));
     return{...result,groupId:group.groupId,groupTitle:group.title,groupUpdatedAt:group.updatedAt,
       executionLocations:group.executionLocations,presentationGroup:{groupId:group.groupId,kind:group.kind,title:group.title,
         updatedAt:group.updatedAt,executionLocations:group.executionLocations,...(group.projectIdentity?{projectIdentity:group.projectIdentity}:{}),
@@ -870,6 +864,37 @@ export class AgentControlStore {
       return{...this.presentationGroupHeader(group.group_key,Number(group.updated_at),rows[0]!,rows),sessions:rows.map(row=>mapped.get(String(row.id))!)};});
     const last=groupRows.at(-1);
     return{data,hasMore,nextCursor:hasMore&&last?encodeCursor(scope,[Number(last.updated_at),last.group_key]):null};
+  }
+
+  /**
+   * What changed in the catalog after a stream cursor: each changed session with its group's current header
+   * (a group's `sessions` holds only its changed ones), and the sessions deleted since. A client holding the
+   * catalog at that cursor merges this instead of reading every group again. `undefined` when more sessions
+   * changed than one answer should carry; read the catalog instead.
+   */
+  changedSessionGroups(after: StreamPosition, limit = 200): { data: Record<string, unknown>[]; deletedSessionIds: string[] } | undefined {
+    this.settleGroups();
+    const changed = this.sql("SELECT id FROM stream_changes WHERE kind='session' AND seq>? ORDER BY seq LIMIT ?")
+      .all(after.changes, limit + 1) as Array<{ id: string }>;
+    if (changed.length > limit) return undefined;
+    const rows = this.sql("SELECT * FROM sessions WHERE id IN (SELECT value FROM json_each(?)) ORDER BY updated_at DESC,id ASC")
+      .all(JSON.stringify(changed.map((row) => row.id))) as Record<string, unknown>[];
+    const present = new Set(rows.map((row) => String(row.id)));
+    const deletedSessionIds = changed.map((row) => row.id).filter((id) => !present.has(id) && this.isSessionDeleted(id));
+    const byKey = new Map<string, Record<string, unknown>[]>();
+    for (const row of rows) { const key = String(row.group_key); const values = byKey.get(key); if (values) values.push(row); else byKey.set(key, [row]); }
+    const mapped = new Map(this.mapSessions(rows, false).map((session) => [String(session.sessionId), session]));
+    const data = [...byKey].map(([key, members]) => ({ ...this.indexedGroupHeader(key), sessions: members.map((row) => mapped.get(String(row.id))!) }));
+    return { data, deletedSessionIds };
+  }
+
+  /** A group's header from the group index alone: its newest session, and where its sessions ran. */
+  private indexedGroupHeader(key: string) {
+    const latest = this.sql("SELECT project_name,project_path,machine_id,group_title,updated_at FROM sessions WHERE group_key=? ORDER BY updated_at DESC,id ASC LIMIT 1")
+      .get(key) as Record<string, unknown>;
+    const places = this.sql(`SELECT agent_type,machine_id,project_path,MAX(updated_at) AS at FROM sessions WHERE group_key=?
+      GROUP BY agent_type,machine_id,project_path ORDER BY at DESC`).all(key) as Record<string, unknown>[];
+    return this.presentationGroupHeader(key, Number(latest.updated_at), latest, places);
   }
 
   /**

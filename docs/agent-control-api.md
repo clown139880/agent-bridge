@@ -530,6 +530,14 @@ scope.md 被编辑、新建、改名或归档后，Control Plane 在约 15 秒�
 边界并编码 aggregate `updatedAt` 与稳定 group key，因此一页不会拆开一个组。客户端不得再从 `/sessions`
 全量拉取后自行重新分组或排序；physical execution location 只用于创建、恢复和路由。
 
+`changedAfter=<streamCursor>`：持有某个 cursor 时目录的客户端只取之后的变化，不必重读所有分组。响应额外带
+`changedAfter`（原样回显）和 `deletedSessionIds`；`data` 中每个分组是当前的组头（`updatedAt`、
+`executionLocations`、标题），`sessions` 只含该组里变化过的会话（状态、待处理数、标题等任何变化都算），
+`hasMore` 恒为 false。客户端把这些会话从原来所在的组移入新组、删去 `deletedSessionIds`，以响应的
+`streamCursor` 作为下次的起点。变化的会话超过 200 个时，服务端不回显 `changedAfter`，按普通分页返回第一页，
+客户端应改为全量重读。没回显 `changedAfter` 的响应（旧服务端）也按全量处理。组头因成员移出而变的部分
+（`updatedAt`、`executionLocations`）不在增量里，客户端应定期全量重读兜底。
+
 #### `GET /sessions`（新增）
 
 使用第 5 节参数，200 返回 `Page<SessionSummary>`。
