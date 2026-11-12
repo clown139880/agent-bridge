@@ -6,6 +6,7 @@ import {
   type SessionState, type StructuredSessionEventMessage, type TurnStatus, type UserInputQuestion,
 } from "@agent-bridge/protocol";
 import { decodeEventBody, encodeEventBody, EVENT_COLUMNS, eventWire, indexEvent, redactSecrets, type EventRow } from "./events.js";
+import { normalizeProjectIdentity } from "./memory.js";
 import { markChanged, signalStream, type StreamKind } from "./stream.js";
 import { eventById, recordAppendedEvent, recordRevisedEvent, viewChanges, viewEntryItems, viewPage, ViewError } from "./view.js";
 
@@ -169,11 +170,88 @@ function legacyStatus(activity: SessionActivityStatus, lastTurn?: TurnStatus): s
   return "unknown";
 }
 
+/** The memory scope a session works in, which names its presentation group. */
+export interface GroupScope { id: string; title: string }
+
+const UNIT = "\u001f";
+
 export class AgentControlStore {
   /** Set by the Control Plane: the chat room (if any) that relays a session's replies. */
   relayRoom?: (sessionId: string) => { connector: string; roomId: string; name: string } | undefined;
+  /**
+   * Set by the Control Plane: the memory scope bound to a session's repository, else to its location.
+   * Without one a session groups by repository identity, else by machine and path. Call `regroupAll`
+   * when the scopes change; every other write regroups what it touches.
+   */
+  groupScope?: (locator: { repository?: string; machineId: string; path: string }) => GroupScope | undefined;
+  private readonly statements = new Map<string, ReturnType<DatabaseSync["prepare"]>>();
 
   constructor(readonly db: DatabaseSync, readonly retention: RetentionOptions) {}
+
+  /** A prepared statement kept for reuse: the session list runs the same few per row, and preparing them dominated its cost. */
+  private sql(text: string): ReturnType<DatabaseSync["prepare"]> {
+    let statement = this.statements.get(text);
+    if (!statement) this.statements.set(text, statement = this.db.prepare(text));
+    return statement;
+  }
+
+  /** Run `fn` in the caller's transaction, or in a new one. */
+  private within<T>(fn: () => T): T { return this.db.isTransaction ? fn() : this.transaction(fn); }
+
+  /**
+   * Decide the group of every session at one machine path. Those sessions decide together: one without a
+   * repository identity takes the identity the others agree on. Returns how many sessions moved.
+   */
+  private regroupLocation(machineId: string, path: string): number {
+    const rows = this.sql("SELECT id,project_identity,group_key,group_title FROM sessions WHERE machine_id=? AND project_path=?")
+      .all(machineId, path) as Array<{ id: string; project_identity: string | null; group_key: string | null; group_title: string | null }>;
+    const identities = new Set(rows.map((row) => row.project_identity?.trim()).filter(Boolean));
+    const inherited = identities.size === 1 ? [...identities][0] : undefined;
+    let moved = 0;
+    for (const row of rows) {
+      const identity = row.project_identity?.trim() || inherited;
+      const scope = this.groupScope?.({ repository: identity, machineId, path });
+      const key = scope ? `scope${UNIT}${scope.id}` : identity ? `repository${UNIT}${identity}` : `location${UNIT}${machineId}${UNIT}${path}`;
+      const title = scope?.title ?? null;
+      if (row.group_key === key && row.group_title === title) continue;
+      this.sql("UPDATE sessions SET group_key=?,group_title=? WHERE id=?").run(key, title, row.id);
+      // A session getting its first group is being written already, or was never read with one.
+      if (row.group_key !== null) markChanged(this.db, "session", row.id);
+      moved++;
+    }
+    return moved;
+  }
+
+  /** Regroup every session, after the memory scopes changed. Returns how many sessions moved. */
+  regroupAll(): number {
+    return this.within(() => {
+      const locations = this.sql("SELECT DISTINCT machine_id,project_path FROM sessions").all() as Array<{ machine_id: string; project_path: string }>;
+      return locations.reduce((moved, row) => moved + this.regroupLocation(row.machine_id, row.project_path), 0);
+    });
+  }
+
+  /** Group sessions written without the store (Store.createSession) before a read relies on their group. */
+  private settleGroups(): void {
+    if (!this.sql("SELECT 1 FROM sessions WHERE group_key IS NULL LIMIT 1").get()) return;
+    this.within(() => {
+      for (const row of this.sql("SELECT DISTINCT machine_id,project_path FROM sessions WHERE group_key IS NULL").all() as Array<{ machine_id: string; project_path: string }>)
+        this.regroupLocation(row.machine_id, row.project_path);
+    });
+  }
+
+  /** Record a session's repository identity (normalized); its location regroups when it changed. */
+  setProjectIdentity(sessionId: string, projectIdentity?: string): void {
+    if (!projectIdentity) return;
+    const identity = normalizeProjectIdentity(projectIdentity);
+    this.within(() => {
+      const row = this.sql("SELECT machine_id,project_path,project_identity FROM sessions WHERE id=?").get(sessionId) as
+        { machine_id: string; project_path: string; project_identity: string | null } | undefined;
+      if (!row || row.project_identity === identity) return;
+      this.sql("UPDATE sessions SET project_identity=? WHERE id=?").run(identity, sessionId);
+      markChanged(this.db, "session", sessionId);
+      this.regroupLocation(row.machine_id, row.project_path);
+    });
+  }
 
   transaction<T>(fn: () => T): T {
     this.db.exec("BEGIN IMMEDIATE");
@@ -380,7 +458,8 @@ export class AgentControlStore {
   upsertSession(machineId: string, state: SessionState): void {
     if (this.isSessionDeleted(state.sessionId)) return;
     this.transaction(() => {
-      const exists = this.db.prepare("SELECT id FROM sessions WHERE id=?").get(state.sessionId);
+      const exists = this.sql("SELECT machine_id,project_path,group_key FROM sessions WHERE id=?").get(state.sessionId) as
+        { machine_id: string; project_path: string; group_key: string | null } | undefined;
       if (exists) {
         // A worker that has not learned the agent's own id omits it (older bridges
         // report the public id instead); neither may overwrite a native id on record.
@@ -396,6 +475,9 @@ export class AgentControlStore {
           // An inventory that says "running" without naming the turn keeps the turn the events named.
           state.source, state.historyCompleteness, state.activityStatus, state.activeTurnId ?? null, state.activityStatus,
           state.activeTurnId ?? null, state.lastTurnStatus ?? null, Date.now(), state.updatedAt, state.updatedAt, state.updatedAt, state.sessionId);
+        const moved = exists.machine_id !== machineId || exists.project_path !== state.projectPath;
+        if (moved) this.regroupLocation(exists.machine_id, exists.project_path);
+        if (moved || exists.group_key === null) this.regroupLocation(machineId, state.projectPath);
       } else {
         this.db.prepare(`INSERT INTO sessions
           (id,machine_id,agent_type,project_name,project_path,matrix_room_id,matrix_thread_id,native_session_id,
@@ -405,6 +487,7 @@ export class AgentControlStore {
           legacyStatus(state.activityStatus, state.lastTurnStatus), state.createdAt, state.updatedAt,
           state.title ?? null, state.promptSummary ?? null, state.source, state.historyCompleteness,
           state.activityStatus, state.activeTurnId ?? null, state.lastTurnStatus ?? null, Date.now());
+        this.regroupLocation(machineId, state.projectPath);
       }
       markChanged(this.db, "session", state.sessionId);
     });
@@ -688,23 +771,23 @@ export class AgentControlStore {
   }
 
   session(id: string): Record<string, unknown> | undefined {
-    const row = this.db.prepare("SELECT * FROM sessions WHERE id=?").get(id) as Record<string, unknown> | undefined;
+    this.settleGroups();
+    const row = this.sql("SELECT * FROM sessions WHERE id=?").get(id) as Record<string, unknown> | undefined;
     if(!row)return undefined;
     const result=this.mapSession(row,true);
     // Detail reads carry the same authoritative placement identity as catalog pages,
     // so opening a deep link never forces a client to derive a group locally.
-    const identity=typeof result.projectIdentity==="string"?result.projectIdentity:undefined;
-    const inferred=`WITH inferred AS (SELECT s.*,COALESCE(NULLIF(TRIM(s.project_identity),''),(
-      SELECT CASE WHEN COUNT(DISTINCT NULLIF(TRIM(p.project_identity),''))=1 THEN MIN(NULLIF(TRIM(p.project_identity),'')) END
-      FROM sessions p WHERE p.machine_id=s.machine_id AND p.project_path=s.project_path)) AS resolved_identity FROM sessions s)`;
-    const rows=this.db.prepare(`${inferred} SELECT * FROM inferred WHERE ${identity?"resolved_identity=?":"resolved_identity IS NULL AND machine_id=? AND project_path=?"}
-      ORDER BY updated_at DESC,id ASC`).all(...(identity?[identity]:[String(row.machine_id),String(row.project_path)])) as Record<string,unknown>[];
-    const key=identity?`repository\u001f${identity}`:`location\u001f${String(row.machine_id)}\u001f${String(row.project_path)}`;
-    // Only the group's header: mapping its every session here ran on each SSE change and pinned the CPU.
-    const group=this.presentationGroupHeader(key,Math.max(...rows.map(value=>Number(value.updated_at))),rows);
+    // Only the group's header, from the group index: its newest session, and where its sessions ran.
+    const key=String(row.group_key);
+    const latest=this.sql("SELECT project_name,project_path,machine_id,group_title,updated_at FROM sessions WHERE group_key=? ORDER BY updated_at DESC,id ASC LIMIT 1")
+      .get(key) as Record<string,unknown>;
+    const locations=this.sql(`SELECT agent_type,machine_id,project_path,MAX(updated_at) AS at FROM sessions WHERE group_key=?
+      GROUP BY agent_type,machine_id,project_path ORDER BY at DESC`).all(key) as Record<string,unknown>[];
+    const group=this.presentationGroupHeader(key,Number(latest.updated_at),latest,locations);
     return{...result,groupId:group.groupId,groupTitle:group.title,groupUpdatedAt:group.updatedAt,
       executionLocations:group.executionLocations,presentationGroup:{groupId:group.groupId,kind:group.kind,title:group.title,
-        updatedAt:group.updatedAt,executionLocations:group.executionLocations,...(group.projectIdentity?{projectIdentity:group.projectIdentity}:{})}};
+        updatedAt:group.updatedAt,executionLocations:group.executionLocations,...(group.projectIdentity?{projectIdentity:group.projectIdentity}:{}),
+        ...(group.scopeId?{scopeId:group.scopeId}:{})}};
   }
 
   listSessions(input: SessionListQuery): { data: Record<string, unknown>[]; nextCursor: string | null; hasMore: boolean } {
@@ -749,52 +832,39 @@ export class AgentControlStore {
 
   /** Page presentation groups, never individual sessions, so a page boundary cannot split a group. */
   listSessionGroups(input: SessionGroupListQuery): { data: Record<string, unknown>[]; nextCursor: string | null; hasMore: boolean } {
+    this.settleGroups();
     const scope=scopeFor("session-groups",{});
-    const inferred=`WITH inferred AS (
-      SELECT s.*,COALESCE(NULLIF(TRIM(s.project_identity),''),(
-        SELECT CASE WHEN COUNT(DISTINCT NULLIF(TRIM(p.project_identity),''))=1
-          THEN MIN(NULLIF(TRIM(p.project_identity),'')) END
-        FROM sessions p WHERE p.machine_id=s.machine_id AND p.project_path=s.project_path
-      )) AS resolved_identity FROM sessions s
-    ), catalog AS (
-      SELECT *,CASE WHEN resolved_identity IS NOT NULL THEN 'repository'||char(31)||resolved_identity
-        ELSE 'location'||char(31)||machine_id||char(31)||project_path END AS group_key FROM inferred
-    )`;
-    const where:string[]=[];const params:any[]=[];
-    if(input.cursor){const [updatedAt,key]=decodeCursor(input.cursor,scope);where.push("(updated_at<? OR (updated_at=? AND group_key>?))");params.push(updatedAt,updatedAt,key);}
-    const groupRows=this.db.prepare(`${inferred}, grouped AS (
-      SELECT group_key,MAX(updated_at) AS updated_at FROM catalog GROUP BY group_key
-    ) SELECT group_key,updated_at FROM grouped ${where.length?`WHERE ${where.join(" AND ")}`:""}
-      ORDER BY updated_at DESC,group_key ASC LIMIT ?`).all(...params,input.limit+1) as Array<{group_key:string;updated_at:number}>;
+    const having:string[]=[];const params:any[]=[];
+    if(input.cursor){const [updatedAt,key]=decodeCursor(input.cursor,scope);having.push("(MAX(updated_at)<? OR (MAX(updated_at)=? AND group_key>?))");params.push(updatedAt,updatedAt,key);}
+    const groupRows=this.db.prepare(`SELECT group_key,MAX(updated_at) AS updated_at FROM sessions GROUP BY group_key
+      ${having.length?`HAVING ${having.join(" AND ")}`:""} ORDER BY updated_at DESC,group_key ASC LIMIT ?`)
+      .all(...params,input.limit+1) as Array<{group_key:string;updated_at:number}>;
     const hasMore=groupRows.length>input.limit;if(hasMore)groupRows.pop();
     if(!groupRows.length)return{data:[],hasMore:false,nextCursor:null};
-    const keys=groupRows.map(row=>row.group_key);
-    const sessionRows=this.db.prepare(`${inferred} SELECT *,CASE WHEN resolved_identity IS NOT NULL THEN 'repository'||char(31)||resolved_identity
-      ELSE 'location'||char(31)||machine_id||char(31)||project_path END AS group_key FROM inferred
-      WHERE (CASE WHEN resolved_identity IS NOT NULL THEN 'repository'||char(31)||resolved_identity
-        ELSE 'location'||char(31)||machine_id||char(31)||project_path END) IN (${keys.map(()=>"?").join(",")})
-      ORDER BY updated_at DESC,id ASC`).all(...keys) as Record<string,unknown>[];
+    const sessionRows=this.sql("SELECT * FROM sessions WHERE group_key IN (SELECT value FROM json_each(?)) ORDER BY updated_at DESC,id ASC")
+      .all(JSON.stringify(groupRows.map(row=>row.group_key))) as Record<string,unknown>[];
     const byKey=new Map<string,Record<string,unknown>[]>();
     for(const row of sessionRows){const key=String(row.group_key);const values=byKey.get(key);if(values)values.push(row);else byKey.set(key,[row]);}
-    const data=groupRows.map(group=>this.mapPresentationGroup(group.group_key,Number(group.updated_at),byKey.get(group.group_key)??[]));
+    const data=groupRows.map(group=>{const rows=byKey.get(group.group_key)??[];
+      return{...this.presentationGroupHeader(group.group_key,Number(group.updated_at),rows[0]!,rows),sessions:rows.map(row=>this.mapSession(row,false))};});
     const last=groupRows.at(-1);
     return{data,hasMore,nextCursor:hasMore&&last?encodeCursor(scope,[Number(last.updated_at),last.group_key]):null};
   }
 
-  private mapPresentationGroup(groupKey:string,updatedAt:number,rows:Record<string,unknown>[]):Record<string,unknown>{
-    return{...this.presentationGroupHeader(groupKey,updatedAt,rows),sessions:rows.map(row=>this.mapSession(row,false))};
-  }
-
-  private presentationGroupHeader(groupKey:string,updatedAt:number,rows:Record<string,unknown>[]){
-    const first=rows[0]!;const repository=groupKey.startsWith("repository\u001f");
-    const projectIdentity=repository?groupKey.slice("repository\u001f".length):undefined;
-    const groupId=(repository?"repo:":"loc:")+createHash("sha256").update(groupKey).digest("base64url").slice(0,22);
+  /**
+   * A group's header from its newest session and its sessions' places (newest first). A memory scope names
+   * its group; otherwise the repository identity or the machine path does, titled after the newest session.
+   */
+  private presentationGroupHeader(groupKey:string,updatedAt:number,latest:Record<string,unknown>,places:Record<string,unknown>[]){
+    const [kind,value]=groupKey.split(UNIT) as ["scope"|"repository"|"location",string];
+    const groupId=kind==="scope"?`scope:${value}`:(kind==="repository"?"repo:":"loc:")+createHash("sha256").update(groupKey).digest("base64url").slice(0,22);
     const locations=new Map<string,Record<string,unknown>>();
-    for(const row of rows){const workerId=buildWorkerId(String(row.agent_type) as AgentType,String(row.machine_id));const key=workerId+"\0"+String(row.project_path);
-      locations.set(key,{workerId,agent:String(row.agent_type),machineId:String(row.machine_id),workspace:String(row.project_path)});}
-    const title=String(first.project_name)||(String(first.project_path).replace(/\\/g,"/").split("/").filter(Boolean).at(-1)??"Sessions");
-    return{groupId,kind:repository?"repository":"location",title:repository?title:`${title} @ ${String(first.machine_id)}`,
-      ...(projectIdentity?{projectIdentity}:{}),updatedAt,executionLocations:[...locations.values()]};
+    for(const row of places){const workerId=buildWorkerId(String(row.agent_type) as AgentType,String(row.machine_id));const key=workerId+"\0"+String(row.project_path);
+      if(!locations.has(key))locations.set(key,{workerId,agent:String(row.agent_type),machineId:String(row.machine_id),workspace:String(row.project_path)});}
+    const name=String(latest.project_name)||(String(latest.project_path).replace(/\\/g,"/").split("/").filter(Boolean).at(-1)??"Sessions");
+    const title=kind==="scope"?String(latest.group_title??value):kind==="repository"?name:`${name} @ ${String(latest.machine_id)}`;
+    return{groupId,kind,title,...(kind==="repository"?{projectIdentity:value}:{}),...(kind==="scope"?{scopeId:value}:{}),
+      updatedAt,executionLocations:[...locations.values()]};
   }
 
   sessionEvents(sessionId: string, after: string | undefined, limit: number, types: string[]):
@@ -819,7 +889,7 @@ export class AgentControlStore {
   }
 
   private deleteSessionRecord(id: string): boolean {
-      const row = this.db.prepare("SELECT machine_id FROM sessions WHERE id=?").get(id) as { machine_id: string } | undefined;
+      const row = this.db.prepare("SELECT machine_id,project_path FROM sessions WHERE id=?").get(id) as { machine_id: string; project_path: string } | undefined;
       if (!row) return false;
       const now = Date.now();
       this.db.prepare(`INSERT INTO deleted_sessions(session_id,machine_id,deleted_at) VALUES(?,?,?)
@@ -835,6 +905,8 @@ export class AgentControlStore {
       this.db.prepare("DELETE FROM worker_runs WHERE session_id=?").run(id);
       this.db.prepare("DELETE FROM sessions WHERE id=?").run(id);
       markChanged(this.db, "session", id);
+      // The identity it held may have been the one its location's other sessions inherited.
+      this.regroupLocation(row.machine_id, row.project_path);
       return true;
   }
 
@@ -1017,12 +1089,15 @@ export class AgentControlStore {
         }
       }
     }
+    // An identity this session lacks is the one its location agrees on: a repository group names it, a location
+    // group has none, and only a scope group (which may span repositories) needs to look.
+    const group=String(row.group_key??"");
     const directProjectIdentity=row.project_identity?String(row.project_identity):undefined;
-    const inheritedProjectIdentities=directProjectIdentity?[]:this.db.prepare(`SELECT DISTINCT project_identity FROM sessions
+    const inheritedProjectIdentities=directProjectIdentity||!group.startsWith(`scope${UNIT}`)?[]:this.sql(`SELECT DISTINCT project_identity FROM sessions
       WHERE machine_id=? AND project_path=? AND project_identity IS NOT NULL AND TRIM(project_identity)<>'' LIMIT 2`)
       .all(String(row.machine_id),String(row.project_path)) as Array<{project_identity:string}>;
-    const projectIdentity=directProjectIdentity??(inheritedProjectIdentities.length===1
-      ?String(inheritedProjectIdentities[0]!.project_identity):undefined);
+    const projectIdentity=directProjectIdentity??(group.startsWith(`repository${UNIT}`)?group.slice(`repository${UNIT}`.length)
+      :inheritedProjectIdentities.length===1?String(inheritedProjectIdentities[0]!.project_identity):undefined);
     const result:Record<string,unknown>={sessionId:String(row.id),nativeSessionId:row.native_session_id?String(row.native_session_id):null,
       workerId:buildWorkerId(String(row.agent_type) as AgentType,String(row.machine_id)),machineId:String(row.machine_id),agent:String(row.agent_type),
       title:sessionTitle(row,promptSummary),promptSummary,

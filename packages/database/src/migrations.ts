@@ -481,6 +481,27 @@ export function migrateDatabase(db: DatabaseSync): void {
       db.exec("COMMIT");
     } catch (error) { try { db.exec("ROLLBACK"); } catch {} throw error; }
   }
+
+  // A session's presentation group, decided when it is written rather than inferred over the whole table on
+  // every read. The backfill is the scope-less grouping; the Control Plane regroups by memory scope on start.
+  if (!db.prepare("SELECT 1 FROM schema_migrations WHERE version=19").get()) {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      addColumn(db, "sessions", "group_key", "TEXT");
+      addColumn(db, "sessions", "group_title", "TEXT");
+      db.exec(`
+        UPDATE sessions SET group_key=(SELECT CASE WHEN resolved IS NOT NULL THEN 'repository'||char(31)||resolved
+          ELSE 'location'||char(31)||sessions.machine_id||char(31)||sessions.project_path END FROM (
+          SELECT COALESCE(NULLIF(TRIM(sessions.project_identity),''),(
+            SELECT CASE WHEN COUNT(DISTINCT NULLIF(TRIM(p.project_identity),''))=1 THEN MIN(NULLIF(TRIM(p.project_identity),'')) END
+            FROM sessions p WHERE p.machine_id=sessions.machine_id AND p.project_path=sessions.project_path)) AS resolved));
+        CREATE INDEX IF NOT EXISTS sessions_group_idx ON sessions(group_key, updated_at);
+        CREATE INDEX IF NOT EXISTS sessions_group_locations_idx ON sessions(group_key, agent_type, machine_id, project_path, updated_at);
+      `);
+      db.prepare("INSERT INTO schema_migrations(version,applied_at) VALUES (19,?)").run(Date.now());
+      db.exec("COMMIT");
+    } catch (error) { try { db.exec("ROLLBACK"); } catch {} throw error; }
+  }
 }
 
 /**

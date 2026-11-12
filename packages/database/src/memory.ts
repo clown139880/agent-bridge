@@ -20,7 +20,7 @@ export interface ConversationSearchInput {
 }
 
 /** Idempotent: an identity the Bridge already normalized (`host:8443/owner/repo`) keeps its port. */
-function normalizeRepository(value: string): string {
+export function normalizeProjectIdentity(value: string): string {
   const remote = value.trim();
   const scp = remote.match(/^(?:[^@/:]+@)?([^:]+):(.+)$/);
   if (scp && !remote.includes("://") && !/^[^@/:]+:\d{1,5}\//.test(remote)) return `${scp[1]}/${scp[2]}`.replace(/\.git$/, "").replace(/\/+$/, "").toLowerCase();
@@ -70,7 +70,7 @@ export class ConversationMemoryStore {
 
   upsertSessionProject(sessionId: string, projectIdentity?: string): void {
     if (projectIdentity) this.db.prepare("UPDATE sessions SET project_identity=? WHERE id=?")
-      .run(normalizeRepository(projectIdentity), sessionId);
+      .run(normalizeProjectIdentity(projectIdentity), sessionId);
   }
 
   recordGap(gapId: string, sourceInstance: string, firstEventId: string | undefined, lastEventId: string | undefined,
@@ -98,7 +98,7 @@ export class ConversationMemoryStore {
       where.push("s.machine_id=? AND s.project_path=?"); params.push(input.machineId, input.cwd);
       resolution.kind = "machine_cwd"; resolution.machineId = input.machineId; resolution.cwd = input.cwd;
     } else if (input.scope !== "all" && input.repository) {
-      const repository = normalizeRepository(input.repository);
+      const repository = normalizeProjectIdentity(input.repository);
       where.push("s.project_identity=?"); params.push(repository);
       resolution.kind = "repository"; resolution.repository = repository;
     } else if (input.scope !== "all" && input.projectAlias) {

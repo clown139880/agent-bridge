@@ -38,7 +38,7 @@ import { toolsEndpoint } from "./mcp/tools.js";
 import { NtfyNotifier, type NtfyOptions, type SessionNotificationKind } from "./ntfy.js";
 import { AgentMessagePublisher, type MessageMqttOptions } from "./message-publisher.js";
 import { EventBus, type EventBusOptions } from "./event-bus.js";
-import { AgentMemory, AgentSkills, type Writer } from "@agent-bridge/agent-memory";
+import { AgentMemory, AgentSkills, type WorkScopeIndex, type Writer } from "@agent-bridge/agent-memory";
 import { ConversationMcpServer } from "./memory-mcp.js";
 import { memoryEndpoint, reviewContext, runMemoryTool, type AgentMemoryMcpOptions } from "./mcp/memory.js";
 import { memoryReviewer, MemoryReviews } from "./memory-review.js";
@@ -110,6 +110,8 @@ export class ControlPlane {
   private readonly announcedBridgeVersions = new Map<string, string>();
   private readonly postDeploy: PostDeployResumer;
   private cleanupTimer?: NodeJS.Timeout;
+  /** The scopes sessions are grouped by; replaced, and every session regrouped, when a scope.md changes. */
+  private workIndex?: WorkScopeIndex;
 
   constructor(
     private readonly store: Store,
@@ -197,6 +199,12 @@ export class ControlPlane {
     if (options.fleetNoticeTarget) this.fleetNotices = new OperatorNotices(this.controlStore, options.fleetNoticeTarget);
     this.conversations = new Conversations(this.controlStore, this.registry, agentMemory, options.conversationSetup);
     this.controlStore.relayRoom = (sessionId) => this.conversations.relayRoom(sessionId);
+    // A session groups under the memory scope it works in (repository, else location). Persona scopes and
+    // _global are no project; an unbound session keeps the repository/location group.
+    this.controlStore.groupScope = (locator) => {
+      const scope = this.workIndex?.resolve({ repository: locator.repository, machineId: locator.machineId, cwd: locator.path });
+      return scope && !scope.id.startsWith("_") && !scope.id.startsWith("card-") ? { id: scope.id, title: scope.title } : undefined;
+    };
     if (options.messages) this.messages = new AgentMessagePublisher(store, this.controlStore, options.messages,
       { relayed: (sessionId) => this.conversations.relays(sessionId) });
     const operator = options.noticeTarget ?? { connector: "app", roomId: "operator", threadId: "" };
@@ -310,6 +318,8 @@ export class ControlPlane {
     }
     setInterval(() => this.store.markStaleMachinesOffline(Date.now() - 45_000), 15_000).unref();
     this.controlStore.cleanup();
+    this.refreshWorkIndex();
+    setInterval(() => this.refreshWorkIndex(), 15_000).unref();
     this.memoryReviews?.resume();
     this.cleanupTimer = setInterval(() => this.controlStore.cleanup(), 60 * 60_000);
     this.cleanupTimer.unref();
@@ -323,6 +333,18 @@ export class ControlPlane {
       update_source: this.options.bridgeUpdate?.source ?? null,
       update_published_at: this.options.bridgeUpdate?.publishedAt ?? null,
     });
+  }
+
+  /** Regroup the sessions when a scope was edited, created, renamed or archived (a stat of each scope.md). */
+  private refreshWorkIndex(): void {
+    if (!this.agentMemory) return;
+    try {
+      const index = this.agentMemory.workIndex();
+      if (index === this.workIndex) return;
+      this.workIndex = index;
+      const moved = this.controlStore.regroupAll();
+      if (moved) log.info({ moved }, "Sessions regrouped by memory scope");
+    } catch (error) { log.warn({ error }, "Sessions not regrouped by memory scope"); }
   }
 
   /** Report a lifecycle event to the operator: the legacy webhook and/or the operator's room. */
@@ -501,7 +523,7 @@ export class ControlPlane {
     }
     if (message.type === "state.snapshot") {
       for (const session of message.sessions) this.controlStore.upsertSession(machineId, session);
-      for (const session of message.sessions) this.memory.upsertSessionProject(session.sessionId, session.projectIdentity);
+      for (const session of message.sessions) this.controlStore.setProjectIdentity(session.sessionId, session.projectIdentity);
       for (const approval of message.approvals) await this.handleApprovalRequest(machineId,
         { type: "approval_request", ...approval });
       for (const input of message.userInputs) this.handleUserInputRequest(machineId, input);
@@ -633,7 +655,7 @@ export class ControlPlane {
     }
     if (message.type === "session.discovered") {
       await this.handleSessionDiscovered(machineId, message);
-      this.memory.upsertSessionProject(message.sessionId, message.projectIdentity);
+      this.controlStore.setProjectIdentity(message.sessionId, message.projectIdentity);
       return;
     }
     if (message.type === "approval_request") {

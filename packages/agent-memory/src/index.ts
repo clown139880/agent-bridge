@@ -205,8 +205,7 @@ export class AgentMemory {
     const attempts: Array<[ScopeResolution["matched"], ScopeInfo[]]> = [
       ["room", room ? scopes.filter((scope) => scope.rooms.includes(room)) : []],
       ["repository", repository ? scopes.filter((scope) => scope.repositories.includes(repository)) : []],
-      ["location", path && locator.machineId
-        ? scopes.filter((scope) => scope.locations.some((item) => item.machine === locator.machineId && item.path === path)) : []],
+      ["location", path && locator.machineId ? locationHits(scopes, locator.machineId, path) : []],
       ["hint", locator.scopeHint ? scopes.filter((scope) => scope.id === locator.scopeHint) : []],
     ];
     for (const [matched, hits] of attempts) {
@@ -234,6 +233,19 @@ export class AgentMemory {
     }
     return this.resolution(GLOBAL, "global", false);
   }
+
+  /**
+   * Where sessions work, for grouping them: the repository → location steps of resolveScope over one parsed
+   * snapshot of the scopes, kept until a scope.md changes, appears or goes. The room and hint steps are left
+   * out: a room picks a session's memory, not the project it works in.
+   */
+  workIndex(): WorkScopeIndex {
+    const scopes = this.keptScopes();
+    const signature = scopes.map((scope) => `${scope.id}:${scope.revision}`).join(",");
+    if (this.index?.signature !== signature) this.index = new WorkScopeIndex(signature, scopes);
+    return this.index;
+  }
+  private index?: WorkScopeIndex;
 
   private resolution(scope: string, matched: ScopeResolution["matched"], created: boolean): ScopeResolution {
     const info = this.keptScope(scope);
@@ -698,6 +710,58 @@ export function normalizeRepository(remote: string): string {
     const url = new URL(value.includes("://") ? value : `https://${value}`);
     return `${url.host}${url.pathname}`.replace(/\.git$/, "").replace(/\/+$/, "").toLowerCase();
   } catch { return value.toLowerCase(); }
+}
+
+/**
+ * The scopes binding a machine path: a location covers its subdirectories and worktrees, and the longest
+ * binding wins. Windows paths compare without case, as the file system does.
+ */
+function locationHits(scopes: ScopeInfo[], machine: string, path: string): ScopeInfo[] {
+  const caseless = (value: string) => /^[A-Za-z]:\//.test(value) ? value.toLowerCase() : value;
+  const target = caseless(path);
+  let best = -1, hits: ScopeInfo[] = [];
+  for (const scope of scopes) {
+    const length = Math.max(-1, ...scope.locations.filter((item) => item.machine === machine)
+      .map((item) => caseless(item.path)).filter((bound) => target === bound || target.startsWith(`${bound}/`)).map((bound) => bound.length));
+    if (length < 0 || length < best) continue;
+    if (length > best) { best = length; hits = []; }
+    hits.push(scope);
+  }
+  return hits;
+}
+
+/** A snapshot of the active scopes answering which one a session works in; see AgentMemory.workIndex. */
+export class WorkScopeIndex {
+  private readonly active: ScopeInfo[];
+  private readonly byRepository = new Map<string, ScopeInfo[]>();
+  private readonly byRoom = new Map<string, ScopeInfo[]>();
+
+  constructor(readonly signature: string, scopes: ScopeInfo[]) {
+    this.active = scopes.filter((scope) => scope.status !== "archived");
+    for (const scope of this.active) {
+      for (const repository of scope.repositories) push(this.byRepository, repository, scope);
+      for (const room of scope.rooms) push(this.byRoom, room, scope);
+    }
+  }
+
+  /** The one scope the repository, else the machine path, is bound to; none when unbound or bound twice. */
+  resolve(locator: { repository?: string; machineId?: string; cwd?: string }): ScopeInfo | undefined {
+    const repository = locator.repository ? this.byRepository.get(normalizeRepository(locator.repository)) ?? [] : [];
+    if (repository.length) return repository.length === 1 ? repository[0] : undefined;
+    const hits = locator.cwd && locator.machineId ? locationHits(this.active, locator.machineId, normalizePath(locator.cwd)) : [];
+    return hits.length === 1 ? hits[0] : undefined;
+  }
+
+  /** The one scope a chat room is bound to (AgentMemory.roomScope over this snapshot). */
+  room(roomId: string): ScopeInfo | undefined {
+    const hits = this.byRoom.get(roomRef(roomId)) ?? [];
+    return hits.length === 1 ? hits[0] : undefined;
+  }
+}
+
+function push<K, V>(map: Map<K, V[]>, key: K, value: V): void {
+  const values = map.get(key);
+  if (values) values.push(value); else map.set(key, [value]);
 }
 
 /** A normalized identity of a remote with a port: no user, digits after the colon, then the path. */

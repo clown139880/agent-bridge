@@ -196,10 +196,11 @@ export interface SessionExecutionLocation {
 }
 
 export interface SessionPresentationGroup {
-  groupId: string;            // stable opaque identity
-  kind: "repository" | "location";
-  title: string;
-  projectIdentity?: string;
+  groupId: string;            // stable opaque identity; `scope:<scopeId>` for a scope group
+  kind: "scope" | "repository" | "location";
+  title: string;              // scope title, else the newest session's project name
+  projectIdentity?: string;   // repository groups
+  scopeId?: string;           // scope groups
   updatedAt: EpochMs;         // max session updatedAt
   executionLocations: SessionExecutionLocation[];
   sessions: SessionSummary[]; // updatedAt DESC, sessionId ASC
@@ -520,8 +521,12 @@ lastSeenAt}`，其中 `workspaces` 是路径字符串数组。当前工作树已
 #### `GET /session-groups`（新增）
 
 会话目录的权威展示接口。仅接受 `limit`（默认 50，最大 200）和 opaque `cursor`，返回
-`Page<SessionPresentationGroup>`。repository identity 优先；没有 identity 时以 `machineId + physical workspace`
-分组。group 按 `updatedAt DESC, groupId ASC`，组内 session 按 `updatedAt DESC, sessionId ASC`。cursor 位于组
+`Page<SessionPresentationGroup>`。分组以中央记忆 scope 为准：用会话的工作位置解析 scope，只走“仓库 → 位置”两步
+（不看房间和 hint，所以房间里开的会话按它实际工作的项目归组，记忆 bootstrap 仍按房间优先）。位置绑定覆盖子目录和
+worktree，最长的绑定优先。没有 origin 的会话继承同一 machine + path 下其他会话一致的仓库标识，再拿去匹配。
+`_global`、`_` 开头的和 `card-*` 角色卡 scope 不作分组；解析不到 scope（未绑定、已归档、两个 scope 冲突）时，
+repository identity 优先，没有 identity 时以 `machineId + physical workspace` 分组。分组在会话写入时确定并存下；
+scope.md 被编辑、新建、改名或归档后，Control Plane 在约 15 秒内重算受影响的会话并逐个推送 `session.updated`。group 按 `updatedAt DESC, groupId ASC`，组内 session 按 `updatedAt DESC, sessionId ASC`。cursor 位于组
 边界并编码 aggregate `updatedAt` 与稳定 group key，因此一页不会拆开一个组。客户端不得再从 `/sessions`
 全量拉取后自行重新分组或排序；physical execution location 只用于创建、恢复和路由。
 

@@ -340,3 +340,28 @@ test("a repository identity with a port resolves its scope however often it is n
     assert.equal(memory.resolveScope({ repository: remote }).scope, "radio", remote);
   assert.equal(memory.resolveScope({ repository: "git@gitea.example.org:me/radio.git" }).scope, "_global", "scp syntax has no port");
 });
+
+test("a location binding covers its subdirectories and worktrees; the longest binding wins", () => {
+  const { memory, root } = fixture();
+  mkdirSync(join(root, "scopes", "radio-agent"));
+  writeFileSync(join(root, "scopes", "radio-agent", "scope.md"), scopeFile("radio-agent", "电台 agent",
+    "  matrix_rooms: []\n  repositories: []\n  locations:\n    - {machine: hal, path: /root/projects/hui-radio-v2/agent}\n    - {machine: win, path: 'C:/Work/Radio'}"));
+  assert.equal(memory.resolveScope({ machineId: "hal", cwd: "/root/projects/hui-radio-v2/.claude/worktrees/x" }).scope, "hui-radio");
+  assert.equal(memory.resolveScope({ machineId: "hal", cwd: "/root/projects/hui-radio-v2/agent/audience" }).scope, "radio-agent");
+  assert.equal(memory.resolveScope({ machineId: "hal", cwd: "/root/projects/hui-radio-v2-old" }).scope, "_global", "a sibling with the same prefix is not inside");
+  assert.equal(memory.resolveScope({ machineId: "win", cwd: "c:\\work\\radio\\src" }).scope, "radio-agent", "Windows paths ignore case");
+});
+
+test("the work index resolves repository then location, never a room or hint, and is rebuilt when a scope changes", () => {
+  const { memory, root } = fixture();
+  const index = memory.workIndex();
+  assert.equal(index.resolve({ repository: "https://github.com/example/agent-bridge.git" })?.id, "agent-bridge");
+  assert.equal(index.resolve({ machineId: "hal", cwd: "/root/projects/hui-radio-v2" })?.id, "hui-radio");
+  assert.equal(index.resolve({ machineId: "hal", cwd: "/elsewhere" }), undefined);
+  assert.equal(index.room("!travel:example.org:$t")?.id, "travel");
+  assert.equal(memory.workIndex(), index, "unchanged scopes keep the snapshot");
+  writeFileSync(join(root, "scopes", "hui-radio", "scope.md"), scopeFile("hui-radio", "惠的电台", "  matrix_rooms: []\n  repositories: []\n  locations: []", "") + "\n");
+  const next = memory.workIndex();
+  assert.notEqual(next.signature, index.signature);
+  assert.equal(next.resolve({ machineId: "hal", cwd: "/root/projects/hui-radio-v2" }), undefined);
+});
