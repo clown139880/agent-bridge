@@ -6,6 +6,17 @@ import type { AgentControlApi, Principal } from "../api/router.js";
 const PREFIX = "/control/api/v1/";
 const SECURITY = { "cache-control": "no-store", "x-content-type-options": "nosniff", "referrer-policy": "no-referrer" };
 
+/** Shared read entrance for trusted-network browser pages; no CORS or browser-held tokens. */
+export function sameOriginBrowser(c: Context): boolean {
+  const site = c.req.header("sec-fetch-site"), origin = c.req.header("origin");
+  if (c.req.header("x-control-center") !== "1" || site && site !== "same-origin") return false;
+  if (origin) {
+    try { const u = new URL(origin); if (!["http:", "https:"].includes(u.protocol) || u.host !== c.req.header("host")) return false; }
+    catch { return false; }
+  }
+  return true;
+}
+
 /** What the Control Center may call through this entrance; every page's request must be listed here (tests/control-center-browser.test.ts). */
 export const BROWSER_READ = /^(?:access|snapshot|workers|workers\/[^/]+\/models|sessions|sessions\/[^/]+(?:\/detail|\/events|\/events\/[^/]+|\/view|\/view\/changes|\/view\/entries\/[^/]+)?|actions\/[^/]+|approvals|user-input|stream|memory-reviews|automations|automations\/proposals|automations\/[^/]+|tool-approvals|notice-targets)$/;
 export const BROWSER_WRITE = /^(?:sessions|sessions\/[^/]+\/(?:turns|interrupt|untrust)|attachments|approvals\/[^/]+\/decision|user-input\/[^/]+\/response|memory-reviews\/[^/]+\/decision|automations\/proposals\/[^/]+\/decision|tool-approvals\/[^/]+\/decision|automations\/[^/]+\/(?:run|pause|resume|edit|delete|deliver))$/;
@@ -20,14 +31,7 @@ export function controlBrowserApi(api: AgentControlApi, tokens: { read?: string;
     const fail = (status: 403 | 404 | 503, code: string) => c.json({ error: { code, message: code } }, status, SECURITY);
     // A custom header requires cross-origin JavaScript to preflight. We never grant
     // CORS; additionally reject foreign browser origins and fetch metadata.
-    const site = c.req.header("sec-fetch-site"), origin = c.req.header("origin");
-    if (c.req.header("x-control-center") !== "1" || site && site !== "same-origin") return fail(403, "browser_origin_required");
-    if (origin) {
-      try {
-        const parsed = new URL(origin);
-        if (!["http:", "https:"].includes(parsed.protocol) || parsed.host !== c.req.header("host")) throw new Error();
-      } catch { return fail(403, "browser_origin_required"); }
-    }
+    if (!sameOriginBrowser(c)) return fail(403, "browser_origin_required");
     const url = new URL(c.req.url), path = url.pathname.slice(PREFIX.length), method = c.req.method;
     const read = method === "GET" && BROWSER_READ.test(path);
     const write = method === "POST" && BROWSER_WRITE.test(path);

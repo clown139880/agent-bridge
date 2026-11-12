@@ -6,6 +6,8 @@ import pino from "pino";
 import type { AgentControlApi } from "./api/router.js";
 import { controlBrowserApi } from "./web/api.js";
 import { createControlWeb } from "./web/app.js";
+import { createCanvasWeb } from "./canvas-web.js";
+import type { CanvasService } from "./canvas.js";
 
 const log = pino({ name: "control-http" });
 const HOOK_MAX_BYTES = 1024 * 1024;
@@ -30,6 +32,7 @@ export interface HttpAppDeps {
   /** Shown by the Control Center next to its own build version. */
   version?: string;
   webDirectory?: string;
+  canvas?: CanvasService;
 }
 
 /**
@@ -84,6 +87,7 @@ export function createHttpApp(deps: HttpAppDeps) {
   }
   if (deps.apiEnabled) app.all("/api/v1/*", nodeRoute("Control API", (request, response) => deps.controlApi.handle(request, response)));
   app.all("/control/api/v1/*", controlBrowserApi(deps.controlApi, deps.browserTokens, deps.version));
+  if (deps.canvas) app.route("/", createCanvasWeb(deps.canvas, Boolean(deps.browserTokens.read || deps.browserTokens.write)));
   app.route("/", createControlWeb(deps.webDirectory));
   app.notFound((c) => c.body(null, 404));
   app.onError((error, c) => {

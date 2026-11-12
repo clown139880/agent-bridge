@@ -10,6 +10,8 @@ import { advised, type ReviewModel } from "./review-model.js";
 import type { SecretStore } from "./secrets.js";
 import { WEB_TOOLS, WebSearch, type SearchKind } from "./web-search.js";
 import { decide, DECIDE_TOOLS } from "./decide.js";
+import { CanvasError, type CanvasService } from "./canvas.js";
+import { CANVAS_TOOLS, canvasAuditArgs } from "./canvas-tools.js";
 
 const log = pino({ name: "tools" });
 const IDLE_MS = 10 * 60_000;
@@ -43,7 +45,7 @@ export interface ToolApproval { id: string; tool: string; args: Record<string, u
 export type ToolReviewer = (request: { tool: string; title: string; description: string; args: Record<string, unknown>; caller: string }) =>
   Promise<{ decision: "allow" | "human"; reason: string }>;
 
-export interface ToolHubOptions { registry: string; secrets?: SecretStore; reviewer?: ToolReviewer; notify?(text: string, level: "silent" | "notice" | "alert"): void }
+export interface ToolHubOptions { registry: string; canvas?: CanvasService; secrets?: SecretStore; reviewer?: ToolReviewer; notify?(text: string, level: "silent" | "notice" | "alert"): void }
 
 const glob = (pattern: string) => new RegExp(`^${pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".")}$`);
 
@@ -144,6 +146,10 @@ export class ToolHub {
     const decision = this.builtins.get("decide");
     if (decision) tools.push(...DECIDE_TOOLS.map((tool) => ({ name: `decide.${tool.tool}`, server: "decide", tool: tool.tool, title: decision.title,
       description: tool.description, inputSchema: tool.inputSchema, risk: riskOf(decision, tool.tool) })));
+    const canvas = this.builtins.get("canvas");
+    if (canvas?.transport.builtin === "canvas" && this.options.canvas) tools.push(...CANVAS_TOOLS.map(tool => ({
+      name: `canvas.${tool.tool}`, server: "canvas", tool: tool.tool, title: canvas.title,
+      description: tool.description, inputSchema: tool.inputSchema, risk: riskOf(canvas, tool.tool) })));
     await Promise.all([...servers].map(async ([name, definition]) => {
       const cached = this.catalogs.get(name);
       if (cached && Date.now() - cached.at < CATALOG_MS) { tools.push(...cached.tools); return; }
@@ -187,29 +193,42 @@ export class ToolHub {
       if (tool !== "decide") throw new Error(`unknown tool ${name}`);
       return { content: [{ type: "text", text: JSON.stringify(await decide({ secrets: this.options.secrets, model: process.env.DECIDE_MODEL }, args)) }] };
     }
-    const definition = this.servers.get(server);
+    const localCanvas = server === "canvas" && this.builtins.get(server)?.transport.builtin === "canvas" && this.options.canvas;
+    const definition = localCanvas ? this.builtins.get(server) : this.servers.get(server);
     if (!definition || !tool) throw new Error(`unknown tool ${name}; find tools with tool_search`);
+    if (localCanvas && !CANVAS_TOOLS.some(item => item.tool === tool)) throw new Error(`unknown tool ${name}`);
+    const auditArgs = localCanvas ? canvasAuditArgs(args) : args;
+    signal?.throwIfAborted();
+    const execute = async () => {
+      signal?.throwIfAborted();
+      if (localCanvas) {
+        try { return { content: [{ type: "text", text: JSON.stringify(await localCanvas.call(tool, args, caller)) }] }; }
+        catch (error) {
+          if (!(error instanceof CanvasError)) throw new Error("canvas_storage_error");
+          return { isError: true, content: [{ type: "text", text: JSON.stringify({ error: error.code, retry_after_ms: error.retry_after_ms }) }] };
+        }
+      }
+      const { client } = await this.connect(server);
+      return client.callTool({ name: tool, arguments: args }, undefined, { timeout: CALL_TIMEOUT_MS, signal });
+    };
     const risk = riskOf(definition, tool);
     let advice: string | undefined;
     if (risk === "review" && this.options.reviewer) {
-      const described = this.catalogs.get(server)?.tools.find((item) => item.tool === tool);
-      const verdict = await this.options.reviewer({ tool: name, title: definition.title, description: described?.description ?? "", args, caller })
+      const described = localCanvas ? CANVAS_TOOLS.find(item => item.tool === tool) : this.catalogs.get(server)?.tools.find((item) => item.tool === tool);
+      const verdict = await this.options.reviewer({ tool: name, title: definition.title, description: described?.description ?? "", args: auditArgs, caller })
         .catch((error: unknown) => ({ decision: "human" as const, reason: `审核失败：${error instanceof Error ? error.message : String(error)}` }));
       if (verdict.decision === "allow") {
-        this.record(name, args, caller, risk, "allowed", "review", verdict.reason);
-        const { client } = await this.connect(server);
-        return client.callTool({ name: tool, arguments: args }, undefined, { timeout: CALL_TIMEOUT_MS, signal });
+        this.record(name, auditArgs, caller, risk, "allowed", "review", verdict.reason);
+        return execute();
       }
       log.info({ tool: name, reason: verdict.reason }, "Reviewer handed a tool call to the human");
       advice = verdict.reason;
     }
     if (risk !== "auto") {
-      const decision = await this.approval(name, args, caller, risk, signal, advice);
+      const decision = await this.approval(name, auditArgs, caller, risk, signal, advice);
       if (decision.status !== "allowed") throw new Error(decision.status === "denied" ? `denied${decision.reason ? `: ${decision.reason}` : ""}` : "approval expired; nobody decided in time");
     }
-    const { client } = await this.connect(server);
-    const result = await client.callTool({ name: tool, arguments: args }, undefined, { timeout: CALL_TIMEOUT_MS, signal });
-    return result;
+    return execute();
   }
 
   private record(tool: string, args: Record<string, unknown>, caller: string, risk: Risk, status: ToolApproval["status"], by: string, reason: string): void {

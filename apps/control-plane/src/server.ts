@@ -48,6 +48,7 @@ import { bridgeEndpoint } from "./mcp/bridge.js";
 import { SessionContacts } from "./mcp/contacts.js";
 import { CallNotices } from "./call-notices.js";
 import { compareBridgeVersions } from "./bridge-version.js";
+import { CanvasService, type CanvasOptions } from "./canvas.js";
 import { PostDeployResumer } from "./post-deploy.js";
 import { createHttpApp, type HttpEnv } from "./http.js";
 
@@ -84,6 +85,7 @@ export class ControlPlane {
   private fleetNotices?: OperatorNotices;
   private readonly automations?: Automations;
   private readonly toolHub?: ToolHub;
+  private readonly canvas: CanvasService;
   private readonly secrets?: SecretStore;
   private readonly toolReviewer?: ToolReviewer;
   /** Notices addressed `call:<who>`: call-bridge rings and reads them out. */
@@ -152,6 +154,7 @@ export class ControlPlane {
       transcribe?: Omit<TranscribeOptions, "secrets">;
       /** The central tool registry (YAML), served at /mcp/tools. */
       toolsRegistry?: string;
+      canvas?: CanvasOptions;
       ntfy?: NtfyOptions;
       messages?: MessageMqttOptions;
       events?: EventBusOptions;
@@ -225,7 +228,8 @@ export class ControlPlane {
             file: "references/learned.md", content }); } });
       }
     }
-    if (options.toolsRegistry) this.toolHub = new ToolHub(store.db, { registry: options.toolsRegistry, secrets, reviewer: tools,
+    this.canvas = new CanvasService(options.canvas);
+    if (options.toolsRegistry) this.toolHub = new ToolHub(store.db, { registry: options.toolsRegistry, canvas: this.canvas, secrets, reviewer: tools,
       notify: (text, level) => this.controlStore.createNotice({ ...operator, text, level, source: "control-plane" }) });
     const hub = this.toolHub;
     if (hub) this.calls = new CallNotices(this.controlStore, (args) => hub.call("call-bridge.call_place", args, "control-plane"),
@@ -303,6 +307,7 @@ export class ControlPlane {
       events: this.events && ((source, body) => this.events!.hook(source, body)),
       apiEnabled,
       browserTokens: { read: options.controlApiReadToken, write: options.controlApiWriteToken },
+      canvas: this.canvas,
       version: options.version,
     });
     this.http = createServer(getRequestListener(app.fetch, { overrideGlobalObjects: false }));
@@ -370,6 +375,7 @@ export class ControlPlane {
     this.events?.stop();
     this.calls?.stop();
     this.toolHub?.stop();
+    this.canvas.stop();
     await this.messages?.stop();
     for (const bridge of this.bridges.values()) bridge.socket.close(1001, "server shutdown");
     await new Promise<void>((resolve) => this.http.close(() => resolve()));

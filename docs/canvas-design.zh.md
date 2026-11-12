@@ -1,6 +1,6 @@
 # 设计：Agent 实时画布工具
 
-状态：待评审，2026-11-12 简化修订。本轮只改设计文档，不写实现代码、不注册或部署。
+状态：用户于 2026-11-12 批准实施，首版实现遵循下述单文件方案。运行配置见文末。
 
 ## 1. 方案
 
@@ -69,7 +69,7 @@ MCP 是短调用，SSE 是浏览器的独立连接。每次可见修改增加 `s
 
 **不保存完整事件历史，连文件内的事件数组也不需要。** 页面带最后收到的序号重连时，从当前 JSON 选择 `updated_seq > cursor` 的图片，以及 `meta_seq > cursor` 的画布信息，发送这些变化和最新 seq。断线期间同一张图改过多次，只需要它现在的版本；不回放已经过去的进度提示。首期没有单图删除功能，无需维护删除记录。
 
-初次读取返回状态及 seq。订阅建立时，在同一画布串行区登记监听并取得补差内容，先发送补差再发送后续实时变化，避免初次查询与订阅之间漏更新；网络发送不占用写入队列。客户端成功应用后才推进游标，图片按 ID/revision 更新。
+初次读取返回状态及 seq。订阅建立时，在同一画布串行区登记监听并将首份补差写入有界响应缓冲，再发送后续实时变化，避免初次查询与订阅之间漏更新；不在队列内等待网络 drain。客户端成功应用后才推进游标，图片按 ID/revision 更新。
 
 没变化只发小心跳；正常重连不全量重发，不同时运行全量轮询。非法或超前游标提示重新同步；新页面首次打开才读取完整的受限元数据。文件丢失则停止重连，提示画布已失效。
 
@@ -90,7 +90,7 @@ MCP 是短调用，SSE 是浏览器的独立连接。每次可见修改增加 `s
 
 工具在 Control Plane 定义静态 schema 与处理函数，并在 ToolHub 接入 canvas 分支；私有登记表使用 `transport.builtin: canvas`。继续通过 `/mcp/tools` 搜索和调用，不新增各机器 MCP 配置。工具发现只读静态描述。
 
-页面使用 `/canvas/{id}/`，同源提供状态和 SSE。复用现有 Control Center 的受控浏览器入口（内网/VPN/既有访问网关），不新增端口，实际域名部署前确认。浏览器只读，服务端沿用同源检查，页面不拿 Agent token；该入口内的查看者可读画布，Agent 工具侧按 owner 检查。只在 canvas 页面 CSP 放行图片源，不放宽整个控制面。
+页面使用 `/canvas/{id}/`，同源提供 `state` 和 `events`（SSE）。复用现有 Control Center 的受控浏览器入口（内网/VPN/既有访问网关），不新增端口。`CANVAS_PUBLIC_URL` 可配置既有入口的 HTTP(S) origin；未指定时工具返回相对页面地址，不猜测域名。浏览器只读，服务端沿用同源检查，页面不拿 Agent token；该入口内的查看者可读画布，Agent 工具侧按 owner 检查。只在 canvas 页面 CSP 放行图片源，不放宽整个控制面。
 
 ## 6. 默认限额与空闲
 
@@ -102,17 +102,35 @@ MCP 是短调用，SSE 是浏览器的独立连接。每次可见修改增加 `s
 | URL 长度 | 每个 URL ≤ 8 KiB（UTF-8） |
 | 单条说明 | ≤ 4 KiB（UTF-8） |
 | 同状态进度更新 | ≤ 1 次/秒；相同内容不重复显示，完成/失败状态可立即提交 |
+| 幂等回执 | 10,000 条/画布；达到上限明确报错，可新建画布，不静默丢弃旧键 |
 
 幂等重试不重复计数；超限返回明确错误，不静默清理数据。
 
 Control Plane 本来常驻，canvas 不新增服务。没有请求或订阅时不运行轮询、探活或清理任务；新增 timer 均 unref，连接释放时清除。无需为本功能建立 systemd 单元；若以后确需拆服务，再按 socket activation + idle-exit 处理。
 
-## 7. 实现位置与评审边界
+## 7. 实现与运行
 
-代码预计只需 Control Plane 内的画布业务/JSON 读写模块、工具描述、网页与 SSE 路由，以及薄 HTML/CSS/JS。复用归档的展示逻辑，不改归档、DSH 或数据库，不新增独立应用。
+实现位于 `apps/control-plane/src/`：`canvas.ts` 管单文件读写、并发与补差，`canvas-tools.ts` 定义工具 schema，`canvas-web.ts` 提供只读路由和 SSE，`canvas-page.ts` 包含随 TypeScript 构建的静态页面。`tools.ts` 的 canvas 分支经过现有风险决策再执行。未改归档、DSH 或数据库 schema，没有独立应用或前端构建流程。
+
+部署登记表增加以下条目；不携带凭据，也不用给各机器增加 MCP 服务：
+
+```yaml
+servers:
+  canvas:
+    title: 实时画布 / Live image canvas
+    transport: { builtin: canvas }
+    risk:
+      auto: [create, list, get, add_image, update_image, set_status, close, open]
+```
+
+环境配置见 [`.env.example`](../.env.example)：`CANVAS_DATA_DIR`、`CANVAS_PUBLIC_URL`，以及 `CANVAS_MAX_IMAGES`、`CANVAS_MAX_URL_BYTES`、`CANVAS_MAX_DESCRIPTION_BYTES`、`CANVAS_PROGRESS_INTERVAL_MS`、`CANVAS_MAX_RECEIPTS`。修改后走正常 Control Plane 部署流程。全局 API 入口仍需认证；网页仅在既有浏览器入口配置了读或写权限时可读取。
+
+Agent 用 `tool_search(query="canvas")` 发现，再通过 `tool_call` 调用。创建需要 `title`、`idempotency_key`；推图需要 `canvas_id`、`url`、`idempotency_key`；更新图片携带 `image_id` 与 `expected_revision`（上次回执的 `revision` 或查询中的 `updated_seq`）。关闭后要先 `open` 才能继续写；已关闭的页面点击“重新连接”恢复。图片排序保持追加顺序，不做单图删除或重排。
+
+文件中的 `status_at` 只用于同状态进度限频。幂等键存成摘要，回执不含原图 URL；风险审核与审批记录中的 URL 只保留 origin，图片完整 URL 仍仅在临时画布文件与获准查看的调用方/页面之间传递。文件或进程丢失没有自动恢复承诺；主机 `/tmp` 清理与外部写入不受进程内队列控制。
 
 设计留在项目 `docs/`；不向历史 `shared-skills/` 添加内容。工具本身无需技能，未来操作手册可经 Control Plane 写入私有技能库。相关约定见 [AGENTS.md](../AGENTS.md)、[技能库设计](agent-skills-design.zh.md)、[中央工具库](tool-hub-design.zh.md)和[审批权限](approval-permissions.zh.md)。
 
 实施时重点验证：单文件原子替换、同画布并发和幂等、revision 冲突、断线只补变化、服务重启读取文件、临时文件丢失后停止恢复、整个过程没有图片下载或落盘。
 
-**当前仍待方案评审。** 本轮只独立提交文档，不写实现、不升版本、不部署；后续若实现 Control Plane 改动，再按仓库约定升根版本并正常提交、推送和部署。
+验证覆盖 `tests/canvas.test.ts`、`tests/canvas-web.test.ts`、`tests/canvas-browser.test.ts`：并发写/幂等/revision/限额、重启和文件丢失、工具风险档与 URL 脱敏、同源只读入口和 SSE、真实浏览器按需取图、后台恢复、失效占位与关闭重开。Control Plane 发布只升根版本，不升 Bridge 版本。

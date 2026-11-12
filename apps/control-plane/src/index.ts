@@ -27,6 +27,7 @@ const control = new ControlPlane(store, {
   secrets: config.secrets,
   transcribe: config.transcribe,
   toolsRegistry: config.toolsRegistry,
+  canvas: config.canvas,
   ntfy: config.ntfy,
   messages: config.messages,
   events: config.events,
