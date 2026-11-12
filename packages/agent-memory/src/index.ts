@@ -255,11 +255,14 @@ export class AgentMemory {
   }
 
   /**
-   * Bind a chat room and/or a machine path to a scope. A key another scope already holds is a
-   * conflict, never moved silently. Legacy `matrix_rooms` entries are folded into `rooms`.
+   * Bind a chat room and/or a machine path to a scope, and optionally drop one of its machine paths (to
+   * correct a binding). A key another scope already holds is a conflict, never moved silently. Legacy
+   * `matrix_rooms` entries are folded into `rooms`.
    */
-  bind(writer: Writer, scope: string, add: { room?: string; location?: { machine: string; path: string } }): ScopeInfo {
+  bind(writer: Writer, scope: string, add: { room?: string; location?: { machine: string; path: string } },
+    remove: { location?: { machine: string; path: string } } = {}): ScopeInfo {
     this.authorize(writer, scope);
+    const dropped = remove.location ? { machine: remove.location.machine.trim(), path: normalizePath(remove.location.path) } : undefined;
     const room = add.room ? roomRef(add.room) : undefined;
     const location = add.location ? { machine: add.location.machine.trim(), path: normalizePath(add.location.path) } : undefined;
     if (location && (!location.machine || !location.path)) throw new MemoryError("invalid_location");
@@ -274,8 +277,10 @@ export class AgentMemory {
     const bindings = (doc.data.bindings ?? {}) as Record<string, unknown>;
     const current = this.scope(scope);
     const rooms = room && !current.rooms.includes(room) ? [...current.rooms, room] : current.rooms;
-    const locations = location && !current.locations.some((l) => l.machine === location.machine && l.path === location.path)
-      ? [...current.locations, location] : current.locations;
+    const kept = dropped ? current.locations.filter((l) => l.machine !== dropped.machine || l.path !== dropped.path) : current.locations;
+    if (dropped && kept.length === current.locations.length) throw new MemoryError("unknown_location", `${dropped.machine}:${dropped.path}`);
+    const locations = location && !kept.some((l) => l.machine === location.machine && l.path === location.path)
+      ? [...kept, location] : kept;
     if (rooms === current.rooms && locations === current.locations && !("matrix_rooms" in bindings)) return current;
     delete bindings.matrix_rooms;
     // A location keeps the `match` its scope.md declared; the default is not written out.
@@ -286,7 +291,8 @@ export class AgentMemory {
       return match ? { machine, path, match } : { machine, path };
     }) };
     writeAtomic(file, renderDocument(doc));
-    this.commit(scope, writer, `memory(${scope}): bind ${[room, location && `${location.machine}:${location.path}`].filter(Boolean).join(", ")}`);
+    this.commit(scope, writer, `memory(${scope}): bind ${[room, location && `${location.machine}:${location.path}`,
+      dropped && `-${dropped.machine}:${dropped.path}`].filter(Boolean).join(", ")}`);
     return this.scope(scope);
   }
 

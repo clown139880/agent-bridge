@@ -405,3 +405,20 @@ test("create=true binds an unbound directory as it is, with its repository when 
   assert.equal(changed, 2);
   assert.ok(!readFileSync(join(root, "scopes", "thing", "scope.md"), "utf8").includes("match:"));
 });
+
+test("scope_bind corrects a path binding: add the right one and drop the wrong one in one commit", async () => {
+  const { memory, root } = fixture();
+  const { runMemoryTool } = await import("../apps/control-plane/src/mcp/memory.js");
+  const { ConversationMemoryStore, Store } = await import("../packages/database/src/index.js");
+  const store = new Store(join(mkdtempSync(join(tmpdir(), "agent-memory-db-")), "control.sqlite"));
+  let changed = 0;
+  const run = (args: Record<string, unknown>) => runMemoryTool(new ConversationMemoryStore(store.db), { store: memory, writers: [], onScopesChanged: () => { changed++; } }, "scope_bind", args, hermes) as Promise<any>;
+  const fixed = await run({ scope: "hui-radio", add: { machine_id: "gqx", cwd: "C:\\Work\\Radio" }, remove: { machine_id: "hal", cwd: "/root/projects/hui-radio-v2" } });
+  assert.deepEqual(fixed.locations, [{ machine: "gqx", path: "C:/Work/Radio", match: "prefix" }]);
+  assert.equal(memory.resolveScope({ machineId: "gqx", cwd: "C:\\Work\\Radio" }).scope, "hui-radio");
+  assert.equal(memory.resolveScope({ machineId: "hal", cwd: "/root/projects/hui-radio-v2" }).scope, "_global");
+  assert.equal(changed, 1);
+  await assert.rejects(run({ scope: "hui-radio", remove: { machine_id: "hal", cwd: "/nowhere" } }), /unknown_location/);
+  await assert.rejects(run({ scope: "travel", add: { machine_id: "gqx", cwd: "C:/Work/Radio" } }), /binding_conflict/);
+  assert.match(readFileSync(join(root, "scopes", "hui-radio", "scope.md"), "utf8"), /machine: gqx\n\s+path: C:\/Work\/Radio/);
+});

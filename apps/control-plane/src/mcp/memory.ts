@@ -19,7 +19,7 @@ export interface AgentMemoryMcpOptions {
 }
 
 /** Tools whose refusal for a project writer becomes a review. */
-const REVIEWED = new Set(["write", "retract", "skill_write", "skill_patch", "skill_rm", "skill_archive", "skill_move"]);
+const REVIEWED = new Set(["write", "retract", "scope_bind", "skill_write", "skill_patch", "skill_rm", "skill_archive", "skill_move"]);
 
 export interface MemoryPrincipal { conversation: boolean; memory: boolean; writer?: Writer }
 
@@ -156,6 +156,24 @@ function baseTools(history: ConversationMemoryStore, agentMemory?: AgentMemoryMc
           scopeHint: stringArg(args.scope_hint) }, args.create === true ? { writer: writer(principal), title: stringArg(args.title) } : undefined);
         if (result.created) agentMemory!.onScopesChanged?.();
         return { ...result };
+      },
+    },
+    {
+      name: "scope_bind", allowed: memoryWrite,
+      description: "Bind a machine path (machine_id + cwd) to a scope, and/or remove one of its path bindings, e.g. to correct a wrong machine name. A path another scope holds is a conflict. Sessions there regroup at once.",
+      inputSchema: object({ scope: SCOPE,
+        add: object({ machine_id: { type: "string" }, cwd: { type: "string" } }, ["machine_id", "cwd"]),
+        remove: object({ machine_id: { type: "string" }, cwd: { type: "string" } }, ["machine_id", "cwd"]) }, ["scope"]),
+      run: (args, principal) => {
+        const location = (value: unknown) => {
+          const item = value && typeof value === "object" ? value as Record<string, unknown> : undefined;
+          return item ? { machine: required(item, "machine_id"), path: required(item, "cwd") } : undefined;
+        };
+        const add = location(args.add), remove = location(args.remove);
+        if (!add && !remove) throw new Error("add_or_remove_required");
+        const scope = store!.bind(writer(principal), required(args, "scope"), { location: add }, { location: remove });
+        agentMemory!.onScopesChanged?.();
+        return { scope: scope.id, locations: scope.locations, revision: scope.revision };
       },
     },
     {
