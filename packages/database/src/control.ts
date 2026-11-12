@@ -678,10 +678,12 @@ export class AgentControlStore {
   private refreshPendingActivity(sessionId: string, now: number): void {
     const kinds=this.db.prepare(`SELECT kind FROM pending_requests WHERE session_id=? AND status='pending' AND ${BLOCKING_PENDING}`)
       .all(sessionId) as Array<{kind:string}>;
+    // With nothing left to answer, a session works on only if a turn is still running; an expired request of a finished one leaves it idle.
+    const running=Boolean((this.db.prepare("SELECT active_turn_id FROM sessions WHERE id=?").get(sessionId) as {active_turn_id:string|null}|undefined)?.active_turn_id);
     const activity=kinds.some(row=>row.kind==="user_input")?"waiting_for_input"
-      :kinds.some(row=>row.kind==="approval")?"waiting_for_approval":"active";
+      :kinds.some(row=>row.kind==="approval")?"waiting_for_approval":running?"active":"idle";
     this.db.prepare("UPDATE sessions SET activity_status=?,status=? WHERE id=?")
-      .run(activity,activity==="active"?"working":activity==="waiting_for_input"?"waiting":"blocked",sessionId);
+      .run(activity,activity==="active"?"working":activity==="idle"?"idle":activity==="waiting_for_input"?"waiting":"blocked",sessionId);
     markChanged(this.db,"session",sessionId);
   }
 

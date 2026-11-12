@@ -202,6 +202,6 @@ test("an approval whose session the Bridge no longer has, or already settled, ex
     assert.equal((await post("a2")).status, 202);
     await fail("No adapter owns session s");
     assert.deepEqual(["a2", "a3"].map((id) => control.controlStore.pending(id)?.status), ["expired", "expired"], "the session is gone: all of its requests");
-    assert.notEqual(control.controlStore.session("s").status, "waiting_for_approval");
+    assert.equal(control.controlStore.session("s").status, "idle", "no turn is running: not shown as working");
   } finally { await control.stop(); store.db.close(); rmSync(path, { force: true }); }
 });
