@@ -191,6 +191,7 @@ export class ControlPlane {
     if (memoryOptions) memoryOptions.onScopeRenamed = (from, to, by) => {
       try { this.automations?.renameScope(from, to, by); } catch (error) { log.warn({ error, from, to }, "Automations did not follow a scope rename"); }
     };
+    if (memoryOptions) memoryOptions.onScopesChanged = () => this.refreshWorkIndex();
     if (memoryOptions) this.memoryMcp = new ConversationMcpServer(this.memory, memoryOptions);
     this.controlStore = new AgentControlStore(store.db, options.retention ?? {
       actionsMs: 86_400_000, attachmentsMs: 7 * 86_400_000,

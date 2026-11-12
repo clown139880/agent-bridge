@@ -382,3 +382,26 @@ test("a root or home directory binding matches only itself unless it declares pr
   assert.match(text, /path: \/home\/me\n\s+match: prefix/);
   assert.doesNotMatch(text, /path: \/root\n\s+match/, "the default is not written out");
 });
+
+test("create=true binds an unbound directory as it is, with its repository when it has one, and announces the new scope", async () => {
+  const { memory, root } = fixture();
+  const { runMemoryTool } = await import("../apps/control-plane/src/mcp/memory.js");
+  const { ConversationMemoryStore, Store } = await import("../packages/database/src/index.js");
+  const store = new Store(join(mkdtempSync(join(tmpdir(), "agent-memory-db-")), "control.sqlite"));
+  let changed = 0;
+  const options = { store: memory, writers: [], onScopesChanged: () => { changed++; } };
+  const scope = (args: Record<string, unknown>) => runMemoryTool(new ConversationMemoryStore(store.db), options, "scope", args, hermes) as Promise<any>;
+  const located = await scope({ machine_id: "hal", cwd: "/root/projects/挂刀", scope_hint: "steam-trading", title: "挂刀", create: true });
+  assert.deepEqual([located.scope, located.matched, located.created, changed], ["steam-trading", "location", true, 1]);
+  assert.deepEqual(memory.scope("steam-trading").locations, [{ machine: "hal", path: "/root/projects/挂刀", match: "prefix" }]);
+  assert.equal(memory.scope("steam-trading").title, "挂刀");
+  assert.deepEqual(memory.scope("steam-trading").repositories, []);
+  const both = await scope({ machine_id: "dev", cwd: "/work/thing/", repository: "git@gitea.local:me/Thing.git", scope_hint: "thing", create: true });
+  assert.equal(both.scope, "thing");
+  assert.deepEqual(memory.scope("thing").repositories, ["gitea.local/me/thing"]);
+  assert.deepEqual(memory.scope("thing").locations, [{ machine: "dev", path: "/work/thing", match: "prefix" }]);
+  assert.equal(memory.scope("thing").title, "thing", "the directory names it without a title");
+  assert.equal((await scope({ machine_id: "dev", cwd: "/work/thing", create: true })).created, false, "a bound directory is resolved, not created again");
+  assert.equal(changed, 2);
+  assert.ok(!readFileSync(join(root, "scopes", "thing", "scope.md"), "utf8").includes("match:"));
+});

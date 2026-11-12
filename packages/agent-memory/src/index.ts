@@ -196,9 +196,10 @@ export class AgentMemory {
   /**
    * Room → repository → machine+path → hint → _global. A key bound by two scopes is a
    * conflict for the human to fix, never a guess. `create` (writers only) adds a provisional
-   * scope for an unbound room, or for an unbound repository/location.
+   * scope for an unbound room, or for an unbound repository and/or location, binding both when both are given
+   * (the location as is, not a parent). `create.title` names it; otherwise the room name or directory does.
    */
-  resolveScope(locator: ScopeLocator, create?: { writer: Writer }): ScopeResolution {
+  resolveScope(locator: ScopeLocator, create?: { writer: Writer; title?: string }): ScopeResolution {
     const scopes = this.keptScopes().filter((scope) => scope.status !== "archived");
     const room = locator.roomId ? roomRef(locator.roomId) : undefined;
     const repository = locator.repository ? normalizeRepository(locator.repository) : undefined;
@@ -219,15 +220,15 @@ export class AgentMemory {
         && !existsSync(join(this.scopesDir, locator.scopeHint)) ? locator.scopeHint : undefined;
       if (room) {
         const id = wanted ?? `room-${createHash("sha256").update(room).digest("hex").slice(0, 8)}`;
-        this.createScope(id, locator.roomName || id, { rooms: [room], repositories: [], locations: [] }, create.writer);
+        this.createScope(id, create.title?.trim() || locator.roomName || id, { rooms: [room], repositories: [], locations: [] }, create.writer);
         return this.resolution(id, "room", true);
       }
       if (repository || (path && locator.machineId)) {
         const name = slugify(basename(repository ?? path!)) || "project";
         const id = wanted ?? this.freeScopeId(`repo-${name}`);
-        this.createScope(id, basename(repository ?? path!), {
+        this.createScope(id, create.title?.trim() || basename(path && locator.machineId ? path : repository!), {
           rooms: [], repositories: repository ? [repository] : [],
-          locations: !repository && path ? [{ machine: locator.machineId!, path }] : [],
+          locations: path && locator.machineId ? [{ machine: locator.machineId, path }] : [],
         }, create.writer);
         return this.resolution(id, repository ? "repository" : "location", true);
       }

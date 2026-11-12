@@ -14,6 +14,8 @@ export interface AgentMemoryMcpOptions {
   review?: MemoryReviews;
   /** Things kept under a scope's id outside memory and skills (automations) follow a rename. */
   onScopeRenamed?(from: string, to: string, by: string): void;
+  /** A scope was created, rebound or renamed here; the Control Plane regroups the sessions at once. */
+  onScopesChanged?(): void;
 }
 
 /** Tools whose refusal for a project writer becomes a review. */
@@ -142,14 +144,19 @@ function baseTools(history: ConversationMemoryStore, agentMemory?: AgentMemoryMc
     },
     {
       name: "scope", legacy: "memory_resolve_scope", allowed: memoryRead,
-      description: "Find the memory scope for a Matrix room or a project (repository remote, or machine_id + cwd). Unbound keys fall back to _global; create=true (writers only) makes a provisional scope for an unbound room/repository; give scope_hint as the new scope's id (a short lowercase slug naming what it is, e.g. ops, travel), otherwise the id is generated.",
+      description: "Find the memory scope for a Matrix room or a project (repository remote, or machine_id + cwd). Unbound keys fall back to _global; create=true (writers only) makes a provisional scope for an unbound room, or for an unbound repository and/or machine_id + cwd (both are bound when both are given; the cwd itself, not a parent); give scope_hint as the new scope's id (a short lowercase slug naming what it is, e.g. ops, travel), otherwise the id is generated; title names it (default: the room name or directory). Sessions there regroup at once.",
       inputSchema: object({
         room_id: { type: "string" }, room_name: { type: "string" }, repository: { type: "string" },
         machine_id: { type: "string" }, cwd: { type: "string" }, scope_hint: { type: "string" }, create: { type: "boolean" },
+        title: { type: "string", description: "title of a scope create=true makes" },
       }),
-      run: (args, principal) => ({ ...store!.resolveScope({ roomId: stringArg(args.room_id), roomName: stringArg(args.room_name),
-        repository: stringArg(args.repository), machineId: stringArg(args.machine_id), cwd: stringArg(args.cwd),
-        scopeHint: stringArg(args.scope_hint) }, args.create === true ? { writer: writer(principal) } : undefined) }),
+      run: (args, principal) => {
+        const result = store!.resolveScope({ roomId: stringArg(args.room_id), roomName: stringArg(args.room_name),
+          repository: stringArg(args.repository), machineId: stringArg(args.machine_id), cwd: stringArg(args.cwd),
+          scopeHint: stringArg(args.scope_hint) }, args.create === true ? { writer: writer(principal), title: stringArg(args.title) } : undefined);
+        if (result.created) agentMemory!.onScopesChanged?.();
+        return { ...result };
+      },
     },
     {
       name: "scope_rename", allowed: memoryWrite,
@@ -160,6 +167,7 @@ function baseTools(history: ConversationMemoryStore, agentMemory?: AgentMemoryMc
         const scope = store!.renameScope(who, from, to, stringArg(args.title));
         const skills = agentMemory!.skills?.renameScope(who, from, to);
         agentMemory!.onScopeRenamed?.(from, to, who.name);
+        agentMemory!.onScopesChanged?.();
         return { scope: scope.id, title: scope.title, skillsMoved: skills?.moved ?? false };
       },
     },
