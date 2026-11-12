@@ -7,6 +7,7 @@ import type { MemoryReviewRoutes } from "../memory-review.js";
 import { CONVERSATION_AGENTS, type ConversationAgent, type Conversations } from "../conversations.js";
 import { parseNoticeTarget } from "../notices.js";
 import { AutomationError, type Automations } from "../automations.js";
+import { JournalError, type Journal } from "../journal.js";
 import type { ToolHub } from "../tools.js";
 import { AgentControlSse, SseCursorError } from "./sse.js";
 import { ActionServiceError, SessionActionService } from "./session-actions.js";
@@ -46,6 +47,8 @@ interface ApiOptions {
   onTrustSession?: (pending: PendingRow, by: string) => void;
   /** Schedules, webhooks and their proposals (/api/v1/automations). */
   automations?: Automations;
+  /** The work journal: one day's progress and the open items ledger (/api/v1/journal). */
+  journal?: Journal;
   /** Whom a notice can ring (call-bridge aliases), for the target picker. */
   callees?: () => Promise<string[]>;
   /** Speech to text for connectors' voice messages (/api/v1/transcriptions). */
@@ -161,6 +164,8 @@ export class AgentControlApi {
       if(request.method==="GET"&&url.pathname==="/api/v1/notice-targets"){this.ok(response,{data:await this.noticeTargets()});return true;}
       const automation=url.pathname.match(/^\/api\/v1\/automations(?:\/([^/]+)(?:\/([^/]+)(?:\/(decision))?)?)?$/);
       if(automation&&this.options.automations){await this.automationRoute(request,response,url,principal,automation[1]&&decodeURIComponent(automation[1]),automation[2]&&decodeURIComponent(automation[2]),automation[3]);return true;}
+      const journal=url.pathname.match(/^\/api\/v1\/journal\/(runs|items)(?:\/([^/]+)\/(close))?$/);
+      if(journal&&this.options.journal){await this.journalRoute(request,response,url,principal,journal[1]!,journal[2]&&decodeURIComponent(journal[2]),journal[3]);return true;}
       const toolApproval=url.pathname.match(/^\/api\/v1\/tool-approvals(?:\/([^/]+)(?:\/(decision))?)?$/);
       if(toolApproval&&this.options.toolHub){
         const hub=this.options.toolHub,id=toolApproval[1]&&decodeURIComponent(toolApproval[1]);
@@ -316,6 +321,23 @@ export class AgentControlApi {
     const principal=this.principalFor(request.headers.authorization);
     if(!principal)throw new ApiProblem(401,"unauthorized","valid bearer token required");
     return principal;
+  }
+
+  /**
+   * POST /journal/runs {date?, tz?} reads one day (yesterday by default) and returns it with the open items;
+   * GET /journal/items?open=1&scope=&date= lists the ledger; POST /journal/items/:id/close marks one done.
+   */
+  private async journalRoute(request:IncomingMessage,response:ServerResponse,url:URL,principal:Principal,kind:string,id:string|undefined,close:string|undefined):Promise<void>{
+    const journal=this.options.journal!;
+    try{
+      if(kind==="items"&&request.method==="GET"&&!id){
+        this.ok(response,{data:journal.items({open:url.searchParams.get("open")==="1",scope:url.searchParams.get("scope")??undefined,date:url.searchParams.get("date")??undefined})});return;}
+      if(request.method!=="POST"||(kind==="runs")===Boolean(id))throw new ApiProblem(405,"method_not_allowed","method not allowed");
+      if(!principal.write)throw new ApiProblem(403,"forbidden","read-only token");
+      const body=await jsonBody(request);
+      if(kind==="runs"){this.ok(response,await journal.run({date:string(body.date,"date"),tz:string(body.tz,"tz")}));return;}
+      if(close)this.ok(response,journal.close(id!));
+    }catch(error){if(error instanceof JournalError)throw new ApiProblem(error.status,error.code,error.message);throw error;}
   }
 
   /** The principal an Authorization header grants on /api/v1, if any. */

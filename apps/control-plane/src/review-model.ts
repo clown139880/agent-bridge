@@ -33,6 +33,25 @@ export function reviewModel(options: ReviewModelOptions): ReviewModel {
   };
 }
 
+/**
+ * The same models for longer reading (the work journal): any JSON object counts as an answer, and the
+ * timeout is the caller's, since a long conversation takes minutes. One retry, then the fallback.
+ */
+export function jsonModel(options: ReviewModelOptions): ReviewModel {
+  const ask = async (model: string, system: string, user: string, maxTokens: number) => {
+    const match = (await tokensapi(options, model, system, user, maxTokens)).match(/\{[\s\S]*\}/);
+    if (!match) throw new Error(`${model} gave no JSON`);
+    return JSON.parse(match[0]) as Record<string, unknown>;
+  };
+  return async (system, user, maxTokens = 3000) => {
+    try { return await ask(options.model, system, user, maxTokens); }
+    catch (error) { log.warn({ error: error instanceof Error ? error.message : String(error) }, "Journal model failed; retrying"); }
+    try { return await ask(options.model, system, user, maxTokens); }
+    catch (error) { if (!options.fallback) throw error; }
+    return ask(options.fallback, system, user, maxTokens);
+  };
+}
+
 /** OpenAI-compatible chat on TokensAPI. The models think before answering, so the budget leaves room for it. */
 async function tokensapi(options: ReviewModelOptions, model: string, system: string, user: string, maxTokens: number): Promise<string> {
   const key = await options.secrets.value("TOKENSAPI_API_KEY", ["shared/tokensapi"]);

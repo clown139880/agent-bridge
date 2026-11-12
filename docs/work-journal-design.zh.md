@@ -1,6 +1,6 @@
 # 工作日志：每天把 agent 干了什么写进笔记
 
-状态：设计稿（2026-11-12），原型已用 2026-11-09 至 11-11 的真实数据跑过四版（§10）。本阶段：整理昨天的对话 → 进度写进日记，记忆直接归档进中央记忆；规则已定，下一步落到 Control Plane。早上简报放到下一阶段。
+状态：Control Plane 部分已实现（0.7.89，`apps/control-plane/src/journal.ts`），原型已用 2026-11-09 至 11-11 的真实数据跑过四版（§10）。本阶段：整理昨天的对话 → 进度写进日记，记忆直接归档进中央记忆。早上简报放到下一阶段。
 
 ## 1. 要解决的问题
 
@@ -51,17 +51,18 @@ Control Plane（通用，开源）                      agent-skills（个人）
 
 **哪些会话不算：** 由自动任务创建的会话（会话创建时间与某次 `automation_runs` 的开始时间相差不到 2 分钟）只进自动任务汇总。接收自动任务推送、但也有人说话的会话（例如房间会话）照常列出。别的程序经 Bridge 发起的会话（例如电台的观众对话）目前还分不出来，以后要在 turn 上记录发起方。
 
-要分清「人主动停的」和「重启打断的」：interrupt 动作有发起方记录（`/sessions/:id/interrupt` 的 principal），没有人发起的中断就是被打断。实现时以 `apps/control-plane/src/api/session-actions.ts` 和 Bridge 重启时的 turn 收尾为准核对。
+要分清「人主动停的」和「重启打断的」：Bridge 失去一个 turn 时（重启、换进程）记下的 `turn.interrupted` 带 `reason`（例如 `worker no longer owns this turn`），人或 agent 自己停的没有；turn 开着却没有结束事件、会话也不再运行它的，同样算被打断。interrupt 动作只保留 24 小时，第二天查不到发起方，所以不用它判断。
 
 自动化不按会话列，只按任务汇总：区间内跑了几次、成功几次、失败几次、静默几次；**该跑没跑**（调度时间已过却没有运行记录）单独标出。有自己推送的任务只出现在汇总那一行里；没有投递目标的任务失败或该跑没跑时，才单独列一条。
 
 ## 4. 增量：只处理变化的部分
 
-不按「昨天的时间戳」扫全量。迟到补传的事件带的是原始时间，已有事件也会被原地改写，单看时间戳或事件 ID 会漏。
+按天运行：一次处理一天（默认是昨天，按任务的时区切），同一天可以重跑。
 
-- 每个会话已有 `view_revision`（每存一个事件、每改写一次就加一，`packages/database/src/view.ts`）。journal 记下每个会话上次处理到的 revision，只处理 revision 变了的会话。
-- 自动任务按 `automation_runs.finished_at` 和上次的处理水位取。
-- 两个水位分开：先把「这次要处理哪些会话、到哪个 revision」落盘，处理完一个会话才推进它自己的水位。中途失败重跑，不会重复，也不会漏。
+- 当天有人或 agent 说过话、或开过 turn 的会话才算这一天的会话；事件按它自己的时间归到哪天，迟到补传的也归回原来那天。
+- 每个会话已有 `view_revision`（每存一个事件、每改写一次就加一，`packages/database/src/view.ts`）。每天每个会话的摘要连同当时的 revision 存进 `journal_sessions`；重跑时 revision 没变就直接复用，只有变了的会话才再调模型。
+- 归档同理：候选集合的哈希没变就复用上次的决定（`journal_archives`）。
+- 摘要生成失败的不缓存，下次重跑再试。同一天同时只跑一次，后来的调用等它的结果。
 
 ## 5. LLM 写摘要
 
@@ -70,7 +71,7 @@ Control Plane（通用，开源）                      agent-skills（个人）
 - **一个一个调，不并发。** 夜里跑，不赶时间；模型的并发额度和在线的审核员共用，并发会撞上限（HTTP 429）。一天约 20 个会话、7 分钟。
 - **预算要给够。** 模型先思考再回答，长会话 4500 token 会在思考里耗尽（`finish_reason=length`）。摘要给 12000，归档给 9500；没解析出 JSON 就重试一次。
 
-输入（有界）：会话标题、项目、程序判出的状态、区间内的用户消息和 agent 回复（不含工具输出），超长时保留开头、人的每一条消息和最后几轮；上一次给这个会话写的摘要，用来接着写。消息标明「人」还是「agent」。
+输入（有界）：会话标题、项目、程序判出的状态、区间内的用户消息和 agent 回复（不含工具输出），超长时保留开头、人的每一条消息和最后几轮。消息标明「人」还是「agent」。
 
 输出（JSON）：
 
@@ -96,9 +97,10 @@ Control Plane（通用，开源）                      agent-skills（个人）
 
 条目是跨天的：一件事没关闭，就一直挂着，直到被关闭。
 
-- 表 `journal_items`：`id`（稳定，由会话 ID、请求 ID 或任务 ID 派生）、`scope`、`session_id`/`automation_id`、`kind`（等你、下一步、被打断、失败…）、`title`、`opened_at`、`closed_at`、`closed_by`（`human` / `auto`）、`note_date`（写在哪天的笔记里）。
-- **自动关闭**：被打断的会话后来续上了、等你的审批被处理了、失败的会话后来成功了——下一次运行时由程序关闭（`closed_by=auto`）。
+- 表 `journal_items`：`id`（稳定：会话条目 `jn-<会话 ID 前 8 位>-<MMDD>-<种类>`，记忆待定 `jn-m-<哈希>`，自动任务 `jn-a-<任务 ID>-<MMDD>`）、`date`（写在哪天的笔记里）、`kind`（`next` 下一步、`human` 等你、`interrupted` 被打断、`failed` 失败、`memory` 记忆待定、`automation` 自动任务失败或该跑没跑）、`title`、`scope`、`session_id`/`automation_id`、`opened_at`、`closed_at`、`closed_by`（`human` / `auto`）。
+- **自动关闭**：会话在条目那天之后又开了 turn（续上了、重试了、人回应了），或者自动任务之后跑成功了——下一次运行时由程序关闭（`closed_by=auto`）。记忆待定只由人关。
 - **人关闭**：人在笔记里勾掉这一条（见 §8），脚本把它回写给 CP（`closed_by=human`）。
+- 重跑某天时，那天还没关、这次不再产出的条目删掉；已关的不再打开。
 
 同一件事一个 ID，所以重跑、重新生成都不会出现两条。
 
@@ -193,12 +195,12 @@ Control Plane（通用，开源）                      agent-skills（个人）
 
 Control Plane（`apps/control-plane/src/journal.ts` 新模块，表在同一个 SQLite 里）：
 
-- `POST /api/v1/journal/runs` `{ until? }`：从上次水位处理到 `until`（默认现在），返回这次的结果：按作用域分组的条目、摘要、自动任务汇总、未关闭条目。幂等：同一水位重复调用返回同一结果。
-- `GET /api/v1/journal/items?scope=&open=1`：查条目。
-- `POST /api/v1/journal/items/:id/close` `{ by: "human" }`：人勾掉了。
+- `POST /api/v1/journal/runs` `{ date?: "YYYY-MM-DD", tz? }`：整理这一天（默认昨天，时区默认 Control Plane 的 `TZ`），返回各会话的状态和摘要（带作用域）、自动任务汇总、记忆候选和归档决定（`action` 为 `project` / `global` / `skip` / `human`；要先建作用域的带 `create`）、未关闭的条目和这次自动关闭的条目。同一天重跑只重读变了的会话（§4）。
+- `GET /api/v1/journal/items?open=1&scope=&date=`：查条目。
+- `POST /api/v1/journal/items/:id/close`：人勾掉了。
 - 记忆归档不另开接口：日志任务用 memory 的 `write`、`scope`（`create: true`）写入，`_` 作用域照常经过自动审核。
-- `/mcp/bridge` 加只读工具 `journal`：agent 能问「这个项目最近干了什么、还有什么没关」。
-- 权限：日志任务用自己的 `AGENT_TOKENS` token；读接口对 agent 开放，`close` 只给日志任务的 token。
+- 权限：读接口对所有 token 开放；`runs` 和 `close` 要写权限。日志任务用自己的 `AGENT_TOKENS` token。
+- 以后：`/mcp/bridge` 加只读工具 `journal`，agent 能问「这个项目最近干了什么、还有什么没关」。
 
 agent-skills：`automations/daily-journal/`（任务定义 + 脚本），调度 `0 7 * * *`（简报阶段再加 `deliver`）。
 

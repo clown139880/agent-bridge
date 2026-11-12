@@ -31,7 +31,8 @@ import { OperatorNotices, type NoticeTarget, type OperatorEvent } from "./notice
 import { Automations, type AutomationOptions } from "./automations.js";
 import { SecretStore, type SecretStoreOptions } from "./secrets.js";
 import { approvalReviewer, automationReviewer, learnRule, titleSession, ToolHub, toolReviewer, type ApprovalReviewer, type ToolReviewer } from "./tools.js";
-import { reviewModel } from "./review-model.js";
+import { jsonModel, reviewModel } from "./review-model.js";
+import { Journal, type AutomationInfo } from "./journal.js";
 import { transcriber, type TranscribeOptions } from "./transcribe.js";
 import { alreadyGated, ApprovalLessons, boundary, remoteTargets, toolOf, type ApprovalAnalysis } from "./approval-review.js";
 import { toolsEndpoint } from "./mcp/tools.js";
@@ -240,6 +241,11 @@ export class ControlPlane {
       roomTurn: (target, input, key) => this.roomTurn(target, input, key),
     });
     const automations = this.automations;
+    // The work journal reads long conversations, so its calls get minutes, not the reviewer's seconds.
+    const journal = new Journal({ db: this.controlStore.db, memory: agentMemory,
+      model: secrets && options.review ? jsonModel({ secrets, ...options.review, timeoutMs: 180_000 }) : undefined,
+      automations: () => (automations?.list() ?? []) as unknown as AutomationInfo[],
+      tz: process.env.TZ || Intl.DateTimeFormat().resolvedOptions().timeZone });
     if (options.events && (options.events.hookSources.length || (options.events.mqtt && options.events.sources.length)))
       this.events = new EventBus(options.events, {
         db: this.controlStore.db,
@@ -250,7 +256,7 @@ export class ControlPlane {
       });
     this.controlApi = new AgentControlApi(store, this.controlStore, this.registry, {
       readToken: options.controlApiReadToken, writeToken: options.controlApiWriteToken, bridgeToken: options.bridgeToken,
-      agents, memoryReviews: this.memoryReviews, conversations: this.conversations, automations: this.automations, toolHub: this.toolHub,
+      agents, memoryReviews: this.memoryReviews, conversations: this.conversations, automations: this.automations, journal, toolHub: this.toolHub,
       transcribe: options.transcribe && (secrets || options.transcribe.fallbackUrl) ? transcriber({ ...options.transcribe, secrets }) : undefined,
       onAllowSimilar: (pending, by) => this.learnFrom(pending, by),
       onTrustSession: (pending) => this.allowWaiting(pending.sessionId, pending.id),
