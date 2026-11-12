@@ -1,5 +1,6 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { setTimeout as delay } from "node:timers/promises";
 import { NOTICE_LEVELS, pendingWire, type Store, type AgentControlStore, type PendingRow, type ActionRow, type NoticeLevel } from "@agent-bridge/database";
 import { parseWorkerId, workerId as buildWorkerId, type AgentType, type ActionKind, type ApprovalChoice, type ControlToBridgeMessage } from "@agent-bridge/protocol";
 import { BridgeRegistry } from "../bridge-registry.js";
@@ -49,6 +50,8 @@ interface ApiOptions {
   automations?: Automations;
   /** The work journal: one day's progress and the open items ledger (/api/v1/journal). */
   journal?: Journal;
+  /** How long POST /journal/runs waits before answering 202 (25 s). */
+  journalWaitMs?: number;
   /** Whom a notice can ring (call-bridge aliases), for the target picker. */
   callees?: () => Promise<string[]>;
   /** Speech to text for connectors' voice messages (/api/v1/transcriptions). */
@@ -324,7 +327,7 @@ export class AgentControlApi {
   }
 
   /**
-   * POST /journal/runs {date?, tz?} reads one day (yesterday by default) and returns it with the open items;
+   * POST /journal/runs {date?, tz?} reads one day (yesterday by default) and returns it with the open items, or 202 while it still runs;
    * GET /journal/items?open=1&scope=&date= lists the ledger; POST /journal/items/:id/close marks one done.
    */
   private async journalRoute(request:IncomingMessage,response:ServerResponse,url:URL,principal:Principal,kind:string,id:string|undefined,close:string|undefined):Promise<void>{
@@ -335,7 +338,10 @@ export class AgentControlApi {
       if(request.method!=="POST"||(kind==="runs")===Boolean(id))throw new ApiProblem(405,"method_not_allowed","method not allowed");
       if(!principal.write)throw new ApiProblem(403,"forbidden","read-only token");
       const body=await jsonBody(request);
-      if(kind==="runs"){this.ok(response,await journal.run({date:string(body.date,"date"),tz:string(body.tz,"tz")}));return;}
+      // A day takes minutes: past the wait the caller gets 202 and asks again; the same day's run is joined, not restarted.
+      if(kind==="runs"){const job=journal.run({date:string(body.date,"date"),tz:string(body.tz,"tz")});
+        const result=await Promise.race([job,delay(this.options.journalWaitMs??25_000,undefined,{ref:false})]);
+        if(result)this.ok(response,result);else{job.catch(()=>undefined);this.ok(response,{state:"running"},202);}return;}
       if(close)this.ok(response,journal.close(id!));
     }catch(error){if(error instanceof JournalError)throw new ApiProblem(error.status,error.code,error.message);throw error;}
   }

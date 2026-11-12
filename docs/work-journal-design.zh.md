@@ -1,6 +1,6 @@
 # 工作日志：每天把 agent 干了什么写进笔记
 
-状态：Control Plane 部分已实现（0.7.89，`apps/control-plane/src/journal.ts`），原型已用 2026-11-09 至 11-11 的真实数据跑过四版（§10）。本阶段：整理昨天的对话 → 进度写进日记，记忆直接归档进中央记忆。早上简报放到下一阶段。
+状态：Control Plane 部分已实现（0.7.90，`apps/control-plane/src/journal.ts`），原型已用 2026-11-09 至 11-11 的真实数据跑过四版（§10）。本阶段：整理昨天的对话 → 进度写进日记，记忆直接归档进中央记忆。早上简报放到下一阶段。
 
 ## 1. 要解决的问题
 
@@ -195,7 +195,7 @@ Control Plane（通用，开源）                      agent-skills（个人）
 
 Control Plane（`apps/control-plane/src/journal.ts` 新模块，表在同一个 SQLite 里）：
 
-- `POST /api/v1/journal/runs` `{ date?: "YYYY-MM-DD", tz? }`：整理这一天（默认昨天，时区默认 Control Plane 的 `TZ`），返回各会话的状态和摘要（带作用域）、自动任务汇总、记忆候选和归档决定（`action` 为 `project` / `global` / `skip` / `human`；要先建作用域的带 `create`）、未关闭的条目和这次自动关闭的条目。同一天重跑只重读变了的会话（§4）。
+- `POST /api/v1/journal/runs` `{ date?: "YYYY-MM-DD", tz? }`：整理这一天（默认昨天，时区默认 Control Plane 的 `TZ`），返回各会话的状态和摘要（带作用域）、自动任务汇总、记忆候选和归档决定（`action` 为 `project` / `global` / `skip` / `human`；要先建作用域的带 `create`）、未关闭的条目和这次自动关闭的条目。同一天重跑只重读变了的会话（§4）。一天要几分钟：25 秒内没算完就回 `202 {state: "running"}`，调用方隔一会儿再发同样的请求，接上同一次运行。
 - `GET /api/v1/journal/items?open=1&scope=&date=`：查条目。
 - `POST /api/v1/journal/items/:id/close`：人勾掉了。
 - 记忆归档不另开接口：日志任务用 memory 的 `write`、`scope`（`create: true`）写入，`_` 作用域照常经过自动审核。

@@ -650,3 +650,19 @@ test("conversation view: snapshot, changes woken by session.updated, entry windo
     assert.equal((await get(`/sessions/thread-1/view?before=v:9:1`)).status, 410);
   } finally { await f.close(); }
 });
+
+test("the journal: a read token lists items, only a writer runs a day or closes one", async () => {
+  const f = await fixture();
+  try {
+    const read = { authorization: "Bearer read", "content-type": "application/json" };
+    assert.equal((await fetch(`${f.base}/journal/runs`, { method: "POST", headers: read, body: "{}" })).status, 403);
+    const run = await fetch(`${f.base}/journal/runs`, { method: "POST", headers: f.headers, body: JSON.stringify({ date: "2026-11-10", tz: "Asia/Shanghai" }) });
+    assert.equal(run.status, 200);
+    const day = await run.json() as { date: string; sessions: unknown[]; items: { open: unknown[] } };
+    assert.deepEqual({ date: day.date, sessions: day.sessions.length, open: day.items.open.length }, { date: "2026-11-10", sessions: 0, open: 0 });
+    assert.equal((await fetch(`${f.base}/journal/runs`, { method: "POST", headers: f.headers, body: JSON.stringify({ date: "tomorrow" }) })).status, 400);
+    const items = await fetch(`${f.base}/journal/items?open=1`, { headers: read });
+    assert.deepEqual(await items.json(), { data: [] });
+    assert.equal((await fetch(`${f.base}/journal/items/nope/close`, { method: "POST", headers: f.headers, body: "{}" })).status, 404);
+  } finally { await f.close(); }
+});
