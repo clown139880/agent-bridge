@@ -6,7 +6,7 @@ import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { AgentControlService } from '../service.js'
 import { AgentBridgeLlmAdapter } from './adapter.js'
 import { AgentBridgeImportTarget } from './import-target.js'
-import { nativeHost } from './dsh-compat.js'
+import { guardImportedTurnNumbers, nativeHost, nativeSession } from './dsh-compat.js'
 import { ACK_EVENT, BINDING_EVENT, PROVIDER } from './mapping.js'
 import { VirtualBridgeAgents } from '../remote-sessions/virtual-agents.js'
 
@@ -26,7 +26,8 @@ export function registerAgentBridgeProvider(ctx: Context, service: AgentControlS
       agent.options.provider = PROVIDER
       agent.options.model = 'remote'
       installModelSelection(agent.ctx, { current: { provider: PROVIDER, model: 'remote' }, assembled: undefined })
-      target.adopt(String(agent.id))
+      // Live remote output joins the native loop's turn: its later appends need translating.
+      guardImportedTurnNumbers(nativeSession(agent))
     }
     scoped.on('llm/stream', (options: GenerateOptions, next: () => AsyncIterable<StreamChunk>) => {
       if (options.purpose || !options.sessionId) return next()

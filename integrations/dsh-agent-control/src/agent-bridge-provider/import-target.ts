@@ -9,10 +9,9 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { BridgeClient } from '../bridge-client.js'
 import { ControlError } from '../errors.js'
 import type { JsonObject } from '../types.js'
-import { appendSessionEvent, guardImportedTurnNumbers, nativeSession, sessionEvents, toolResultShape, type NativeHost, type NativeHandle, type NativeEvent } from './dsh-compat.js'
+import { appendSessionEvent, nativeSession, sessionEvents, toolResultShape, type NativeHost, type NativeHandle, type NativeEvent } from './dsh-compat.js'
 import { ACK_EVENT, BINDING_EVENT, PROVIDER, openStep, projectNativeEvents, record, str } from './mapping.js'
-import { isStoredSessionCorruption, repairStoredToolResults } from './session-repair.js'
-import { readSyncVersions, writeSyncSidecar } from './sync-version-cache.js'
+import { writeSyncSidecar } from './sync-version-cache.js'
 
 const hash = (value: string) => createHash('sha256').update(value).digest('hex').slice(0, 32)
 const workerAtMachine = (name: string, machineId: string) => /\s@\s/.test(name) ? name : name + ' @ ' + machineId
@@ -37,13 +36,6 @@ export function promptTitle(row: JsonObject, events: readonly NativeEvent[]): st
 let cachedHostname: string | undefined
 const hostname = (): string => cachedHostname ??= osHostname()
 const FULL_SYNC_MS = 60_000
-/** Sessions kept loaded: running or waiting ones, plus the most recent of the last day. */
-const HOT_MS = 24 * 60 * 60 * 1000
-const HOT_LIMIT = 20
-/** Catalog fields that follow the whole page rather than the session's own version. */
-const PLACEMENT_FIELDS = ['presentationOrder', 'groupId', 'groupTitle', 'groupUpdatedAt', 'executionLocations', 'updatedAt', 'lastPromptAt'] as const
-const VOLATILE_BINDING_FIELDS = new Set<string>([...PLACEMENT_FIELDS, 'status'])
-const durableBinding = (binding: JsonObject): JsonObject => Object.fromEntries(Object.entries(binding).filter(([key]) => !VOLATILE_BINDING_FIELDS.has(key)))
 /** Sidebar recency: the user's last prompt, as in the Control Center. Agent replies,
  * tool progress and status changes do not reorder the list (a reply clock moved
  * every running session on each assistant message); a session without a prompt
@@ -75,21 +67,20 @@ export async function readHistory(bridge: Pick<BridgeClient, 'call'>, sessionId:
   } while (true)
 }
 
-/** Internal materialization target. No browser import workflow and no second session store. */
+/**
+ * The catalog of Bridge sessions, which DSH shows as client-side virtual sessions
+ * (remote-sessions/), and the local drafts that become Bridge sessions with their
+ * first message. A remote session is never stored as a native DSH session.
+ */
 export class AgentBridgeImportTarget {
   private readonly handles = new Map<string, NativeHandle>()
-  private readonly jobs = new Map<string, Promise<Agent>>()
   private readonly bindings = new Map<string, JsonObject>()
   private readonly workers = new Map<string, JsonObject>()
-  private readonly cursors = new Map<string, string>()
   private readonly busy = new Set<string>()
   private readonly abort = new AbortController()
   private timer: ReturnType<typeof setTimeout> | undefined
   private refreshJob: Promise<void> | undefined
   private presetDisposer: (() => Promise<void>) | undefined
-  private readonly versions = new Map<string, number>()
-  /** Last running state published per native id; DSH rebuilds its whole session list on every status event. */
-  private readonly published = new Map<string, boolean>()
   /** Control-plane stream position of the last complete pass that left nothing deferred. */
   private synced: { cursor: string; at: number } | undefined
   private readonly placementOverrides = new Map<string, string>()
@@ -102,9 +93,6 @@ export class AgentBridgeImportTarget {
   /** Remote id → native id for drafts, whose native id predates (so is not derived from) their remote id. */
   private readonly aliases = new Map<string, string>()
   private aliasesLoaded: Promise<void> | undefined
-  private versionsLoaded: Promise<void> | undefined
-  private versionsDirty = false
-  private started = false
   /** Drafts whose remote session is being created; its id is not known until the action settles. */
   private readonly drafting = new Set<string>()
   constructor(readonly host: NativeHost, readonly bridge: Pick<BridgeClient, 'call'>, readonly origin: string,
@@ -140,38 +128,6 @@ export class AgentBridgeImportTarget {
       }
     })()
     return this.aliasesLoaded
-  }
-  /** Catalog version each stored Session was last synchronized to; 0 means stored at an unknown version. */
-  private loadVersions(): Promise<void> {
-    if (!this.versionsLoaded) {
-      const attempt = readSyncVersions(join(this.dataRoot, 'synced-versions.json'), message => this.host.logger.warn(message)).then(({ versions, recovered }) => {
-        for (const [id, version] of Object.entries(versions)) if (!this.versions.has(id)) this.versions.set(id, version)
-        if (recovered) this.versionsDirty = true
-      })
-      this.versionsLoaded = attempt
-      void attempt.catch(() => { if (this.versionsLoaded === attempt) this.versionsLoaded = undefined })
-    }
-    return this.versionsLoaded
-  }
-  private async saveVersions(): Promise<void> {
-    if (!this.versionsDirty) return
-    this.versionsDirty = false
-    const path = join(this.dataRoot, 'synced-versions.json')
-    try { await writeSyncSidecar(path, Object.fromEntries(this.versions)) }
-    catch (error) { this.versionsDirty = true; throw error }
-  }
-  private synchronized(id: string, version: number): void {
-    if (this.versions.get(id) === version) return
-    this.versions.set(id, version); this.versionsDirty = true
-  }
-  /** DSH loaded a cold Bridge session (the user opened it): bring its log up to the catalog. */
-  adopt(nativeId: string): void {
-    const binding = this.bindings.get(nativeId)
-    if (!this.started || !binding || !str(binding['sessionId']) || this.jobs.has(nativeId) || this.deleted.has(nativeId)) return
-    const version = Number(binding['updatedAt'])
-    if (this.versions.get(nativeId) === version) return
-    void this.ensure(binding).then(() => { if (!this.isBusy(nativeId)) this.synchronized(nativeId, version) })
-      .catch((error: unknown) => { if (!this.abort.signal.aborted) this.host.logger.warn(`Agent Bridge could not sync opened session "${nativeId}": ${String(error)}`) })
   }
   status(): JsonObject {
     const counts: Record<string, number> = {}
@@ -291,8 +247,6 @@ export class AgentBridgeImportTarget {
     try { await this.handles.get(nativeId)?.dispose() }
     catch (error) { warnings.push('dispose: ' + String(error)) }
     this.handles.delete(nativeId)
-    if (this.versions.delete(nativeId)) this.versionsDirty = true
-    this.published.delete(nativeId)
     if (warnings.length) this.host.logger.warn(`Agent Bridge local cleanup for "${nativeId}" was incomplete after remote deletion: ${warnings.join('; ')}`)
     return warnings.join('; ')
   }
@@ -487,7 +441,6 @@ export class AgentBridgeImportTarget {
     }
   }
   start(): void {
-    this.started = true
     const tick = async () => {
       try { await this.refresh() }
       catch (error) { if (!this.abort.signal.aborted) { this.error = String(error); this.host.logger.warn('Agent Bridge session sync: ' + this.error) } }
@@ -499,7 +452,6 @@ export class AgentBridgeImportTarget {
     this.abort.abort()
     if (this.timer) clearTimeout(this.timer)
     await this.refreshJob?.catch(() => {})
-    await Promise.allSettled(this.jobs.values())
     // Owned idle presentation agents only. Plugin reload must be refused while a native turn is running.
     await Promise.allSettled([...this.handles.values()].map(handle => handle.dispose()))
     this.handles.clear()
@@ -512,7 +464,6 @@ export class AgentBridgeImportTarget {
   }
   private async refreshAll(): Promise<void> {
     await this.loadAliases()
-    await this.loadVersions()
     const workerPage = record(await this.bridge.call({ operation: 'workers' }, this.abort.signal))
     if (!Array.isArray(workerPage['workers'])) throw new Error('Invalid Bridge worker page')
     for (const worker of workerPage['workers']) { const row = record(worker); this.workers.set(str(row['id']), row) }
@@ -545,13 +496,6 @@ export class AgentBridgeImportTarget {
       if (!next || cursors.has(next)) throw new Error('Bridge session cursor did not advance')
       cursors.add(next); cursor = next
     } while (true)
-    // A binding is only re-materialized when its own session changes, but its
-    // catalog position and group move whenever any sibling does. Refresh the
-    // placement fields of every known binding from this complete page.
-    for (const row of summaries) {
-      const id = this.nativeIdFor(str(row['sessionId'])), binding = this.bindings.get(id)
-      if (binding) this.bindings.set(id, { ...binding, ...Object.fromEntries(PLACEMENT_FIELDS.filter(key => key in row).map(key => [key, row[key]!])) })
-    }
     this.presentationPlacements.clear()
     this.presentationGroups.clear()
     for (const group of groups) this.presentationGroups.set(str(group['groupId']), group)
@@ -565,157 +509,21 @@ export class AgentBridgeImportTarget {
       if (retained.has(str(binding['sessionId'])) || this.isBusy(id) || this.deleting.has(id) || this.deleted.has(id)) continue
       await this.cleanupDeletedNative(id)
     }
-    const failures: string[] = []
-    // Only recent sessions stay loaded. DSH lists every stored log and loads a cold one when it is opened.
-    const hot = new Set(summaries.filter(row => Number(row['updatedAt']) > Date.now() - HOT_MS)
-      .sort((left, right) => Number(right['updatedAt']) - Number(left['updatedAt'])).slice(0, HOT_LIMIT)
-      .map(row => this.nativeIdFor(str(row['sessionId']))))
-    // Bounded concurrent hydration. A single broken/offline session cannot hide all other sessions.
-    let index = 0
-    await Promise.all(Array.from({ length: Math.min(4, summaries.length) }, async () => {
-      while (index < summaries.length) {
-        const row = summaries[index++]!
-        const remoteId = str(row['sessionId'])
-        const id = this.nativeIdFor(remoteId)
-        if (this.deleting.has(id) || this.deleted.has(id)) continue
-        // While a draft's create action is pending, a new session in its location
-        // may be that draft's; wait for the binding rather than materialize a twin.
-        if (!this.aliases.has(remoteId) && !this.bindings.has(id) && [...this.drafting].some(draft =>
-          str(this.bindings.get(draft)?.['workerId']) === str(row['workerId']) && str(this.bindings.get(draft)?.['workspace']) === str(row['workspace']))) { deferred = true; continue }
-        try {
-          this.abort.signal.throwIfAborted()
-          const current = this.host.agents.get(id)
-          const running = ['active', 'waiting_for_approval', 'waiting_for_input'].includes(str(row['status']))
-          const unchanged = !!current && this.versions.get(id) === Number(row['updatedAt'])
-          const cold = !current && !running && !hot.has(id)
-          if (cold && (this.versions.has(id) || await this.host.sessionPersistence.stat(id))) {
-            // Stored and not loaded: keep only its catalog binding until it is opened or turns hot.
-            this.bindings.set(id, { ...row, origin: new URL(this.origin).origin })
-            if (!this.versions.has(id)) this.synchronized(id, 0)
-          }
-          else if (!unchanged || running) {
-            await this.ensure(row)
-            if (!this.isBusy(id)) this.synchronized(id, Number(row['updatedAt']))
-            else deferred = true
-          }
-          // Publish transitions only: each status event makes DSH rebuild its whole session list,
-          // and republishing every session on every poll saturated the Desktop renderer.
-          // Unpublished counts as idle, so a restart does not announce every idle session.
-          if ((this.published.get(id) ?? false) !== running) {
-            this.published.set(id, running)
-            this.host.emit('api-session/status', id, running)
-          }
-          // Pending approvals and questions are relayed by the virtual session's stand-in agent
-          // (remote-sessions/virtual-agents.ts); relaying here too would ask twice.
-        } catch (error) { failures.push(remoteId + ': ' + String(error)) }
-      }
-    }))
+    // Every row is a catalog binding only; the virtual session shows its history.
+    for (const row of summaries) {
+      const remoteId = str(row['sessionId'])
+      const id = this.nativeIdFor(remoteId)
+      if (this.deleting.has(id) || this.deleted.has(id)) continue
+      // While a draft's create action is pending, a new session in its location
+      // may be that draft's; wait for the binding rather than record a twin.
+      if (!this.aliases.has(remoteId) && !this.bindings.has(id) && [...this.drafting].some(draft =>
+        str(this.bindings.get(draft)?.['workerId']) === str(row['workerId']) && str(this.bindings.get(draft)?.['workspace']) === str(row['workspace']))) { deferred = true; continue }
+      this.bindings.set(id, { ...row, origin: new URL(this.origin).origin })
+    }
     await this.reconcilePresentationWorkspaces(groups)
-    await this.saveVersions().catch((error: unknown) => { this.host.logger.warn('Agent Bridge synced versions: ' + String(error)) })
-    this.error = failures.join('\n')
+    this.error = ''
     this.lastSyncAt = Date.now()
-    if (stream && !failures.length && !deferred) this.synced = { cursor: stream, at: this.lastSyncAt }
-    if (failures.length) this.host.logger.warn('Agent Bridge: ' + failures.length + ' session(s) failed to sync: ' + failures.slice(0, 3).join('; '))
-  }
-  async open(remoteId: string): Promise<Agent> {
-    const row = record(await this.bridge.call({ operation: 'session', args: { sessionId: remoteId } }, this.abort.signal))
-    return this.ensure(row)
-  }
-  async ensure(row: JsonObject): Promise<Agent> {
-    const remoteId = str(row['sessionId'])
-    if (!remoteId || !str(row['workerId'])) throw new Error('Bridge session identity is missing')
-    await this.loadAliases()
-    const id = this.nativeIdFor(remoteId)
-    let job = this.jobs.get(id)
-    if (!job) {
-      job = this.materialize(id, row).finally(() => { this.jobs.delete(id) })
-      this.jobs.set(id, job)
-    }
-    return job
-  }
-  private async workspace(row: JsonObject): Promise<{ cwd: string; title: string }> {
-    const path = str(row['workspace'])
-    const worker = this.workers.get(str(row['workerId']))
-    if (worker && this.isLocalWorker(worker) && isAbsolute(path)) {
-      try { return { cwd: await realpath(path), title: basename(path) } } catch { /* remote/missing paths use an isolated presentation directory */ }
-    }
-    const groupId = str(row['groupId'])
-    if (!groupId) throw new Error('Bridge session has no authoritative presentation group')
-    const key = 'group\0' + groupId
-    const planned = this.presentationPlacements.get(key)
-    if (planned) return { cwd: planned, title: str(row['groupTitle'], projectName(row)) }
-    const cwd = join(this.dataRoot, 'groups', hash(new URL(this.origin).origin + '\0' + groupId))
-    await mkdir(cwd, { recursive: true })
-    this.presentationPlacements.set(key, cwd)
-    return { cwd, title: str(row['groupTitle'], projectName(row)) }
-  }
-  private async materialize(id: string, row: JsonObject): Promise<Agent> {
-    this.abort.signal.throwIfAborted()
-    const remoteId = str(row['sessionId'])
-    const binding: JsonObject = { ...row, origin: new URL(this.origin).origin }
-    this.bindings.set(id, binding)
-    let agent = this.host.agents.get(id)
-    if (agent && this.isBusy(id)) return agent
-    const placement = await this.workspace(row)
-    placement.cwd = this.placementOverrides.get(id) ?? placement.cwd
-    const model = str(row['model'], 'remote')
-    if (!agent) {
-      const stored = await this.host.sessionPersistence.stat(id)
-      const options = { provider: PROVIDER, model }
-      const setup = async (ctx: Context) => { await this.host.agentPresets?.mount(ctx, PROVIDER) }
-      let handle: NativeHandle
-      if (stored) {
-        try { handle = await this.host.agents.resume({ resumeSessionId: id, agentOptions: options, setup }) }
-        catch (error) {
-          // A log another plugin release wrote in the other DSH generation's
-          // tool/result shape is refused whole; convert it once, then resume.
-          if (!isStoredSessionCorruption(error)) throw error
-          const repaired = await repairStoredToolResults(this.host.sessionPersistence, id, toolResultShape(this.host), this.dataRoot)
-            .catch((repairError: unknown) => { this.host.logger.warn(`Agent Bridge could not repair stored session "${id}": ${String(repairError)}`); return [] })
-          if (!repaired.length) throw error
-          this.host.logger.warn(`Agent Bridge repaired ${repaired.length} tool result(s) in stored session "${id}" (seq ${repaired.slice(0, 5).join(', ')})`)
-          handle = await this.host.agents.resume({ resumeSessionId: id, agentOptions: options, setup })
-        }
-      }
-      else {
-        const history = await readHistory(this.bridge, remoteId, undefined, this.abort.signal)
-        const time = Number(row['createdAt'] ?? row['updatedAt']) || Date.now()
-        const seed: NativeEvent[] = [{ type: bridgeRecordType(BINDING_EVENT), ignorable: true, data: binding, seq: 0, time }]
-        seed.push(...projectNativeEvents(history.rows, seed, model, toolResultShape(this.host), undefined, ['active', 'waiting_for_approval', 'waiting_for_input'].includes(str(binding['status'])) ? str(binding['activeTurnId']) || undefined : undefined))
-        // Empty retained histories still have a real, selectable presentation Session.
-        if (!seed.some(e => e.type === 'turn/start')) seed.push(
-          { type: 'turn/start', data: { turn: 1 }, seq: seed.length, time },
-          { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } }, seq: seed.length + 1, time },
-        )
-        seed.push({ type: 'session/title', data: { title: promptTitle(row, seed), messageSeqs: [], source: { kind: 'user' } }, seq: seed.length, time })
-        handle = await this.host.agents.create({ sessionId: id, meta: { cwd: placement.cwd, createdAt: time, agentPreset: PROVIDER }, seed, agentOptions: options, setup })
-        if (history.cursor) this.cursors.set(id, history.cursor)
-      }
-      this.handles.set(id, handle); agent = handle.agent
-    }
-    guardImportedTurnNumbers(nativeSession(agent))
-    await this.syncHistory(id, agent)
-    const session = nativeSession(agent)
-    const previousBinding = [...sessionEvents(session)].reverse().find(event => isBridgeRecord(event.type, BINDING_EVENT))
-    // Placement and status move on every sibling change and turn; the in-memory binding carries
-    // them and each sync refreshes them, so only a durable change is appended to the Session log.
-    if (!previousBinding || JSON.stringify(durableBinding(previousBinding.data)) !== JSON.stringify(durableBinding(binding))) appendBridgeRecord(session, BINDING_EVENT, binding)
-    const title = promptTitle(row, sessionEvents(session))
-    const previous = [...sessionEvents(session)].reverse().find(e => e.type === 'session/title')
-    const previousBindingTitle = previousBinding ? promptTitle(previousBinding.data, sessionEvents(session)) : ''
-    // Preserve explicit DSH renames, while allowing older importer-owned titles to improve.
-    if (previous?.data['title'] !== title && (!usefulTitle(previous?.data['title']) || previous?.data['title'] === previousBindingTitle)) session.append('session/title', { title, messageSeqs: [], source: { kind: 'user' } })
-    const cwd = session.header.cwd ?? placement.cwd
-    const missingRetainedCheckout = cwd !== placement.cwd && !await realpath(cwd).then(() => true, () => false)
-    if (!await this.host.sessions.flush(agent.session)) throw new Error('Native session has no persistence writer')
-    // DSH intentionally freezes the persisted Session header and validates it
-    // when attaching to a workspace. If that checkout was deleted, keep the
-    // conversation synchronized but do not retry an impossible attachment on
-    // every refresh tick; the native registry already filters its old entry.
-    if (missingRetainedCheckout || cwd !== placement.cwd) return agent
-    const workspace = await this.host.workspaceRegistry.resolveByPath(cwd) ?? await this.host.workspaceRegistry.create(cwd, placement.title)
-    await workspace.attachSession(id)
-    return agent
+    if (stream && !deferred) this.synced = { cursor: stream, at: this.lastSyncAt }
   }
   private preparePresentationPlacements(groups: readonly JsonObject[]): void {
     const workspaces = this.host.workspaceRegistry.list?.()
@@ -741,8 +549,7 @@ export class AgentBridgeImportTarget {
       const groupId = str(group['groupId']); const key = 'group\0' + groupId
       const rows = Array.isArray(group['sessions']) ? group['sessions'].map(record) : []
       const ids = new Set(rows.map(row => this.nativeIdFor(str(row['sessionId']))))
-      let workspaces = registry.list()
-      const members = workspaces.filter(workspace => workspace.sessionIds?.some(id => ids.has(id)))
+      const members = registry.list().filter(workspace => workspace.sessionIds?.some(id => ids.has(id)))
       const cwd = join(this.dataRoot, 'groups', hash(new URL(this.origin).origin + '\0' + groupId))
       let keep = members.find(workspace => workspace.path && !inside(this.dataRoot, workspace.path))
       keep ??= members.find(workspace => workspace.path === cwd)
@@ -760,12 +567,6 @@ export class AgentBridgeImportTarget {
         if (workspace === keep || !workspace.id || !workspace.path || !inside(this.dataRoot, workspace.path)) continue
         await registry.delete(workspace.id)
       }
-      workspaces = registry.list()
-      const accounted = new Set(workspaces.flatMap(workspace => workspace.sessionIds ?? []))
-      for (const id of ids) if (!accounted.has(id)) {
-        try { await registry.archiveSession?.(id) }
-        catch (error) { this.host.logger.warn(`Agent Bridge could not archive unaccounted session "${id}": ${String(error)}`) }
-      }
     }
     const activePresentationPaths = new Set(this.presentationPlacements.values())
     for (const workspace of registry.list()) {
@@ -775,22 +576,5 @@ export class AgentBridgeImportTarget {
       const obsoleteGroup = inside(groupRoot, workspace.path) && !activePresentationPaths.has(workspace.path)
       if (obsoleteLegacy || obsoleteProject || obsoleteGroup) await registry.delete(workspace.id)
     }
-  }
-  async syncHistory(id: string, agent = this.host.agents.get(id)): Promise<void> {
-    const binding = this.binding(id)
-    if (!agent || !binding || !str(binding['sessionId']) || this.isBusy(id)) return
-    let history: Awaited<ReturnType<typeof readHistory>>
-    try { history = await readHistory(this.bridge, str(binding['sessionId']), this.cursors.get(id), this.abort.signal) }
-    catch (error) {
-      if ((error as { code?: string }).code !== 'cursor_expired') throw error
-      this.cursors.delete(id)
-      history = await readHistory(this.bridge, str(binding['sessionId']), undefined, this.abort.signal)
-    }
-    // A native prompt may have started while the HTTP read was pending.
-    if (this.isBusy(id)) return
-    const session = nativeSession(agent)
-    for (const event of projectNativeEvents(history.rows, sessionEvents(session), str(binding['model'], 'remote'), toolResultShape(this.host), undefined, undefined, true)) appendSessionEvent(session, event)
-    if (history.cursor) this.cursors.set(id, history.cursor)
-    await this.host.sessions.flush(agent.session)
   }
 }

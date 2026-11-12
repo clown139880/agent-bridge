@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { Session, SessionId, SESSION_FORMAT_VERSION, KNOWN_SESSION_EVENT_TYPES, adoptSessionEvent } from '@deepseek-ai/dsh-session'
+import { Session, SessionId, SESSION_FORMAT_VERSION, KNOWN_SESSION_EVENT_TYPES } from '@deepseek-ai/dsh-session'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { JsonObject, JsonValue } from '../src/types.js'
 import { AgentBridgeImportTarget, nativeSessionId, readHistory } from '../src/agent-bridge-provider/import-target.js'
+import { bridgeRecordType } from '../src/agent-bridge-provider/records.js'
 import { ACK_EVENT, BINDING_EVENT, projectNativeEvents, projectStreamChunks, sameUserText } from '../src/agent-bridge-provider/mapping.js'
-import { nativeSession, sessionEvents, appendSessionEvent, guardImportedTurnNumbers, toolResultShape, conformToolResult, type NativeHost, type ToolResultShape, type NativeEvent } from '../src/agent-bridge-provider/dsh-compat.js'
+import { nativeSession, sessionEvents, appendSessionEvent, guardImportedTurnNumbers, toolResultShape, type NativeHost, type NativeWorkspace, type ToolResultShape, type NativeEvent } from '../src/agent-bridge-provider/dsh-compat.js'
 import { AgentBridgeLlmAdapter, stoppedByUser, toolProgressLine } from '../src/agent-bridge-provider/adapter.js'
 import { uploadPromptImages } from '../src/agent-bridge-provider/attachments.js'
 import type { AgentControlService } from '../src/service.js'
@@ -13,9 +14,7 @@ import type { BridgeClient } from '../src/bridge-client.js'
 import { ControlError } from '../src/errors.js'
 import { bridgeUserInputToQuestions, userInputAnswerToBridge, relayPendingInteractions } from '../src/agent-bridge-provider/approval-bridge.js'
 import type { Context } from '@deepseek-ai/cordis'
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
-import { constants, zstdCompressSync, zstdDecompressSync } from 'node:zlib'
-import { isStoredSessionCorruption, repairStoredToolResults, zstdFrames } from '../src/agent-bridge-provider/session-repair.js'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createRequire } from 'node:module'
@@ -50,15 +49,20 @@ async function fixture(rows = [row('u', 'message.completed', { role: 'user', tex
     agents.set(options.sessionId, agent)
     return { agent, dispose: async () => { agents.delete(options.sessionId) } }
   })
-  const resume = vi.fn(async (options: Parameters<NativeHost['agents']['resume']>[0]) => {
-    const old = stored.get(options.resumeSessionId)!
-    return create({ sessionId: options.resumeSessionId, meta: old.header as never, seed: [...old.events], agentOptions: options.agentOptions })
-  })
+  const registered: NativeWorkspace[] = []
   const host: NativeHost = {
-    agents: { create, resume, get: id => agents.get(id), list: () => [...agents.values()] },
+    agents: { create, get: id => agents.get(id), list: () => [...agents.values()] },
     sessions: { flush: vi.fn(async value => { const session = value as Session; stored.set(String(session.id), { header: session.header, events: sessionEvents(value as never) }); return true }) },
     sessionPersistence: { stat: async id => stored.get(id) },
-    workspaceRegistry: { resolveByPath: async () => undefined, create: vi.fn(async () => ({ attachSession: vi.fn(async () => {}) })) },
+    workspaceRegistry: {
+      list: () => registered, delete: async id => { const index = registered.findIndex(workspace => workspace.id === id); if (index < 0) return false; registered.splice(index, 1); return true },
+      resolveByPath: async path => registered.find(workspace => workspace.path === path),
+      create: vi.fn(async (path: string, title?: string) => {
+        const workspace: NativeWorkspace = { id: 'workspace-' + registered.length, path, title: title ?? path, sessionIds: [], setTitle: async next => { workspace.title = next }, attachSession: async id => { workspace.sessionIds = [id, ...(workspace.sessionIds ?? [])] } }
+        registered.push(workspace)
+        return workspace
+      }),
+    },
     emit: vi.fn(), logger: { warn: vi.fn() },
   }
   const bridge = { call: vi.fn<BridgeClient['call']>(async request => {
@@ -69,8 +73,19 @@ async function fixture(rows = [row('u', 'message.completed', { role: 'user', tex
     return page([])
   }) }
   const target = new AgentBridgeImportTarget(host, bridge, 'http://bridge.test', root)
-  return { target, host, bridge, agents, stored, create, resume }
+  return { target, host, bridge, agents, stored, create }
 }
+
+/** A native agent bound to remote-1, as a draft is once its first message created the Bridge session. */
+async function boundAgent(f: Awaited<ReturnType<typeof fixture>>): Promise<Agent> {
+  const id = nativeSessionId('http://bridge.test', 'remote-1')
+  const seed: NativeEvent[] = [{ type: bridgeRecordType(BINDING_EVENT), ignorable: true, data: { ...summary, origin: 'http://bridge.test' }, seq: 0, time: 1 }]
+  const { agent } = await f.host.agents.create({ sessionId: id, meta: { cwd: '/remote/repo', createdAt: 1, agentPreset: 'agent-bridge' }, seed, agentOptions: { provider: 'agent-bridge', model: 'remote' } })
+  guardImportedTurnNumbers(nativeSession(agent))
+  return agent
+}
+/** The directory DSH offers for a catalog session's project. */
+const projectPath = (f: Awaited<ReturnType<typeof fixture>>) => String((f.target.catalog()['sessions'] as JsonObject[])[0]!['presentationPath'])
 
 describe('native history projection', () => {
   it('does not split incremental observations when the remote summary incorrectly reports idle', () => {
@@ -201,43 +216,6 @@ describe('native history projection', () => {
     expect(toolResultShape(host({ ...presets, register: async () => async () => {} }))).toBe('tool-role')
     expect(toolResultShape(host({ ...presets, roots: [] }))).toBe('tool-result-block')
   })
-  it('converts stored Bridge tool results between the two DSH shapes', () => {
-    const rows = [row('cmd', 'command.completed', { command: 'false', output: 'boom', status: 'failed' })]
-    const result = (shape: ToolResultShape) => projectNativeEvents(rows, [], 'remote', shape).find(e => e.type === 'tool/result')!.data['message'] as JsonObject
-    expect(conformToolResult(result('tool-role'), 'tool-result-block')).toEqual(result('tool-result-block'))
-    expect(conformToolResult(result('tool-result-block'), 'tool-role')).toEqual(result('tool-role'))
-    expect(conformToolResult(result('tool-role'), 'tool-role')).toBeUndefined()
-    expect(conformToolResult(result('tool-result-block'), 'tool-result-block')).toBeUndefined()
-    // Only the plugin's own results are rewritten.
-    expect(conformToolResult({ ...result('tool-role'), id: 'local-1' }, 'tool-result-block')).toBeUndefined()
-  })
-  it('repairs a stored log written in the other DSH generation so it validates again', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'agent-bridge-repair-'))
-    try {
-      const id = 'agent-bridge-repair'
-      const path = join(directory, 'session.v3.jsonl.zstd')
-      const header = { type: 'session', version: 3, id, createdAt: 1, isSeeded: false, delegationDepth: 0, agentPreset: 'agent-bridge' }
-      // 0.1.63 appended tool-role results into a DSH 0.1.5 (block-shape) log.
-      const events = projectNativeEvents([row('cmd', 'command.completed', { command: 'pwd', output: '/repo' }), row('answer')], [], 'remote', 'tool-role')
-      const frame = (text: string) => zstdCompressSync(text, { params: { [constants.ZSTD_c_checksumFlag]: 1 } })
-      await writeFile(path, Buffer.concat([frame(JSON.stringify(header) + '\n'), ...events.map(event => frame(JSON.stringify(event) + '\n'))]))
-      const decode = async () => zstdFrames(await readFile(path)).map(part => zstdDecompressSync(part).toString('utf8'))
-      const stored = async () => (await decode()).join('').split('\n').filter(Boolean).slice(1).map(line => JSON.parse(line) as NativeEvent)
-      expect(() => (events.map(event => adoptSessionEvent(structuredClone(event) as never)))).toThrow(/must have role "user"/)
-      const persistence = { stat: async () => ({ header }), locate: () => ({ kind: 'jsonl', path }) }
-      expect(await repairStoredToolResults(persistence, id, 'tool-result-block', directory)).toEqual([events.find(e => e.type === 'tool/result')!.seq])
-      const repaired = await stored()
-      expect(() => repaired.map(event => adoptSessionEvent(event as never))).not.toThrow()
-      expect(repaired.map(e => e.type)).toEqual(events.map(e => e.type))
-      // DSH lists sessions by decoding only the first frame: it must stay the header alone.
-      expect((await decode())[0]).toBe(JSON.stringify(header) + '\n')
-      expect(await readdir(join(directory, 'session-repairs', id))).toHaveLength(1)
-      expect(await repairStoredToolResults(persistence, id, 'tool-result-block', directory)).toEqual([])
-      expect(isStoredSessionCorruption(new Error(`stored session "${id}" is corrupt`, { cause: new Error('x') }))).toBe(true)
-      expect(isStoredSessionCorruption(Object.assign(new Error('x'), { name: 'SessionPersistenceCorruptionError' }))).toBe(true)
-      expect(isStoredSessionCorruption(new Error('会话不存在'))).toBe(false)
-    } finally { await rm(directory, { recursive: true, force: true }) }
-  })
   it('deduplicates legacy history ids against canonical live App Server item ids', () => {
     const liveId = 'app-server:thread-1:exec-1:command'
     const legacyId = 'app-server:thread-1:turn-1:exec-1:history-command'
@@ -347,7 +325,7 @@ describe('native session catalog', () => {
     const sessions = () => f.target.catalog()['sessions'] as JsonObject[]
     await f.target.refresh()
     expect(sessions().map(item => item['nativeId'])).toEqual([a, b])
-    // Only B changed; A keeps its version and is not re-materialized, yet its position and group moved.
+    // Only B changed, yet A's position and group moved.
     summaries = [{ ...summaries[1]!, updatedAt: 30, lastPromptAt: 30 }, summaries[0]!]
     await f.target.refresh()
     expect(sessions().map(item => item['nativeId'])).toEqual([b, a])
@@ -357,32 +335,6 @@ describe('native session catalog', () => {
     summaries = [{ ...summaries[1]!, updatedAt: 40, lastResponseAt: 40 }, summaries[0]!]
     await f.target.refresh()
     expect(sessions().find(item => item['nativeId'] === a)).toMatchObject({ activityAt: 20 })
-  })
-  it('publishes a running state only when it changes and leaves unchanged idle sessions alone', async () => {
-    const f = await fixture()
-    let current: JsonObject = { ...summary, updatedAt: Date.now() }
-    const stale: JsonObject = { ...summary, sessionId: 'remote-old', updatedAt: 10 }
-    f.bridge.call.mockImplementation(async request => {
-      if (request.operation === 'workers') return { workers: [{ id: 'w', machineId: 'dev-wsl', name: 'Codex', status: 'online' }] }
-      if (request.operation === 'session_groups') return groupPage([current, stale])
-      if (request.operation === 'session_events') return page([])
-      return page([])
-    })
-    const statuses = () => (f.host.emit as ReturnType<typeof vi.fn>).mock.calls.filter(call => call[0] === 'api-session/status').map(call => [call[1], call[2]])
-    const id = nativeSessionId('http://bridge.test', 'remote-1')
-    await f.target.refresh()
-    expect(statuses()).toEqual([])
-    f.bridge.call.mockClear(); await f.target.refresh(); await f.target.refresh()
-    // DSH rebuilds its whole session list per status event: unchanged states are not republished.
-    expect(statuses()).toHaveLength(0)
-    expect(f.bridge.call.mock.calls.some(([request]) => request.operation === 'session_events')).toBe(false)
-    current = { ...current, status: 'active', updatedAt: Date.now() }
-    await f.target.refresh()
-    expect(statuses()).toEqual([[id, true]])
-    current = { ...current, status: 'idle', updatedAt: Date.now() }
-    await f.target.refresh()
-    expect(statuses().slice(1)).toEqual([[id, false]])
-    await f.target.dispose()
   })
   it('skips the catalog while the control-plane stream cursor has not moved', async () => {
     const f = await fixture()
@@ -400,48 +352,10 @@ describe('native session catalog', () => {
     expect(groups()).toBe(2)
     const id = nativeSessionId('http://bridge.test', 'remote-1')
     expect((f.target.catalog()['sessions'] as JsonObject[]).find(item => item['nativeId'] === id)?.['title']).toBe('renamed')
-    // Placement-only moves stay in memory instead of appending a binding event per poll.
-    const bindings = () => sessionEvents(nativeSession(f.agents.get(id)!)).filter(event => event.type === 'agent-bridge/binding').length
-    const before = bindings()
-    cursor = 'c:3:1'; current = { ...current, status: 'active', presentationOrder: 7, updatedAt: Date.now() + 2 }
+    cursor = 'c:3:1'; current = { ...current, status: 'active', updatedAt: Date.now() + 2 }
     await f.target.refresh()
-    expect(bindings()).toBe(before)
+    expect(f.target.sessionStatuses()).toEqual([{ sessionId: 'remote-1', status: 'active' }])
     await f.target.dispose()
-  })
-  it('keeps old stored sessions unloaded across a restart and syncs one when it is opened', async () => {
-    const f = await fixture()
-    let current: JsonObject = { ...summary }
-    f.bridge.call.mockImplementation(async request => {
-      if (request.operation === 'workers') return { workers: [{ id: 'w', machineId: 'dev-wsl', name: 'Codex', status: 'online' }] }
-      if (request.operation === 'session_groups') return groupPage([current])
-      if (request.operation === 'session_events') return page(request.args?.['after'] ? [] : [row('u', 'message.completed', { role: 'user', text: 'hello' })])
-      return page([])
-    })
-    const id = nativeSessionId('http://bridge.test', 'remote-1')
-    await f.target.refresh()
-    expect(f.agents.has(id)).toBe(true)
-    const dataRoot = (f.target as unknown as { dataRoot: string }).dataRoot
-    await f.target.dispose(); f.agents.delete(id)
-    // A restart does not resume an old idle session, and does not re-sync it while it changes.
-    const restarted = new AgentBridgeImportTarget(f.host, f.bridge, 'http://bridge.test', dataRoot)
-    restarted.start()
-    await restarted.refresh()
-    expect(f.agents.has(id)).toBe(false)
-    expect(restarted.binding(id)?.['title']).toBe('Remote conversation')
-    current = { ...current, title: 'Changed while cold', updatedAt: 20 }
-    f.resume.mockClear()
-    await restarted.refresh()
-    expect(f.resume).not.toHaveBeenCalled()
-    // Opening it in DSH loads it; the provider hands the loaded agent over for a catch-up sync.
-    await f.host.agents.resume({ resumeSessionId: id, agentOptions: { provider: 'agent-bridge', model: 'remote' } })
-    restarted.adopt(id)
-    await vi.waitFor(() => expect(f.stored.get(id)?.events.some(event => event.type === 'session/title' && event.data['title'] === 'Changed while cold')).toBe(true))
-    // Activity makes it hot again, and hot sessions are loaded and synchronized.
-    f.agents.delete(id)
-    current = { ...current, updatedAt: Date.now() }
-    await restarted.refresh()
-    expect(f.agents.has(id)).toBe(true)
-    await restarted.dispose()
   })
   it('does not report remote deletion as failed when stale local cleanup rejects', async () => {
     const f = await fixture()
@@ -477,8 +391,7 @@ describe('native session catalog', () => {
       {id:'other',machineId:'machine-b',hostname:'remote-host',name:'Other machine',status:'online'},
     ]} : originalCall(request,signal))
     await f.target.refresh()
-    const agent = [...f.agents.values()][0]!
-    const cwd = nativeSession(agent).header.cwd!
+    const cwd = projectPath(f)
     const sources = (await f.target.creationSources(cwd))['sources'] as JsonObject[]
     expect(sources.map(source => source['workerId'])).toEqual(['w','claude'])
     expect(sources.every(source => source['workspace'] === '/remote/repo')).toBe(true)
@@ -486,15 +399,14 @@ describe('native session catalog', () => {
     expect(f.bridge.call.mock.calls.some(([request]) => request.operation === 'create_session')).toBe(false)
     await f.target.dispose()
   })
-  it('resolves cold catalog bindings without loading their native agents and keeps the draft in the same group', async () => {
+  it('resolves catalog bindings without native agents and keeps the draft in the same group', async () => {
     const f = await fixture()
     const original = f.bridge.call.getMockImplementation()!
     f.bridge.call.mockImplementation(async (request, signal) => request.operation === 'workers'
       ? { workers: [{ id: 'w', machineId: 'remote', hostname: 'remote-host', status: 'online' }] } : original(request, signal))
     await f.target.refresh()
     const id = nativeSessionId('http://bridge.test', 'remote-1')
-    const cwd = nativeSession(f.agents.get(id)!).header.cwd!
-    f.agents.delete(id)
+    const cwd = projectPath(f)
     const sources = (await f.target.creationSources(cwd))['sources'] as JsonObject[]
     expect(sources.map(source => source['id'])).toEqual(['w\0/remote/repo'])
     const draft = await f.target.createInWorkspace(cwd, 'w\0/remote/repo')
@@ -518,7 +430,7 @@ describe('native session catalog', () => {
       if (request.operation === 'action') {
         // A sync while the action is pending must not claim the draft's new session.
         await f.target.refresh()
-        expect(f.agents.has(nativeSessionId('http://bridge.test', 'remote-new'))).toBe(false)
+        expect(f.target.binding(nativeSessionId('http://bridge.test', 'remote-new'))).toBeUndefined()
         return { actionId: 'create', status: 'succeeded', sessionId: 'remote-new', turnId: 't1' }
       }
       if (request.operation === 'session_events') return page(request.args?.['sessionId'] === 'remote-new' && created ? [
@@ -530,7 +442,7 @@ describe('native session catalog', () => {
       return page([])
     })
     await f.target.refresh()
-    const cwd = nativeSession(f.agents.get(nativeSessionId('http://bridge.test', 'remote-1'))!).header.cwd!
+    const cwd = projectPath(f)
     const draft = await f.target.createInWorkspace(cwd, 'w\0/remote/repo')
     const draftId = String(draft.id)
     expect(f.bridge.call.mock.calls.some(([request]) => request.operation === 'create_session')).toBe(false)
@@ -560,7 +472,7 @@ describe('native session catalog', () => {
     const restarted = new AgentBridgeImportTarget(f.host, f.bridge, 'http://bridge.test', (f.target as unknown as { dataRoot: string }).dataRoot)
     f.agents.delete(draftId)
     await restarted.refresh()
-    // An old stored session stays unloaded after a restart, still bound to the draft.
+    // The restarted catalog still binds the remote session to the draft.
     expect(restarted.binding(draftId)?.['sessionId']).toBe('remote-new')
     expect(f.agents.has(nativeSessionId('http://bridge.test', 'remote-new'))).toBe(false)
     await f.target.dispose(); await restarted.dispose()
@@ -571,7 +483,7 @@ describe('native session catalog', () => {
     f.bridge.call.mockImplementation(async (request, signal) => request.operation === 'workers'
       ? { workers: [{ id: 'w', machineId: 'dev-wsl', hostname: 'remote-host', name: 'Codex', status: 'online' }] } : originalCall(request, signal))
     await f.target.refresh()
-    const cwd = nativeSession(f.agents.get(nativeSessionId('http://bridge.test', 'remote-1'))!).header.cwd!
+    const cwd = projectPath(f)
     const draftId = String((await f.target.createInWorkspace(cwd, 'w\0/remote/repo')).id)
     f.host.workspaceRegistry.archiveSession = vi.fn(async () => {})
     await expect(f.target.deleteNative(draftId)).resolves.toMatchObject({ deleted: true, nativeId: draftId })
@@ -596,7 +508,7 @@ describe('native session catalog', () => {
       return page([])
     })
     await f.target.refresh()
-    const cwd = nativeSession(f.agents.get(nativeSessionId('http://bridge.test', 'remote-1'))!).header.cwd!
+    const cwd = projectPath(f)
     const sources = (await f.target.creationSources(cwd))['sources'] as JsonObject[]
     expect(sources.map(source => ({ name: source['name'], machineId: source['machineId'], workspace: source['workspace'] }))).toEqual([
       { name: 'Codex @ dev-wsl', machineId: 'dev-wsl', workspace: '/remote/repo' },
@@ -607,58 +519,36 @@ describe('native session catalog', () => {
     expect(sources.map(source => source['agentType'])).toEqual(['', ''])
     await f.target.dispose()
   })
-  it('automatically merges remote sessions into the native registry without touching native sessions', async () => {
+  it('records catalog bindings without creating, resuming or archiving native sessions', async () => {
     const f = await fixture()
+    const archive = vi.fn(async () => {})
+    f.host.workspaceRegistry.archiveSession = archive
     f.agents.set('local-session', { id: 'local-session' } as Agent)
+    const now = Date.now()
+    const summaries: JsonObject[] = [{ ...summary, status: 'active', updatedAt: now }, { ...summary, sessionId: 'remote-2', updatedAt: now - 1 }, { ...summary, sessionId: 'remote-old', updatedAt: 10 }]
+    f.bridge.call.mockImplementation(async request => {
+      if (request.operation === 'workers') return { workers: [{ id: 'w', machineId: 'dev-wsl', hostname: 'remote-host', name: 'Codex', status: 'online', recentWorkspaces: [{ path: '/remote/repo', lastUsedAt: 123 }] }] }
+      if (request.operation === 'session_groups') return groupPage(summaries)
+      return page([])
+    })
     await f.target.refresh()
-    const id = nativeSessionId('http://bridge.test', 'remote-1')
-    expect([...f.agents.keys()]).toEqual(['local-session', id])
-    expect(f.target.binding(id)?.['workspace']).toBe('/remote/repo')
-    expect((f.target.catalog()['sessions'] as JsonObject[])[0]).toMatchObject({ lastUsedAt: 123, projectIdentity: 'github.com/example/repo' })
+    await f.target.refresh()
+    // Running, recent and old sessions alike: no agent, no stored log, no history read, no status event, no archive.
+    expect([...f.agents.keys()]).toEqual(['local-session'])
+    expect(f.create).not.toHaveBeenCalled()
+    expect(f.stored.size).toBe(0)
+    expect(f.bridge.call.mock.calls.some(([request]) => request.operation === 'session_events')).toBe(false)
+    expect(f.host.emit).not.toHaveBeenCalled()
+    expect(archive).not.toHaveBeenCalled()
+    const ids = summaries.map(item => nativeSessionId('http://bridge.test', String(item['sessionId'])))
+    const sessions = f.target.catalog()['sessions'] as JsonObject[]
+    expect(sessions.map(item => item['nativeId'])).toEqual(ids)
+    expect(f.target.binding(ids[0]!)).toMatchObject({ sessionId: 'remote-1', workspace: '/remote/repo', status: 'active', origin: 'http://bridge.test' })
+    expect(sessions[0]).toMatchObject({ lastUsedAt: 123, projectIdentity: 'github.com/example/repo' })
+    // The project workspace is where a new session in it is created.
+    expect(f.host.workspaceRegistry.create).toHaveBeenCalledTimes(1)
     expect(f.host.workspaceRegistry.create).toHaveBeenCalledWith(expect.stringContaining('groups'), 'repo')
-    expect(f.stored.has(id)).toBe(true)
-    await f.target.refresh()
-    expect(f.create).toHaveBeenCalledTimes(1)
-    expect(sessionEvents(nativeSession(f.agents.get(id)!)).filter(e => e.type === 'user/message')).toHaveLength(1)
     await f.target.dispose()
-  })
-  it('single-flights opening and resumes persisted native identity without duplicating history', async () => {
-    const f = await fixture()
-    const [a, b] = await Promise.all([f.target.ensure(summary), f.target.ensure(summary)])
-    expect(a).toBe(b)
-    expect(f.create).toHaveBeenCalledTimes(1)
-    f.agents.delete(String(a.id))
-    await f.target.ensure(summary)
-    expect(f.resume).toHaveBeenCalledTimes(1)
-    expect(sessionEvents(nativeSession(f.agents.get(String(a.id))!)).filter(e => e.type === 'assistant/message')).toHaveLength(1)
-    await f.target.dispose()
-  })
-  it('repairs a stored session refused for its tool/result shape, then resumes it', async () => {
-    const f = await fixture([])
-    const id = nativeSessionId('http://bridge.test', 'remote-1')
-    const header = { type: 'session', version: SESSION_FORMAT_VERSION, id, createdAt: 1, isSeeded: false, delegationDepth: 0 }
-    const events = projectNativeEvents([row('cmd', 'command.completed', { command: 'pwd', output: '/repo' })], [], 'remote', 'tool-role')
-    const path = join(roots[0]!, 'session.v3.jsonl')
-    await writeFile(path, [header, ...events].map(line => JSON.stringify(line) + '\n').join(''))
-    const { type: _type, ...meta } = header
-    f.stored.set(id, { header: meta, events: [] })
-    f.host.sessionPersistence.locate = () => ({ kind: 'jsonl', path })
-    const corrupt = new Error(`stored session "${id}" is corrupt: stored session "${id}" failed validation: Error: session event at seq 3 message must have role "user"`)
-    f.resume.mockRejectedValueOnce(corrupt)
-    await f.target.open('remote-1')
-    expect(f.resume).toHaveBeenCalledTimes(2)
-    expect(f.host.logger.warn).toHaveBeenCalledWith(expect.stringContaining('repaired 1 tool result(s)'))
-    const repaired = (await readFile(path, 'utf8')).split('\n').filter(Boolean).slice(1).map(line => JSON.parse(line) as NativeEvent)
-    expect(() => repaired.map(event => adoptSessionEvent(event as never))).not.toThrow()
-    // Nothing left to repair: the refusal is surfaced instead of looping.
-    await f.target.dispose()
-    const g = await fixture([])
-    g.stored.set(id, { header: meta, events: [] })
-    g.host.sessionPersistence.locate = () => ({ kind: 'jsonl', path })
-    g.resume.mockRejectedValueOnce(corrupt)
-    await expect(g.target.open('remote-1')).rejects.toBe(corrupt)
-    expect(g.resume).toHaveBeenCalledTimes(1)
-    await g.target.dispose()
   })
   it('replaces legacy per-location presentation workspaces with one durable project workspace', async () => {
     const f = await fixture([])
@@ -692,7 +582,7 @@ describe('native session catalog', () => {
     expect(registered.map(workspace => workspace.id)).toEqual(['project'])
     expect(createWorkspace).toHaveBeenCalledWith(expect.stringContaining('groups'), 'repo')
     expect(f.host.workspaceRegistry.delete).toHaveBeenCalledTimes(3)
-    expect(f.host.workspaceRegistry.archiveSession).toHaveBeenCalledTimes(2)
+    expect(f.host.workspaceRegistry.archiveSession).not.toHaveBeenCalled()
     expect((f.target.catalog()['sessions'] as JsonObject[]).every(item => String(item['presentationPath']).includes('groups'))).toBe(true)
     await f.target.refresh()
     expect(createWorkspace).toHaveBeenCalledTimes(1)
@@ -744,29 +634,6 @@ describe('native session catalog', () => {
     expect(registered.map(workspace => workspace.id)).toEqual(['real'])
     expect(createWorkspace).not.toHaveBeenCalled()
     expect(new Set((f.target.catalog()['sessions'] as JsonObject[]).map(item => item['presentationPath'])).size).toBe(1)
-    await f.target.dispose()
-  })
-  it('keeps syncing without retrying workspace attachment after a retained checkout disappears', async () => {
-    const f = await fixture()
-    const agent = await f.target.ensure(summary)
-    const id = String(agent.id)
-    const stored = f.stored.get(id)!
-    const missing = join(roots[0]!, 'removed-checkout')
-    stored.header = { ...(stored.header as object), cwd: missing }
-    f.agents.delete(id)
-    await f.target.ensure(summary)
-    expect(f.host.workspaceRegistry.create).toHaveBeenCalledTimes(1)
-    expect(sessionEvents(nativeSession(f.agents.get(id)!)).filter(e => e.type === 'assistant/message')).toHaveLength(1)
-    await f.target.dispose()
-  })
-  it('does not append imported turns while the native loop is running', async () => {
-    const f = await fixture()
-    const agent = await f.target.ensure(summary)
-    const count = sessionEvents(nativeSession(agent)).length
-    f.target.setBusy(String(agent.id), true)
-    await f.target.ensure({ ...summary, updatedAt: 20 })
-    expect(sessionEvents(nativeSession(agent))).toHaveLength(count)
-    f.target.setBusy(String(agent.id), false)
     await f.target.dispose()
   })
 })
@@ -865,7 +732,7 @@ describe('Bridge native turn', () => {
   })
   it('settles on the matching remote turn, excludes old/foreign output and does not execute remote tools locally', async () => {
     const f = await fixture([])
-    const agent = await f.target.ensure(summary)
+    const agent = await boundAgent(f)
     let submitted = false
     f.bridge.call.mockImplementation(async request => {
       if (request.operation === 'session_events') return page(submitted ? [
@@ -903,7 +770,7 @@ describe('Bridge native turn', () => {
   })
   it('shows a subagent as one card listing its steps, never as thinking', async () => {
     const f = await fixture([])
-    const agent = await f.target.ensure(summary)
+    const agent = await boundAgent(f)
     let submitted = false
     f.bridge.call.mockImplementation(async request => {
       if (request.operation === 'session_events') return page(submitted ? [
@@ -932,7 +799,7 @@ describe('Bridge native turn', () => {
   })
   it('presents assistant text after a remote tool below that tool, not above it', async () => {
     const f = await fixture([])
-    const agent = await f.target.ensure(summary)
+    const agent = await boundAgent(f)
     let submitted = false
     f.bridge.call.mockImplementation(async request => {
       if (request.operation === 'session_events') return page(submitted ? [
@@ -955,7 +822,7 @@ describe('Bridge native turn', () => {
   })
   it('shows each text and tool while the remote turn still runs, not when it ends', async () => {
     const f = await fixture([])
-    const agent = await f.target.ensure(summary)
+    const agent = await boundAgent(f)
     const batches = [
       [row('plan', 'message.completed', { role: 'assistant', text: 'checking' }), row('cmd', 'command.completed', { command: 'pwd', output: '/repo' })],
       [row('edit', 'file_change.completed', { changes: [{ path: 'a.ts' }] }), row('note', 'message.completed', { role: 'assistant', text: 'one more' })],
@@ -989,9 +856,9 @@ describe('Bridge native turn', () => {
     expect(shown(events)).toEqual(['text:checking', 'tool:bridge:cmd', 'tool:bridge:edit', 'text:one more', 'tool:bridge:grep', 'text:done'])
     await f.target.dispose()
   })
-  it('keeps what a stopped turn showed and never shows it again after the turn or a restart', async () => {
+  it('keeps what a stopped turn showed', async () => {
     const f = await fixture([])
-    const agent = await f.target.ensure(summary)
+    const agent = await boundAgent(f)
     const rows = [row('plan', 'message.completed', { role: 'assistant', text: 'checking' }), row('cmd', 'command.completed', { command: 'pwd', output: '/repo' }),
       row('half', 'message.completed', { role: 'assistant', text: 'half an answer' })]
     let submitted = false
@@ -1013,23 +880,14 @@ describe('Bridge native turn', () => {
     const { error } = await nativeTurn(agent, adapter, { signal: stop.signal })
     expect(error).toBeDefined()
     expect(f.bridge.call).toHaveBeenCalledWith({ operation: 'interrupt_turn', args: { sessionId: 'remote-1', expectedTurnId: 't1' } })
-    let events = sessionEvents(nativeSession(agent))
+    const events = sessionEvents(nativeSession(agent))
     expectSessionInvariants(events)
     expect(shown(events)).toEqual(['text:checking', 'tool:bridge:cmd', 'text:half an answer'])
-    // The background sync and a restarted plugin read the whole history again: nothing repeats.
-    f.bridge.call.mockImplementation(async request => request.operation === 'session_events' ? page([...rows, row('end', 'turn.interrupted', { status: 'interrupted' })])
-      : request.operation === 'session' ? summary : page([]))
-    await f.target.syncHistory(String(agent.id))
-    const restarted = new AgentBridgeImportTarget(f.host, f.bridge, 'http://bridge.test', (f.target as unknown as { dataRoot: string }).dataRoot)
-    await restarted.syncHistory(String(agent.id))
-    events = sessionEvents(nativeSession(agent))
-    expectSessionInvariants(events)
-    expect(shown(events)).toEqual(['text:checking', 'tool:bridge:cmd', 'text:half an answer'])
-    await f.target.dispose(); await restarted.dispose()
+    await f.target.dispose()
   })
   it('forwards a worker-scoped model selection on a new Bridge turn', async () => {
     const f = await fixture([])
-    const agent = await f.target.ensure(summary)
+    const agent = await boundAgent(f)
     let submitted = false
     f.bridge.call.mockImplementation(async request => {
       if (request.operation === 'session') return summary
@@ -1054,7 +912,7 @@ describe('Bridge native turn', () => {
   })
   it('reports failed receipts rather than emitting a successful finish', async () => {
     const f = await fixture([])
-    const agent = await f.target.ensure(summary)
+    const agent = await boundAgent(f)
     f.bridge.call.mockImplementation(async request => request.operation === 'session_events' ? page([]) :
       request.operation === 'submit_turn' ? { actionId: 'a', status: 'failed', error: { message: 'offline' } } : summary)
     const adapter = new AgentBridgeLlmAdapter({ bridge: f.bridge } as unknown as AgentControlService, f.target, 1)
@@ -1064,7 +922,7 @@ describe('Bridge native turn', () => {
   })
   it('finishes an idle turn when retained history repeats without a cursor or completion event', async () => {
     const f = await fixture([])
-    const agent = await f.target.ensure(summary)
+    const agent = await boundAgent(f)
     let submitted = false
     f.bridge.call.mockImplementation(async request => {
       if (request.operation === 'session_events') return page(submitted ? [row('answer', 'message.completed', { role: 'assistant', text: 'done' })] : [])
@@ -1081,7 +939,7 @@ describe('Bridge native turn', () => {
   })
   it('rejects successful actions without a turn identity instead of polling forever', async () => {
     const f = await fixture([])
-    const agent = await f.target.ensure(summary)
+    const agent = await boundAgent(f)
     f.bridge.call.mockImplementation(async request => request.operation === 'session_events' ? page([]) :
       request.operation === 'submit_turn' ? { actionId: 'a', status: 'succeeded' } : { ...summary, activeTurnId: null })
     const adapter = new AgentBridgeLlmAdapter({ bridge: f.bridge } as unknown as AgentControlService, f.target, 1)
@@ -1200,43 +1058,5 @@ describe('remote turn cancellation', () => {
     expect(stoppedByUser({ kind: 'disposed' })).toBe(false)
     expect(stoppedByUser(new Error('agent "a" lifecycle disposed'))).toBe(false)
     expect(stoppedByUser(new Error('agent loop is not active'))).toBe(false)
-  })
-})
-
-describe('synchronization cache recovery', () => {
-  it('continues importing conversations after preserving a corrupt cache', async () => {
-    const { target, agents, host } = await fixture()
-    const path = join(target.dataRoot, 'synced-versions.json')
-    await writeFile(path, Buffer.alloc(22219))
-    await target.refresh()
-    expect(target.error).toBe('')
-    expect(agents.size).toBe(1)
-    expect(host.logger.warn).toHaveBeenCalledWith(expect.stringContaining('original preserved'))
-    expect(JSON.parse(await readFile(path, 'utf8'))).toHaveProperty(nativeSessionId('http://bridge.test', 'remote-1'), 10)
-    await target.dispose()
-  })
-
-  it('retries a failed cache read rather than retaining a rejected promise', async () => {
-    const { target } = await fixture()
-    const path = join(target.dataRoot, 'synced-versions.json')
-    await mkdir(path)
-    await expect(target.refresh()).rejects.toThrow()
-    await rm(path, { recursive: true })
-    await writeFile(path, '{}')
-    await expect(target.refresh()).resolves.toBeUndefined()
-    expect(target.error).toBe('')
-    await target.dispose()
-  })
-
-  it('retries failed cache writes even when the conversation version is unchanged', async () => {
-    const { target } = await fixture()
-    const path = join(target.dataRoot, 'synced-versions.json')
-    await (target as unknown as { loadVersions(): Promise<void> }).loadVersions()
-    await mkdir(path)
-    await target.refresh()
-    await rm(path, { recursive: true })
-    await target.refresh()
-    expect(JSON.parse(await readFile(path, 'utf8'))).toHaveProperty(nativeSessionId('http://bridge.test', 'remote-1'), 10)
-    await target.dispose()
   })
 })

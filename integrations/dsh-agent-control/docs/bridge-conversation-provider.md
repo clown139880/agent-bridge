@@ -27,26 +27,22 @@ materialization is an implementation detail, not another user entry point.
 ## Data path
 
 Bridge workers + server-paginated presentation groups
-  -> AgentBridgeImportTarget materialization
-  -> stable native ID / history projection / workspace attachment
-  -> DSH AgentRegistry + Session persistence
+  -> AgentBridgeImportTarget catalog bindings + presentation workspaces
+  -> client virtual sessions (`bridge-remote-*`, see remote-sessions.md)
   -> DSH sessionQuery / original Sessions tree
 
-Native composer
+Native composer (a draft created in a Bridge project)
   -> agent-scoped route selection
   -> AgentBridgeLlmAdapter
   -> submit_turn + ephemeral live deltas + retained event cursors + action/turn settlement
   -> DSH stream chunks / native session history
 
-The implementation materializes presentation agents with no remote subprocess
-per native agent. Explicit creation or user prompts submit Bridge actions. Initial
-retained history is hydrated with four concurrent jobs; subsequent reconciliation
-uses changed metadata, live status and per-session cursors. Reconciliation runs
-every five seconds and is abortable. An individual session failure does not hide
-all other native or Bridge sessions.
-
-This first implementation hydrates retained history eagerly. Lazy cold-session
-hydration is a future optimization, not a different UI entry point.
+Since 0.7.3 a remote Bridge session is never stored as a native DSH session: the
+catalog only records its binding and the virtual session reads its history on
+demand. Reconciliation runs every five seconds and is abortable. Only a draft
+keeps a native agent, from its creation until its first message makes it a Bridge
+session. The older text below still describes materialized `agent-bridge-*`
+sessions in places; it is historical.
 
 ## Identity and workspaces
 

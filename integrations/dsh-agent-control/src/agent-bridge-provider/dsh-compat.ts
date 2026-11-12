@@ -18,10 +18,9 @@ export interface NativeHost {
     get(id: string): Agent | undefined
     list(): Agent[]
     create(options: { sessionId: string; meta: { cwd: string; createdAt: number; agentPreset: string }; seed: NativeEvent[]; agentOptions: { provider: string; model: string }; setup?(ctx: Context): Promise<void> }): Promise<NativeHandle>
-    resume(options: { resumeSessionId: string; agentOptions: { provider: string; model: string }; setup?(ctx: Context): Promise<void> }): Promise<NativeHandle>
   }
   sessions: { flush(session: unknown): Promise<boolean> }
-  sessionPersistence: { stat(id: string): Promise<unknown>; locate?(header: unknown): { kind?: string; path?: string } | undefined }
+  sessionPersistence: { stat(id: string): Promise<unknown> }
   workspaceRegistry: {
     archiveSession?(id: string): Promise<void>
     list?(): NativeWorkspace[]
@@ -58,23 +57,6 @@ export function toolResultMessage(id: string, callId: string, text: string, isEr
   return shape === 'tool-role'
     ? { id, role: 'tool', toolCallId: callId, isError, source: { kind: 'tool', callId }, content }
     : { id, role: 'user', source: { kind: 'tool', callId }, content: [{ type: 'tool-result', toolCallId: callId, content, isError }] }
-}
-/**
- * The same tool/result message in `shape`, or undefined when it already conforms.
- * A log written under one DSH generation is refused whole by the other, so a
- * stored Bridge session is repaired by converting its own (`bridge:`) results.
- */
-export function conformToolResult(message: JsonObject, shape: ToolResultShape): JsonObject | undefined {
-  const id = typeof message['id'] === 'string' ? message['id'] : ''
-  const source = message['source'] && typeof message['source'] === 'object' && !Array.isArray(message['source']) ? message['source'] : {}
-  const callId = typeof source['callId'] === 'string' ? source['callId'] : ''
-  const content = Array.isArray(message['content']) ? message['content'] : []
-  const block = content.length === 1 && content[0] && typeof content[0] === 'object' && !Array.isArray(content[0]) && content[0]['type'] === 'tool-result' ? content[0] : undefined
-  if (!id.startsWith('bridge:') || !callId) return undefined
-  if (shape === 'tool-role' ? message['role'] === 'tool' && message['toolCallId'] === callId && !block : message['role'] === 'user' && block?.['toolCallId'] === callId && Array.isArray(block['content'])) return undefined
-  const inner = block && Array.isArray(block['content']) ? block['content'] : content
-  const text = inner.map(part => part && typeof part === 'object' && !Array.isArray(part) && part['type'] === 'text' && typeof part['text'] === 'string' ? part['text'] : '').join('')
-  return toolResultMessage(id, callId, text, (block?.['isError'] ?? message['isError']) === true, shape)
 }
 export interface NativeWorkspace { id?: string; path?: string; title?: string; sessionIds?: readonly string[]; setTitle?(title: string): Promise<void>; attachSession(id: string): Promise<void> }
 export function nativeHost(ctx: Context): NativeHost { return ctx as unknown as NativeHost }

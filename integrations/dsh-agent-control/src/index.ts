@@ -14,6 +14,7 @@ export * from './types.js'
 export { AgentBridgeImportTarget } from './agent-bridge-provider/import-target.js'
 export { AgentBridgeLlmAdapter } from './agent-bridge-provider/adapter.js'
 export { projectNativeEvents } from './agent-bridge-provider/mapping.js'
+export { guardImportedTurnNumbers } from './agent-bridge-provider/dsh-compat.js'
 export { MUTATING_TOOL_NAMES, TOOL_SPECS } from './tools.js'
 export const name = 'agent-control'
 export const inject = ['tools', 'systemPrompt', 'connection']

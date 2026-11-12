@@ -67,11 +67,10 @@ export class AgentControlService {
         return { nativeSessionId: String(agent.id) }
       }
       if (request.operation === 'import') {
-        if (!this.importTarget) throw new ControlError('invalid_operation', 'AgentBridge import target is not registered.', 400)
         const sessionId = args['sessionId']
         if (typeof sessionId !== 'string' || !sessionId) throw new ControlError('invalid_parameter', 'sessionId is required.', 400)
-        const agent = await this.importTarget.open(sessionId)
-        return { nativeSessionId: typeof agent.id === 'string' ? agent.id : sessionId }
+        // A Bridge session is opened as its virtual session; nothing is stored natively.
+        return { nativeSessionId: virtualSessionId(this.config.bridge.origin, sessionId) }
       }
       if (!BRIDGE_OPERATIONS.has(request.operation as BridgeCall['operation'])) throw new ControlError('invalid_operation', 'Unknown Bridge operation.', 400)
       return this.bridge.call({ operation: request.operation as BridgeCall['operation'], args }, signal)
