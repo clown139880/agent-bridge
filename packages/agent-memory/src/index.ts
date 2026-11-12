@@ -132,25 +132,44 @@ export class AgentMemory {
   // ---- scopes ----
 
   scopes(): ScopeInfo[] {
+    return this.keptScopes().map((info) => structuredClone(info));
+  }
+
+  scope(id: string): ScopeInfo {
+    return structuredClone(this.keptScope(id));
+  }
+
+  /**
+   * The scope a chat room is bound to: one active scope listing it, as resolveScope's room step, without the
+   * resolution's sync-conflict walk. The session list asks this for every relayed row.
+   */
+  roomScope(roomId: string): ScopeInfo | undefined {
+    const room = roomRef(roomId);
+    const hits = this.keptScopes().filter((scope) => scope.status !== "archived" && scope.rooms.includes(room));
+    return hits.length === 1 ? structuredClone(hits[0]!) : undefined;
+  }
+
+  /** The kept parsed scopes; never handed out, so callers cannot alter them. */
+  private keptScopes(): ScopeInfo[] {
     const result: ScopeInfo[] = [];
     for (const name of readdirSync(this.scopesDir).sort()) {
       if (!SCOPE_SLUG.test(name) || !existsSync(join(this.scopesDir, name, "scope.md"))) continue;
-      try { result.push(this.scope(name)); } catch { /* reported by lint() */ }
+      try { result.push(this.keptScope(name)); } catch { /* reported by lint() */ }
     }
     return result;
   }
 
-  scope(id: string): ScopeInfo {
+  private keptScope(id: string): ScopeInfo {
     if (!SCOPE_SLUG.test(id)) throw new MemoryError("invalid_scope", id);
     const file = join(this.scopesDir, id, "scope.md");
     if (!existsSync(file)) throw new MemoryError("unknown_scope", id);
     const stat = statSync(file, { bigint: true });
     const stamp = `${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`;
     const cached = this.parsedScopes.get(id);
-    if (cached?.stamp === stamp) return structuredClone(cached.info);
+    if (cached?.stamp === stamp) return cached.info;
     const info = this.readScope(id, readFileSync(file, "utf8"));
     this.parsedScopes.set(id, { stamp, info });
-    return structuredClone(info);
+    return info;
   }
 
   private readScope(id: string, text: string): ScopeInfo {
@@ -179,7 +198,7 @@ export class AgentMemory {
    * scope for an unbound room, or for an unbound repository/location.
    */
   resolveScope(locator: ScopeLocator, create?: { writer: Writer }): ScopeResolution {
-    const scopes = this.scopes().filter((scope) => scope.status !== "archived");
+    const scopes = this.keptScopes().filter((scope) => scope.status !== "archived");
     const room = locator.roomId ? roomRef(locator.roomId) : undefined;
     const repository = locator.repository ? normalizeRepository(locator.repository) : undefined;
     const path = locator.cwd ? normalizePath(locator.cwd) : undefined;
@@ -217,7 +236,7 @@ export class AgentMemory {
   }
 
   private resolution(scope: string, matched: ScopeResolution["matched"], created: boolean): ScopeResolution {
-    const info = this.scope(scope);
+    const info = this.keptScope(scope);
     return { scope, matched, created, revision: info.revision, prefetch: info.prefetch, warnings: this.syncConflicts(scope) };
   }
 

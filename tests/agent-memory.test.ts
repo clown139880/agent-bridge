@@ -86,6 +86,8 @@ test("a parsed scope is reused until its scope.md changes, and callers cannot al
     scopeFile("travel", "旅行", "  matrix_rooms: [\"!trip:example.org\"]\n  repositories: []\n  locations: []"));
   assert.equal(memory.scope("travel").title, "旅行");
   assert.equal(memory.resolveScope({ roomId: "!trip:example.org" }).scope, "travel");
+  assert.equal(memory.roomScope("!trip:example.org:$thread-1")?.id, "travel");
+  assert.equal(memory.roomScope("!travel:example.org"), undefined);
 });
 
 test("writes declare topics, supersede with history, answer as-of queries and tombstone retractions", () => {

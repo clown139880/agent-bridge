@@ -156,8 +156,7 @@ export class Conversations {
   }
 
   private scopeOf(connector: string, roomId: string): ScopeInfo | undefined {
-    const resolved = this.memory!.resolveScope({ roomId: `${connector}:${roomId}` });
-    return resolved.matched === "room" ? this.memory!.scope(resolved.scope) : undefined;
+    return this.memory!.roomScope(`${connector}:${roomId}`);
   }
 
   /** A bound location on an online machine first; otherwise the latest session of the scope's repository. */
