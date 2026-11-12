@@ -6,6 +6,14 @@ export class SseCursorError extends Error {
 }
 
 const BATCH = 200;
+/** A change's state is one object shared by every stream (AgentControlStore.changedState); serialize it once. */
+const serialized = new WeakMap<object, string>();
+function json(value: unknown): string {
+  if (!value || typeof value !== "object") return JSON.stringify(value) ?? "null";
+  let text = serialized.get(value);
+  if (text === undefined) serialized.set(value, text = JSON.stringify(value));
+  return text;
+}
 
 export class AgentControlSse {
   constructor(private readonly store:AgentControlStore,private readonly options:{
@@ -29,9 +37,9 @@ export class AgentControlSse {
         const batch=this.store.streamAfter(position,BATCH);
         for(const item of batch.items){
           if(sessionFilter&&item.sessionId!==sessionFilter)continue;
-          const envelope={cursor:item.cursor,eventId:item.eventId,type:item.type,timestamp:item.createdAt,
-            resource:{kind:item.resourceKind,id:item.resourceId},sessionId:item.sessionId,data:item.payload};
-          const writable=response.write(`id: ${item.cursor}\nevent: bridge.event\ndata: ${JSON.stringify(envelope)}\n\n`);
+          const envelope=JSON.stringify({cursor:item.cursor,eventId:item.eventId,type:item.type,timestamp:item.createdAt,
+            resource:{kind:item.resourceKind,id:item.resourceId},sessionId:item.sessionId});
+          const writable=response.write(`id: ${item.cursor}\nevent: bridge.event\ndata: ${envelope.slice(0,-1)},"data":${json(item.payload)}}\n\n`);
           lastWrite=Date.now();
           if(writable)backpressure=0;else if(++backpressure>=this.options.maxBackpressure){close();return;}
         }

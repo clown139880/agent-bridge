@@ -174,10 +174,15 @@ function legacyStatus(activity: SessionActivityStatus, lastTurn?: TurnStatus): s
 export interface GroupScope { id: string; title: string }
 
 const UNIT = "\u001f";
+/** Delivered change states kept for the other streams (see changedState). */
+const CHANGE_STATES = 2_000;
 
 export class AgentControlStore {
-  /** Set by the Control Plane: the chat room (if any) that relays a session's replies. */
-  relayRoom?: (sessionId: string) => { connector: string; roomId: string; name: string } | undefined;
+  /**
+   * Set by the Control Plane: names chat rooms by their scope's title. Asked once per page, so a list that
+   * shows the rooms relaying its sessions reads the scopes once, not per row.
+   */
+  roomNames?: () => (connector: string, roomId: string) => string | undefined;
   /**
    * Set by the Control Plane: the memory scope bound to a session's repository, else to its location.
    * Without one a session groups by repository identity, else by machine and path. Call `regroupAll`
@@ -300,12 +305,27 @@ export class AgentControlStore {
     const now = Date.now();
     for (const change of changes) {
       position = { ...position, changes: Number(change.seq) };
-      const state = this.currentState(change.kind, change.id);
+      const state = this.changedState(change);
       if (state) items.push({ cursor: formatStreamCursor(position), eventId: `change:${change.seq}`, type: state.type,
         resourceKind: change.kind, resourceId: change.id, sessionId: state.sessionId, payload: state.payload, createdAt: now });
     }
     return { items, position };
   }
+
+  /**
+   * The state a change delivers, materialized once for every stream that reads it: each open stream used to
+   * rebuild the same session. A later change of the resource replaces its row (stream_changes keeps one per
+   * resource), so a kept state is never delivered in place of a newer one.
+   */
+  private changedState(change: { seq: number; kind: StreamKind; id: string }): ReturnType<AgentControlStore["currentState"]> {
+    const seq = Number(change.seq);
+    if (this.changeStates.has(seq)) return this.changeStates.get(seq);
+    const state = this.currentState(change.kind, change.id);
+    this.changeStates.set(seq, state);
+    if (this.changeStates.size > CHANGE_STATES) this.changeStates.delete(this.changeStates.keys().next().value!);
+    return state;
+  }
+  private readonly changeStates = new Map<number, ReturnType<AgentControlStore["currentState"]>>();
 
   private currentState(kind: StreamKind, id: string): { type: string; sessionId: string | null; payload: unknown } | undefined {
     if (kind === "session") {
@@ -825,7 +845,7 @@ export class AgentControlStore {
       ORDER BY ${column} ${direction},id ${direction} LIMIT ?`;
     const rows=this.db.prepare(sql).all(...params,input.limit+1) as Record<string,unknown>[];
     const hasMore=rows.length>input.limit; if(hasMore) rows.pop();
-    const data=rows.map(row=>this.mapSession(row,false)); const lastRow=rows.at(-1);
+    const data=this.mapSessions(rows,false); const lastRow=rows.at(-1);
     const sortValue=(row:Record<string,unknown>)=>Number(input.sort==="lastPromptAt"?row.last_prompt_at??row.created_at:row[column]);
     return { data,hasMore,nextCursor:hasMore&&lastRow?encodeCursor(scope,[sortValue(lastRow),String(lastRow.id)]):null };
   }
@@ -845,8 +865,9 @@ export class AgentControlStore {
       .all(JSON.stringify(groupRows.map(row=>row.group_key))) as Record<string,unknown>[];
     const byKey=new Map<string,Record<string,unknown>[]>();
     for(const row of sessionRows){const key=String(row.group_key);const values=byKey.get(key);if(values)values.push(row);else byKey.set(key,[row]);}
+    const mapped=new Map(this.mapSessions(sessionRows,false).map(session=>[String(session.sessionId),session]));
     const data=groupRows.map(group=>{const rows=byKey.get(group.group_key)??[];
-      return{...this.presentationGroupHeader(group.group_key,Number(group.updated_at),rows[0]!,rows),sessions:rows.map(row=>this.mapSession(row,false))};});
+      return{...this.presentationGroupHeader(group.group_key,Number(group.updated_at),rows[0]!,rows),sessions:rows.map(row=>mapped.get(String(row.id))!)};});
     const last=groupRows.at(-1);
     return{data,hasMore,nextCursor:hasMore&&last?encodeCursor(scope,[Number(last.updated_at),last.group_key]):null};
   }
@@ -1068,62 +1089,97 @@ export class AgentControlStore {
     return this.automationRunsTable ||= Boolean(this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='automation_runs'").get());
   }
 
+  private conversationThreadsTable = false;
+  /** Whether chat rooms relay sessions here (the Control Plane's Conversations creates the table). */
+  private conversationThreads(): boolean {
+    return this.conversationThreadsTable ||= Boolean(this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='conversation_threads'").get());
+  }
+
   private mapSession(row: Record<string, unknown>, detail: boolean): Record<string, unknown> {
-    const latest = this.db.prepare("SELECT * FROM worker_runs WHERE session_id=? ORDER BY created_at DESC,id DESC LIMIT 1")
-      .get(String(row.id)) as Record<string, unknown> | undefined;
-    const counts = this.db.prepare(`SELECT kind,COUNT(*) AS n FROM pending_requests WHERE session_id=? AND status='pending' AND ${BLOCKING_PENDING} GROUP BY kind`)
-      .all(String(row.id)) as Array<{kind:string;n:number}>;
-    const count=(kind:string)=>Number(counts.find(item=>item.kind===kind)?.n??0);
-    const run=latest?{runId:String(latest.id),taskId:latest.task_id?String(latest.task_id):null,
-      conversationId:latest.conversation_id?String(latest.conversation_id):null,status:String(latest.status),
-      createdAt:Number(latest.created_at),updatedAt:Number(latest.updated_at)}:null;
-    let promptSummary=row.prompt_summary?String(row.prompt_summary):null;
-    if(!promptSummary){
-      const messages=this.db.prepare("SELECT body FROM events WHERE session_id=? AND type='message.completed' ORDER BY id LIMIT 20")
-        .all(String(row.id)) as Array<{body:unknown}>;
-      for(const message of messages){
-        const payload=decodeEventBody(message.body);
-        if(payload.role==="user"&&typeof payload.text==="string"){
-          promptSummary=promptExcerpt(payload.text);
-          if(promptSummary)break;
+    return this.mapSessions([row], detail)[0]!;
+  }
+
+  /**
+   * Sessions as the API shows them. What each needs from other tables (its latest run, pending requests,
+   * trust, relaying room, automation) is read for the whole page at once rather than per row.
+   */
+  private mapSessions(rows: Record<string, unknown>[], detail: boolean): Record<string, unknown>[] {
+    if (!rows.length) return [];
+    const ids = JSON.stringify(rows.map((row) => String(row.id)));
+    const latestRuns = new Map((this.sql(`SELECT * FROM (SELECT *,ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY created_at DESC,id DESC) AS rank
+      FROM worker_runs WHERE session_id IN (SELECT value FROM json_each(?))) WHERE rank=1`).all(ids) as Record<string, unknown>[])
+      .map((run) => [String(run.session_id), run]));
+    const pending = new Map<string, number>();
+    for (const item of this.sql(`SELECT session_id,kind,COUNT(*) AS n FROM pending_requests WHERE status='pending' AND ${BLOCKING_PENDING}
+      AND session_id IN (SELECT value FROM json_each(?)) GROUP BY session_id,kind`).all(ids) as Array<{ session_id: string; kind: string; n: number }>)
+      pending.set(`${item.session_id}\0${item.kind}`, Number(item.n));
+    const trusted = new Set((this.sql("SELECT session_id FROM session_trust WHERE session_id IN (SELECT value FROM json_each(?))").all(ids) as
+      Array<{ session_id: string }>).map((item) => item.session_id));
+    const relays = new Map(this.conversationThreads() ? (this.sql(`SELECT session_id,connector,room_id FROM conversation_threads
+      WHERE session_id IN (SELECT value FROM json_each(?)) GROUP BY session_id`).all(ids) as Array<{ session_id: string; connector: string; room_id: string }>)
+      .map((item) => [item.session_id, item]) : []);
+    const roomName = relays.size ? this.roomNames?.() : undefined;
+    const automations = new Map(this.automationRuns() ? (this.sql(`SELECT session_id,MIN(automation_id) AS automation_id FROM automation_runs
+      WHERE session_id IN (SELECT value FROM json_each(?)) GROUP BY session_id`).all(ids) as Array<{ session_id: string; automation_id: string }>)
+      .map((item) => [item.session_id, item.automation_id]) : []);
+    return rows.map((row) => {
+      const id = String(row.id);
+      const latest = latestRuns.get(id);
+      const count = (kind: string) => pending.get(`${id}\0${kind}`) ?? 0;
+      const run=latest?{runId:String(latest.id),taskId:latest.task_id?String(latest.task_id):null,
+        conversationId:latest.conversation_id?String(latest.conversation_id):null,status:String(latest.status),
+        createdAt:Number(latest.created_at),updatedAt:Number(latest.updated_at)}:null;
+      let promptSummary=row.prompt_summary?String(row.prompt_summary):null;
+      if(!promptSummary){
+        const messages=this.sql("SELECT body FROM events WHERE session_id=? AND type='message.completed' ORDER BY id LIMIT 20")
+          .all(id) as Array<{body:unknown}>;
+        for(const message of messages){
+          const payload=decodeEventBody(message.body);
+          if(payload.role==="user"&&typeof payload.text==="string"){
+            promptSummary=promptExcerpt(payload.text);
+            if(promptSummary)break;
+          }
         }
       }
-    }
-    // An identity this session lacks is the one its location agrees on: a repository group names it, a location
-    // group has none, and only a scope group (which may span repositories) needs to look.
-    const group=String(row.group_key??"");
-    const directProjectIdentity=row.project_identity?String(row.project_identity):undefined;
-    const inheritedProjectIdentities=directProjectIdentity||!group.startsWith(`scope${UNIT}`)?[]:this.sql(`SELECT DISTINCT project_identity FROM sessions
-      WHERE machine_id=? AND project_path=? AND project_identity IS NOT NULL AND TRIM(project_identity)<>'' LIMIT 2`)
-      .all(String(row.machine_id),String(row.project_path)) as Array<{project_identity:string}>;
-    const projectIdentity=directProjectIdentity??(group.startsWith(`repository${UNIT}`)?group.slice(`repository${UNIT}`.length)
-      :inheritedProjectIdentities.length===1?String(inheritedProjectIdentities[0]!.project_identity):undefined);
-    const result:Record<string,unknown>={sessionId:String(row.id),nativeSessionId:row.native_session_id?String(row.native_session_id):null,
-      workerId:buildWorkerId(String(row.agent_type) as AgentType,String(row.machine_id)),machineId:String(row.machine_id),agent:String(row.agent_type),
-      title:sessionTitle(row,promptSummary),promptSummary,
-      projectName:String(row.project_name),workspace:String(row.project_path),status:String(row.activity_status??"unknown"),
-      ...(projectIdentity?{projectIdentity}:{}),
-      ...(this.sessionTrusted(String(row.id))?{trusted:true}:{}),
-      activeTurnId:row.active_turn_id?String(row.active_turn_id):null,lastTurnStatus:row.last_turn_status?String(row.last_turn_status):null,
-      pendingApprovalCount:count("approval"),pendingUserInputCount:count("user_input"),latestRun:run,
-      createdAt:Number(row.created_at),updatedAt:Number(row.updated_at??row.created_at),
-      lastResponseAt:row.last_response_at==null?null:Number(row.last_response_at),
-      lastPromptAt:row.last_prompt_at==null?null:Number(row.last_prompt_at),messageCount:Number(row.message_count??0),viewRevision:Number(row.view_revision??0),orderingEpoch:Number(row.ordering_epoch??0),source:String(row.source??"app-server"),
-      historyCompleteness:String(row.history_completeness??"loaded-only")};
-    // A chat room that relays this session answers it there; the list marks it instead of counting unread replies.
-    const relay=this.relayRoom?.(String(row.id));
-    if(relay)Object.assign(result,{room:relay});
-    // A session an automation started for one run: the list hides it by default, the task's runs link to it.
-    const automation=this.automationRuns()?this.db.prepare("SELECT automation_id FROM automation_runs WHERE session_id=? LIMIT 1")
-      .get(String(row.id)) as {automation_id:string}|undefined:undefined;
-    if(automation)Object.assign(result,{automation:automation.automation_id});
-    if(detail){const runs=this.db.prepare("SELECT * FROM worker_runs WHERE session_id=? ORDER BY created_at DESC,id DESC LIMIT 20")
+      // An identity this session lacks is the one its location agrees on: a repository group names it, a location
+      // group has none, and only a scope group (which may span repositories) needs to look.
+      const group=String(row.group_key??"");
+      const directProjectIdentity=row.project_identity?String(row.project_identity):undefined;
+      const inheritedProjectIdentities=directProjectIdentity||!group.startsWith(`scope${UNIT}`)?[]:this.sql(`SELECT DISTINCT project_identity FROM sessions
+        WHERE machine_id=? AND project_path=? AND project_identity IS NOT NULL AND TRIM(project_identity)<>'' LIMIT 2`)
+        .all(String(row.machine_id),String(row.project_path)) as Array<{project_identity:string}>;
+      const projectIdentity=directProjectIdentity??(group.startsWith(`repository${UNIT}`)?group.slice(`repository${UNIT}`.length)
+        :inheritedProjectIdentities.length===1?String(inheritedProjectIdentities[0]!.project_identity):undefined);
+      const result:Record<string,unknown>={sessionId:id,nativeSessionId:row.native_session_id?String(row.native_session_id):null,
+        workerId:buildWorkerId(String(row.agent_type) as AgentType,String(row.machine_id)),machineId:String(row.machine_id),agent:String(row.agent_type),
+        title:sessionTitle(row,promptSummary),promptSummary,
+        projectName:String(row.project_name),workspace:String(row.project_path),status:String(row.activity_status??"unknown"),
+        ...(projectIdentity?{projectIdentity}:{}),
+        ...(trusted.has(id)?{trusted:true}:{}),
+        activeTurnId:row.active_turn_id?String(row.active_turn_id):null,lastTurnStatus:row.last_turn_status?String(row.last_turn_status):null,
+        pendingApprovalCount:count("approval"),pendingUserInputCount:count("user_input"),latestRun:run,
+        createdAt:Number(row.created_at),updatedAt:Number(row.updated_at??row.created_at),
+        lastResponseAt:row.last_response_at==null?null:Number(row.last_response_at),
+        lastPromptAt:row.last_prompt_at==null?null:Number(row.last_prompt_at),messageCount:Number(row.message_count??0),viewRevision:Number(row.view_revision??0),orderingEpoch:Number(row.ordering_epoch??0),source:String(row.source??"app-server"),
+        historyCompleteness:String(row.history_completeness??"loaded-only")};
+      // A chat room that relays this session answers it there; the list marks it instead of counting unread replies.
+      const relay=relays.get(id);
+      if(relay)Object.assign(result,{room:{connector:relay.connector,roomId:relay.room_id,name:roomName?.(relay.connector,relay.room_id)??relay.room_id}});
+      // A session an automation started for one run: the list hides it by default, the task's runs link to it.
+      const automation=automations.get(id);
+      if(automation)Object.assign(result,{automation});
+      if(detail)Object.assign(result,this.sessionDetailFields(row));
+      return result;
+    });
+  }
+
+  private sessionDetailFields(row: Record<string, unknown>): Record<string, unknown> {
+    const runs=this.sql("SELECT * FROM worker_runs WHERE session_id=? ORDER BY created_at DESC,id DESC LIMIT 20")
       .all(String(row.id)) as Record<string,unknown>[];
-      const contextRow=this.db.prepare("SELECT body FROM events WHERE session_id=? AND type='context.updated' ORDER BY id DESC LIMIT 1")
-        .get(String(row.id)) as {body:unknown}|undefined;
-      const context=contextRow?decodeEventBody(contextRow.body):undefined;
-      Object.assign(result,{capabilities:[],runs:runs.map(r=>({runId:String(r.id),taskId:r.task_id?String(r.task_id):null,conversationId:r.conversation_id?String(r.conversation_id):null,status:String(r.status),createdAt:Number(r.created_at),updatedAt:Number(r.updated_at)})),...(context?{context}:{}),matrixRoomId:row.matrix_room_id?String(row.matrix_room_id):null,matrixThreadId:row.matrix_thread_id?String(row.matrix_thread_id):null,error:row.last_error?{error:{code:"session_error",message:String(row.last_error),requestId:"",retryable:true}}:null});}
-    return result;
+    const contextRow=this.sql("SELECT body FROM events WHERE session_id=? AND type='context.updated' ORDER BY id DESC LIMIT 1")
+      .get(String(row.id)) as {body:unknown}|undefined;
+    const context=contextRow?decodeEventBody(contextRow.body):undefined;
+    return{capabilities:[],runs:runs.map(r=>({runId:String(r.id),taskId:r.task_id?String(r.task_id):null,conversationId:r.conversation_id?String(r.conversation_id):null,status:String(r.status),createdAt:Number(r.created_at),updatedAt:Number(r.updated_at)})),...(context?{context}:{}),matrixRoomId:row.matrix_room_id?String(row.matrix_room_id):null,matrixThreadId:row.matrix_thread_id?String(row.matrix_thread_id):null,error:row.last_error?{error:{code:"session_error",message:String(row.last_error),requestId:"",retryable:true}}:null};
   }
 
   private mapPending(row: Record<string, unknown>): PendingRow {

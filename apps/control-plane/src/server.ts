@@ -198,7 +198,10 @@ export class ControlPlane {
     if (options.noticeTarget) this.operatorNotices = new OperatorNotices(this.controlStore, options.noticeTarget);
     if (options.fleetNoticeTarget) this.fleetNotices = new OperatorNotices(this.controlStore, options.fleetNoticeTarget);
     this.conversations = new Conversations(this.controlStore, this.registry, agentMemory, options.conversationSetup);
-    this.controlStore.relayRoom = (sessionId) => this.conversations.relayRoom(sessionId);
+    this.controlStore.roomNames = () => {
+      const index = this.agentMemory?.workIndex();
+      return (connector, roomId) => index?.room(`${connector}:${roomId}`)?.title;
+    };
     // A session groups under the memory scope it works in (repository, else location). Persona scopes and
     // _global are no project; an unbound session keeps the repository/location group.
     this.controlStore.groupScope = (locator) => {
