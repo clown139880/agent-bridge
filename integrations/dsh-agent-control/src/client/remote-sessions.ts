@@ -107,8 +107,12 @@ export interface VirtualSessionsFace {
   handleSessionAdded(summary: unknown): void; handleSessionRemoved(id: string): void;
   handleSessionStatus(id: string, running: boolean): void; refresh(): Promise<void>
 }
+/** `catalog.listed` (default: the whole snapshot) are the sessions DSH lists; the
+ * rest stay reachable by id. Imported twins of every catalog session stay hidden. */
 export function installVirtualSessions(remote: Namespace, sessions: VirtualSessionsFace, rpc: Rpc,
-  catalog: { snapshot(): NativeEntry[]; subscribe(listener: () => void): () => void }): () => void {
+  catalog: { snapshot(): NativeEntry[]; listed?(): NativeEntry[]; subscribe(listener: () => void): () => void }): () => void {
+  const listed = () => (catalog.listed?.() ?? catalog.snapshot()).filter(row => isVirtualSession(row.nativeId))
+  const importedIds = () => catalog.snapshot().filter(row => isVirtualSession(row.nativeId)).map(row => (row as NativeEntry & { importedId?: string }).importedId)
   const transport = new VirtualSessionTransport(rpc)
   let previous = new Set<string>()
   let imported = new Set<string>()
@@ -123,8 +127,8 @@ export function installVirtualSessions(remote: Namespace, sessions: VirtualSessi
   let runningPublished = new Map<string, boolean>()
   const choices = new Map<string, { model: string; reasoningEffort?: string }>()
   const sync = () => {
-    const entries = catalog.snapshot().filter(row => isVirtualSession(row.nativeId)), next = new Map<string, string>(), running = new Map<string, boolean>()
-    const hidden = new Set(entries.map(row => (row as NativeEntry & { importedId?: string }).importedId).filter((id): id is string => !!id))
+    const entries = listed(), next = new Map<string, string>(), running = new Map<string, boolean>()
+    const hidden = new Set(importedIds().filter((id): id is string => !!id))
     for (const id of hidden) if (!imported.has(id)) sessions.handleSessionRemoved(id)
     imported = hidden
     for (const id of previous) if (!entries.some(row => row.nativeId === id)) sessions.handleSessionRemoved(id)
@@ -142,7 +146,7 @@ export function installVirtualSessions(remote: Namespace, sessions: VirtualSessi
     if (name === 'list') return Promise.resolve(original(...args)).then(result => {
       const response = obj(result), value = obj(response['value'])
       if (!response['ok']) return result
-      const entries = catalog.snapshot().filter(row => isVirtualSession(row.nativeId)), hidden = new Set(entries.map(entry => (entry as NativeEntry & { importedId?: string }).importedId))
+      const entries = listed(), hidden = new Set(importedIds())
       return { ...response, value: { ...value, items: [...(value['items'] as Array<{ sessionId: string }>).filter(row => !hidden.has(row.sessionId) && !isVirtualSession(row.sessionId)), ...entries.map(virtualSummary)] } }
     })
     const id = virtualTarget(args[0])

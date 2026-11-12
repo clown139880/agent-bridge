@@ -184,6 +184,15 @@ describe('client remote interception', () => {
     expect(sessions.handleSessionRemoved).toHaveBeenCalledWith(id)
     dispose()
   })
+  it('publishes only listed sessions and still hides the imported copy of every catalog session', () => {
+    const other = { ...entry, nativeId: virtualSessionId(origin, 'other'), sessionId: 'other', importedId: 'agent-bridge-other' } as NativeEntry
+    const added = vi.fn(), removed = vi.fn()
+    const dispose = installVirtualSessions({ session: {} }, { handleSessionAdded: added, handleSessionRemoved: removed, handleSessionStatus: vi.fn(), refresh: vi.fn(async () => {}) },
+      vi.fn(), { snapshot: () => [entry, other], listed: () => [entry], subscribe: () => () => {} })
+    expect(added.mock.calls.map(([summary]) => summary.sessionId)).toEqual([id])
+    expect(removed).toHaveBeenCalledWith('agent-bridge-other')
+    dispose()
+  })
   it('keeps drafts in their workspace without publishing synthetic remote summaries for them', () => {
     const draft = { ...entry, nativeId: 'agent-bridge-draft', sessionId: '', presentationPath: '/presentation' }
     const added = vi.fn()

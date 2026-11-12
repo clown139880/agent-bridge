@@ -206,6 +206,8 @@ export class AgentBridgeImportTarget {
         executionLocations,
         ...(str(binding['model'], '') ? { model: str(binding['model']) } : {}),
         ...(str(binding['projectIdentity']) ? { projectIdentity: str(binding['projectIdentity']) } : {}),
+        // Started by an automation run: the sidebar, like the Control Center's list, leaves it out.
+        ...(str(binding['automation']) ? { automation: str(binding['automation']) } : {}),
         ...(this.presentationPlacements.get(placementKey) ? { presentationPath: this.presentationPlacements.get(placementKey)! } : {}),
         title: agent ? promptTitle(binding, sessionEvents(nativeSession(agent))) : str(binding['title']),
         status: str(binding['status']), worker: str(worker?.['name'], str(binding['workerId'])),

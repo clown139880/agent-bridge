@@ -7,7 +7,7 @@ import { isVirtualSession } from '../remote-sessions/id.js'
 import { READ_ONLY } from './remote-sessions.js'
 
 export type ExecutionLocation = { workerId: string; workerName: string; agent?: string; machineId: string; machineName: string; workspace: string; online: boolean; available: boolean; local?: boolean }
-export type NativeEntry = { nativeId: string; sessionId: string; workerId: string; model?: string; groupId: string; groupTitle: string; groupUpdatedAt: number; executionLocations: ExecutionLocation[]; machineId: string; workspace: string; projectIdentity?: string; presentationPath?: string; title: string; status: string; worker: string; updatedAt: number; activityAt: number; lastUsedAt?: number }
+export type NativeEntry = { nativeId: string; sessionId: string; workerId: string; model?: string; groupId: string; groupTitle: string; groupUpdatedAt: number; executionLocations: ExecutionLocation[]; machineId: string; workspace: string; projectIdentity?: string; presentationPath?: string; title: string; status: string; worker: string; updatedAt: number; activityAt: number; lastUsedAt?: number; automation?: string }
 export type WorkspaceRow = { workspaceId: string; sourceWorkspaceId?: string; path: string; title: string; sessionIds: readonly string[]; createdAt: string; updatedAt: string }
 type WorkspaceSnapshot = { items: readonly WorkspaceRow[]; archivedSessionIds: readonly string[] }
 type Source<T> = { getSnapshot(): T; subscribe(listener: () => void): () => void }
@@ -24,16 +24,48 @@ const EMPTY_WORKSPACES: Source<WorkspaceSnapshot> = { getSnapshot: () => EMPTY_S
 const SPLIT_GROUP_PREFIX = 'agent-bridge-group:'
 
 const canonicalPath =(value: string) => value.replace(/\\/g, '/').replace(/\/$/, '').toLocaleLowerCase()
+/** Bridge sessions the sidebar lists, as the Control Center's list does. */
+export const LISTED_LIMIT = 50
+const RUNNING = new Set(['creating', 'active', 'waiting_for_approval', 'waiting_for_input'])
 
-/** Sidebar recency of one row. Bridge sessions use the catalog's agent-reply
+/** The Bridge sessions DSH lists: the most recently prompted ones without automation
+ * runs, as in the Control Center, plus every running or waiting one. DSH renders
+ * every listed row on each change, so older sessions stay in the Control Center.
+ * Drafts have no Bridge session yet and are always listed. */
+export function listedEntries(catalog: readonly NativeEntry[], limit = LISTED_LIMIT): NativeEntry[] {
+  const recent = new Set(catalog.filter(entry => isVirtualSession(entry.nativeId) && !entry.automation)
+    .sort((left, right) => right.activityAt - left.activityAt).slice(0, limit))
+  return catalog.filter(entry => !isVirtualSession(entry.nativeId) || recent.has(entry) || !entry.automation && RUNNING.has(entry.status))
+}
+
+/** Sidebar recency of one row. Bridge sessions use the catalog's last-prompt
  * time: DSH stamps imported prompts with their sync time, so its own
  * `updatedAt` is not a real activity time for them. Local DSH sessions keep it. */
 export function sessionActivity(id: string, entries: ReadonlyMap<string, Pick<NativeEntry, 'activityAt'>>, sessions: SessionSnapshot = {}): number {
   return entries.get(id)?.activityAt ?? sessions.byId?.[id]?.updatedAt ?? Number.NEGATIVE_INFINITY
 }
 
-/** Adapt server-owned groups to DSH workspaces and only fuse path-matching local DSH sessions. */
-export function mergeWorkspaces(rows: readonly WorkspaceRow[], catalog: readonly NativeEntry[], catalogReady = true, sessions: SessionSnapshot = {}): WorkspaceRow[] {
+/** `next`, or `previous` when it holds the same ids in the same order. */
+export function sameIds(previous: readonly string[] | undefined, next: readonly string[]): readonly string[] {
+  return previous && previous.length === next.length && previous.every((id, index) => id === next[index]) ? previous : next
+}
+const sameRow = (previous: WorkspaceRow, next: WorkspaceRow): boolean => {
+  const keys = Object.keys(next) as (keyof WorkspaceRow)[]
+  return keys.length === Object.keys(previous).length
+    && keys.every(key => key === 'sessionIds' ? sameIds(previous.sessionIds, next.sessionIds) === previous.sessionIds : previous[key] === next[key])
+}
+/** `next` with every unchanged row (by workspace id) kept as before; `previous` itself when nothing changed. */
+export function sameRows(previous: readonly WorkspaceRow[] | undefined, next: readonly WorkspaceRow[]): readonly WorkspaceRow[] {
+  if (!previous) return next
+  const before = new Map(previous.map(row => [row.workspaceId, row]))
+  const rows = next.map(row => { const old = before.get(row.workspaceId); return old && sameRow(old, row) ? old : row })
+  return rows.length === previous.length && rows.every((row, index) => row === previous[index]) ? previous : rows
+}
+
+/** Adapt server-owned groups to DSH workspaces and only fuse path-matching local DSH sessions.
+ * `listed` (default: all) are the catalog ids the sidebar shows; a group with none of
+ * them and no fused local session still owns its rows but is not shown. */
+export function mergeWorkspaces(rows: readonly WorkspaceRow[], catalog: readonly NativeEntry[], catalogReady = true, sessions: SessionSnapshot = {}, listed?: ReadonlySet<string>): WorkspaceRow[] {
   // The Host workspace snapshot arrives before this client plugin can fetch the
   // Bridge catalog. Do not briefly expose every physical presentation workspace
   // while repository identities are still unknown. Native DSH sessions remain
@@ -74,7 +106,7 @@ export function mergeWorkspaces(rows: readonly WorkspaceRow[], catalog: readonly
     const nativeIds = [...new Set(localRows.flatMap(row => row.sessionIds).filter(id => !entries.has(id) && !isBridgeId(id)))]
     // One clock for every member: never trust the arrival order, which can lag
     // behind the activity it was derived from. The sort is stable for ties.
-    const sessionIds = [...members.map(entry => entry.nativeId), ...nativeIds].sort(newestFirst)
+    const sessionIds = [...members.map(entry => entry.nativeId).filter(id => !listed || listed.has(id)), ...nativeIds].sort(newestFirst)
     assigned.set(groupId, { owner, members, sessionIds, latest: Math.max(...sessionIds.map(updatedAt)) })
   }
   const owners = new Map<string, number>()
@@ -83,6 +115,8 @@ export function mergeWorkspaces(rows: readonly WorkspaceRow[], catalog: readonly
   for (const groupId of groups.keys()) {
     if (!assigned.has(groupId)) continue
     const { owner, members, sessionIds, latest } = assigned.get(groupId)!
+    // Counted among the owners above all the same, so a shown group keeps its id.
+    if (!sessionIds.length) continue
     // Separate server groups may share one physical workspace. Each needs its own
     // order account and React key, and none may borrow the physical id: whichever
     // did would hand it, its persisted order and its view state to the others.
@@ -134,6 +168,16 @@ export class NativeCatalog {
     if (this.activityCache?.entries !== this.entries) this.activityCache = { entries: this.entries, value: new Map(this.entries.map(entry => [entry.nativeId, entry.activityAt])) }
     return this.activityCache.value
   }
+  private listedCache: { entries: NativeEntry[]; value: NativeEntry[]; ids: ReadonlySet<string> } | undefined
+  private listedState() {
+    if (this.listedCache?.entries !== this.entries) {
+      const value = listedEntries(this.entries)
+      this.listedCache = { entries: this.entries, value, ids: new Set(value.map(entry => entry.nativeId)) }
+    }
+    return this.listedCache
+  }
+  /** The entries DSH lists (see `listedEntries`); one array identity per catalog snapshot. */
+  listed = (): NativeEntry[] => this.listedState().value
   /** Never throws: a hot reload disposes this plugin while DSH may still render
    * its patched sidebar, and a throw there crashes the slot into a blank list. */
   useWorkspaces: WorkspaceHook =<T,>(selector: (snapshot: WorkspaceSnapshot) => T): T => {
@@ -203,16 +247,23 @@ export class NativeCatalog {
     const source = workspaces.list
     const original = source.getSnapshot
     const subscribe = source.subscribe
-    let raw: WorkspaceSnapshot | undefined, catalog: NativeEntry[] | undefined, sessionById: SessionSnapshot['byId'], cached: WorkspaceSnapshot
+    let raw: WorkspaceSnapshot | undefined, catalog: NativeEntry[] | undefined, sessionById: SessionSnapshot['byId'], cached: WorkspaceSnapshot | undefined
     const projected = () => {
       const next = original.call(source)
       const nextSessions = this.sessions.list.getSnapshot()
       if (next !== raw || catalog !== this.entries || sessionById !== nextSessions.byId) {
         raw = next; catalog = this.entries; sessionById = nextSessions.byId
         const current = new Set(this.entries.map(entry => entry.nativeId))
-        cached = { ...next, items: mergeWorkspaces(next.items, this.entries, this.loaded, nextSessions), archivedSessionIds: next.archivedSessionIds.filter(id => !current.has(id)) }
+        // DSH rebuilds its session list on every change, unchanged or not. Keep the
+        // previous rows when they come out the same, or the sidebar renders again.
+        const items = sameRows(cached?.items, mergeWorkspaces(next.items, this.entries, this.loaded, nextSessions, this.listedState().ids))
+        const archivedSessionIds = sameIds(cached?.archivedSessionIds, next.archivedSessionIds.filter(id => !current.has(id)))
+        const rest = (snapshot: WorkspaceSnapshot) => Object.entries(snapshot).filter(([key]) => key !== 'items' && key !== 'archivedSessionIds')
+        const unchanged = !!cached && items === cached.items && archivedSessionIds === cached.archivedSessionIds
+          && rest(next).every(([key, value]) => (cached as Record<string, unknown>)[key] === value) && rest(cached).length === rest(next).length
+        if (!unchanged) cached = { ...next, items, archivedSessionIds }
       }
-      return cached
+      return cached!
     }
     const projectedSubscribe = (listener: () => void) => { const a = subscribe.call(source, listener); const b = this.subscribe(listener); const c = this.sessions.list.subscribe(listener); return () => { a(); b(); c() } }
     this.workspaceSource = { getSnapshot: projected, subscribe: projectedSubscribe }

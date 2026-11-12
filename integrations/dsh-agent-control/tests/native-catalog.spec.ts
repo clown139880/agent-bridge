@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { mergeWorkspaces, NativeCatalog, sourceLabel, type NativeEntry, type WorkspaceRow } from '../src/client/native-catalog.js'
+import { listedEntries, mergeWorkspaces, NativeCatalog, sameIds, sameRows, sourceLabel, type NativeEntry, type WorkspaceRow } from '../src/client/native-catalog.js'
 import { promptTitle } from '../src/agent-bridge-provider/import-target.js'
 import type { NativeEvent } from '../src/agent-bridge-provider/dsh-compat.js'
 
@@ -183,6 +183,38 @@ describe('native catalog', () => {
       { ...entry('new', 'windows', 'D:\\repo', 10, 'repo', 200), presentationPath: row.path },
     ]
     expect(mergeWorkspaces([row], catalog)[0]?.sessionIds).toEqual(['new', 'old'])
+  })
+  it('lists the most recently prompted Bridge sessions, every running one and every draft', () => {
+    const virtual = (name: string, activityAt: number, extra: Partial<NativeEntry> = {}): NativeEntry => ({ ...entry('bridge-remote-' + name), activityAt, ...extra })
+    const catalog = [virtual('old', 1), virtual('running', 0, { status: 'waiting_for_approval' }), virtual('new', 3), virtual('mid', 2),
+      virtual('automation', 9, { automation: 'nightly' }), virtual('automation-running', 9, { automation: 'nightly', status: 'active' }), entry('agent-bridge-draft')]
+    expect(listedEntries(catalog, 2).map(row => row.nativeId)).toEqual(['bridge-remote-running', 'bridge-remote-new', 'bridge-remote-mid', 'agent-bridge-draft'])
+    // A group without a listed session is not shown; its rows stay consumed.
+    const rows = mergeWorkspaces([workspace('kept')], [{ ...entry('bridge-remote-new', 'hal', '/a'), presentationPath: '/presentation/kept' }, entry('bridge-remote-old', 'hal', '/b')],
+      true, {}, new Set(['bridge-remote-new']))
+    expect(rows.map(row => row.sessionIds)).toEqual([['bridge-remote-new']])
+  })
+  it('keeps the workspace snapshot when a DSH list rebuild changes nothing', async () => {
+    const current = { ...entry('bridge-remote-a', 'hal', '/repo', 10, 'repo', 200) }
+    const raw = { items: [], archivedSessionIds: ['native-archived'] }
+    let list = { byId: { [current.nativeId]: { updatedAt: 1 } } }
+    const source = { getSnapshot: () => raw, subscribe: () => () => {} }
+    const catalog = new NativeCatalog(async () => ({ sessions: [current] }), { list: { getSnapshot: () => list, subscribe: () => () => {} }, clear() {}, async refresh() {} })
+    await catalog.refresh()
+    const dispose = catalog.install({ list: source, async rename() {}, async delete() {}, async insertSessionBefore() {} })
+    const first = source.getSnapshot()
+    list = { byId: { ...list.byId } }
+    expect(source.getSnapshot()).toBe(first)
+    dispose()
+  })
+  it('reuses unchanged rows and ids', () => {
+    const a = workspace('a'), b = workspace('b')
+    const previous = [a, b]
+    expect(sameRows(previous, [{ ...a, sessionIds: ['a'] }, { ...b }])).toBe(previous)
+    const changed = sameRows(previous, [{ ...a }, { ...b, title: 'renamed' }])
+    expect(changed).not.toBe(previous); expect(changed[0]).toBe(a)
+    const ids = ['x']
+    expect(sameIds(ids, ['x'])).toBe(ids); expect(sameIds(ids, ['y'])).toEqual(['y'])
   })
   it('projects current catalog sessions out of the durable archive set', async () => {
     const row = { ...workspace('project'), path: 'C:\\data\\projects\\repo', sessionIds: [] }

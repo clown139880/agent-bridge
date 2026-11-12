@@ -21,8 +21,20 @@ export interface MenuSlots { entries(name: string): readonly Entry[]; subscribe(
  * No DOM/title-to-id matching: rows are addressed by their own props. */
 export function extendSessionMenu(Component: ComponentType<any>, useWorkspaces?: WorkspaceHook, decor?: SidebarDecor, recency?: () => ReadonlyMap<string, number>): ComponentType<any> {
   const wrappers = new WeakMap<object, ComponentType<any>>()
+  // Returns `value` itself wherever nothing changed: DSH renders every row on each
+  // list change, so cloning untouched subtrees cost every render time and garbage.
   const visit = (value: ReactNode, session?: { id: string; title: string }, label?: [string, ReactNode]): ReactNode => {
-    if (Array.isArray(value)) return Children.map(value, child => visit(child, session, label))
+    if (Array.isArray(value)) {
+      let changed = false
+      // DSH's own keys are kept; a replaced unkeyed element is keyed by its position.
+      const next = value.map((child, index) => {
+        const visited = visit(child, session, label)
+        if (visited === child) return child
+        changed = true
+        return isValidElement(visited) && visited.key === null ? cloneElement(visited, { key: `.${index}` }) : visited
+      })
+      return changed ? next : value
+    }
     if (!isValidElement<Props>(value)) return value
     const props = value.props
     if (session && Array.isArray(props['items']) && ['rename', 'fork', 'archive'].every(id => props['items'].some((item: Props) => item['id'] === id))) {
@@ -55,17 +67,20 @@ export function extendSessionMenu(Component: ComponentType<any>, useWorkspaces?:
       return cloneElement({ ...value, type: wrapped } as ReactElement<Props>)
     }
     if (label && props['children'] === label[0]) return cloneElement(value, { children: label[1] })
-    const update: Props = {}
-    for (const key of ['children', 'anchor']) if (props[key] !== undefined) update[key] = visit(props[key], session, label)
+    let update: Props | undefined
+    for (const key of ['children', 'anchor']) if (props[key] !== undefined) {
+      const visited = visit(props[key], session, label)
+      if (visited !== props[key]) (update ??= {})[key] = visited
+    }
     const icon = session && decor && props['role'] === 'treeitem' ? decor.session(session.id) : undefined
     if (icon) {
       // The title is the row's first plain-text child; the status slot precedes it.
-      const children = Children.toArray(update['children'])
+      const children = Children.toArray(update?.['children'] ?? props['children'])
       const title = children.findIndex(child => isValidElement<Props>(child) && typeof child.props['children'] === 'string')
       children.splice(Math.max(title, 0), 0, <Fragment key="agent-control-identity">{icon}</Fragment>)
-      update['children'] = children
+      ;(update ??= {})['children'] = children
     }
-    return cloneElement(value, update)
+    return update ? cloneElement(value, update) : value
   }
   // One projected Session list per (DSH list snapshot, activity map), so hooks
   // that select the whole list keep a stable snapshot identity.
