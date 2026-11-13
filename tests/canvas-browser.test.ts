@@ -10,7 +10,7 @@ import { getRequestListener } from "../apps/control-plane/node_modules/@hono/nod
 import { CanvasService } from "../apps/control-plane/src/canvas.js";
 import { createCanvasWeb } from "../apps/control-plane/src/canvas-web.js";
 
-test("canvas browser: lazy direct images, live updates, cursor resume, safe text, image errors and page reload", {
+test("canvas browser: current-image drag/context menu, live updates, cursor resume, safe text and reload", {
   skip: !existsSync("/usr/bin/chromium"), timeout: 40_000,
 }, async t => {
   await mkdir(resolve(".runtime/tests"), { recursive: true });
@@ -67,13 +67,35 @@ test("canvas browser: lazy direct images, live updates, cursor resume, safe text
     while (Date.now() < end) { if (await js(expression)) return; await new Promise(r => setTimeout(r, 30)); }
     throw new Error(`UI timed out: ${expression}; ${await js("document.body.innerText")}`);
   };
+  const checkImageActions = async (number: number) => {
+    const expected = `${base}/images/${number}`;
+    await wait(`document.querySelector('img.visible')?.src === ${JSON.stringify(expected)}`);
+    const hit = await js("document.elementFromPoint(195, 400)?.src");
+    assert.equal(hit, expected, "a transparent image must not intercept the current image's pointer actions");
+    await js("window.__context=null;window.__drag=null;document.addEventListener('contextmenu',e=>{window.__context=e.target.src;e.preventDefault()},{once:true});document.addEventListener('dragstart',e=>{window.__drag={src:e.target.src,uri:e.dataTransfer.getData('text/uri-list')};e.preventDefault()},{once:true})");
+    await command("Input.dispatchMouseEvent", { type: "mousePressed", x: 195, y: 400, button: "right", buttons: 2, clickCount: 1 });
+    await command("Input.dispatchMouseEvent", { type: "mouseReleased", x: 195, y: 400, button: "right", buttons: 0, clickCount: 1 });
+    assert.equal(await js("window.__context"), expected, "the context menu's image must be the displayed image");
+    await command("Input.dispatchMouseEvent", { type: "mouseMoved", x: 195, y: 400 });
+    await command("Input.dispatchMouseEvent", { type: "mousePressed", x: 195, y: 400, button: "left", buttons: 1, clickCount: 1 });
+    await command("Input.dispatchMouseEvent", { type: "mouseMoved", x: 235, y: 420, button: "left", buttons: 1 });
+    await command("Input.dispatchMouseEvent", { type: "mouseReleased", x: 235, y: 420, button: "left", buttons: 0, clickCount: 1 });
+    const drag = await js("window.__drag");
+    assert.equal(drag?.src, expected); assert.ok(drag.uri.includes(expected), "native drag data must contain the current image URL");
+  };
   await command("Runtime.enable"); await command("Page.enable");
   await command("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
   await command("Page.navigate", { url: `${base}/canvas/${id}/` });
   await wait("document.querySelector('#count')?.textContent === '5 / 5' && !!document.querySelector('img.visible')");
   assert.deepEqual(imageRequests, ["/images/5"], "opening the page must not download every source image");
+  await checkImageActions(5);
   await js("document.getElementById('previous').click()");
   await wait("document.getElementById('count').textContent === '4 / 5'");
+  await checkImageActions(4);
+  await js("document.getElementById('previous').click()");
+  await checkImageActions(3);
+  await js("document.getElementById('next').click()");
+  await checkImageActions(4);
   await image(6); await wait("document.getElementById('count').textContent === '4 / 6'");
   await js("document.getElementById('follow').click()");
   await wait("document.getElementById('count').textContent === '6 / 6'");

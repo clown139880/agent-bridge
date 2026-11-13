@@ -21,7 +21,7 @@
 
 **只处理可访问的 HTTP(S) URL，不处理图片文件。** 后端仅校验 URL 格式与长度，不上传、下载、代理、缓存、探测或删除源图片。需要私密认证的图源应提供浏览器可直接加载的 URL。HTTPS 页面使用 HTTPS 图片源。
 
-页面 `/canvas/{id}/` 提供全屏、淡入切换、标题/说明、键盘导航、幻灯片和跟随新图。只加载当前图；缩略图如有需要由调用方提供。源 URL 失效时显示占位，Agent 可通过 `push` 换 URL。
+页面 `/canvas/{id}/` 提供全屏、淡入切换、标题/说明、键盘导航、幻灯片和跟随新图。只加载当前图；缩略图如有需要由调用方提供。只有当前显示的图片接收鼠标事件，透明旧图不拦截右键或拖拽。源 URL 失效时显示占位，Agent 可通过 `push` 换 URL。
 
 页面复用既有受控浏览器入口（内网/VPN/访问网关）。同源 `state`、`events` 是页面内部只读接口，需要浏览器入口已配置读或写权限与同源请求头；浏览器不拿 Agent token。工具侧按 owner 校验，受控入口内的查看者可读画布。只对 canvas 页面放行图片源 CSP，使用 `Referrer-Policy: no-referrer`。
 
@@ -73,4 +73,4 @@ servers:
 
 实现在 `apps/control-plane/src/` 的 `canvas.ts`、`canvas-tools.ts`、`canvas-web.ts`、`canvas-page.ts`，由 ToolHub 和既有 HTTP 入口接入。没有改归档、数据库或 DSH，也不新增前端构建流程。项目知识留在 docs，不向历史 shared-skills 添加内容，工具无需额外 skill。
 
-验证：`tests/canvas.test.ts` 覆盖文件、并发、幂等、revision、配额与旧文件兼容；`canvas-web.test.ts` 覆盖两个工具、风险决策、同源入口和 SSE；`canvas-browser.test.ts` 用真实 Chromium 验证按需取图、后台恢复、失效占位与刷新后继续推图。Control Plane 发布只升根版本。
+验证：`tests/canvas.test.ts` 覆盖文件、并发、幂等、revision、配额与旧文件兼容；`canvas-web.test.ts` 覆盖两个工具、风险决策、同源入口和 SSE；`canvas-browser.test.ts` 用真实 Chromium 验证连续切图后的右键目标与原生拖拽 URL、按需取图、后台恢复、失效占位与刷新后继续推图。Control Plane 发布只升根版本。

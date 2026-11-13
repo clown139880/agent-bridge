@@ -12,7 +12,7 @@ export const CANVAS_HTML = `<!doctype html>
 
 export const CANVAS_CSS = `:root{color-scheme:dark;font:15px/1.5 system-ui,sans-serif;color:#f0f0f0;background:#101114}
 *{box-sizing:border-box}body{margin:0}main{height:100dvh;min-height:320px;position:relative;overflow:hidden}
-#stage{position:absolute;inset:0}#stage img{position:absolute;width:100%;height:100%;object-fit:contain;opacity:0;transition:opacity .4s ease}#stage img.visible{opacity:1}
+#stage{position:absolute;inset:0}#stage img{position:absolute;width:100%;height:100%;object-fit:contain;opacity:0;pointer-events:none;transition:opacity .4s ease}#stage img.visible{opacity:1;pointer-events:auto}
 header,footer{position:absolute;left:0;right:0;padding:24px 30px}header{top:0;display:flex;justify-content:space-between;background:linear-gradient(#0009,transparent);pointer-events:none}
 header a{color:#fff;text-decoration:none;font-size:12px;letter-spacing:.2em;pointer-events:auto}#connection{font-size:12px;color:#aeb6c2}
 footer{bottom:0;background:linear-gradient(transparent,#000e);padding-top:55px}h1{font-size:21px;margin:0 0 4px;font-weight:550}
