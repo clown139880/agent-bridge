@@ -93,7 +93,8 @@ export class OperatorNotices {
       message += `\n🧮 上一窗口已合并 ${this.folded.length} 条通知（${list}）`;
       this.folded = [];
     }
-    this.post(message);
+    // A worker coming online (every deploy and update) needs nothing from the human; going offline still rings.
+    this.post(message, event.type === "bridge.online" ? "silent" : "notice");
   }
 
   private post(message: string, level: NoticeLevel = "notice"): void {

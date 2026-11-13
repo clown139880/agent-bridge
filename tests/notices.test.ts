@@ -132,6 +132,9 @@ test("only what waits for the human or failed rings; settled outcomes and automa
     { type: "bridge_update.status", phase: "failed", name: "hal" }]) notices.notify(event);
   const levels = (store.db.prepare("SELECT level FROM notices ORDER BY rowid").all() as Array<{ level: string }>).map((row) => row.level);
   assert.deepEqual(levels, ["silent", "silent", "silent", "notice", "alert", "silent", "alert"]);
+  const fleet = new OperatorNotices(control, { connector: "app", roomId: "fleet", threadId: "" }, 0);
+  fleet.notify({ type: "bridge.online", name: "hal" }); fleet.notify({ type: "bridge.offline", name: "hal" });
+  assert.deepEqual((store.db.prepare("SELECT level FROM notices WHERE room_id='fleet' ORDER BY rowid").all() as Array<{ level: string }>).map((row) => row.level), ["silent", "notice"]);
   store.upsertMachine({ id: "hal", name: "hal", platform: "linux", hostname: "hal", capabilities: [] });
   const act = (principal: string, key: string, turnId: string, resolvedAction: string) => {
     const { action } = control.createAction({ principal, key, method: "POST", path: "/api/v1/sessions/s/turns", body: {}, kind: "submit_turn", machineId: "hal", sessionId: "s" });
