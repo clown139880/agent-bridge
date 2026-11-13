@@ -111,3 +111,24 @@ test("shutdown also rejects a subscription still waiting on its initial file rea
   f.service.stop();
   await assert.rejects(pending, /server_shutdown/);
 });
+
+test("video URLs use the same metadata, idempotency and revision path without fetching media", async t => {
+  const f = await fixture(t);
+  t.mock.method(globalThis, "fetch", () => { throw new Error("backend must never fetch media"); });
+  const args = { canvas_id: f.id, idempotency_key: "video", url: "https://media.example/opaque?signature=private", media_type: "video" };
+  const added = await f.call("push", args);
+  assert.deepEqual(await f.call("push", args), added);
+  const fresh = new CanvasService({ dataDir: f.dir }); t.after(() => fresh.stop());
+  assert.equal((await fresh.get(f.id)).images[0]!.media_type, "video");
+  for (const media_type of ["audio", "auto", "", null, 42]) await assert.rejects(f.call("push", { ...args, idempotency_key: "invalid", media_type }), /invalid_media_type/);
+  assert.equal((await f.service.get(f.id)).seq, added.seq);
+  const changed = await f.call("push", { canvas_id: f.id, image_id: added.image_id, expected_revision: added.revision,
+    idempotency_key: "image", media_type: "image", url: "https://media.example/still.png" });
+  const delta = await f.service.get(f.id, added.seq);
+  assert.equal(delta.images.length, 1); assert.equal(delta.images[0]!.media_type, "image");
+  assert.equal(delta.images[0]!.order, 0); assert.equal(delta.images[0]!.updated_seq, changed.revision);
+  await assert.rejects(f.call("push", { ...args, idempotency_key: "stale", image_id: added.image_id, expected_revision: added.revision }), /revision_conflict/);
+  const legacy = await f.call("push", { canvas_id: f.id, idempotency_key: "legacy", url: "https://media.example/old.mp4" });
+  assert.equal((await f.service.get(f.id, changed.seq)).images[0]!.media_type, undefined, "old records need no migration; the browser infers video from the URL");
+  assert.equal(legacy.seq, changed.seq + 1);
+});

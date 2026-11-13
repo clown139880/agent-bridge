@@ -1,0 +1,10 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>实时画布</title><link rel="stylesheet" href="/canvas/assets/page.css"><script src="/canvas/assets/page.js" defer></script></head>
+<body><main><div id="stage"><img id="back" alt=""><img id="front" alt=""><video id="video" controls playsinline muted preload="metadata" hidden></video></div>
+<div id="empty" role="status">等待图片或视频</div>
+<header><a href="/control/" aria-label="返回控制中心">CANVAS</a><span id="connection" role="status">连接中</span></header>
+<footer><div id="details"><h1 id="title">实时画布</h1><p id="caption"></p></div>
+<nav aria-label="画布导航"><button id="previous" aria-label="上一项">←</button><span id="count">0 / 0</span><button id="next" aria-label="下一项">→</button>
+<button id="play" aria-pressed="false">自动切换</button><button id="follow" aria-pressed="true">跟随更新</button><button id="fullscreen">全屏</button></nav></footer>
+</main></body></html>

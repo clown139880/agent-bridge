@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { resolve } from "node:path";
 import test from "node:test";
@@ -10,14 +10,21 @@ import { getRequestListener } from "../apps/control-plane/node_modules/@hono/nod
 import { CanvasService } from "../apps/control-plane/src/canvas.js";
 import { createCanvasWeb } from "../apps/control-plane/src/canvas-web.js";
 
-test("canvas browser: current-image drag/context menu, live updates, cursor resume, safe text and reload", {
-  skip: !existsSync("/usr/bin/chromium"), timeout: 40_000,
+test("canvas browser: image actions, mixed video playback and cleanup, live updates, resume and reload", {
+  skip: !existsSync("/usr/bin/chromium"), timeout: 60_000,
 }, async t => {
   await mkdir(resolve(".runtime/tests"), { recursive: true });
   const directory = await mkdtemp(resolve(".runtime/tests/canvas-browser-"));
   const canvas = new CanvasService({ dataDir: directory }), app = getRequestListener(createCanvasWeb(canvas, true).fetch, { overrideGlobalObjects: false });
-  const imageRequests: string[] = [], streamRequests: string[] = [];
+  // Eight-second VP8 fixture generated with ffmpeg's color source; no remote media or runtime encoder needed.
+  const clip = await readFile(new URL("./fixtures/canvas-video.webm", import.meta.url));
+  const imageRequests: string[] = [], videoRequests: string[] = [], streamRequests: string[] = [];
   const server = createServer((req, res) => {
+    if (req.url!.startsWith("/videos/")) {
+      videoRequests.push(req.url!); assert.equal(req.headers.referer, undefined); assert.equal(req.headers.authorization, undefined);
+      if (req.url!.includes("broken")) { res.writeHead(404); res.end(); return; }
+      res.writeHead(200, { "content-type": "video/webm", "content-length": clip.length }); res.end(clip); return;
+    }
     if (req.url!.startsWith("/images/")) {
       imageRequests.push(req.url!); assert.equal(req.headers.referer, undefined); assert.equal(req.headers.authorization, undefined);
       if (req.url!.includes("broken")) { res.writeHead(404); res.end(); return; }
@@ -65,7 +72,7 @@ test("canvas browser: current-image drag/context menu, live updates, cursor resu
   const wait = async (expression: string) => {
     const end = Date.now() + 6000;
     while (Date.now() < end) { if (await js(expression)) return; await new Promise(r => setTimeout(r, 30)); }
-    throw new Error(`UI timed out: ${expression}; ${await js("document.body.innerText")}`);
+    throw new Error(`UI timed out: ${expression}; ${await js("document.body.innerText")}; media=${await js("JSON.stringify((()=>{const v=document.getElementById('video');return {paused:v.paused,ended:v.ended,time:v.currentTime,duration:v.duration,ready:v.readyState,network:v.networkState,error:v.error?.message}})())")}`);
   };
   const checkImageActions = async (number: number) => {
     const expected = `${base}/images/${number}`;
@@ -118,6 +125,43 @@ test("canvas browser: current-image drag/context menu, live updates, cursor resu
   assert.equal(await js("document.getElementById('reconnect')"), null);
   await command("Page.reload"); await wait("document.getElementById('connection').textContent === '实时连接'");
   await image(8); await wait("document.getElementById('count').textContent === '8 / 8' && document.getElementById('empty').hidden");
+
+  await js("document.getElementById('follow').click()");
+  await call("push", { canvas_id: id, idempotency_key: "video-extension", url: `${base}/videos/clip.WEBM?signature=test`, description: "视频" });
+  await call("push", { canvas_id: id, idempotency_key: "video-explicit", url: `${base}/videos/opaque`, media_type: "video" });
+  await wait("document.getElementById('count').textContent === '8 / 10'");
+  assert.deepEqual(videoRequests, [], "unselected videos must not fetch metadata or content");
+  await js("document.getElementById('next').click()");
+  await wait("document.getElementById('count').textContent === '9 / 10' && !document.getElementById('video').paused && document.getElementById('video').currentTime > 0.1");
+  assert.equal(await js("document.getElementById('video').muted && document.getElementById('video').controls && document.getElementById('video').playsInline"), true);
+  assert.equal(await js("document.querySelectorAll('#stage img[src]').length"), 0, "video selection releases old image sources");
+  assert.equal(await js("(()=>{const r=document.getElementById('video').getBoundingClientRect();return document.elementFromPoint(r.x+r.width/2,r.bottom-12)?.id})()"), "video", "the footer must not cover native video controls");
+  await js("Object.defineProperty(document,'hidden',{configurable:true,get:()=>!!window.__hidden});window.__hidden=true;document.dispatchEvent(new Event('visibilitychange'))");
+  assert.equal(await js("document.getElementById('video').paused"), true);
+  const pausedAt = await js("document.getElementById('video').currentTime");
+  await js("window.__hidden=false;document.dispatchEvent(new Event('visibilitychange'))");
+  await wait(`!document.getElementById('video').paused && document.getElementById('video').currentTime > ${pausedAt}`);
+  await js("document.getElementById('video').pause();window.__hidden=true;document.dispatchEvent(new Event('visibilitychange'));window.__hidden=false;document.dispatchEvent(new Event('visibilitychange'))");
+  assert.equal(await js("document.getElementById('video').paused"), true, "returning to a tab must preserve a user's pause");
+  await js("window.dispatchEvent(new PageTransitionEvent('pagehide',{persisted:true}))");
+  assert.equal(await js("document.getElementById('video').hasAttribute('src')"), false);
+  await js("window.dispatchEvent(new PageTransitionEvent('pageshow',{persisted:true}))");
+  await wait("!document.getElementById('video').paused && document.getElementById('video').currentTime > 0.1");
+  const videoScreenshot = await command("Page.captureScreenshot", { format: "png" });
+  await writeFile(resolve(directory, "video-mobile.png"), Buffer.from(videoScreenshot.data, "base64"));
+  await js("document.getElementById('video').currentTime=0;document.getElementById('play').click()");
+  await wait("!document.getElementById('video').paused && document.getElementById('video').currentTime > 0.1");
+  await new Promise(r => setTimeout(r, 5200));
+  assert.equal(await js("document.getElementById('count').textContent"), "9 / 10", "slideshow must not cut a video off after five seconds");
+  await wait("document.getElementById('count').textContent === '10 / 10' && document.getElementById('video').currentSrc.endsWith('/videos/opaque') && !document.getElementById('video').paused");
+  await js("document.getElementById('play').click();document.getElementById('previous').click();document.getElementById('previous').click()");
+  await wait("document.getElementById('count').textContent === '8 / 10' && !!document.querySelector('img.visible')");
+  assert.equal(await js("document.getElementById('video').hidden && document.getElementById('video').paused && !document.getElementById('video').hasAttribute('src')"), true, "leaving video must stop playback and release its source");
+  await checkImageActions(8);
+  await js("document.getElementById('follow').click()");
+  await call("push", { canvas_id: id, idempotency_key: "video-broken", url: `${base}/videos/broken.mp4` });
+  await wait("!document.getElementById('empty').hidden && document.getElementById('empty').textContent.includes('视频暂时无法播放')");
+  await image(12); await wait("document.getElementById('count').textContent === '12 / 12' && document.getElementById('empty').hidden");
   assert.deepEqual(exceptions, []);
   console.log(`Canvas browser screenshot: ${directory}/mobile.png`);
 });

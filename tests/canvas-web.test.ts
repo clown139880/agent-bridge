@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { mkdtemp, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:http";
@@ -9,6 +9,31 @@ import { Store } from "../packages/database/src/index.js";
 import { CanvasService } from "../apps/control-plane/src/canvas.js";
 import { createCanvasWeb } from "../apps/control-plane/src/canvas-web.js";
 import { ToolHub } from "../apps/control-plane/src/tools.js";
+
+test("canvas static files update in the same app without a build or restart; only named assets are served", async t => {
+  const dir = await mkdtemp(join(tmpdir(), "canvas-assets-")), canvas = new CanvasService({ dataDir: dir });
+  t.after(async () => { canvas.stop(); await rm(dir, { recursive: true, force: true }); });
+  const app = createCanvasWeb(canvas, true, dir), id = `cv_${"0".repeat(32)}`;
+  for (const [file, path, type] of [["index.html", `/canvas/${id}/`, "text/html"],
+    ["page.js", "/canvas/assets/page.js", "text/javascript"], ["page.css", "/canvas/assets/page.css", "text/css"]]) {
+    await writeFile(join(dir, file!), "before");
+    const before = await app.request(path!);
+    assert.equal(before.status, 200); assert.equal(await before.text(), "before");
+    assert.equal(before.headers.get("content-type"), `${type}; charset=utf-8`);
+    assert.equal(before.headers.get("cache-control"), "no-store");
+    assert.equal(before.headers.get("x-content-type-options"), "nosniff");
+    if (file === "index.html") assert.match(before.headers.get("content-security-policy")!, /script-src 'self'/);
+    await writeFile(join(dir, "next"), "after"); await rename(join(dir, "next"), join(dir, file!));
+    assert.equal(await (await app.request(path!)).text(), "after", "the running app must reread replaced assets");
+  }
+  await writeFile(join(dir, "secret.txt"), "private");
+  for (const path of ["/canvas/assets/secret.txt", "/canvas/assets/..%2Fsecret.txt", "/canvas/assets/page.js.map", "/canvas/invalid/"]) {
+    const response = await app.request(path);
+    assert.equal(response.status, 404); assert.ok(!(await response.text()).includes("private"));
+  }
+  await rm(join(dir, "page.js"));
+  assert.equal((await app.request("/canvas/assets/page.js")).status, 503);
+});
 
 test("canvas tools use auto/review/human decisions and never store signed URLs in approvals", async t => {
   const dir = await mkdtemp(join(tmpdir(), "canvas-hub-")), registry = join(dir, "registry.yaml");
@@ -20,13 +45,15 @@ test("canvas tools use auto/review/human decisions and never store signed URLs i
   t.after(async () => { hub.stop(); canvas.stop(); store.db.close(); await rm(dir, { recursive: true, force: true }); });
   const call = async (name: string, args: Record<string, unknown>) => JSON.parse((await hub.call(`canvas.${name}`, args, "agent:test") as any).content[0].text);
   const found = await hub.search("canvas", 30); assert.deepEqual(found.tools.map(t => t.name).sort(), ["canvas.create", "canvas.push"]);
+  assert.deepEqual((found.tools.find(t => t.name === "canvas.push")!.inputSchema as any).properties.media_type.enum, ["image", "video"]);
   for (const name of ["list", "get", "set_status", "close", "open", "add_image", "update_image"]) await assert.rejects(call(name, {}), /unknown tool/);
   const created = await call("create", { title: "test", idempotency_key: "c" }), id = created.canvas_id;
   const signed = "https://image.example/private-secret/path?signature=do-not-log";
-  await call("push", { canvas_id: id, idempotency_key: "a", url: signed });
+  await call("push", { canvas_id: id, idempotency_key: "a", url: signed, media_type: "video" });
   assert.equal(reviewed.length, 1); assert.equal(reviewed[0].args.url, "https://image.example/[redacted]");
   assert.ok(!JSON.stringify(hub.approvals()).includes("do-not-log"));
   assert.equal((await canvas.get(id)).images[0]!.url, signed, "the actual image URL stays intact");
+  assert.equal((await canvas.get(id)).images[0]!.media_type, "video");
   const stamp = (await stat(registry)).mtimeMs;
   await writeFile(registry, registryText.replace("review: [push]", "human: [push]"));
   await utimes(registry, new Date(stamp + 1000), new Date(stamp + 1000));
@@ -54,6 +81,7 @@ test("browser state/SSE are read-only and same-origin, resume only changes, and 
   const path = `${base}/canvas/${id}`;
   const page = await fetch(`${path}/`);
   assert.equal(page.status, 200); assert.match(page.headers.get("content-security-policy")!, /img-src http: https:/);
+  assert.match(page.headers.get("content-security-policy")!, /media-src http: https:/);
   assert.equal(page.headers.get("referrer-policy"), "no-referrer");
   assert.equal((await fetch(`${path}/state`)).status, 403);
   assert.equal((await fetch(`${path}/state`, { headers: { ...headers, origin: "https://evil.example" } })).status, 403);
@@ -74,8 +102,10 @@ test("browser state/SSE are read-only and same-origin, resume only changes, and 
     }
   };
   assert.deepEqual((await next()).images, []);
-  const b = await call("push", { canvas_id: id, idempotency_key: "b", url: "https://images.example/b" });
-  assert.deepEqual((await next()).images.map((i: any) => i.id), [b.image_id]);
+  const b = await call("push", { canvas_id: id, idempotency_key: "b", url: "https://images.example/b", media_type: "video" });
+  const videoDelta = await next();
+  assert.deepEqual(videoDelta.images.map((i: any) => i.id), [b.image_id]);
+  assert.equal(videoDelta.images[0].media_type, "video");
   const changed = await (await fetch(`${path}/state?cursor=${a.seq}`, { headers })).json() as any;
   assert.deepEqual(changed.images.map((i: any) => i.id), [b.image_id]);
   assert.equal((await fetch(`${path}/events?cursor=9000`, { headers })).status, 409);

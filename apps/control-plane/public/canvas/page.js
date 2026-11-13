@@ -1,37 +1,22 @@
-// Static assets stay alongside the route so tsc is the only build step this page needs.
-export const CANVAS_HTML = `<!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>实时画布</title><link rel="stylesheet" href="/canvas/assets/page.css"><script src="/canvas/assets/page.js" defer></script></head>
-<body><main><div id="stage"><img id="back" alt=""><img id="front" alt=""></div>
-<div id="empty" role="status">等待第一张图片</div>
-<header><a href="/control/" aria-label="返回控制中心">CANVAS</a><span id="connection" role="status">连接中</span></header>
-<footer><div id="details"><h1 id="title">实时画布</h1><p id="caption"></p></div>
-<nav aria-label="画布导航"><button id="previous" aria-label="上一张">←</button><span id="count">0 / 0</span><button id="next" aria-label="下一张">→</button>
-<button id="play" aria-pressed="false">播放</button><button id="follow" aria-pressed="true">跟随新图</button><button id="fullscreen">全屏</button></nav></footer>
-</main></body></html>`;
-
-export const CANVAS_CSS = `:root{color-scheme:dark;font:15px/1.5 system-ui,sans-serif;color:#f0f0f0;background:#101114}
-*{box-sizing:border-box}body{margin:0}main{height:100dvh;min-height:320px;position:relative;overflow:hidden}
-#stage{position:absolute;inset:0}#stage img{position:absolute;width:100%;height:100%;object-fit:contain;opacity:0;pointer-events:none;transition:opacity .4s ease}#stage img.visible{opacity:1;pointer-events:auto}
-header,footer{position:absolute;left:0;right:0;padding:24px 30px}header{top:0;display:flex;justify-content:space-between;background:linear-gradient(#0009,transparent);pointer-events:none}
-header a{color:#fff;text-decoration:none;font-size:12px;letter-spacing:.2em;pointer-events:auto}#connection{font-size:12px;color:#aeb6c2}
-footer{bottom:0;background:linear-gradient(transparent,#000e);padding-top:55px}h1{font-size:21px;margin:0 0 4px;font-weight:550}
-p{margin:4px 0;white-space:pre-wrap;overflow-wrap:anywhere}#caption{max-height:18vh;overflow:auto;color:#ddd}
-nav{display:flex;align-items:center;gap:8px;margin-top:18px;flex-wrap:wrap}button{font:inherit;font-size:13px;background:#ffffff12;border:1px solid #ffffff30;border-radius:6px;color:inherit;padding:7px 12px;cursor:pointer}
-button:hover,button[aria-pressed=true]{background:#ffffff2b}button:disabled{opacity:.35;cursor:default}button:focus-visible{outline:2px solid #91b9ff;outline-offset:3px}#count{font-variant-numeric:tabular-nums;min-width:64px;text-align:center;font-size:13px}
-#empty{position:absolute;top:45%;left:0;right:0;text-align:center;color:#9ca5b5;padding:20px;pointer-events:none}[hidden]{display:none!important}
-@media(max-width:600px){header,footer{padding:16px}footer{padding-top:45px}h1{font-size:18px}nav{gap:6px}button{padding:8px}#count{min-width:48px}}
-@media(prefers-reduced-motion:reduce){#stage img{transition:none}}`;
-
-export const CANVAS_JS = String.raw`"use strict";
+"use strict";
 (() => {
   const $ = id => document.getElementById(id);
   const base = location.pathname.replace(/\/$/, ""), images = new Map();
   let seq = 0, meta = {}, selected = null, following = true, playing = false, gone = false;
-  let controller, retryTimer, playTimer, displayed = "", generation = 0;
+  let controller, retryTimer, playTimer, displayed = "", generation = 0, resumeVideo = false;
   let front = $("front"), back = $("back");
+  const video = $("video");
   const rows = () => [...images.values()].sort((a,b) => a.order - b.order);
   const status = text => { $("connection").textContent = text; };
+  const mediaType = item => item.media_type || (/\.(mp4|webm|ogv|mov|m4v)$/i.test(new URL(item.url).pathname) ? "video" : "image");
+  function releaseVideo() {
+    video.onloadeddata = video.onerror = video.onended = null;
+    video.pause(); video.hidden = true; resumeVideo = false;
+    if (video.hasAttribute("src")) { video.removeAttribute("src"); video.load(); }
+  }
+  function playVideo() {
+    if (!video.hidden && !document.hidden) video.play().catch(() => {});
+  }
   function show() {
     const list = rows();
     if (!selected && list.length) selected = list[list.length - 1].id;
@@ -42,9 +27,23 @@ export const CANVAS_JS = String.raw`"use strict";
     $("title").textContent = meta.title || "实时画布";
     document.title = meta.title || "实时画布";
     if (!item) { $("empty").hidden = false; return; }
-    if (displayed === item.url) return;
-    displayed = item.url;
-    const revision = ++generation, next = back;
+    const type = mediaType(item), key = item.id + ":" + type + ":" + item.url;
+    if (displayed === key) return;
+    displayed = key;
+    const revision = ++generation;
+    releaseVideo(); playback(); document.querySelector("main").classList.toggle("video", type === "video");
+    if (type === "video") {
+      for (const img of [front, back]) { img.onload = img.onerror = null; img.classList.remove("visible"); img.removeAttribute("src"); }
+      $("empty").textContent = "正在加载视频"; $("empty").hidden = false;
+      video.hidden = false; resumeVideo = document.hidden;
+      video.onloadeddata = () => { if (revision === generation) { $("empty").hidden = true; playVideo(); } };
+      video.onerror = () => { if (revision === generation) { $("empty").textContent = "视频暂时无法播放，请检查来源或浏览器格式支持"; $("empty").hidden = false; } };
+      video.onended = () => { if (revision === generation && playing && !document.hidden) step(1); };
+      if (location.protocol === "https:" && !item.url.startsWith("https:")) { video.onerror(); return; }
+      video.src = item.url; video.load(); playVideo();
+      return;
+    }
+    const next = back;
     next.classList.remove("visible");
     next.onload = () => {
       if (revision !== generation) return;
@@ -68,8 +67,8 @@ export const CANVAS_JS = String.raw`"use strict";
   }
   function playback() {
     clearInterval(playTimer);
-    if (playing && !document.hidden) playTimer = setInterval(() => step(1), 5000);
-    $("play").textContent = playing ? "暂停" : "播放"; $("play").setAttribute("aria-pressed", String(playing));
+    if (playing && !document.hidden) playTimer = setInterval(() => { if (video.hidden) step(1); }, 5000);
+    $("play").textContent = playing ? "暂停切换" : "自动切换"; $("play").setAttribute("aria-pressed", String(playing));
   }
   function apply(delta) {
     if (delta.seq < seq) return;
@@ -120,21 +119,24 @@ export const CANVAS_JS = String.raw`"use strict";
   }
   $("previous").onclick = () => step(-1); $("next").onclick = () => step(1);
   $("follow").onclick = () => { follow(!following); if (following) { selected = rows().at(-1)?.id; show(); } };
-  $("play").onclick = () => { playing = !playing; playback(); };
+  function togglePlayback() { playing = !playing; follow(false); playback(); if (playing) playVideo(); }
+  $("play").onclick = togglePlayback;
   $("fullscreen").onclick = () => {
     const action = document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen();
     action?.catch(() => {});
   };
   document.addEventListener("keydown", event => {
-    if (event.target instanceof HTMLButtonElement || event.altKey || event.ctrlKey || event.metaKey) return;
+    if (event.target instanceof HTMLButtonElement || event.target instanceof HTMLVideoElement || event.altKey || event.ctrlKey || event.metaKey) return;
     if (event.key === "ArrowLeft") { event.preventDefault(); step(-1); }
     if (event.key === "ArrowRight") { event.preventDefault(); step(1); }
-    if (event.code === "Space") { event.preventDefault(); playing = !playing; playback(); }
+    if (event.code === "Space") { event.preventDefault(); togglePlayback(); }
   });
   document.addEventListener("visibilitychange", () => {
     playback();
-    if (document.hidden) { clearTimeout(retryTimer); controller?.abort(); } else connect();
+    if (document.hidden) { resumeVideo = !video.hidden && !video.paused; video.pause(); clearTimeout(retryTimer); controller?.abort(); }
+    else { if (resumeVideo) playVideo(); resumeVideo = false; connect(); }
   });
-  window.addEventListener("pagehide", () => { clearTimeout(retryTimer); clearInterval(playTimer); controller?.abort(); });
+  window.addEventListener("pagehide", () => { releaseVideo(); clearTimeout(retryTimer); clearInterval(playTimer); controller?.abort(); });
+  window.addEventListener("pageshow", event => { if (event.persisted) { displayed = ""; show(); playback(); connect(); } });
   connect();
-})();`;
+})();

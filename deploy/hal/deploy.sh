@@ -17,10 +17,9 @@
 # Usage: deploy/hal/deploy.sh [--force] [--note TEXT] [--frontend-only]
 #   --force          restart even when up to date
 #   --note TEXT      what the continued session should verify or finish
-#   --frontend-only  rebuild only the Control Center and restart nothing. The Control
-#                    Plane reads its dist from disk on every request, so the new page
-#                    is live at once. Refused unless everything since the commit the
-#                    services run is Control Center, tests, docs or the root version.
+#   --frontend-only  update Control Center / canvas pages without restarting services.
+#                    Canvas assets need no build. Refused if anything since the
+#                    running commit changes backend code or other runtime files.
 set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/../.." && pwd)
@@ -48,7 +47,7 @@ done
 log() { echo "[deploy] $*"; }
 die() { echo "[deploy] $*" >&2; exit 1; }
 
-exec 9>/run/lock/agent-bridge-deploy.lock
+exec 9>"${AGENT_BRIDGE_DEPLOY_LOCK:-/run/lock/agent-bridge-deploy.lock}"
 flock -n 9 || die "another deploy is running"
 
 cd "$repo"
@@ -67,28 +66,50 @@ if "$frontend_only"; then
   target=$(git rev-parse "origin/$branch")
   running=$(cat "$marker" 2>/dev/null) || die "no deployed-commit marker; run a full deploy"
   others=$(git diff --name-only "$running" "$target" \
-    | grep -Ev '^(apps/control-center/|tests/|docs/)|\.md$' | grep -vx package.json || true)
+    | grep -Ev '^(apps/control-center/|apps/control-plane/public/canvas/|tests/|docs/)|\.md$' | grep -vx package.json || true)
   # The root package.json may change only its version (the page shows it).
   if git diff -U0 "$running" "$target" -- package.json | grep -E '^[-+] ' | grep -qv '"version":'; then
     others="$others package.json"
   fi
   [ -z "$others" ] || die "not frontend-only since $running (services would run stale code); changed: $(echo $others)"
-  git merge --ff-only --quiet "origin/$branch"
-  if [ ! -d node_modules ] || ! git diff --quiet "$previous" "$target" -- pnpm-lock.yaml; then
-    CI=true pnpm install --frozen-lockfile --filter '!dsh-agent-control-plugin'
+  canvas_changed=false
+  git diff --quiet "$running" "$target" -- apps/control-plane/public/canvas/ || canvas_changed=true
+  if "$canvas_changed"; then
+    git show "$target:apps/control-plane/public/canvas/page.js" | node --check \
+      || die "canvas JavaScript is invalid; checkout unchanged"
   fi
-  # Build beside the live dist and swap it in, so requests never see a half-written build.
-  dist=apps/control-center/dist
-  rm -rf "$dist.next" "$dist.prev"
-  pnpm --filter @agent-bridge/control-center exec sh -c 'tsc --noEmit && vite build --outDir dist.next --emptyOutDir' \
-    || die "frontend build failed; the live page is unchanged"
-  [ -d "$dist" ] && mv "$dist" "$dist.prev"
-  mv "$dist.next" "$dist"
-  rm -rf "$dist.prev"
-  entry=$(grep -o '/control/assets/[^"]*\.js' "$dist/index.html" | head -n 1)
-  served=$(curl -fsS --max-time 5 "${health_url%/health}/control/sessions" | grep -o '/control/assets/[^"]*\.js' | head -n 1 || true)
-  [ -n "$entry" ] && [ "$served" = "$entry" ] || die "built $entry but the Control Plane serves ${served:-nothing}"
-  log "frontend $(node -p 'require("./package.json").version') ($target) is live: $entry; services untouched at $running"
+  git merge --ff-only --quiet "origin/$branch"
+  # A canvas-only update is already live after the fast-forward; it needs neither
+  # the Control Center build nor dependency installation.
+  if ! "$canvas_changed" || ! git diff --quiet "$running" "$target" -- apps/control-center/; then
+    if [ ! -d node_modules ] || ! git diff --quiet "$previous" "$target" -- pnpm-lock.yaml; then
+      CI=true pnpm install --frozen-lockfile --filter '!dsh-agent-control-plugin'
+    fi
+    # Build beside the live dist and swap it in, so requests never see a half-written build.
+    dist=apps/control-center/dist
+    rm -rf "$dist.next" "$dist.prev"
+    pnpm --filter @agent-bridge/control-center exec sh -c 'tsc --noEmit && vite build --outDir dist.next --emptyOutDir' \
+      || die "frontend build failed; the live Control Center is unchanged"
+    [ -d "$dist" ] && mv "$dist" "$dist.prev"
+    mv "$dist.next" "$dist"
+    rm -rf "$dist.prev"
+    entry=$(grep -o '/control/assets/[^"]*\.js' "$dist/index.html" | head -n 1)
+    served=$(curl -fsS --max-time 5 "${health_url%/health}/control/sessions" | grep -o '/control/assets/[^"]*\.js' | head -n 1 || true)
+    [ -n "$entry" ] && [ "$served" = "$entry" ] || die "built $entry but the Control Plane serves ${served:-nothing}"
+    log "Control Center is live: $entry"
+  fi
+  if "$canvas_changed"; then
+    for asset in index.html page.css page.js; do
+      path="/canvas/assets/$asset"
+      # The HTML route only needs a syntactically valid ID; this creates no canvas.
+      [ "$asset" != index.html ] || path=/canvas/cv_00000000000000000000000000000000/
+      expected=$(sha256sum "apps/control-plane/public/canvas/$asset")
+      served=$(curl -fsS --max-time 5 "${health_url%/health}$path" | sha256sum) || die "unable to verify canvas $asset"
+      [ "${expected%% *}" = "${served%% *}" ] || die "canvas $asset does not match the published file"
+    done
+    log "canvas HTML/CSS/JS are live; no canvas build needed"
+  fi
+  log "frontend $(node -p 'require("./package.json").version') ($target) is live; services untouched at $running"
   exit 0
 fi
 
@@ -105,6 +126,7 @@ build() {
     CI=true pnpm install --frozen-lockfile --filter '!dsh-agent-control-plugin'
   fi
   pnpm exec tsc -b --pretty false || return $?
+  node --check apps/control-plane/public/canvas/page.js || return $?
   pnpm --filter @agent-bridge/control-center build
 }
 

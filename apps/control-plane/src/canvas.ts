@@ -8,7 +8,7 @@ export interface CanvasOptions {
 }
 export interface CanvasImage {
   id: string; url: string; description: string; order: number; updated_seq: number;
-  thumbnail_url?: string; expires_at?: string;
+  media_type?: "image" | "video"; thumbnail_url?: string; expires_at?: string;
 }
 export interface CanvasMeta {
   id: string; title: string; created_at: number; updated_at: number;
@@ -29,7 +29,7 @@ const canonical = (value: unknown): string => JSON.stringify(value, (_key, item)
 const missing = (e: unknown) => (e as NodeJS.ErrnoException).code === "ENOENT";
 const ID = /^cv_[a-f0-9]{32}$/;
 
-/** One process, one small JSON file per canvas. No image I/O, event log or background jobs. */
+/** One process, one small JSON file per canvas. No media I/O, event log or background jobs. */
 export class CanvasService {
   readonly directory: string;
   private readonly queues = new Map<string, Promise<unknown>>();
@@ -130,6 +130,10 @@ export class CanvasService {
   private imageFields(args: Record<string, unknown>, add: boolean): Partial<CanvasImage> {
     const fields: Partial<CanvasImage> = {};
     if (add || args.url !== undefined) fields.url = this.url(args.url);
+    if (args.media_type !== undefined) {
+      if (args.media_type !== "image" && args.media_type !== "video") throw new CanvasError("invalid_media_type");
+      fields.media_type = args.media_type;
+    }
     if (add || args.description !== undefined) fields.description = this.text(args.description ?? "", this.limits.maxDescriptionBytes, "description");
     if (args.thumbnail_url !== undefined) fields.thumbnail_url = this.url(args.thumbnail_url);
     if (args.expires_at !== undefined) {
@@ -142,7 +146,7 @@ export class CanvasService {
     if (!owner) throw new CanvasError("identity_required", 403);
     const fields: Record<string, string[]> = {
       create: ["title", "idempotency_key"],
-      push: ["canvas_id", "idempotency_key", "image_id", "expected_revision", "url", "description", "thumbnail_url", "expires_at"],
+      push: ["canvas_id", "idempotency_key", "image_id", "expected_revision", "url", "media_type", "description", "thumbnail_url", "expires_at"],
     };
     if (!fields[tool] || Object.keys(args).some(key => !fields[tool]!.includes(key))) throw new CanvasError("invalid_arguments");
     const updating = tool === "push" && args.image_id !== undefined;
