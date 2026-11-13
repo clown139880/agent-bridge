@@ -64,11 +64,12 @@ export class AgentControlService {
         }
         return this.importTarget.deleteNativeWorkspace(args['nativeIds'], signal)
       }
-      if (request.operation === 'creation_sources' || request.operation === 'create_native') {
+      if (request.operation === 'creation_sources' || request.operation === 'create_native' || request.operation === 'dsh_workspace') {
         if (!this.importTarget) throw new ControlError('invalid_operation', 'Bridge provider is not ready.', 400)
         if (typeof args['cwd'] !== 'string' || !args['cwd']) throw new ControlError('invalid_parameter', 'cwd is required.', 400)
         if (request.operation === 'creation_sources') return this.importTarget.creationSources(args['cwd'])
         if (typeof args['sourceId'] !== 'string') throw new ControlError('invalid_parameter', 'sourceId is required.', 400)
+        if (request.operation === 'dsh_workspace') return this.importTarget.dshWorkspace(args['cwd'], args['sourceId'])
         const agent = await this.importTarget.createInWorkspace(args['cwd'], args['sourceId'], signal)
         return { nativeSessionId: String(agent.id) }
       }

@@ -42,6 +42,11 @@ export class SessionCreationController {
       controller.cancel()
       const source = await new Promise<Source>((resolve, reject) => { controller.pending = { cwd, sources: result.sources, resolve, reject }; controller.emit() })
       if (source.id === 'dsh') return original.call(this, nativeOptions(options))
+      if (source.agentType === 'dsh') {
+        // DSH in a group's local checkout: its own workspace, which the catalog fuses into the group.
+        const { workspaceId } = await controller.rpc('dsh_workspace', { cwd, sourceId: source.id }) as { workspaceId: string }
+        return original.call(this, { workspaceId })
+      }
       const created = await controller.rpc('create_native', { cwd, sourceId: source.id }) as { nativeSessionId?: string }
       if (!created.nativeSessionId) throw new Error('Bridge returned no native session identity')
       // Preserve the native create contract: the returned session is immediately addressable.
@@ -86,13 +91,13 @@ type MachineGroup = { key: string; machineId: string; label: string; platform: s
 export function groupSources(sources: readonly Source[]): MachineGroup[] {
   const groups = new Map<string, MachineGroup>()
   for (const source of sources) {
-    const local = source.id === 'dsh' || !!source.local
+    const local = source.agentType === 'dsh' || !!source.local
     const key = (local ? 'local' : source.machineId) + '\0' + source.workspace
     let group = groups.get(key)
     if (!group) groups.set(key, group = { key, machineId: source.machineId, label: '', platform: source.platform ?? '', local, workspace: source.workspace, sources: [] })
     group.sources.push(source)
     // A local Bridge worker names the machine better than the bare DSH hostname.
-    if (!group.label || source.id !== 'dsh') { group.label = source.machineName || source.name.split(/\s@\s/)[1] || source.machineId; if (source.id !== 'dsh') group.machineId = source.machineId }
+    if (!group.label || source.agentType !== 'dsh') { group.label = source.machineName || source.name.split(/\s@\s/)[1] || source.machineId; if (source.agentType !== 'dsh') group.machineId = source.machineId }
     if (!group.platform && source.platform) group.platform = source.platform
   }
   return [...groups.values()].sort((left, right) => Number(right.local) - Number(left.local))

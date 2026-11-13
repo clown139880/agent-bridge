@@ -81,4 +81,19 @@ describe('native directory creation', () => {
     expect(rpc).toHaveBeenCalledTimes(2)
     dispose()
   })
+  it('creates DSH in a group\'s local checkout through that checkout\'s own workspace', async () => {
+    const checkout = {id:'dsh\0C:\\repo',name:'DSH @ PC',agentType:'dsh',machineId:'local-dsh',local:true,workspace:'C:\\repo',available:true}
+    const rpc = vi.fn(async (op: string) => op === 'creation_sources' ? {sources:[checkout]} : {workspaceId:'real'})
+    const controller = new SessionCreationController(rpc)
+    const original = vi.fn(async (_options?: {workspaceId?:string}) => 'local')
+    const sessions = {create:original,refresh:vi.fn(async () => {})}
+    const dispose = controller.install(sessions,{list:{getSnapshot:() => ({items:[{workspaceId:'group',path:'/presentation'}]})}})
+    const created = sessions.create({workspaceId:'group'})
+    await vi.waitFor(() => expect(controller.snapshot()).toBeDefined())
+    controller.select(checkout)
+    await expect(created).resolves.toBe('local')
+    expect(rpc).toHaveBeenLastCalledWith('dsh_workspace',{cwd:'/presentation',sourceId:checkout.id})
+    expect(original).toHaveBeenCalledWith({workspaceId:'real'})
+    dispose()
+  })
 })

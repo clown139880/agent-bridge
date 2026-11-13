@@ -36,6 +36,8 @@ export function promptTitle(row: JsonObject, events: readonly NativeEvent[]): st
 let cachedHostname: string | undefined
 const hostname = (): string => cachedHostname ??= osHostname()
 const FULL_SYNC_MS = 60_000
+/** Creation source id of DSH in a local checkout other than the requested folder. */
+const DSH_SOURCE_PREFIX = 'dsh\0'
 /** Sidebar recency: the user's last prompt, as in the Control Center. Agent replies,
  * tool progress and status changes do not reorder the list (a reply clock moved
  * every running session on each assistant message); a session without a prompt
@@ -291,7 +293,15 @@ export class AgentBridgeImportTarget {
       const machineId = str(worker['machineId'], str(worker['id']))
       locations.set(machineId + '\0' + canonical, { machineId, workspace: canonical })
     }
-    const sources: JsonObject[] = local ? [{ id: 'dsh', name: 'DSH @ ' + hostname(), agentType: 'dsh', machineId: 'local-dsh', machineName: hostname(), platform: process.platform, local: true, workspace: canonical, available: true }] : []
+    const dsh = (id: string, workspace: string): JsonObject => ({ id, name: 'DSH @ ' + hostname(), agentType: 'dsh', machineId: 'local-dsh', machineName: hostname(), platform: process.platform, local: true, workspace, available: true })
+    const sources: JsonObject[] = local ? [dsh('dsh', canonical)] : []
+    // A presentation folder is no DSH directory, but its group's existing checkouts on
+    // this Host are: offer DSH in each, as a group used to show its local workspace.
+    if (!local) for (const location of locations.values()) {
+      const worker = [...this.workers.values()].find(item => str(item['machineId'], str(item['id'])) === location.machineId)
+      const directory = worker && this.isLocalWorker(worker) ? await realpath(location.workspace).catch(() => '') : ''
+      if (directory && !sources.some(source => source['workspace'] === directory)) sources.push(dsh(DSH_SOURCE_PREFIX + directory, directory))
+    }
     for (const location of locations.values()) for (const worker of this.workers.values()) {
       if (str(worker['machineId'], str(worker['id'])) !== location.machineId) continue
       const id = str(worker['id']) + '\0' + location.workspace
@@ -303,6 +313,16 @@ export class AgentBridgeImportTarget {
         local: this.isLocalWorker(worker), ...location, available: worker['status'] === 'online' })
     }
     return { cwd: canonical, sources }
+  }
+  /** The DSH workspace of a checkout offered as a DSH source for `cwd`, registered on first use. */
+  async dshWorkspace(cwd: string, sourceId: string): Promise<JsonObject> {
+    const context = await this.creationSources(cwd)
+    const source = (context['sources'] as JsonObject[]).find(item => item['id'] === sourceId && item['agentType'] === 'dsh')
+    if (!source) throw new Error('This directory offers no such DSH source')
+    const directory = str(source['workspace'])
+    const workspace = await this.host.workspaceRegistry.resolveByPath(directory) ?? await this.host.workspaceRegistry.create(directory, basename(directory))
+    if (!workspace.id) throw new Error('DSH registered the workspace without an identity')
+    return { workspaceId: workspace.id }
   }
   async createInWorkspace(directory: string, sourceId: string, signal?: AbortSignal): Promise<Agent> {
     const context = await this.creationSources(directory)

@@ -14,8 +14,8 @@ import type { BridgeClient } from '../src/bridge-client.js'
 import { ControlError } from '../src/errors.js'
 import { bridgeUserInputToQuestions, userInputAnswerToBridge, relayPendingInteractions } from '../src/agent-bridge-provider/approval-bridge.js'
 import type { Context } from '@deepseek-ai/cordis'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
+import { hostname, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createRequire } from 'node:module'
 
@@ -410,6 +410,26 @@ describe('native session catalog', () => {
     expect(sources.every(source => source['workspace'] === '/remote/repo')).toBe(true)
     await expect(f.target.createInWorkspace(cwd,'other\0/remote/repo')).rejects.toThrow('unavailable')
     expect(f.bridge.call.mock.calls.some(([request]) => request.operation === 'create_session')).toBe(false)
+    await f.target.dispose()
+  })
+  it('offers DSH in the group\'s local checkout from its presentation folder and registers that workspace', async () => {
+    const f = await fixture()
+    const checkout = await mkdtemp(join(tmpdir(), 'bridge-checkout-')); roots.push(checkout)
+    const local = { ...summary, workspace: checkout, executionLocations: [{ workerId: 'w', machineId: 'dev-wsl', workspace: checkout }] }
+    f.bridge.call.mockImplementation(async request => {
+      if (request.operation === 'workers') return { workers: [{ id: 'w', machineId: 'dev-wsl', hostname: hostname(), platform: process.platform, name: 'Codex', status: 'online' }] }
+      if (request.operation === 'session_groups') return groupPage([local])
+      return page([])
+    })
+    await f.target.refresh()
+    const cwd = projectPath(f)
+    const sources = (await f.target.creationSources(cwd))['sources'] as JsonObject[]
+    const real = await realpath(checkout)
+    expect(sources.map(source => [source['agentType'], source['workspace']])).toEqual([['dsh', real], ['', checkout]])
+    expect(sources.some(source => source['workspace'] === cwd)).toBe(false)
+    const { workspaceId } = await f.target.dshWorkspace(cwd, String(sources[0]!['id']))
+    expect(f.host.workspaceRegistry.list!().find(workspace => workspace.id === workspaceId)?.path).toBe(real)
+    await expect(f.target.dshWorkspace(cwd, 'dsh')).rejects.toThrow('no such DSH source')
     await f.target.dispose()
   })
   it('resolves catalog bindings without native agents and keeps the draft in the same group', async () => {

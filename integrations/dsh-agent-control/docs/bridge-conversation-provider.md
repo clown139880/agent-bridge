@@ -65,6 +65,9 @@ The original directory New Session action now opens a source picker through a
 narrow, disposable wrapper around the client Sessions.create method. The Host
 resolves the directory's binding and advertises only workers on its machine.
 DSH is offered only for a real Host directory, never a remote presentation folder.
+From a presentation folder it is offered in each existing checkout of the group on
+this Host instead; choosing it registers that checkout as a DSH workspace, which
+the client fuses into the group.
 The Host revalidates the selected source and creates only a local draft with its
 Bridge binding; the Bridge session is created by the first message, so cancel or
 an abandoned draft leaves nothing remote. Offline sources remain visible but cannot be selected.
