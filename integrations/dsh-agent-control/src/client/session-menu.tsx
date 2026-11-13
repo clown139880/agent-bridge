@@ -1,6 +1,6 @@
 import { IconTrashOutline16 } from '@deepseek-ai/dsh-client-ui-primitives'
 import { Children, Fragment, cloneElement, isValidElement, type ReactElement, type ReactNode, type ComponentType } from 'react'
-import { DELETE_SESSION_EVENT } from './native-catalog.js'
+import { DELETE_SESSION_EVENT, RETITLE_SESSION_EVENT } from './native-catalog.js'
 import type { WorkspaceHook } from './native-catalog.js'
 
 type Props = Record<string, any>
@@ -40,8 +40,9 @@ export function extendSessionMenu(Component: ComponentType<any>, useWorkspaces?:
     if (session && Array.isArray(props['items']) && ['rename', 'fork', 'archive'].every(id => props['items'].some((item: Props) => item['id'] === id))) {
       const onSelect = props['onSelect'] as (id: string) => void
       return cloneElement(value, {
-        items: [...props['items'], { id: 'agent-control-delete', label: '删除会话', icon: <IconTrashOutline16 /> }],
+        items: [...props['items'], { id: 'agent-control-retitle', label: '按最近对话重新起名' }, { id: 'agent-control-delete', label: '删除会话', icon: <IconTrashOutline16 /> }],
         onSelect: (id: string) => {
+          if (id === 'agent-control-retitle') { props['onClose']?.(); window.dispatchEvent(new CustomEvent(RETITLE_SESSION_EVENT, { detail: { nativeId: session.id } })); return }
           if (id !== 'agent-control-delete') return onSelect(id)
           props['onClose']?.()
           window.dispatchEvent(new CustomEvent(DELETE_SESSION_EVENT, { detail: { nativeId: session.id, title: session.title } }))

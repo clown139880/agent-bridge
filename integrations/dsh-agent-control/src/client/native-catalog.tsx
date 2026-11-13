@@ -16,6 +16,7 @@ type Workspaces = { list: Source<WorkspaceSnapshot>; rename(id: string, title: s
 type SessionSnapshot = { current?: string; byId?: Record<string, { updatedAt?: number }> }
 export type CatalogSessions = { list: Source<SessionSnapshot>; clear(): void; refresh(): Promise<void> }
 export const DELETE_SESSION_EVENT = 'agent-control:delete-session'
+export const RETITLE_SESSION_EVENT = 'agent-control:retitle-session'
 type Rpc = (operation: string, args?: Record<string, string | number | string[]>) => Promise<unknown>
 
 const EMPTY_SNAPSHOT: WorkspaceSnapshot = { items: [], archivedSessionIds: [] }
@@ -234,6 +235,12 @@ export class NativeCatalog {
     if (typeof data.rev === 'number') this.position = { epoch: data.epoch ?? '', rev: data.rev }
     this.loaded = true; this.entries = next; this.emit()
   }
+  /** Name a Bridge session again from its latest conversation; the list shows it on the next catalog change. */
+  async retitle(nativeId: string): Promise<void> {
+    if (isVirtualSession(nativeId)) throw new Error(READ_ONLY)
+    await this.rpc('retitle_native', { nativeId })
+    await this.sessions.refresh()
+  }
   async remove(entry: Pick<NativeEntry, 'nativeId'>): Promise<void> {
     if (isVirtualSession(entry.nativeId)) throw new Error(READ_ONLY)
     const result = await this.rpc('delete_native', { nativeId: entry.nativeId }) as { deleted?: boolean }
@@ -368,6 +375,8 @@ export function DeleteNativeSession({ catalog }: { catalog: NativeCatalog }) {
   const [pending, setPending] = useState<NativeEntry>()
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const [retitleError, setRetitleError] = useState('')
+  useEffect(() => { if (!retitleError) return; const timer = setTimeout(() => setRetitleError(''), 6_000); return () => clearTimeout(timer) }, [retitleError])
   const ref = useDialog(!!pending, () => { if (!busy) setPending(undefined) })
   useEffect(() => {
     const request = (event: Event) => {
@@ -376,9 +385,15 @@ export function DeleteNativeSession({ catalog }: { catalog: NativeCatalog }) {
       setError(''); setPending(entries.find(row => row.nativeId === detail.nativeId) ?? { nativeId: detail.nativeId, sessionId: detail.nativeId.startsWith('agent-bridge-') ? '?' : '', workerId: '', groupId: '', groupTitle: '', groupUpdatedAt: 0, executionLocations: [], machineId: '', workspace: '', title: detail.title || 'DSH 对话', status: '', worker: 'DSH', updatedAt: 0, activityAt: 0 })
     }
     window.addEventListener(DELETE_SESSION_EVENT, request)
-    return () => window.removeEventListener(DELETE_SESSION_EVENT, request)
+    // Renaming needs no confirmation: it only asks the Control Plane for a new title; a failure shows here.
+    const retitle = (event: Event) => {
+      const nativeId = (event as CustomEvent<{ nativeId: string }>).detail?.nativeId
+      if (typeof nativeId === 'string') void catalog.retitle(nativeId).catch(cause => { setPending(undefined); setRetitleError(cause instanceof Error ? cause.message : '重新起名失败') })
+    }
+    window.addEventListener(RETITLE_SESSION_EVENT, retitle)
+    return () => { window.removeEventListener(DELETE_SESSION_EVENT, request); window.removeEventListener(RETITLE_SESSION_EVENT, retitle) }
   }, [entries, busy])
-  return <>{pending && <div className={css.sourceOverlay}>
+  return <>{retitleError && <div role="alert" className={css.help}>{retitleError}</div>}{pending && <div className={css.sourceOverlay}>
     <div ref={ref} tabIndex={-1} role="dialog" aria-modal="true" aria-labelledby="delete-session-title" className={css.sourceDialog}>
       <h2 id="delete-session-title">删除此会话？</h2><p className={css.deleteTitle}>{pending.title}</p><p className={css.help}>{pending.worker}{pending.workspace ? ' · ' + pending.workspace : ''}</p>
       <p>{pending.sessionId ? '将删除 Bridge 中的会话并从客户端列表移除。' : '将删除此 DSH 对话的列表记录。底层日志保留以便恢复。'}工作目录和项目文件会保留。</p>

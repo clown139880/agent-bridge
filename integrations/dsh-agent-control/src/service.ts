@@ -52,6 +52,12 @@ export class AgentControlService {
         if (!this.importTarget || typeof args['nativeId'] !== 'string') throw new ControlError('invalid_parameter', 'nativeId is required.', 400)
         return this.importTarget.deleteNative(args['nativeId'], signal)
       }
+      if (request.operation === 'retitle_native') {
+        const binding = typeof args['nativeId'] === 'string' ? this.importTarget?.binding(args['nativeId']) : undefined
+        if (!binding) throw new ControlError('invalid_parameter', '只有 Bridge 会话可以重新起名', 400)
+        const session = record(await this.bridge.call({ operation: 'retitle_session', args: { sessionId: str(binding['sessionId']) } }, signal))
+        return { title: str(session['title']) }
+      }
       if (request.operation === 'delete_native_workspace') {
         if (!this.importTarget || !Array.isArray(args['nativeIds']) || !args['nativeIds'].every(id => typeof id === 'string')) {
           throw new ControlError('invalid_parameter', 'nativeIds is required.', 400)

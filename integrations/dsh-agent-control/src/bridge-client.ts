@@ -57,6 +57,8 @@ export class BridgeClient {
       case 'session_groups': return this.request('GET', `/session-groups?${query(args, ['limit', 'cursor', 'changedAfter'])}`, undefined, undefined, signal)
       case 'session': return this.request('GET', `/sessions/${this.segment(textArg(args, 'sessionId')!)}`, undefined, undefined, signal)
       case 'delete_session': return this.request('DELETE', `/sessions/${this.segment(textArg(args, 'sessionId')!)}`, {}, randomUUID(), signal)
+      // Control Plane 0.7.92+: name the session again from where its conversation went.
+      case 'retitle_session': return this.write(`/sessions/${this.segment(textArg(args, 'sessionId')!)}/title`, { auto: true }, signal)
       case 'session_events': {
         const id = this.segment(textArg(args, 'sessionId')!)
         return this.request('GET', `/sessions/${id}/events?${query(args, ['after', 'before', 'tail', 'limit', 'type'])}`, undefined, undefined, signal)
