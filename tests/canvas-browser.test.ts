@@ -70,9 +70,10 @@ test("canvas browser: image actions, mixed video playback and cleanup, live upda
     if (r.exceptionDetails) throw new Error(JSON.stringify(r.exceptionDetails)); return r.result.value;
   };
   const wait = async (expression: string) => {
-    const end = Date.now() + 6000;
-    while (Date.now() < end) { if (await js(expression)) return; await new Promise(r => setTimeout(r, 30)); }
-    throw new Error(`UI timed out: ${expression}; ${await js("document.body.innerText")}; media=${await js("JSON.stringify((()=>{const v=document.getElementById('video');return {paused:v.paused,ended:v.ended,time:v.currentTime,duration:v.duration,ready:v.readyState,network:v.networkState,error:v.error?.message}})())")}`);
+    // A page still loading (after a reload) may not have the element yet: that is "not yet", not a failure.
+    const end = Date.now() + 6000; let last: unknown;
+    while (Date.now() < end) { try { if (await js(expression)) return; } catch (error) { last = error; } await new Promise(r => setTimeout(r, 30)); }
+    throw new Error(`UI timed out: ${expression}; ${last ? `last error ${String(last).slice(0, 200)}; ` : ""}${await js("document.body.innerText")}; media=${await js("JSON.stringify((()=>{const v=document.getElementById('video');return {paused:v.paused,ended:v.ended,time:v.currentTime,duration:v.duration,ready:v.readyState,network:v.networkState,error:v.error?.message}})())")}`);
   };
   const checkImageActions = async (number: number) => {
     const expected = `${base}/images/${number}`;
