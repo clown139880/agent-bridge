@@ -206,7 +206,7 @@ export class Journal {
   }
 
   /**
-   * One call files every candidate: the session's project scope by default, `_global` only when the
+   * Files every candidate, one project's batch per call: the session's project scope by default, `_global` only when the
    * human said it holds everywhere, skip what only describes this piece of work. A contradiction, a
    * candidate the model left out and a project with no scope name go to the human.
    */
@@ -222,21 +222,38 @@ export class Journal {
         .map((f) => `${f.topic}/${f.kind} = ${f.value.slice(0, width)}`).join("；") || "（无）"; }
       catch { return "（无）"; }
     };
-    const input = candidates.map((c, i) => {
-      const s = bySession.get(c.session)!;
-      return `${i}. [${c.kind}] ${c.value}\n   来源：${s.title}（${s.path}） 证据：${c.evidence}\n   项目作用域：${s.scope
-        ? `${s.scope.id}（${s.scope.title}） 已有：${facts(s.scope.id, 120)}` : "不存在，需在 newScopes 里起一个"}`;
-    }).join("\n");
-    let answer: { decisions?: Array<Record<string, unknown>>; newScopes?: Array<Record<string, unknown>> } = {};
-    let failed = "";
-    if (this.options.model) {
-      try { answer = await this.options.model(ARCHIVE_SYSTEM, `候选：\n${input}\n\n_global 已有：${facts("_global", 600)}`, 8_000); }
-      catch (error) { failed = error instanceof Error ? error.message : String(error); }
-    } else failed = "no model";
-    const named = new Map((answer.newScopes ?? []).map((n) => [text(n.workspace), n]));
+    // A busy day has dozens of candidates; one call for all of them runs out of room or breaks its JSON,
+    // so they go in batches of one project's candidates each, a failed batch failing only itself.
+    const batches: number[][] = [];
+    const byScope = new Map<string, number[]>();
+    candidates.forEach((c, i) => {
+      const s = bySession.get(c.session)!, key = s.scope?.id ?? s.path;
+      byScope.set(key, [...byScope.get(key) ?? [], i]);
+    });
+    for (const group of byScope.values()) for (let i = 0; i < group.length; i += ARCHIVE_BATCH) batches.push(group.slice(i, i + ARCHIVE_BATCH));
+    const global = facts("_global", 600);
+    const raws: Array<Record<string, unknown>> = [];
+    const named = new Map<string, Record<string, unknown>>();
+    const failures = new Map<number, string>();
+    for (const batch of batches) {
+      const input = batch.map((index, i) => {
+        const c = candidates[index]!, s = bySession.get(c.session)!;
+        return `${i}. [${c.kind}] ${c.value}\n   来源：${s.title}（${s.path}） 证据：${c.evidence}\n   项目作用域：${s.scope
+          ? `${s.scope.id}（${s.scope.title}） 已有：${facts(s.scope.id, 120)}` : "不存在，需在 newScopes 里起一个"}`;
+      }).join("\n");
+      try {
+        if (!this.options.model) throw new Error("no model");
+        const answer = await this.options.model(ARCHIVE_SYSTEM, `候选：\n${input}\n\n_global 已有：${global}`, 4_000) as
+          { decisions?: Array<Record<string, unknown>>; newScopes?: Array<Record<string, unknown>> };
+        for (const n of answer.newScopes ?? []) named.set(text(n.workspace), n);
+        // The batch numbers its candidates from 0; map them back to the day's.
+        for (const raw of answer.decisions ?? []) raws.push({ ...raw, candidate: [raw.candidate].flat().map(Number)
+          .filter((i) => Number.isInteger(i) && batch[i] !== undefined).map((i) => batch[i]!) });
+      } catch (error) { for (const index of batch) failures.set(index, error instanceof Error ? error.message : String(error)); }
+    }
     const decisions: MemoryDecision[] = [];
-    for (const raw of answer.decisions ?? []) {
-      const indexes = [raw.candidate].flat().map(Number).filter((i) => Number.isInteger(i) && candidates[i]);
+    for (const raw of raws) {
+      const indexes = (raw.candidate as number[]).filter((i) => candidates[i]);
       const first = candidates[indexes[0]!];
       if (!first) continue;
       const session = bySession.get(first.session)!;
@@ -261,9 +278,9 @@ export class Journal {
     const decided = new Set(decisions.flatMap((d) => d.candidates));
     candidates.forEach((c, i) => {
       if (!decided.has(i)) decisions.push({ candidates: [i], action: "human", scope: bySession.get(c.session)?.scope?.id ?? "", topic: "", kind: c.kind,
-        value: c.value, pin: false, reason: failed ? `归档失败：${failed}` : "归档模型没有给出决定", conflict: "", derivedFrom: [`session:${c.session}`] });
+        value: c.value, pin: false, reason: failures.has(i) ? `归档失败：${failures.get(i)}` : "归档模型没有给出决定", conflict: "", derivedFrom: [`session:${c.session}`] });
     });
-    if (!failed) db.prepare(`INSERT INTO journal_archives (date,candidates_hash,decisions,created_at) VALUES (?,?,?,?)
+    if (!failures.size) db.prepare(`INSERT INTO journal_archives (date,candidates_hash,decisions,created_at) VALUES (?,?,?,?)
       ON CONFLICT(date) DO UPDATE SET candidates_hash=excluded.candidates_hash, decisions=excluded.decisions, created_at=excluded.created_at`)
       .run(date, hash, JSON.stringify(decisions), this.now());
     return decisions;
@@ -414,6 +431,9 @@ memory：
 - 用户说明的、会持续一段时间的自身处境（收支、资产用途、家里设备的状况），以后回答要用到的，可以记为 fact。
 - 大部分会话没有记忆候选，宁缺毋滥。`;
 }
+
+/** Candidates per archive call. */
+const ARCHIVE_BATCH = 8;
 
 const ARCHIVE_SYSTEM = `你是中央记忆的归档员。给你昨天对话里提出的记忆候选，每个都附上它所属项目的作用域和那里已有的记忆，以及全局作用域 _global 已有的记忆。决定每个候选怎么处理。只输出 JSON：
 {"decisions":[{"candidate":序号或序号数组,"action":"project|global|skip","topic":"小写英文连字符 slug","kind":"rule|preference|decision|fact|lesson","value":"一句话，写成以后的 agent 读了就知道怎么做","pin":true或false,"conflict":"与 _global 或项目已有记忆相反时写明冲突的那条，否则空","reason":"一句话"}],

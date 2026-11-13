@@ -126,14 +126,16 @@ test("memory candidates are filed; a conflict, an unnamed scope and a left-out c
     summary: (user) => ({ title: "", done: ["做完了"], memory: user.includes("新目录") ? [{ kind: "rule", value: "在挂刀里先查价", evidence: "10:00「先查价」" }]
       : [{ kind: "rule", value: "测试先跑单个文件", evidence: "09:00「先跑单个」" }, { kind: "rule", value: "提交前不跑全量", evidence: "09:01「别跑全量」" },
         { kind: "fact", value: "被漏掉的", evidence: "" }] }),
-    archive: () => ({
+    // Each project's candidates come in their own call, numbered from 0.
+    archive: (user) => user.includes("新目录") ? {
+      decisions: [{ candidate: [0], action: "project", topic: "check-price", kind: "rule", value: "在挂刀里先查价", reason: "" }],
+      newScopes: [{ workspace: "/root/新目录", id: "steam-trading", title: "Steam 挂刀" }],
+    } : {
       decisions: [
         { candidate: 0, action: "project", topic: "single-test-first", kind: "rule", value: "先跑单个测试文件", pin: false, conflict: "", reason: "纠正" },
         { candidate: 1, action: "project", topic: "full-tests", kind: "rule", value: "提交前不跑全量", conflict: "full-tests/rule 要求跑全量", reason: "" },
-        { candidate: [3], action: "project", topic: "check-price", kind: "rule", value: "在挂刀里先查价", reason: "" },
       ],
-      newScopes: [{ workspace: "/root/新目录", id: "steam-trading", title: "Steam 挂刀" }],
-    }) });
+    } });
   f.session("a", "项目会话");
   f.store.db.prepare("UPDATE sessions SET group_key=?, group_title=? WHERE id='a'").run("scope\x1frepo-app", "App");
   f.turn("a", "a", at(2), { type: "turn.completed", time: at(3) });
@@ -151,6 +153,27 @@ test("memory candidates are filed; a conflict, an unnamed scope and a left-out c
   const calls = f.calls.length;
   await f.journal.run({ date: "2026-11-10" });
   assert.equal(f.calls.length, calls, "the same candidates are not filed twice");
+});
+
+test("a batch whose answer breaks fails only its own candidates, and the day is filed again next run", async () => {
+  let broken = true;
+  const f = fixture({
+    summary: (user) => ({ title: "", done: ["做完了"], memory: [{ kind: "rule", value: user.includes("坏") ? "坏批次的规则" : "好批次的规则", evidence: "" }] }),
+    archive: (user) => {
+      if (user.includes("坏批次") && broken) throw new Error("bad JSON");
+      return { decisions: [{ candidate: 0, action: "project", topic: "a-rule", kind: "rule", value: "规则", reason: "" }] };
+    } });
+  for (const [id, scope] of [["good", "repo-good"], ["bad", "repo-bad"]] as const) {
+    f.session(id, id === "bad" ? "坏" : "好");
+    f.store.db.prepare("UPDATE sessions SET group_key=?, group_title=? WHERE id=?").run(`scope\x1f${scope}`, scope, id);
+    f.turn(id, "a", at(2), { type: "turn.completed", time: at(3) });
+  }
+  const day = await f.journal.run({ date: "2026-11-10" });
+  assert.deepEqual(day.memory.decisions.map((d) => [d.scope, d.action]).sort(), [["repo-bad", "human"], ["repo-good", "project"]]);
+  broken = false;
+  const again = await f.journal.run({ date: "2026-11-10" });
+  assert.ok(again.memory.decisions.every((d) => d.action === "project"), "not cached while a batch failed");
+  assert.equal(again.items.open.filter((i) => i.kind === "memory").length, 0, "the failed batch's item goes away once filed");
 });
 
 test("a bad date or time zone is refused", async () => {

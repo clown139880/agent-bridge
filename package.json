@@ -1,6 +1,6 @@
 {
   "name": "agent-bridge",
-  "version": "0.7.91",
+  "version": "0.7.92",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@11.3.0",
