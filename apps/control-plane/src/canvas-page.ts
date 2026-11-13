@@ -5,9 +5,9 @@ export const CANVAS_HTML = `<!doctype html>
 <body><main><div id="stage"><img id="back" alt=""><img id="front" alt=""></div>
 <div id="empty" role="status">等待第一张图片</div>
 <header><a href="/control/" aria-label="返回控制中心">CANVAS</a><span id="connection" role="status">连接中</span></header>
-<footer><div id="details"><h1 id="title">实时画布</h1><p id="progress"></p><p id="caption"></p></div>
+<footer><div id="details"><h1 id="title">实时画布</h1><p id="caption"></p></div>
 <nav aria-label="画布导航"><button id="previous" aria-label="上一张">←</button><span id="count">0 / 0</span><button id="next" aria-label="下一张">→</button>
-<button id="play" aria-pressed="false">播放</button><button id="follow" aria-pressed="true">跟随新图</button><button id="reconnect">重新连接</button><button id="fullscreen">全屏</button></nav></footer>
+<button id="play" aria-pressed="false">播放</button><button id="follow" aria-pressed="true">跟随新图</button><button id="fullscreen">全屏</button></nav></footer>
 </main></body></html>`;
 
 export const CANVAS_CSS = `:root{color-scheme:dark;font:15px/1.5 system-ui,sans-serif;color:#f0f0f0;background:#101114}
@@ -16,7 +16,7 @@ export const CANVAS_CSS = `:root{color-scheme:dark;font:15px/1.5 system-ui,sans-
 header,footer{position:absolute;left:0;right:0;padding:24px 30px}header{top:0;display:flex;justify-content:space-between;background:linear-gradient(#0009,transparent);pointer-events:none}
 header a{color:#fff;text-decoration:none;font-size:12px;letter-spacing:.2em;pointer-events:auto}#connection{font-size:12px;color:#aeb6c2}
 footer{bottom:0;background:linear-gradient(transparent,#000e);padding-top:55px}h1{font-size:21px;margin:0 0 4px;font-weight:550}
-p{margin:4px 0;white-space:pre-wrap;overflow-wrap:anywhere}#caption{max-height:18vh;overflow:auto;color:#ddd}#progress{color:#b7c1d0;font-size:13px;max-height:12vh;overflow:auto}
+p{margin:4px 0;white-space:pre-wrap;overflow-wrap:anywhere}#caption{max-height:18vh;overflow:auto;color:#ddd}
 nav{display:flex;align-items:center;gap:8px;margin-top:18px;flex-wrap:wrap}button{font:inherit;font-size:13px;background:#ffffff12;border:1px solid #ffffff30;border-radius:6px;color:inherit;padding:7px 12px;cursor:pointer}
 button:hover,button[aria-pressed=true]{background:#ffffff2b}button:disabled{opacity:.35;cursor:default}button:focus-visible{outline:2px solid #91b9ff;outline-offset:3px}#count{font-variant-numeric:tabular-nums;min-width:64px;text-align:center;font-size:13px}
 #empty{position:absolute;top:45%;left:0;right:0;text-align:center;color:#9ca5b5;padding:20px;pointer-events:none}[hidden]{display:none!important}
@@ -41,7 +41,6 @@ export const CANVAS_JS = String.raw`"use strict";
     $("caption").textContent = item?.description || "";
     $("title").textContent = meta.title || "实时画布";
     document.title = meta.title || "实时画布";
-    $("progress").textContent = ({working:"进行中",complete:"已完成",failed:"失败"}[meta.status] || "") + (meta.description ? " · " + meta.description : "");
     if (!item) { $("empty").hidden = false; return; }
     if (displayed === item.url) return;
     displayed = item.url;
@@ -80,10 +79,9 @@ export const CANVAS_JS = String.raw`"use strict";
     }
     if (following && images.size) selected = rows().at(-1).id;
     show(); seq = delta.seq;
-    if (meta.closed) { status("画布已关闭"); controller?.abort(); }
   }
   async function connect() {
-    if (controller || document.hidden || gone || meta.closed) return;
+    if (controller || document.hidden || gone) return;
     clearTimeout(retryTimer);
     const active = controller = new AbortController();
     status("连接中");
@@ -117,13 +115,12 @@ export const CANVAS_JS = String.raw`"use strict";
     } catch (_) { /* Resume with the last successfully applied cursor. */ }
     finally {
       active.abort(); if (controller === active) controller = undefined;
-      if (!document.hidden && !gone && !meta.closed) { status("连接中断，正在重连"); retryTimer = setTimeout(connect, 3000); }
+      if (!document.hidden && !gone) { status("连接中断，正在重连"); retryTimer = setTimeout(connect, 3000); }
     }
   }
   $("previous").onclick = () => step(-1); $("next").onclick = () => step(1);
   $("follow").onclick = () => { follow(!following); if (following) { selected = rows().at(-1)?.id; show(); } };
   $("play").onclick = () => { playing = !playing; playback(); };
-  $("reconnect").onclick = () => location.reload();
   $("fullscreen").onclick = () => {
     const action = document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen();
     action?.catch(() => {});

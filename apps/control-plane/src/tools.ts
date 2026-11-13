@@ -205,7 +205,7 @@ export class ToolHub {
         try { return { content: [{ type: "text", text: JSON.stringify(await localCanvas.call(tool, args, caller)) }] }; }
         catch (error) {
           if (!(error instanceof CanvasError)) throw new Error("canvas_storage_error");
-          return { isError: true, content: [{ type: "text", text: JSON.stringify({ error: error.code, retry_after_ms: error.retry_after_ms }) }] };
+          return { isError: true, content: [{ type: "text", text: JSON.stringify({ error: error.code }) }] };
         }
       }
       const { client } = await this.connect(server);

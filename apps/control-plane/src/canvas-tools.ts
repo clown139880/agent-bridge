@@ -7,18 +7,11 @@ const schema = (properties: Record<string, unknown>, required: string[]) => ({ t
 export const CANVAS_TOOLS = [
   { tool: "create", description: "创建实时画布 / Create a live slideshow canvas for image URLs; returns canvas_id and page_url. Temporary metadata, no image storage.",
     inputSchema: schema({ title: str, idempotency_key: key }, ["title", "idempotency_key"]) },
-  { tool: "list", description: "List your principal's canvases, without image URLs. Sessions sharing this principal share ownership.",
-    inputSchema: schema({ after: str, limit: { type: "integer", minimum: 1, maximum: 100, default: 20 } }, []) },
-  { tool: "get", description: "Read canvas state. Optional cursor returns only current image/metadata changes since seq; no historical replay.",
-    inputSchema: schema({ canvas_id: id, cursor: { type: "integer", minimum: 0 } }, ["canvas_id"]) },
-  { tool: "add_image", description: "推图 / Append an image URL to an open canvas. Browser loads the source directly. Returns image_id and revision.",
-    inputSchema: schema({ canvas_id: id, idempotency_key: key, ...image }, ["canvas_id", "idempotency_key", "url"]) },
-  { tool: "update_image", description: "Replace URL or description without changing image order. expected_revision must match the image's updated_seq. Canvas must be open.",
-    inputSchema: schema({ canvas_id: id, idempotency_key: key, image_id: str, expected_revision: { type: "integer", minimum: 1 }, ...image }, ["canvas_id", "idempotency_key", "image_id", "expected_revision"]) },
-  { tool: "set_status", description: "Set open canvas progress/status. Same-state progress is limited to once per second by default; identical content is a no-op.",
-    inputSchema: schema({ canvas_id: id, idempotency_key: key, status: { type: "string", enum: ["working", "complete", "failed"] }, description: str }, ["canvas_id", "idempotency_key", "status"]) },
-  ...["close", "open"].map(tool => ({ tool, description: tool === "close" ? "Close canvas and stop live viewers; keeps metadata, never deletes images. Reopen before further writes."
-    : "Reopen canvas for writes. Viewers of a closed canvas can refresh/reconnect to resume.", inputSchema: schema({ canvas_id: id, idempotency_key: key }, ["canvas_id", "idempotency_key"]) })),
+  { tool: "push", description: "推图 / Send an image URL to the live canvas; the page updates automatically. Returns image_id and revision. To replace an earlier image or its description, also pass image_id and expected_revision from its last receipt; its order stays unchanged. Browser loads URLs directly, no image storage.",
+    inputSchema: { ...schema({ canvas_id: id, idempotency_key: key, ...image, image_id: str,
+      expected_revision: { type: "integer", minimum: 1 } }, ["canvas_id", "idempotency_key"]),
+      oneOf: [{ required: ["url"], not: { anyOf: [{ required: ["image_id"] }, { required: ["expected_revision"] }] } },
+        { required: ["image_id", "expected_revision"], anyOf: Object.keys(image).map(field => ({ required: [field] })) }] } },
 ];
 
 /** Approval storage/reviewer sees the destination, never signed query strings or URL path credentials. */

@@ -10,7 +10,7 @@ import { getRequestListener } from "../apps/control-plane/node_modules/@hono/nod
 import { CanvasService } from "../apps/control-plane/src/canvas.js";
 import { createCanvasWeb } from "../apps/control-plane/src/canvas-web.js";
 
-test("canvas browser: lazy direct images, live updates, cursor resume, safe text, errors and close/open", {
+test("canvas browser: lazy direct images, live updates, cursor resume, safe text, image errors and page reload", {
   skip: !existsSync("/usr/bin/chromium"), timeout: 40_000,
 }, async t => {
   await mkdir(resolve(".runtime/tests"), { recursive: true });
@@ -32,7 +32,7 @@ test("canvas browser: lazy direct images, live updates, cursor resume, safe text
   const base = `http://127.0.0.1:${(server.address() as any).port}`;
   const call = (tool: string, args: Record<string, unknown>) => canvas.call(tool, args, "agent:test") as Promise<any>;
   const created = await call("create", { title: "实时画布 · 浏览器验收", idempotency_key: "c" }), id = created.canvas_id;
-  const image = (n: number) => call("add_image", { canvas_id: id, idempotency_key: `a${n}`, url: `${base}/images/${n}`, description: `第 ${n} 张` });
+  const image = (n: number) => call("push", { canvas_id: id, idempotency_key: `a${n}`, url: `${base}/images/${n}`, description: `第 ${n} 张` });
   for (let n = 1; n <= 5; n++) await image(n);
   const chrome = spawn("/usr/bin/chromium", ["--headless=new", "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage", "--remote-debugging-port=0",
     "--no-proxy-server", `--user-data-dir=${directory}/profile`, `--disk-cache-dir=${directory}/cache`, "--no-first-run", "--no-default-browser-check", "about:blank"], {
@@ -81,7 +81,7 @@ test("canvas browser: lazy direct images, live updates, cursor resume, safe text
   await new Promise(r => setTimeout(r, 50));
   const added = await image(7);
   const injection = "<img src=x onerror=alert(1)>";
-  await call("update_image", { canvas_id: id, image_id: added.image_id, expected_revision: added.revision, idempotency_key: "description", description: injection });
+  await call("push", { canvas_id: id, image_id: added.image_id, expected_revision: added.revision, idempotency_key: "description", description: injection });
   await js("window.__hidden=false;document.dispatchEvent(new Event('visibilitychange'))");
   await wait("document.getElementById('count').textContent === '7 / 7'");
   assert.equal(await js("document.getElementById('caption').textContent"), injection);
@@ -90,12 +90,12 @@ test("canvas browser: lazy direct images, live updates, cursor resume, safe text
   const mobile = await command("Page.captureScreenshot", { format: "png" });
   await writeFile(resolve(directory, "mobile.png"), Buffer.from(mobile.data, "base64"));
   const revision = (await canvas.get(id)).images.at(-1)!.updated_seq;
-  await call("update_image", { canvas_id: id, image_id: added.image_id, expected_revision: revision, idempotency_key: "broken", url: `${base}/images/broken` });
+  await call("push", { canvas_id: id, image_id: added.image_id, expected_revision: revision, idempotency_key: "broken", url: `${base}/images/broken` });
   await wait("!document.getElementById('empty').hidden && document.getElementById('empty').textContent.includes('无法加载')");
-  await call("close", { canvas_id: id, idempotency_key: "close" });
-  await wait("document.getElementById('connection').textContent === '画布已关闭'");
-  await call("open", { canvas_id: id, idempotency_key: "open" });
+  assert.equal(await js("document.getElementById('progress')"), null);
+  assert.equal(await js("document.getElementById('reconnect')"), null);
   await command("Page.reload"); await wait("document.getElementById('connection').textContent === '实时连接'");
+  await image(8); await wait("document.getElementById('count').textContent === '8 / 8' && document.getElementById('empty').hidden");
   assert.deepEqual(exceptions, []);
   console.log(`Canvas browser screenshot: ${directory}/mobile.png`);
 });

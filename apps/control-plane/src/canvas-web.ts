@@ -41,7 +41,7 @@ export function createCanvasWeb(service: CanvasService, enabled: boolean) {
       try {
         unsubscribe = await service.subscribe(id, cursor, event => {
           if (event instanceof CanvasError) { send({ error: event.code }); close(); return; }
-          send(event, event.seq); if (event.meta?.closed) close();
+          send(event, event.seq);
         });
       } catch (e) { cleanup(); throw e; }
       if (ended || response.destroyed) { cleanup(); return RESPONSE_ALREADY_SENT; }

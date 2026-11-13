@@ -1,27 +1,26 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 export interface CanvasOptions {
   dataDir?: string; publicUrl?: string; maxImages?: number; maxUrlBytes?: number;
-  maxDescriptionBytes?: number; progressIntervalMs?: number; maxReceipts?: number;
+  maxDescriptionBytes?: number; maxReceipts?: number;
 }
 export interface CanvasImage {
   id: string; url: string; description: string; order: number; updated_seq: number;
   thumbnail_url?: string; expires_at?: string;
 }
 export interface CanvasMeta {
-  id: string; title: string; status: "working" | "complete" | "failed"; description: string;
-  closed: boolean; created_at: number; updated_at: number;
+  id: string; title: string; created_at: number; updated_at: number;
 }
 export interface CanvasDelta { id: string; seq: number; meta?: CanvasMeta; images: CanvasImage[] }
 interface Receipt { hash: string; result: Record<string, unknown> }
 interface CanvasFile extends CanvasMeta {
-  version: 1; owner: string; seq: number; meta_seq: number; status_at: number;
+  version: 1; owner: string; seq: number;
   images: CanvasImage[]; idempotency: Record<string, Receipt>;
 }
 export class CanvasError extends Error {
-  constructor(readonly code: string, readonly status = 400, readonly retry_after_ms?: number) { super(code); }
+  constructor(readonly code: string, readonly status = 400) { super(code); }
 }
 type Listener = (event: CanvasDelta | CanvasError) => void;
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
@@ -40,7 +39,7 @@ export class CanvasService {
   constructor(private readonly options: CanvasOptions = {}) {
     this.directory = join(options.dataDir ?? "/tmp", "agent-bridge-canvas");
     this.limits = { maxImages: options.maxImages ?? 500, maxUrlBytes: options.maxUrlBytes ?? 8192,
-      maxDescriptionBytes: options.maxDescriptionBytes ?? 4096, progressIntervalMs: options.progressIntervalMs ?? 1000,
+      maxDescriptionBytes: options.maxDescriptionBytes ?? 4096,
       maxReceipts: options.maxReceipts ?? 10_000 };
     for (const [key, value] of Object.entries(this.limits)) if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`invalid canvas limit: ${key}`);
     if (options.publicUrl) {
@@ -67,13 +66,13 @@ export class CanvasService {
     try {
       c = JSON.parse(raw) as CanvasFile;
       if (c.version !== 1 || c.id !== id || typeof c.owner !== "string" || !Number.isSafeInteger(c.seq) || c.seq < 1
-        || !Number.isSafeInteger(c.meta_seq) || !Array.isArray(c.images) || !c.idempotency || typeof c.idempotency !== "object"
-        || typeof c.title !== "string" || typeof c.closed !== "boolean"
-        || !["working", "complete", "failed"].includes(c.status)
+        || !Array.isArray(c.images) || !c.idempotency || typeof c.idempotency !== "object"
+        || typeof c.title !== "string"
         || c.images.some(i => typeof i.id !== "string" || typeof i.url !== "string" || !Number.isSafeInteger(i.updated_seq))) throw new Error();
     } catch { throw new CanvasError("canvas_corrupt", 500); }
     if (owner !== undefined && c.owner !== owner) throw new CanvasError("canvas_gone", 404);
-    return c;
+    // Older files may contain task status/closed fields. Ignore them without migrating or deleting data.
+    return { version: 1, owner: c.owner, ...this.meta(c), seq: c.seq, images: c.images, idempotency: c.idempotency };
   }
   private async save(c: CanvasFile, existing: boolean): Promise<void> {
     await mkdir(this.directory, { recursive: true, mode: 0o700 });
@@ -86,12 +85,12 @@ export class CanvasService {
     } finally { await unlink(temporary).catch(e => { if (!missing(e)) throw e; }); }
   }
   private meta(c: CanvasFile): CanvasMeta {
-    const { id, title, status, description, closed, created_at, updated_at } = c;
-    return { id, title, status, description, closed, created_at, updated_at };
+    const { id, title, created_at, updated_at } = c;
+    return { id, title, created_at, updated_at };
   }
   private delta(c: CanvasFile, cursor = 0): CanvasDelta {
     if (!Number.isSafeInteger(cursor) || cursor < 0 || cursor > c.seq) throw new CanvasError("invalid_cursor", 409);
-    return { id: c.id, seq: c.seq, ...(c.meta_seq > cursor ? { meta: this.meta(c) } : {}), images: c.images.filter(i => i.updated_seq > cursor) };
+    return { id: c.id, seq: c.seq, ...(cursor === 0 ? { meta: this.meta(c) } : {}), images: c.images.filter(i => i.updated_seq > cursor) };
   }
   async get(id: string, cursor = 0, owner?: string): Promise<CanvasDelta> {
     return this.serial(id, async () => this.delta(await this.read(id, owner), cursor));
@@ -142,30 +141,12 @@ export class CanvasService {
   async call(tool: string, args: Record<string, unknown>, owner: string): Promise<unknown> {
     if (!owner) throw new CanvasError("identity_required", 403);
     const fields: Record<string, string[]> = {
-      create: ["title", "idempotency_key"], list: ["after", "limit"], get: ["canvas_id", "cursor"],
-      add_image: ["canvas_id", "idempotency_key", "url", "description", "thumbnail_url", "expires_at"],
-      update_image: ["canvas_id", "idempotency_key", "image_id", "expected_revision", "url", "description", "thumbnail_url", "expires_at"],
-      set_status: ["canvas_id", "idempotency_key", "status", "description"], close: ["canvas_id", "idempotency_key"], open: ["canvas_id", "idempotency_key"],
+      create: ["title", "idempotency_key"],
+      push: ["canvas_id", "idempotency_key", "image_id", "expected_revision", "url", "description", "thumbnail_url", "expires_at"],
     };
     if (!fields[tool] || Object.keys(args).some(key => !fields[tool]!.includes(key))) throw new CanvasError("invalid_arguments");
-    if (tool === "list") {
-      const limit = args.limit ?? 20, after = args.after ?? "";
-      if (!Number.isSafeInteger(limit) || Number(limit) < 1 || Number(limit) > 100 || typeof after !== "string" || (after && !ID.test(after))) throw new CanvasError("invalid_arguments");
-      const files = await readdir(this.directory).catch(e => { if (missing(e)) return []; throw e; });
-      const items: Array<CanvasMeta & { seq: number; image_count: number; page_url: string }> = [];
-      for (const file of files.sort()) {
-        const id = file.replace(/\.json$/, "");
-        if (!file.endsWith(".json") || !ID.test(id) || id <= after) continue;
-        try {
-          const c = await this.serial(id, () => this.read(id, owner));
-          items.push({ ...this.meta(c), seq: c.seq, image_count: c.images.length, page_url: this.pageUrl(id) });
-          if (items.length > Number(limit)) break;
-        } catch (e) { if (!(e instanceof CanvasError) || !["canvas_gone", "canvas_corrupt"].includes(e.code)) throw e; }
-      }
-      const more = items.length > Number(limit); if (more) items.pop();
-      return { items, next: more ? items.at(-1)!.id : null };
-    }
-    if (tool === "get") return this.get(this.text(args.canvas_id, 64, "canvas_id", false), args.cursor === undefined ? 0 : args.cursor as number, owner);
+    const updating = tool === "push" && args.image_id !== undefined;
+    if (tool === "push" && (updating ? typeof args.image_id !== "string" || !args.image_id || !Number.isSafeInteger(args.expected_revision) : args.expected_revision !== undefined)) throw new CanvasError("invalid_arguments");
     const key = this.text(args.idempotency_key, 256, "idempotency_key", false);
     const id = tool === "create" ? `cv_${hash(canonical([owner, key])).slice(0, 32)}` : this.text(args.canvas_id, 64, "canvas_id", false);
     this.path(id);
@@ -177,41 +158,27 @@ export class CanvasService {
         if (tool !== "create" || !(e instanceof CanvasError) || e.code !== "canvas_gone") throw e;
         exists = false;
         const now = Date.now();
-        c = { version: 1, id, owner, title: this.text(args.title, 1024, "title", false), status: "working", description: "", closed: false,
-          created_at: now, updated_at: now, status_at: 0, seq: 0, meta_seq: 0, images: [], idempotency: {} };
+        c = { version: 1, id, owner, title: this.text(args.title, 1024, "title", false),
+          created_at: now, updated_at: now, seq: 0, images: [], idempotency: {} };
       }
       const receiptKey = hash(key), digest = hash(canonical({ tool, args })), old = c.idempotency[receiptKey];
       if (old) { if (old.hash !== digest) throw new CanvasError("idempotency_conflict", 409); return old.result; }
       if (Object.keys(c.idempotency).length >= this.limits.maxReceipts) throw new CanvasError("receipt_limit", 409);
-      if (c.closed && !["open", "close"].includes(tool)) throw new CanvasError("canvas_closed", 409);
       const before = c.seq, seq = before + 1, now = Date.now();
       let image: CanvasImage | undefined;
-      if (tool === "create") { c.meta_seq = seq; c.seq = seq; }
-      if (tool === "add_image") {
+      if (tool === "create") c.seq = seq;
+      if (tool === "push" && !updating) {
         if (c.images.length >= this.limits.maxImages) throw new CanvasError("image_limit", 409);
         image = { ...this.imageFields(args, true), id: `im_${randomUUID()}`, order: c.images.length, updated_seq: seq } as CanvasImage;
         c.images.push(image); c.seq = seq;
       }
-      if (tool === "update_image") {
+      if (updating) {
         image = c.images.find(i => i.id === args.image_id);
         if (!image) throw new CanvasError("image_not_found", 404);
         if (!Number.isSafeInteger(args.expected_revision) || args.expected_revision !== image.updated_seq) throw new CanvasError("revision_conflict", 409);
         const patch = this.imageFields(args, false);
         if (!Object.keys(patch).length) throw new CanvasError("invalid_arguments");
         if (Object.entries(patch).some(([k, v]) => image![k as keyof CanvasImage] !== v)) { Object.assign(image, patch, { updated_seq: seq }); c.seq = seq; }
-      }
-      if (tool === "set_status") {
-        if (!["working", "complete", "failed"].includes(String(args.status))) throw new CanvasError("invalid_status");
-        const description = this.text(args.description ?? "", this.limits.maxDescriptionBytes, "description");
-        if (c.status !== args.status || c.description !== description) {
-          const remaining = this.limits.progressIntervalMs - (now - c.status_at);
-          if (c.status === args.status && remaining > 0) throw new CanvasError("rate_limited", 429, remaining);
-          c.status = args.status as CanvasMeta["status"]; c.description = description; c.status_at = now; c.meta_seq = seq; c.seq = seq;
-        }
-      }
-      if (tool === "close" || tool === "open") {
-        const closed = tool === "close";
-        if (c.closed !== closed) { c.closed = closed; c.meta_seq = seq; c.seq = seq; }
       }
       if (c.seq !== before) c.updated_at = now;
       const result = { canvas_id: id, seq: c.seq, ...(tool === "create" ? { page_url: this.pageUrl(id) } : {}),

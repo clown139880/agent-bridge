@@ -94,7 +94,6 @@ export const config = {
     maxImages: Number(process.env.CANVAS_MAX_IMAGES ?? 500),
     maxUrlBytes: Number(process.env.CANVAS_MAX_URL_BYTES ?? 8192),
     maxDescriptionBytes: Number(process.env.CANVAS_MAX_DESCRIPTION_BYTES ?? 4096),
-    progressIntervalMs: Number(process.env.CANVAS_PROGRESS_INTERVAL_MS ?? 1000),
     maxReceipts: Number(process.env.CANVAS_MAX_RECEIPTS ?? 10_000),
   },
   // Schedules and webhooks (docs/automations-design.zh.md); off unless AUTOMATIONS_DIR is set.
