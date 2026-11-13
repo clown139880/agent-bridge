@@ -83,7 +83,7 @@ interface SessionRow { id: string; title: string | null; machine_id: string; age
   group_key: string | null; group_title: string | null; view_revision: number; active_turn_id: string | null }
 interface Turn { type: string; turn: string | null; at: number; reason?: string }
 interface Message { at: number; role: string; text: string }
-interface Summary { version?: number; title?: string; done?: string[]; next?: string; waitingOnHuman?: string; memory?: Array<{ kind?: string; value?: string; evidence?: string }>; error?: string }
+interface Summary { version?: number; title?: string; done?: string | string[]; next?: string; waitingOnHuman?: string; memory?: Array<{ kind?: string; value?: string; evidence?: string }>; error?: string }
 
 const AGENT: Record<string, string> = { "codex-cli": "codex", "claude-code": "claude", pi: "pi" };
 
@@ -422,7 +422,7 @@ function itemWire(row: Record<string, unknown>): JournalItem {
 
 /** A session is one piece of work: what it got done is one line, even when the model gave several. */
 function oneLine(done: unknown): string[] {
-  const parts = Array.isArray(done) ? done.map(String).map((d) => d.trim()).filter(Boolean) : [];
+  const parts = (Array.isArray(done) ? done : [done]).filter((d) => typeof d === "string").map((d) => d.trim()).filter(Boolean);
   return parts.length ? [parts.join("；")] : [];
 }
 
@@ -431,7 +431,7 @@ const SUMMARY_VERSION = 2;
 
 function summarySystem(day: string): string {
   return `你在整理用户的 agent 在 ${day} 这天的一个会话里做了什么，结果会写进他的工作日志。只输出一个 JSON 对象，不要别的文字：
-{"title":"≤16字的会话主题","done":["这个会话这天做成了什么，一句话"],"next":"agent 自己接下来要做、但还没做的事；没有就空字符串","waitingOnHuman":"没有用户回应 agent 就没法往下做的决定或动作；没有就空字符串","memory":[{"kind":"rule|preference|decision|fact|lesson","value":"一句话","evidence":"HH:MM「人的原话」"}]}
+{"title":"≤16字的会话主题","done":"这个会话这天做成了什么，一句话","next":"agent 自己接下来要做、但还没做的事；没有就空字符串","waitingOnHuman":"没有用户回应 agent 就没法往下做的决定或动作；没有就空字符串","memory":[{"kind":"rule|preference|decision|fact|lesson","value":"一句话","evidence":"HH:MM「人的原话」"}]}
 done：
 - 只写 1 条，50 字以内：一个会话就是一件事，方案、实现、测试、上线合成一句，写它最后到了哪一步（例如「canvas 内置工具上线，测试通过，0.7.91」）。只写交付的结果（上线了什么、查明了什么、定了什么）。
 - 只留读者需要的一个关键数字或版本号；不写 PID、提交哈希、IP、MAC、文件路径、会话 id、测试条数这类细节。

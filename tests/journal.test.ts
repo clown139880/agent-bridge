@@ -127,6 +127,13 @@ test("a session's work is one line, and a summary cached under older rules is wr
   assert.equal(again.usage.summarized, 1);
 });
 
+test("the model may give the line as a plain string", async () => {
+  const f = fixture({ summary: () => ({ title: "", done: "canvas 上线，测试通过" }) });
+  f.session("s", "canvas");
+  f.turn("s", "a", at(2), { type: "turn.completed", time: at(3) });
+  assert.deepEqual((await f.journal.run({ date: "2026-11-10" })).sessions[0]?.done, ["canvas 上线，测试通过"]);
+});
+
 test("a schedule that came due with no run at all counts as missed", async () => {
   const f = fixture();
   const day = await f.journal.run({ date: "2026-11-10" });
