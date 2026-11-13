@@ -116,6 +116,17 @@ test("one day: states, the open items, automation runs, and a rerun reads only w
   assert.throws(() => f.journal.close("nope"), /not found/);
 });
 
+test("a session's work is one line, and a summary cached under older rules is written again", async () => {
+  const f = fixture({ summary: () => ({ title: "", done: ["方案定稿", "实现上线"] }) });
+  f.session("s", "canvas");
+  f.turn("s", "a", at(2), { type: "turn.completed", time: at(3) });
+  const day = await f.journal.run({ date: "2026-11-10" });
+  assert.deepEqual(day.sessions[0]?.done, ["方案定稿；实现上线"]);
+  f.store.db.prepare("UPDATE journal_sessions SET summary=?").run(JSON.stringify({ title: "", done: ["旧的", "三条"] }));
+  const again = await f.journal.run({ date: "2026-11-10" });
+  assert.equal(again.usage.summarized, 1);
+});
+
 test("a schedule that came due with no run at all counts as missed", async () => {
   const f = fixture();
   const day = await f.journal.run({ date: "2026-11-10" });

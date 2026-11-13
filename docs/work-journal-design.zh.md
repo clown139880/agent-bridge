@@ -87,7 +87,7 @@ Control Plane（通用，开源）                      agent-skills（个人）
 
 提示词里的规则（原型迭代出来的）：
 
-- `done` 最多 3 条，每条 40 字以内，只写结果（上线了什么、查明了什么、定了什么），不写过程（「澄清了意图」「保存了文件」）；只留一个关键数字或版本号，不写 PID、提交哈希、IP、路径、测试条数。
+- `done` 只写 1 条，50 字以内：一个会话就是一件事，方案、实现、测试、上线合成一句，写它最后到了哪一步（模型给了几条也合成一行）。只写结果（上线了什么、查明了什么、定了什么），不写过程（「澄清了意图」「保存了文件」）；只留一个关键数字或版本号，不写 PID、提交哈希、IP、路径、测试条数。
 - `waitingOnHuman` 只在 agent 明确停下来等人拍板、给信息或做它做不了的动作时写；结尾的客套（「需要的话告诉我」「请验收」）不算。
 - `memory` 见 §7。
 
@@ -145,12 +145,12 @@ Control Plane（通用，开源）                      agent-skills（个人）
 **写在哪里：** 不另开标题，放在 `## 日常记录` 末尾（人手写的内容之后、`## 习惯打卡` 之前），用标记围起来，按项目分组：
 
 ```markdown
-%%agent-journal:start — 本段由 agent 维护，重新生成时整段替换（勾选状态按 🆔 保留）%%
+%%agent-journal:start — 本段由 agent 维护，重新生成时整段替换（勾选状态按链接里的条目保留）%%
 - Agent Bridge
 	- [x] 房间绑定 hal 路径，/new 固定开在 hal #BBB/Agent-Bridge ✅ 2026-11-10
-	- [ ] 下一步：按共识写自进化设计文档 #BBB/Agent-Bridge 🆔 jn-00e1610d-next
-	- [ ] 等你：确认设计后再动代码 #BBB/Agent-Bridge 🆔 jn-00e1610d-human
-	- [ ] 被打断：部署重启时停下，没有继续 #BBB/Agent-Bridge 🆔 jn-91d2…-interrupted
+	- [ ] [下一步](https://bridge.example/control/sessions/<会话 ID>?item=jn-00e1610d-1110-next)：按共识写自进化设计文档 #BBB/Agent-Bridge
+	- [ ] [等你](https://bridge.example/control/sessions/<会话 ID>?item=jn-00e1610d-1110-human)：确认设计后再动代码 #BBB/Agent-Bridge
+	- [ ] [被打断](https://bridge.example/control/sessions/<会话 ID>?item=jn-91d2…-1110-interrupted)：部署重启时停下，没有继续 #BBB/Agent-Bridge
 - Live2D AI音乐电台
 	- [x] 查明直播自停根因：推流端断开 #BBB/Live2D-AI音乐电台 ✅ 2026-11-10
 - 自动任务
@@ -159,11 +159,11 @@ Control Plane（通用，开源）                      agent-skills（个人）
 ```
 
 - 做完的写成已勾选的任务 `- [x] … ✅ <日期>`，带项目 tag：Tasks 插件和项目卡把它算作这天完成的事，成为项目的进展流水。
-- 要人介入、或 agent 还有下一步的写成 `- [ ]`，带项目 tag 和 `🆔`（由会话 ID 和种类派生，稳定），会出现在项目卡的「任务」（`TaskListByTag`）和 `任务.md` 里，没处理就一直挂着。
+- 要人介入、或 agent 还有下一步的写成 `- [ ]`，带项目 tag。开头的状态词（下一步、等你、被打断……）就是链接，点开到 Control Center 里那个会话或自动任务；链接的 `?item=` 是条目 ID（由会话 ID、日期和种类派生，稳定），笔记里不另写 ID，Control Center 不理会这个参数。会出现在项目卡的「任务」（`TaskListByTag`）和 `任务.md` 里，没处理就一直挂着。
 - 被自动关闭的条目，到它所在那天的日记里勾上，并加 `✅ <日期>`。
 - 记忆候选不写进笔记（§7）；自动任务那组里只写一行「写入 N 条，M 条等你审核」，链到 Control Center 的审核面板。
-- 每条未完成的条目末尾带一个链接，点开就到 Control Center 里那个会话（`/control/sessions/<id>`）或自动任务（`/control/automations/<id>`），可以马上接着做。Control Center 的地址由任务配置给出。
-- 重新生成时整段替换，但先读一遍旧段落，按 `🆔` 保留人打的勾。人在这一段里改的其他文字会被覆盖；要长期留的话写到段落外面。
+- 链接指向 Control Center 的会话页（`/control/sessions/<id>`）或自动任务页（`/control/automations/<id>`），可以马上接着做。Control Center 的地址由任务配置给出。
+- 重新生成时整段替换，但先读一遍旧段落，按链接里的条目 ID 保留人打的勾。人在这一段里改的其他文字会被覆盖；要长期留的话写到段落外面。
 
 **项目怎么对应：** 先取会话的作用域（`group_key`），再由作用域对应到 LifeOS 项目 tag。计划用作用域 `scope.md` 里已有的 `para_note` 字段指向项目卡，脚本读项目卡得到 tag；原型阶段先用一份对照表。很多项目起初是在 Agent Bridge 里聊出来的，之后才单独立项，所以早期会话挂在 `#BBB/Agent-Bridge` 下是正常的。对不上的会话归到「其他」：不是每件事都有项目卡，不提醒。
 

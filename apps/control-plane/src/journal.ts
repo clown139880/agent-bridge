@@ -83,7 +83,7 @@ interface SessionRow { id: string; title: string | null; machine_id: string; age
   group_key: string | null; group_title: string | null; view_revision: number; active_turn_id: string | null }
 interface Turn { type: string; turn: string | null; at: number; reason?: string }
 interface Message { at: number; role: string; text: string }
-interface Summary { title?: string; done?: string[]; next?: string; waitingOnHuman?: string; memory?: Array<{ kind?: string; value?: string; evidence?: string }>; error?: string }
+interface Summary { version?: number; title?: string; done?: string[]; next?: string; waitingOnHuman?: string; memory?: Array<{ kind?: string; value?: string; evidence?: string }>; error?: string }
 
 const AGENT: Record<string, string> = { "codex-cli": "codex", "claude-code": "claude", pi: "pi" };
 
@@ -154,13 +154,14 @@ export class Journal {
       const pending = Number((db.prepare("SELECT count(*) AS n FROM pending_requests WHERE session_id=? AND status='pending'").get(id) as { n: number }).n);
       const cached = db.prepare("SELECT revision, summary FROM journal_sessions WHERE date=? AND session_id=?").get(date, id) as { revision: number; summary: string } | undefined;
       let summary: Summary;
-      if (cached && cached.revision === Number(row.view_revision)) { summary = JSON.parse(cached.summary) as Summary; reused++; }
+      const old = cached && cached.revision === Number(row.view_revision) ? JSON.parse(cached.summary) as Summary : undefined;
+      if (old && old.version === SUMMARY_VERSION) { summary = old; reused++; }
       else {
         summary = await this.summarize(row, program, pending, messages, date);
         summarized++;
         if (!summary.error) db.prepare(`INSERT INTO journal_sessions (date,session_id,revision,summary,created_at) VALUES (?,?,?,?,?)
           ON CONFLICT(date,session_id) DO UPDATE SET revision=excluded.revision, summary=excluded.summary, created_at=excluded.created_at`)
-          .run(date, id, Number(row.view_revision), JSON.stringify(summary), this.now());
+          .run(date, id, Number(row.view_revision), JSON.stringify({ ...summary, version: SUMMARY_VERSION }), this.now());
       }
       const [kind, scopeId] = String(row.group_key ?? "").split("\x1f");
       const waiting = text(summary.waitingOnHuman), next = text(summary.next);
@@ -169,7 +170,7 @@ export class Journal {
         : waiting ? "waiting_human" : next ? "in_progress" : "done";
       sessions.push({ id, title: text(summary.title) || row.title || id, workerId: `${AGENT[row.agent_type] ?? row.agent_type}@${row.machine_id}`,
         machineId: row.machine_id, path: row.project_path, scope: kind === "scope" && scopeId ? { id: scopeId, title: row.group_title ?? scopeId } : null,
-        status, done: Array.isArray(summary.done) ? summary.done.map(String).filter(Boolean) : [], next, waitingOnHuman: waiting,
+        status, done: oneLine(summary.done), next, waitingOnHuman: waiting,
         interruptions: program.interruptions, pending, ...(summary.error ? { error: summary.error } : {}) });
       for (const item of Array.isArray(summary.memory) ? summary.memory : [])
         if (text(item.value)) candidates.push({ session: id, kind: text(item.kind) || "rule", value: text(item.value), evidence: text(item.evidence) });
@@ -419,11 +420,20 @@ function itemWire(row: Record<string, unknown>): JournalItem {
     openedAt: Number(row.opened_at), closedAt: row.closed_at == null ? null : Number(row.closed_at), closedBy: row.closed_by == null ? null : row.closed_by as "auto" | "human" };
 }
 
+/** A session is one piece of work: what it got done is one line, even when the model gave several. */
+function oneLine(done: unknown): string[] {
+  const parts = Array.isArray(done) ? done.map(String).map((d) => d.trim()).filter(Boolean) : [];
+  return parts.length ? [parts.join("；")] : [];
+}
+
+/** Raised when the summary rules change, so a rerun writes the cached days again under the new rules. */
+const SUMMARY_VERSION = 2;
+
 function summarySystem(day: string): string {
   return `你在整理用户的 agent 在 ${day} 这天的一个会话里做了什么，结果会写进他的工作日志。只输出一个 JSON 对象，不要别的文字：
-{"title":"≤16字的会话主题","done":["做成了什么，一句一件"],"next":"agent 自己接下来要做、但还没做的事；没有就空字符串","waitingOnHuman":"没有用户回应 agent 就没法往下做的决定或动作；没有就空字符串","memory":[{"kind":"rule|preference|decision|fact|lesson","value":"一句话","evidence":"HH:MM「人的原话」"}]}
+{"title":"≤16字的会话主题","done":["这个会话这天做成了什么，一句话"],"next":"agent 自己接下来要做、但还没做的事；没有就空字符串","waitingOnHuman":"没有用户回应 agent 就没法往下做的决定或动作；没有就空字符串","memory":[{"kind":"rule|preference|decision|fact|lesson","value":"一句话","evidence":"HH:MM「人的原话」"}]}
 done：
-- 最多 3 条，每条 40 字以内，只写交付的结果（上线了什么、查明了什么、定了什么）。几件小事合成一句。
+- 只写 1 条，50 字以内：一个会话就是一件事，方案、实现、测试、上线合成一句，写它最后到了哪一步（例如「canvas 内置工具上线，测试通过，0.7.91」）。只写交付的结果（上线了什么、查明了什么、定了什么）。
 - 只留读者需要的一个关键数字或版本号；不写 PID、提交哈希、IP、MAC、文件路径、会话 id、测试条数这类细节。
 - 不写过程和中间动作：不写「澄清了意图」「回答了问题」「保存了文件」「收集了 N 个来源」，不写工具输出。
 next / waitingOnHuman：
