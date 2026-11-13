@@ -53,6 +53,15 @@ function failure(event: OperatorEvent): boolean {
     || (event.type === "memory_review.status" && event.status === "failed");
 }
 
+/**
+ * Outcomes nobody needs to act on: a deploy or update that went through, a memory write the reviewer
+ * settled. They stay in the room and the App's list; only what waits for the human, or failed, rings.
+ */
+function quiet(event: OperatorEvent): boolean {
+  return event.type === "control_plane.up" || (event.type === "bridge_update.status" && event.phase === "completed")
+    || (event.type === "memory_review.status" && ["applied", "denied"].includes(text(event.status)));
+}
+
 /** Deploy and update outcomes are rare and are exactly what the operator waits for: never folded. */
 function verdict(event: OperatorEvent): boolean {
   return event.type === "control_plane.up" || event.type === "memory_review.status"
@@ -72,7 +81,7 @@ export class OperatorNotices {
     private readonly windowMs = 60_000, private readonly now: () => number = Date.now) {}
 
   notify(event: OperatorEvent): void {
-    if (verdict(event)) { this.post(formatOperatorEvent(event), failure(event) ? "alert" : "notice"); return; }
+    if (verdict(event)) { this.post(formatOperatorEvent(event), failure(event) ? "alert" : quiet(event) ? "silent" : "notice"); return; }
     const now = this.now();
     if (now - this.windowStart < this.windowMs) { this.folded.push(event.type); return; }
     this.windowStart = now;

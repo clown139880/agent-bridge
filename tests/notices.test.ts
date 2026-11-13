@@ -120,3 +120,24 @@ test("with a fleet room, workers coming and going and Bridge updates go there; t
       [["!ops:example.org", "🔄 更新完"], ["!ops:example.org", "🔴 gqx"], ["operator", "📝 记忆审"]]);
   } finally { await control.stop(); store.db.close(); rmSync(path, { force: true }); }
 });
+
+test("only what waits for the human or failed rings; settled outcomes and automation-woken turns are silent", async () => {
+  const { Store, AgentControlStore } = await import("../packages/database/src/index.js");
+  const { OperatorNotices } = await import("../apps/control-plane/src/notices.js");
+  const store = new Store(":memory:"), control = new AgentControlStore(store.db, { actionsMs: 86_400_000, attachmentsMs: 86_400_000 });
+  const notices = new OperatorNotices(control, { connector: "app", roomId: "operator", threadId: "" });
+  for (const event of [{ type: "control_plane.up", version: "1" }, { type: "memory_review.status", status: "applied", writer: "a" },
+    { type: "memory_review.status", status: "denied", writer: "a" }, { type: "memory_review.status", status: "waiting_human", writer: "a" },
+    { type: "memory_review.status", status: "failed", writer: "a" }, { type: "bridge_update.status", phase: "completed", name: "hal" },
+    { type: "bridge_update.status", phase: "failed", name: "hal" }]) notices.notify(event);
+  const levels = (store.db.prepare("SELECT level FROM notices ORDER BY rowid").all() as Array<{ level: string }>).map((row) => row.level);
+  assert.deepEqual(levels, ["silent", "silent", "silent", "notice", "alert", "silent", "alert"]);
+  store.upsertMachine({ id: "hal", name: "hal", platform: "linux", hostname: "hal", capabilities: [] });
+  const act = (principal: string, key: string, turnId: string, resolvedAction: string) => {
+    const { action } = control.createAction({ principal, key, method: "POST", path: "/api/v1/sessions/s/turns", body: {}, kind: "submit_turn", machineId: "hal", sessionId: "s" });
+    store.db.prepare("UPDATE actions SET turn_id=?,resolved_action=? WHERE id=?").run(turnId, resolvedAction, action.actionId);
+  };
+  act("system:automations", "a", "woke", "start_turn"); act("system:automations", "b", "joined", "steer"); act("control:write", "c", "mine", "start_turn");
+  assert.deepEqual(["woke", "joined", "mine"].map((id) => control.automatedTurn(id)), [true, false, false]);
+  store.db.close();
+});

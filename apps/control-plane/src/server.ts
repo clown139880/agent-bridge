@@ -616,7 +616,8 @@ export class ControlPlane {
         if (status) this.controlStore.updateSessionActivity(message.sessionId, status.activity,
           status.active ? message.turnId : undefined, status.lastTurn);
         if (message.eventType === "turn.completed") this.giveTitle(message.sessionId);
-        if ((message.eventType === "turn.completed" || message.eventType === "turn.failed") && !this.controlStore.automationOf(message.sessionId)) {
+        if ((message.eventType === "turn.completed" || message.eventType === "turn.failed") && !this.controlStore.automationOf(message.sessionId)
+          && !(message.turnId && this.controlStore.automatedTurn(message.turnId))) {
           this.notifySession(message.eventType === "turn.completed" ? "completed" : "failed", message.sessionId,
             message.payload.summary ?? message.payload.error);
         }

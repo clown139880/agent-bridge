@@ -1136,6 +1136,12 @@ export class AgentControlStore {
       .get(sessionId) as { automation_id: string } | undefined)?.automation_id;
   }
 
+  /** Whether an automation started this turn (it woke a session or opened one for a room); a turn it only joined stays the human's. */
+  automatedTurn(turnId: string): boolean {
+    return Boolean(this.db.prepare(`SELECT 1 FROM actions WHERE turn_id=? AND principal='system:automations'
+      AND kind IN ('submit_turn','create_session') AND COALESCE(resolved_action,'start_turn')<>'steer' LIMIT 1`).get(turnId));
+  }
+
   private automationRunsTable = false;
   /** Whether automations keep their runs here (the table exists once Automations has started). */
   private automationRuns(): boolean {

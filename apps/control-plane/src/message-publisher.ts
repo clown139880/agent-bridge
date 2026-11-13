@@ -165,7 +165,7 @@ export class AgentMessagePublisher {
       this.enqueue({ eventId: `ab:${item.eventId}`, type: `agent.${event.type}`,
         key: `agent:${session.id}:turn:${event.turnId ?? item.eventId}`, state: "message",
         // An automation's own session reports through its run (deliveries, a failure alert): its turns stay quiet.
-        level: this.control.automationOf(session.id) ? "silent" : completed ? this.quiet(session.id, "notice") : "alert", title: `${completed ? "任务完成" : "任务失败"} · ${this.title(session.id)}`,
+        level: this.control.automationOf(session.id) || (event.turnId && this.control.automatedTurn(event.turnId)) ? "silent" : completed ? this.quiet(session.id, "notice") : "alert", title: `${completed ? "任务完成" : "任务失败"} · ${this.title(session.id)}`,
         body: summary, url: `/control/sessions/${encodeURIComponent(session.id)}`, createdAt: event.timestamp,
         expiresAt: event.timestamp + (completed ? 600_000 : 1_800_000),
         data: { sessionId: session.id, machineId: session.machineId, agent: session.agentType,
