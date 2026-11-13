@@ -29,7 +29,7 @@
 | `docs/control-center-mobile.md` | 原设计及实施状态 |
 | `docs/control-center-mobile-delivery.md` | 本记录 |
 | `tests/control-center.test.ts` | 静态安全、SSE、状态合并、恢复、权限与写入竞态测试 |
-| `tests/control-center-browser.test.ts` | Chromium 390px 手机视口模拟 API 闭环 |
+| ~~`tests/control-center-browser.test.ts`~~ | Chromium 390px 手机视口模拟 API 闭环（2026-11-13 删除：测试套件不再启动真实浏览器） |
 | `tests/agent-control-api.test.ts` | 同 listener 的网页/API/health 兼容性回归 |
 
 现有 `/api/v1` handler、SSE 服务端、协议、数据库、审批与权限代码均未修改；没有修改其他仓库。`dist/`、pnpm store 和 `.runtime/` 已被现有根 gitignore 规则覆盖，没有提交产物或浏览器 profile。

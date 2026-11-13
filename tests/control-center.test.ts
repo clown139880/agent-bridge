@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import test from "node:test";
 import { createControlWeb } from "../apps/control-plane/src/web/app.js";
@@ -25,9 +25,10 @@ const viewEntry = (id: string, anchor: number, rev: number): EntryView => ({ ...
   events: [{ seq: anchor, eventId: id, cursor: `e:${anchor}`, sessionId: "s", type: "message.completed", turnId: id, timestamp: anchor, payload: { role: "assistant", text: id } }] }), rev });
 const emptyView = { projectionVersion: 1, viewRevision: 0, orderingEpoch: 0, rawHigh: 0, entries: [], entriesBefore: null, streamCursor: "c:0:0" };
 
-test("web routes constrain SPA fallback, traversal, caching, missing build and security headers", async () => {
+test("web routes constrain SPA fallback, traversal, caching, missing build and security headers", async (t) => {
   await mkdir(resolve(".runtime/tests"), { recursive: true });
   const directory = await mkdtemp(resolve(".runtime/tests/web-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
   await mkdir(resolve(directory, "assets"));
   await writeFile(resolve(directory, "index.html"), "<!doctype html><title>test shell</title>");
   await writeFile(resolve(directory, "assets/test-abc.js"), "console.log('test')");
@@ -404,9 +405,10 @@ test("stale-build check compares the running entry with the served one", async (
   assert.equal(await newerBuild("/control/assets/index-old.js", (async () => { throw new TypeError("redirect"); }) as typeof fetch), false);
 });
 
-test("installable app: manifest and service worker are served with their types and allowed by the CSP", async () => {
+test("installable app: manifest and service worker are served with their types and allowed by the CSP", async (t) => {
   await mkdir(resolve(".runtime/tests"), { recursive: true });
   const directory = await mkdtemp(resolve(".runtime/tests/pwa-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
   await writeFile(resolve(directory, "index.html"), "<!doctype html><title>shell</title>");
   await writeFile(resolve(directory, "manifest.webmanifest"), "{}");
   await writeFile(resolve(directory, "sw.js"), "self.addEventListener('fetch', () => {});");
