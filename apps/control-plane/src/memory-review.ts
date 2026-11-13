@@ -79,6 +79,22 @@ export class MemoryReviews implements MemoryReviewRoutes {
       note: "This write is outside your own scopes, so it was held for review instead of applied. It is applied as you if allowed; check the outcome later with the review tool." };
   }
 
+  /**
+   * A write that goes straight to the human, past the reviewer: the work journal's memory decisions it
+   * could not make. The same write held again returns the review already there.
+   */
+  hold(writer: Writer, tool: string, args: Record<string, unknown>, reason: string): Pick<MemoryReview, "id" | "status"> {
+    const json = JSON.stringify(args);
+    const existing = this.db.prepare("SELECT id, status FROM memory_reviews WHERE writer=? AND tool=? AND args_json=? ORDER BY created_at DESC LIMIT 1")
+      .get(writer.name, tool, json) as { id: string; status: ReviewStatus } | undefined;
+    if (existing) return existing;
+    const id = `mr_${randomUUID()}`, now = Date.now();
+    this.db.prepare(`INSERT INTO memory_reviews(id,writer,tool,args_json,summary,status,decided_by,reason,created_at,updated_at)
+      VALUES (?,?,?,?,?,'waiting_human',?,?,?,?)`).run(id, writer.name, tool, json, describe(tool, args), writer.name, reason, now, now);
+    this.announce(this.get(id)!);
+    return { id, status: "waiting_human" };
+  }
+
   list(filter: { status?: string; limit?: number } = {}): MemoryReview[] {
     const limit = Math.min(Math.max(filter.limit ?? 50, 1), 200);
     const rows = filter.status

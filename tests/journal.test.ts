@@ -15,7 +15,9 @@ function fixture(answers: { summary?: (user: string) => Record<string, unknown>;
     trigger_at INTEGER NOT NULL, started_at INTEGER, finished_at INTEGER, status TEXT NOT NULL, session_id TEXT, output TEXT, error TEXT)`);
   const calls: string[] = [];
   let now = at(31);
+  const held: Array<{ args: Record<string, unknown>; reason: string }> = [];
   const journal = new Journal({ db: store.db, tz: TZ, now: () => now,
+    reviews: { hold: (_writer, _tool, args, reason) => (held.push({ args, reason }), { id: `mr_${held.length}` }) },
     model: async (system, user) => {
       calls.push(user);
       if (system.startsWith("你是中央记忆的归档员")) return answers.archive?.(user) ?? { decisions: [] };
@@ -36,7 +38,7 @@ function fixture(answers: { summary?: (user: string) => Record<string, unknown>;
     event(sessionId, "message.completed", start + 2000, { role: "assistant", text }, turnId);
     if (end) event(sessionId, end.type, end.time, end.payload ?? {}, turnId);
   };
-  return { store, control, journal, calls, session, event, turn, advance: (ms: number) => { now += ms; } };
+  return { store, control, journal, calls, held, session, event, turn, advance: (ms: number) => { now += ms; } };
 }
 
 test("a day is cut at midnight in the given time zone", () => {
@@ -148,7 +150,12 @@ test("memory candidates are filed; a conflict, an unnamed scope and a left-out c
   assert.equal(created?.scope, "steam-trading");
   assert.deepEqual(created?.create, { machine_id: "hal", cwd: "/root/新目录", scope_hint: "steam-trading", title: "Steam 挂刀" });
   assert.deepEqual({ action: missing?.action, value: missing?.value }, { action: "human", value: "被漏掉的" });
-  assert.equal(day.items.open.filter((i) => i.kind === "memory").length, 2);
+  // The conflict can be written as it stands, so it waits in the review queue; the left-out one has no topic.
+  assert.deepEqual(f.held.map((h) => [h.args.scope, h.args.topic]), [["repo-app", "full-tests"]]);
+  assert.match(f.held[0]!.reason, /冲突/);
+  assert.equal(conflict?.review, "mr_1");
+  assert.equal(missing?.review, undefined);
+  assert.deepEqual(day.items.open.map((i) => i.kind), ["automation"], "memory never lands in the notebook's items");
 
   const calls = f.calls.length;
   await f.journal.run({ date: "2026-11-10" });
@@ -173,7 +180,7 @@ test("a batch whose answer breaks fails only its own candidates, and the day is 
   broken = false;
   const again = await f.journal.run({ date: "2026-11-10" });
   assert.ok(again.memory.decisions.every((d) => d.action === "project"), "not cached while a batch failed");
-  assert.equal(again.items.open.filter((i) => i.kind === "memory").length, 0, "the failed batch's item goes away once filed");
+  assert.equal(f.held.length, 0, "a failed batch is filed again, not handed to the human");
 });
 
 test("a bad date or time zone is refused", async () => {

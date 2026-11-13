@@ -21,7 +21,7 @@ const AUTOMATION_SESSION_MS = 120_000;
  */
 
 export type JournalStatus = "done" | "in_progress" | "waiting_human" | "interrupted" | "failed";
-export type ItemKind = "next" | "human" | "interrupted" | "failed" | "memory" | "automation";
+export type ItemKind = "next" | "human" | "interrupted" | "failed" | "automation";
 
 export interface JournalSession {
   id: string; title: string; workerId: string; machineId: string; path: string;
@@ -38,6 +38,8 @@ export interface MemoryDecision {
   /** The provisional scope to create first: memory `scope` with `create: true`. */
   create?: { machine_id: string; cwd: string; repository?: string; scope_hint: string; title: string };
   derivedFrom: string[];
+  /** A human decision complete enough to write waits in the memory review queue under this id. */
+  review?: string;
 }
 
 export interface JournalItem {
@@ -65,6 +67,8 @@ export interface JournalOptions {
   /** jsonModel(); without it every summary falls back to the program's view. */
   model?: ReviewModel;
   memory?: AgentMemory;
+  /** The memory review queue; a decision for the human waits there, not in the notebook. */
+  reviews?: { hold(writer: { name: string; role: "agent" }, tool: string, args: Record<string, unknown>, reason: string): { id: string } };
   automations?: () => AutomationInfo[];
   /** Time zone a day is cut in when the caller names none. */
   tz: string;
@@ -172,7 +176,7 @@ export class Journal {
     }
     const decisions = await this.archive(date, candidates, sessions);
     const automations = this.automationDay(from, to);
-    const closed = this.ledger(date, to, sessions, decisions, automations, candidates);
+    const closed = this.ledger(date, to, sessions, automations);
     return { date, tz, window: { from, to }, sessions, automations, memory: { candidates, decisions },
       items: { open: this.items({ open: true }), closed }, usage: { summarized, reused } };
   }
@@ -266,12 +270,12 @@ export class Journal {
       else if (action === "project") {
         const name = named.get(session.path), hint = text(name?.id);
         const repository = (db.prepare("SELECT project_identity FROM sessions WHERE id=?").get(session.id) as { project_identity: string | null } | undefined)?.project_identity;
-        if (/^[a-z0-9][a-z0-9-]{0,63}$/.test(hint)) {
+        if (TOPIC.test(hint)) {
           decision.scope = hint;
           decision.create = { machine_id: session.machineId, cwd: session.path, ...(repository ? { repository } : {}), scope_hint: hint, title: text(name?.title) || hint };
         } else { decision.action = "human"; decision.reason = `没有作用域，也没起好名字：${decision.reason}`; }
       }
-      if (decision.action !== "skip" && (decision.conflict || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(decision.topic))) decision.action = "human";
+      if (decision.action !== "skip" && (decision.conflict || !TOPIC.test(decision.topic))) decision.action = "human";
       decisions.push(decision);
     }
     // A candidate the model left out is not dropped quietly.
@@ -280,6 +284,13 @@ export class Journal {
       if (!decided.has(i)) decisions.push({ candidates: [i], action: "human", scope: bySession.get(c.session)?.scope?.id ?? "", topic: "", kind: c.kind,
         value: c.value, pin: false, reason: failures.has(i) ? `归档失败：${failures.get(i)}` : "归档模型没有给出决定", conflict: "", derivedFrom: [`session:${c.session}`] });
     });
+    // What the human has to decide and could be written as it stands waits in the review queue;
+    // the rest (a failed batch, a candidate left out, a project with no scope yet) is only counted.
+    for (const d of decisions) if (d.action === "human" && d.scope && !d.create && TOPIC.test(d.topic) && this.options.reviews) {
+      d.review = this.options.reviews.hold({ name: "journal", role: "agent" }, "write",
+        { scope: d.scope, topic: d.topic, kind: d.kind, value: d.value, pin: d.pin, derived_from: d.derivedFrom },
+        `工作日志 ${date}：${d.conflict ? `冲突：${d.conflict}` : d.reason || "归档员没把握"}`).id;
+    }
     if (!failures.size) db.prepare(`INSERT INTO journal_archives (date,candidates_hash,decisions,created_at) VALUES (?,?,?,?)
       ON CONFLICT(date) DO UPDATE SET candidates_hash=excluded.candidates_hash, decisions=excluded.decisions, created_at=excluded.created_at`)
       .run(date, hash, JSON.stringify(decisions), this.now());
@@ -316,7 +327,7 @@ export class Journal {
   }
 
   /** This day's items replace its open ones; then any open item whose session moved on since closes by itself. */
-  private ledger(date: string, to: number, sessions: JournalSession[], decisions: MemoryDecision[], automations: AutomationDay, candidates: MemoryCandidate[]): JournalItem[] {
+  private ledger(date: string, to: number, sessions: JournalSession[], automations: AutomationDay): JournalItem[] {
     const db = this.options.db, now = this.now(), md = date.slice(5).replace("-", "");
     const wanted: Array<Omit<JournalItem, "openedAt" | "closedAt" | "closedBy" | "date">> = [];
     for (const s of sessions) {
@@ -327,12 +338,6 @@ export class Journal {
       else if (s.next) add("next", s.next);
       if (s.waitingOnHuman) add("human", s.waitingOnHuman);
       else if (s.pending) add("human", `${s.pending} 个审批/提问没有处理`);
-    }
-    for (const d of decisions) if (d.action === "human") {
-      const id = `jn-m-${createHash("sha256").update(`${date}\n${d.value}`).digest("hex").slice(0, 10)}`;
-      const session = candidates[d.candidates[0]!]?.session ?? null;
-      wanted.push({ id, kind: "memory", title: `记忆待定：${d.value}${d.conflict ? `（冲突：${d.conflict}）` : d.reason ? `（${d.reason}）` : ""}`,
-        scope: d.scope || null, sessionId: session, automationId: null });
     }
     for (const f of automations.failures) if (!f.delivered && !wanted.some((w) => w.id === `jn-a-${f.id}-${md}`))
       wanted.push({ id: `jn-a-${f.id}-${md}`, kind: "automation", title: `${f.title}${f.status === "missed" ? "该跑没跑" : "失败"}：${f.error}`,
@@ -345,7 +350,9 @@ export class Journal {
       for (const w of wanted) db.prepare(`INSERT INTO journal_items (id,date,kind,title,scope,session_id,automation_id,window_end,opened_at)
         VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET title=excluded.title, scope=excluded.scope WHERE journal_items.closed_at IS NULL`)
         .run(w.id, date, w.kind, w.title, w.scope, w.sessionId, w.automationId, to, now);
-      const moved = db.prepare(`SELECT i.id FROM journal_items i WHERE i.closed_at IS NULL AND i.kind<>'memory' AND (
+      // Memory items of the versions before the review queue took them over stay out of the ledger.
+      db.prepare("DELETE FROM journal_items WHERE kind='memory' AND closed_at IS NULL").run();
+      const moved = db.prepare(`SELECT i.id FROM journal_items i WHERE i.closed_at IS NULL AND (
           (i.session_id IS NOT NULL AND EXISTS (SELECT 1 FROM events e WHERE e.session_id=i.session_id AND e.type='turn.started' AND e.created_at>=i.window_end))
           ${this.hasRuns() ? "OR (i.automation_id IS NOT NULL AND EXISTS (SELECT 1 FROM automation_runs r WHERE r.automation_id=i.automation_id AND r.trigger_at>=i.window_end AND r.status IN ('ok','silent')))" : ""})`)
         .all() as Array<{ id: string }>;
@@ -432,6 +439,8 @@ memory：
 - 大部分会话没有记忆候选，宁缺毋滥。`;
 }
 
+/** A scope or topic slug. */
+const TOPIC = /^[a-z0-9][a-z0-9-]{0,63}$/;
 /** Candidates per archive call. */
 const ARCHIVE_BATCH = 8;
 

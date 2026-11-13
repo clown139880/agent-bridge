@@ -248,6 +248,7 @@ export class ControlPlane {
     // The work journal reads long conversations, so its calls get minutes, not the reviewer's seconds.
     const journal = new Journal({ db: this.controlStore.db, memory: agentMemory,
       model: secrets && options.review ? jsonModel({ secrets, ...options.review, timeoutMs: 180_000 }) : undefined,
+      reviews: this.memoryReviews,
       automations: () => (automations?.list() ?? []) as unknown as AutomationInfo[],
       tz: process.env.TZ || Intl.DateTimeFormat().resolvedOptions().timeZone });
     if (options.events && (options.events.hookSources.length || (options.events.mqtt && options.events.sources.length)))

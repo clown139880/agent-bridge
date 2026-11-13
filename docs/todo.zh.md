@@ -175,3 +175,15 @@ OpenRouter Chat Completions 加服务端工具即可,**不需要 X 会员或 Sup
 - 开源:**搜索引擎、模型和索引都闭源**。开源(MIT)的只有客户端和周边:`exa-mcp-server`(约 5.1k star,可以自部署,但仍要 key)、`exa-py`、`exa-js`、`agent-skills`、`benchmarks`(搜索 API 评测代码),以及一些示例应用。没办法自建 Exa。
 - 社区反馈:Hacker News 上普遍认为结果质量好,能找到被 SEO 垃圾埋没的长尾优质页面,LLM 评测里 Exa 和 Parallel、Tavily 同属第一梯队。批评集中在:价格高于 Linkup、ceramic 等;Websets 在商品、地域、非英语内容上偏弱;第三方指出它在 FreshQA 这类时效性基准上分数偏低;零数据保留(ZDR)要额外付费;有用户反映退订要发邮件给客服。
 - 社区常见用法:查询写成"理想页面的描述"(例如 "blog post comparing X and Y"),而不是关键词;用 `objective` 说明要哪类文档、排除什么;先用 `web_search_exa` 拿摘录,不够再用 `web_fetch_exa` 读全文;用 `category: news` 加日期窗口做新闻溯源;在 Claude Code、Cursor 里直接挂托管 MCP。
+
+## Control Center:审核记录页
+
+### 动机
+
+审核模型（记忆和技能写入的 `memory_reviews`、工具审批的分诊）放行了什么、为什么放行，现在只能查数据库。2026-11-02 起 8 条 `_` 作用域写入全由审核模型放行，人一条没看到；放行得对不对，人无从核对。
+
+### 要做的
+
+- Control Center 加一页列出审核记录：时间、发起的 agent、写入摘要、谁决定的（审核模型 / 人 / 工作日志）、决定和理由、结果或错误；可按状态、决定方筛选。
+- 人可以纠正：审核模型放行的写入可以撤回（记忆 `retract`，技能回到写入前的版本），交给人的照旧允许或拒绝；纠正记成新的一条，原记录不改。
+- 之后考虑把人的纠正喂回审核模型的提示词，作为例子。
