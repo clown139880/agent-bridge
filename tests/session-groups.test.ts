@@ -131,3 +131,24 @@ test("the catalog's changes after a stream cursor carry only the changed session
     assert.equal(f.control.changedSessionGroups({ events: 0, changes: 0 }, 3), undefined, "too many changes: read the catalog");
   } finally { f.close(); }
 });
+
+test("only the session a run started counts as the automation's; one it handed text to stays listed", () => {
+  const f = fixture();
+  try {
+    f.create("room", "dev", "/work/room", 1000);
+    f.create("own", "dev", "/work/own", 1000);
+    f.store.db.exec(`CREATE TABLE automation_runs (id TEXT PRIMARY KEY, automation_id TEXT NOT NULL, trigger TEXT NOT NULL,
+      trigger_at INTEGER NOT NULL, started_at INTEGER, finished_at INTEGER, status TEXT NOT NULL, session_id TEXT, output TEXT, error TEXT)`);
+    // `room` existed long before the webhook handed it a callback; `own` was created by its run.
+    f.store.db.prepare("UPDATE sessions SET created_at=? WHERE id=?").run(Date.now() - 86_400_000, "room");
+    const own = (f.store.db.prepare("SELECT created_at FROM sessions WHERE id='own'").get() as { created_at: number }).created_at;
+    f.store.db.prepare("INSERT INTO automation_runs VALUES ('r1','velvet','webhook',?,?,?,'ok','room',NULL,NULL)").run(Date.now(), Date.now(), Date.now());
+    f.store.db.prepare("INSERT INTO automation_runs VALUES ('r2','daily','schedule',?,?,?,'ok','own',NULL,NULL)").run(own - 5_000, own - 5_000, own);
+    const listed = f.control.listSessions({ sort: "updatedAt", order: "desc", limit: 10, automations: false }).data.map((row) => row.sessionId);
+    assert.deepEqual(listed, ["room"]);
+    assert.equal(f.control.session("room")?.automation, undefined);
+    assert.equal(f.control.session("own")?.automation, "daily");
+    assert.equal(f.control.automationOf("room"), undefined);
+    assert.equal(f.control.automationOf("own"), "daily");
+  } finally { f.close(); }
+});

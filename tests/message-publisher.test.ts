@@ -262,7 +262,7 @@ test("an automation's own session and a settled request reach the phone quietly"
     f.control.resolvePending("request", "accepted", { choice: "allow" }); producer.capture(); await producer.flush();
     f.store.db.exec(`CREATE TABLE automation_runs (id TEXT PRIMARY KEY, automation_id TEXT NOT NULL, trigger TEXT NOT NULL, trigger_at INTEGER NOT NULL,
       started_at INTEGER, finished_at INTEGER, status TEXT NOT NULL, session_id TEXT, output TEXT, error TEXT)`);
-    f.store.db.prepare("INSERT INTO automation_runs(id,automation_id,trigger,trigger_at,status,session_id) VALUES('r','daily','schedule',1,'ok','session')").run();
+    f.store.db.prepare("INSERT INTO automation_runs(id,automation_id,trigger,trigger_at,status,session_id) SELECT 'r','daily','schedule',created_at,'ok','session' FROM sessions WHERE id='session'").run();
     f.event("one", "turn-1"); f.event("two", "turn-2", "turn.failed", "失败"); producer.capture(); await producer.flush();
     const sent = f.deliveries.map(d => JSON.parse(d.payload) as BusinessMessage).map(m => [m.type, m.level]);
     assert.deepEqual(sent, [["agent.approval.requested", "alert"], ["agent.approval.resolved", "silent"],

@@ -174,6 +174,11 @@ function legacyStatus(activity: SessionActivityStatus, lastTurn?: TurnStatus): s
 export interface GroupScope { id: string; title: string }
 
 const UNIT = "\u001f";
+/**
+ * A run that started session `s`: one created this close to the run's start. Runs that hand their text to a
+ * session already there (a room's current session, a task that wakes one) record it too, but did not start it.
+ */
+const STARTED_BY_RUN = "abs(s.created_at-COALESCE(a.started_at,a.trigger_at))<120000";
 /** Delivered change states kept for the other streams (see changedState). */
 const CHANGE_STATES = 2_000;
 
@@ -849,7 +854,7 @@ export class AgentControlStore {
     if (input.q) { where.push("(LOWER(COALESCE(title,'')) LIKE ? OR LOWER(COALESCE(auto_title,'')) LIKE ? OR LOWER(COALESCE(manual_title,'')) LIKE ? OR LOWER(COALESCE(prompt_summary,'')) LIKE ? OR LOWER(project_name) LIKE ?)"); const q=`%${input.q.toLowerCase()}%`; params.push(q,q,q,q,q); }
     if (input.taskId) { where.push("EXISTS(SELECT 1 FROM worker_runs r WHERE r.session_id=sessions.id AND r.task_id=?)"); params.push(input.taskId); }
     if (input.conversationId) { where.push("EXISTS(SELECT 1 FROM worker_runs r WHERE r.session_id=sessions.id AND r.conversation_id=?)"); params.push(input.conversationId); }
-    if (input.automations === false && this.automationRuns()) where.push("NOT EXISTS(SELECT 1 FROM automation_runs a WHERE a.session_id=sessions.id)");
+    if (input.automations === false && this.automationRuns()) where.push(`NOT EXISTS(SELECT 1 FROM automation_runs a JOIN sessions s ON s.id=a.session_id WHERE a.session_id=sessions.id AND ${STARTED_BY_RUN})`);
     if (input.cursor) { const [value,id] = decodeCursor(input.cursor, scope); where.push(`(${column}${comparator}? OR (${column}=? AND id${comparator}?))`); params.push(value,value,id); }
     const sql=`SELECT * FROM sessions ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
       ORDER BY ${column} ${direction},id ${direction} LIMIT ?`;
@@ -1127,7 +1132,8 @@ export class AgentControlStore {
   /** The automation whose run started this session, if one did. */
   automationOf(sessionId: string): string | undefined {
     if (!this.automationRuns()) return undefined;
-    return (this.db.prepare("SELECT automation_id FROM automation_runs WHERE session_id=? LIMIT 1").get(sessionId) as { automation_id: string } | undefined)?.automation_id;
+    return (this.db.prepare(`SELECT a.automation_id FROM automation_runs a JOIN sessions s ON s.id=a.session_id WHERE a.session_id=? AND ${STARTED_BY_RUN} LIMIT 1`)
+      .get(sessionId) as { automation_id: string } | undefined)?.automation_id;
   }
 
   private automationRunsTable = false;
@@ -1166,8 +1172,8 @@ export class AgentControlStore {
       WHERE session_id IN (SELECT value FROM json_each(?)) GROUP BY session_id`).all(ids) as Array<{ session_id: string; connector: string; room_id: string }>)
       .map((item) => [item.session_id, item]) : []);
     const roomName = relays.size ? this.roomNames?.() : undefined;
-    const automations = new Map(this.automationRuns() ? (this.sql(`SELECT session_id,MIN(automation_id) AS automation_id FROM automation_runs
-      WHERE session_id IN (SELECT value FROM json_each(?)) GROUP BY session_id`).all(ids) as Array<{ session_id: string; automation_id: string }>)
+    const automations = new Map(this.automationRuns() ? (this.sql(`SELECT a.session_id,MIN(a.automation_id) AS automation_id FROM automation_runs a
+      JOIN sessions s ON s.id=a.session_id WHERE a.session_id IN (SELECT value FROM json_each(?)) AND ${STARTED_BY_RUN} GROUP BY a.session_id`).all(ids) as Array<{ session_id: string; automation_id: string }>)
       .map((item) => [item.session_id, item.automation_id]) : []);
     return rows.map((row) => {
       const id = String(row.id);
