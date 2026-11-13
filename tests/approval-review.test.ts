@@ -205,3 +205,45 @@ test("an approval whose session the Bridge no longer has, or already settled, ex
     assert.equal(control.controlStore.session("s").status, "idle", "no turn is running: not shown as working");
   } finally { await control.stop(); store.db.close(); rmSync(path, { force: true }); }
 });
+
+test("a complete inventory ends the background tasks the Bridge no longer runs; the human renames a session", async () => {
+  const { randomUUID } = await import("node:crypto");
+  const { rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { WebSocket } = await import("ws");
+  const { Store } = await import("../packages/database/src/index.js");
+  const { ControlPlane } = await import("../apps/control-plane/src/server.js");
+  const path = join(tmpdir(), `tasks-${randomUUID()}.sqlite`), store = new Store(path);
+  store.upsertMachine({ id: "hal", name: "HAL", platform: "linux", hostname: "hal", capabilities: ["claude-code"] });
+  for (const id of ["gone", "live"]) store.createSession({ id, machineId: "hal", agentType: "claude-code", projectName: "p", projectPath: "/p", matrixRoomId: "",
+    matrixThreadId: null, nativeSessionId: id, status: "idle", createdAt: 1, updatedAt: 1 });
+  const socket = { readyState: WebSocket.OPEN, OPEN: WebSocket.OPEN, send() {}, close() {} };
+  const control = new ControlPlane(store, { host: "127.0.0.1", port: 0, controlApiWriteToken: "w", sse: { keepaliveMs: 50, pollMs: 5, maxBackpressure: 3 } }) as any;
+  control.bridges.set("hal", { machineId: "hal", name: "HAL", capabilities: ["claude-code"], features: ["session-actions", "task-inventory"], bridgeVersion: "9", socket });
+  control.titler = async (prompts: string[], _replies: string[], latest?: boolean) => latest ? `改为：${prompts.at(-1)}` : "x";
+  await control.start();
+  const start = (sessionId: string, item: string) => control.handleBridgeMessage("hal", { type: "session.event", sessionId, eventId: `${item}:s`, eventType: "task.started",
+    itemId: item, timestamp: 1, payload: { taskId: item, kind: "bash", description: `deploy ${item}`, background: true } });
+  const ended = (sessionId: string) => control.controlStore.sessionEvents(sessionId, undefined, 50, ["task.completed"]).data.map((e: any) => [e.itemId, e.payload.status]);
+  try {
+    await start("gone", "t1"); await start("live", "t2"); await start("live", "t3");
+    const session = (sessionId: string, openTaskItemIds: string[]) => ({ sessionId, agentType: "claude-code", projectPath: "/p", projectName: "p", activityStatus: "idle",
+      createdAt: 1, updatedAt: 1, source: "claude-cli", historyCompleteness: "terminal-only", openTaskItemIds });
+    await control.handleBridgeMessage("hal", { type: "state.snapshot", generation: "g", sessions: [session("live", ["t3"])], approvals: [], userInputs: [], complete: true });
+    assert.deepEqual(ended("gone"), [["t1", "lost"]], "the session is gone from the Bridge: its task ended with it");
+    assert.deepEqual(ended("live"), [["t2", "lost"]], "only the task the Bridge does not run");
+    await control.handleBridgeMessage("hal", { type: "state.snapshot", generation: "g2", sessions: [session("live", ["t3"])], approvals: [], userInputs: [], complete: true });
+    assert.equal(ended("live").length, 1, "closed once");
+
+    await control.handleBridgeMessage("hal", { type: "session.event", sessionId: "live", eventId: "m1", eventType: "message.completed", turnId: "t", timestamp: 2, payload: { role: "user", text: "先修登录" } });
+    await control.handleBridgeMessage("hal", { type: "session.event", sessionId: "live", eventId: "m2", eventType: "message.completed", turnId: "t", timestamp: 3, payload: { role: "user", text: "后来改做导出" } });
+    const title = (body: unknown) => fetch(`http://127.0.0.1:${control.http.address().port}/api/v1/sessions/live/title`, { method: "POST",
+      headers: { authorization: "Bearer w", "content-type": "application/json" }, body: JSON.stringify(body) }).then(async (r) => [r.status, (await r.json() as any).title]);
+    assert.deepEqual(await title({ auto: true }), [200, "改为：后来改做导出"], "named from where the conversation went");
+    assert.deepEqual(await title({ title: "导出功能" }), [200, "导出功能"]);
+    store.db.prepare("UPDATE sessions SET title='Claude 起的名字' WHERE id='live'").run();
+    assert.equal(control.controlStore.session("live").title, "导出功能", "the human's name wins over the agent's");
+    assert.deepEqual(await title({ title: null }), [200, "Claude 起的名字"]);
+  } finally { await control.stop(); store.db.close(); rmSync(path, { force: true }); }
+});

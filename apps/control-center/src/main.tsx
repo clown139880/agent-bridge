@@ -832,6 +832,8 @@ function Detail({ control, state, id, banners }: { control: ControlState; state:
           onChange={e => { setMode(e.target.value as DetailMode); close(); }}>
           {Object.entries(DETAIL_MODES).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
         <button type="button" className="sheet-item" disabled={state.loading} onClick={() => { close(); void control.refresh(); }}>↻ 刷新会话</button>
+        {state.writable && <button type="button" className="sheet-item" onClick={() => { close(); void control.retitle(id, { auto: true }); }}>✎ 按最近的对话重新起名</button>}
+        {state.writable && <button type="button" className="sheet-item" onClick={() => { close(); const name = prompt("会话名称", title(session)); if (name?.trim()) void control.retitle(id, { title: name.trim() }); }}>✎ 手动改名</button>}
       </>} />
     {banners}
     {session?.error && <p className="error">{session.error.error.message}</p>}

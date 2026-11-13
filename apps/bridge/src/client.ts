@@ -307,7 +307,7 @@ export class BridgeClient {
         ],
         protocolVersion: BRIDGE_PROTOCOL_VERSION,
         features: ["session-inventory", "session-events", "session-actions", "turn-steer",
-          "turn-interrupt", "approvals", "user-input", "desktop-terminal-history", "history-backfill"],
+          "turn-interrupt", "approvals", "user-input", "desktop-terminal-history", "history-backfill", "task-inventory"],
         bridgeVersion: this.options.version,
         sharedSkills: this.sharedSkillsStatus(),
         token: this.options.token,

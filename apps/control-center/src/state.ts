@@ -515,6 +515,14 @@ export class ControlState {
     else { this.markRead(); void this.open(this.state.route, false); }
   }
   /** Take back “allow everything in this session”. */
+  /** Rename a session: `{title}` sets it, `{auto:true}` has it named again from its latest conversation. */
+  async retitle(sessionId: string, body: { title: string } | { auto: true }) {
+    try {
+      const session = await this.api.request<Session>(`/sessions/${encodeURIComponent(sessionId)}/title`, { body });
+      if (this.state.session?.sessionId === sessionId) this.patch({ session: { ...this.state.session, title: session.title } });
+      this.patch({ sessions: this.state.sessions.map(s => s.sessionId === sessionId ? { ...s, title: session.title } : s) });
+    } catch (error) { this.patch({ error: explain(error) }); }
+  }
   async untrust(sessionId: string) {
     try {
       await this.api.request(`/sessions/${encodeURIComponent(sessionId)}/untrust`, { body: {} });

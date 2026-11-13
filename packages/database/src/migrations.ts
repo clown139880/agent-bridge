@@ -502,6 +502,16 @@ export function migrateDatabase(db: DatabaseSync): void {
       db.exec("COMMIT");
     } catch (error) { try { db.exec("ROLLBACK"); } catch {} throw error; }
   }
+
+  // A title the human asked for (renamed it, or had it named again from where the conversation went); it wins over all others.
+  if (!db.prepare("SELECT 1 FROM schema_migrations WHERE version=20").get()) {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      addColumn(db, "sessions", "manual_title", "TEXT");
+      db.prepare("INSERT INTO schema_migrations(version,applied_at) VALUES (20,?)").run(Date.now());
+      db.exec("COMMIT");
+    } catch (error) { try { db.exec("ROLLBACK"); } catch {} throw error; }
+  }
 }
 
 /**

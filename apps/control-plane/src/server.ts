@@ -7,7 +7,7 @@ import { basename, join } from "node:path";
 import type { Duplex } from "node:stream";
 import pino from "pino";
 import { WebSocket, WebSocketServer } from "ws";
-import { AgentControlStore, ConversationMemoryStore, setRedactedSecrets, Store, type PendingRow } from "@agent-bridge/database";
+import { AgentControlStore, ConversationMemoryStore, decodeEventBody, setRedactedSecrets, Store, type PendingRow } from "@agent-bridge/database";
 import {
   parseMessage,
   statusForEvent,
@@ -94,7 +94,7 @@ export class ControlPlane {
   private learnRule?: (summary: string, what: string, where: string) => Promise<string>;
   private approvalLessons?: ApprovalLessons;
   /** Names a session whose agent does not (Codex via app-server, Pi); absent without the reviewer model. */
-  private titler?: (prompts: string[], replies: string[]) => Promise<string>;
+  private titler?: (prompts: string[], replies: string[], latest?: boolean) => Promise<string>;
   private readonly titling = new Set<string>();
   /** The reviewer's explanation of approvals it handed to the human, kept across Bridge replays. */
   private readonly approvalAnalyses = new Map<string, ApprovalAnalysis>();
@@ -220,7 +220,7 @@ export class ControlPlane {
     if (tools && model) {
       this.approvalReviewer = approvalReviewer(model);
       this.learnRule = (summary, what, where) => learnRule(model, summary, what, where);
-      this.titler = (prompts, replies) => titleSession(model, prompts, replies);
+      this.titler = (prompts, replies, latest) => titleSession(model, prompts, replies, latest);
       if (agentSkills && options.agentMemory?.skills) {
         const skills = agentSkills, repo = options.agentMemory.skills.repo;
         this.approvalLessons = new ApprovalLessons({ file: join(repo, "scopes/_global/agent-bridge/approval-review/references/learned.md"),
@@ -263,6 +263,7 @@ export class ControlPlane {
       agents, memoryReviews: this.memoryReviews, conversations: this.conversations, automations: this.automations, journal, toolHub: this.toolHub,
       transcribe: options.transcribe && (secrets || options.transcribe.fallbackUrl) ? transcriber({ ...options.transcribe, secrets }) : undefined,
       onAllowSimilar: (pending, by) => this.learnFrom(pending, by),
+      retitle: (sessionId) => this.retitle(sessionId),
       onTrustSession: (pending) => this.allowWaiting(pending.sessionId, pending.id),
       callees: async () => {
         const tool = (await this.toolHub?.search("call_place", 3))?.tools.find((item) => item.name === "call-bridge.call_place");
@@ -560,6 +561,7 @@ export class ControlPlane {
           if (session.active_turn_id) this.resumeInterrupted(session.id, machineId, session.active_turn_id);
         }
         this.reclaimOrphanedRuns(machineId, present);
+        if (this.bridges.get(machineId)?.features?.includes("task-inventory")) this.closeLostTasks(machineId, message.sessions);
         this.backfillOffline(machineId, message.sessions);
         const pendingIds = new Set([...message.approvals.map((item) => item.approvalId),
           ...message.userInputs.map((item) => item.requestId)]);
@@ -1002,6 +1004,17 @@ export class ControlPlane {
       .finally(() => this.titling.delete(sessionId));
   }
 
+  /** The human asked to name a session again from where its conversation went; that name wins from now on. */
+  private async retitle(sessionId: string): Promise<string> {
+    if (!this.titler) throw new Error("no title model configured");
+    const material = this.controlStore.titleMaterial(sessionId);
+    if (!material.prompts.length) throw new Error("the session has no messages yet");
+    const title = await this.titler(material.prompts, material.replies, true);
+    this.controlStore.setManualTitle(sessionId, title);
+    log.info({ sessionId, title }, "Named a session again");
+    return title;
+  }
+
   /** What the boundary needs to know about where a session works: its workspace and the remote targets allowed there. */
   private approvalPlace(sessionId: string): { workspace: string; remotes: string[]; caller: string } {
     const session = this.store.getSession(sessionId), workspace = session?.projectPath ?? "";
@@ -1047,6 +1060,31 @@ export class ControlPlane {
     } catch (error) { log.warn({ error, approvalId: message.approvalId }, "Reviewed approval could not be sent; asking the human"); return false; }
     log.info({ approvalId: message.approvalId, choice, reason, summary: message.summary.slice(0, 200) }, "Approval decided by the reviewer");
     return true;
+  }
+
+  /**
+   * Background tasks (a shell, a monitor, a subagent) whose end was never reported: the Bridge or its agent
+   * process died with them, e.g. a deploy that restarted the Bridge running it. A complete inventory names the
+   * tasks still running; every other open one ends as `lost`, so no client shows it running forever.
+   */
+  private closeLostTasks(machineId: string, sessions: Array<{ sessionId: string; openTaskItemIds?: string[] }>): void {
+    const held = new Map(sessions.map((session) => [session.sessionId, session.openTaskItemIds]));
+    const open = this.store.db.prepare(`SELECT e.session_id,e.item_id,e.body FROM events e JOIN sessions s ON s.id=e.session_id
+      WHERE s.machine_id=? AND e.type='task.started' AND e.item_id IS NOT NULL
+        AND NOT EXISTS(SELECT 1 FROM events c WHERE c.session_id=e.session_id AND c.type='task.completed' AND c.item_id=e.item_id)`)
+      .all(machineId) as Array<{ session_id: string; item_id: string; body: unknown }>;
+    let closed = 0;
+    for (const task of open) {
+      // A session the Bridge holds without listing its tasks (an adapter that does not report them) is left alone.
+      if (held.has(task.session_id) && (!held.get(task.session_id) || held.get(task.session_id)!.includes(task.item_id))) continue;
+      const started = decodeEventBody(task.body);
+      this.controlStore.appendSessionEvent({ type: "session.event", sessionId: task.session_id, itemId: task.item_id,
+        eventId: `lost:${task.session_id}:${task.item_id}`, eventType: "task.completed", timestamp: Date.now(),
+        payload: { taskId: started.taskId, kind: started.kind, description: started.description, status: "lost",
+          summary: "Bridge 重启或进程退出时它没有报告结束，已不在运行" } });
+      closed++;
+    }
+    if (closed) log.info({ machineId, closed }, "Closed background tasks that ended without a report");
   }
 
   /**

@@ -74,3 +74,9 @@ project agent 写 _global / _assistants / _agent-* 或这些作用域里的技�
 Claude 自己给会话起名（`/rename` 的 `custom-title`，否则 `ai-title`），Bridge 读到后更新过来。Codex 经 app-server 开的会话没人起名（Codex 的标题是 Desktop 客户端另起线程生成的，app-server 只转发 `thread/name/updated`），Pi 只拿第一句提示当名字。
 
 所以非 Claude 会话的一轮完成后，如果它还没有名字，或者名字只是第一句提示的开头，Control Plane 用审核员模型（`deepseek-v4-flash`，失败用 `qwen3.8-flash-next`）根据开头的几条消息起一个 20 字以内的标题，写进 `sessions.auto_title`，只起一次，失败就等下一轮完成再试。显示时 agent 自己的名字优先：之后 Codex Desktop 或 agent 起了真正的名字，就改用那个。这个标题只存在 Control Plane，不会写回 Codex 或 Pi；会话搜索也匹配它。旧会话要等下一轮完成后才有标题。
+
+手动改名（0.7.92）：`POST /api/v1/sessions/{id}/title`，只有人的 token 能用。`{auto:true}` 用最初的请求加最近的对话重新起名（以最近在做的事为准），`{title:"…"}` 直接设定，`{title:null}` 撤回。人定的名字（`sessions.manual_title`）优先于 agent 自己的和自动起的，Claude 会话也一样。控制中心会话页菜单有“按最近的对话重新起名”和“手动改名”，DSH 插件 0.7.6 的会话菜单有“按最近对话重新起名”。
+
+## 7. 没报结束的后台任务（0.7.92）
+
+Claude 的后台命令、监视器、子代理（`task.started`）如果 Bridge 或 claude 进程在它报告结束前就死了（典型是 `deploy.sh` 重启了运行它的 Bridge），以前永远没有 `task.completed`，DSH 一直显示“后台仍在运行”。Bridge 0.7.44 起在完整清单里给每个会话带上还在跑的任务（`openTaskItemIds`，特性 `task-inventory`）；Control Plane 收到后，把这台机器上其余没结束的任务补一条 `task.completed`（`status: lost`）。Bridge 持有却不上报任务的会话（其他 adapter）不动。

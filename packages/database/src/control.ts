@@ -395,6 +395,22 @@ export class AgentControlStore {
     return { agent: String(row.agent_type), prompts, replies: messages.filter((payload) => payload.role === "assistant").map((payload) => String(payload.text)) };
   }
 
+  /** What the conversation is about now: its opening request and its latest messages, for naming it again. */
+  titleMaterial(sessionId: string): { prompts: string[]; replies: string[] } {
+    const decode = (rows: Array<{ body: unknown }>) => rows.map((row) => decodeEventBody(row.body)).filter((payload) => typeof payload.text === "string");
+    const first = decode(this.db.prepare("SELECT body FROM events WHERE session_id=? AND type='message.completed' ORDER BY id LIMIT 4").all(sessionId) as Array<{ body: unknown }>);
+    const last = decode(this.db.prepare("SELECT body FROM events WHERE session_id=? AND type='message.completed' ORDER BY id DESC LIMIT 12").all(sessionId) as Array<{ body: unknown }>).reverse();
+    const text = (payload: Record<string, unknown>) => String(payload.text).slice(0, 600);
+    return { prompts: [...first.filter((payload) => payload.role === "user").slice(0, 1), ...last.filter((payload) => payload.role === "user")].map(text),
+      replies: last.filter((payload) => payload.role === "assistant").slice(-4).map(text) };
+  }
+
+  /** The human's title for a session (null takes it back); shown over the agent's own and any given one. */
+  setManualTitle(sessionId: string, title: string | null): void {
+    this.db.prepare("UPDATE sessions SET manual_title=? WHERE id=?").run(title, sessionId);
+    markChanged(this.db, "session", sessionId);
+  }
+
   setAutoTitle(sessionId: string, title: string): void {
     this.db.prepare("UPDATE sessions SET auto_title=? WHERE id=?").run(title, sessionId);
     markChanged(this.db, "session", sessionId);
@@ -830,7 +846,7 @@ export class AgentControlStore {
     if (input.active != null) { where.push(input.active
       ? "activity_status IN ('active','waiting_for_approval','waiting_for_input')"
       : "activity_status NOT IN ('active','waiting_for_approval','waiting_for_input')"); }
-    if (input.q) { where.push("(LOWER(COALESCE(title,'')) LIKE ? OR LOWER(COALESCE(auto_title,'')) LIKE ? OR LOWER(COALESCE(prompt_summary,'')) LIKE ? OR LOWER(project_name) LIKE ?)"); const q=`%${input.q.toLowerCase()}%`; params.push(q,q,q,q); }
+    if (input.q) { where.push("(LOWER(COALESCE(title,'')) LIKE ? OR LOWER(COALESCE(auto_title,'')) LIKE ? OR LOWER(COALESCE(manual_title,'')) LIKE ? OR LOWER(COALESCE(prompt_summary,'')) LIKE ? OR LOWER(project_name) LIKE ?)"); const q=`%${input.q.toLowerCase()}%`; params.push(q,q,q,q,q); }
     if (input.taskId) { where.push("EXISTS(SELECT 1 FROM worker_runs r WHERE r.session_id=sessions.id AND r.task_id=?)"); params.push(input.taskId); }
     if (input.conversationId) { where.push("EXISTS(SELECT 1 FROM worker_runs r WHERE r.session_id=sessions.id AND r.conversation_id=?)"); params.push(input.conversationId); }
     if (input.automations === false && this.automationRuns()) where.push("NOT EXISTS(SELECT 1 FROM automation_runs a WHERE a.session_id=sessions.id)");
@@ -1274,6 +1290,7 @@ function promptLike(title: string, prompt: string): boolean {
 
 /** The agent's own name for a session wins; a given title replaces none, or one that only repeats the first prompt. */
 function sessionTitle(row: Record<string, unknown>, promptSummary: string | null): string | null {
+  if (row.manual_title) return String(row.manual_title);
   const own = row.title ? String(row.title) : null, given = row.auto_title ? String(row.auto_title) : null;
   if (!given) return own;
   return own && !promptLike(own, String(row.prompt_summary ?? promptSummary ?? "")) ? own : given;

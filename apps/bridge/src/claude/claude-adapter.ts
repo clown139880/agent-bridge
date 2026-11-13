@@ -1245,6 +1245,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
         source: "claude-cli" as const,
         historyCompleteness: "terminal-only" as const,
         projectIdentity: s.projectIdentity,
+        openTaskItemIds: [...s.tasks.values()].map((task) => task.toolUseId ?? task.taskId),
       }));
     const approvals = [...this.sessions.values()].flatMap((s) =>
       [...s.pendingApprovals.values()]

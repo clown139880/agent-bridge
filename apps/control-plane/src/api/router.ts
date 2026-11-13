@@ -44,6 +44,8 @@ interface ApiOptions {
   toolHub?: ToolHub;
   /** A human answered “allow similar”: learn the class of call so the reviewer allows it next time. */
   onAllowSimilar?: (pending: PendingRow, by: string) => void;
+  /** Name a session again from its latest conversation (POST /sessions/{id}/title with `{auto:true}`). */
+  retitle?: (sessionId: string) => Promise<string>;
   /** A human let the session do anything: its other pending approvals are allowed too. */
   onTrustSession?: (pending: PendingRow, by: string) => void;
   /** Schedules, webhooks and their proposals (/api/v1/automations). */
@@ -148,7 +150,7 @@ export class AgentControlApi {
       if(request.method==="GET"&&detail){this.sessionDetail(url,response,decodeURIComponent(detail[1]!));return true;}
       const view=url.pathname.match(/^\/api\/v1\/sessions\/([^/]+)\/(view|view\/changes|view\/entries\/[^/]+|events\/[^/]+)$/);
       if(request.method==="GET"&&view){this.sessionView(url,response,decodeURIComponent(view[1]!),view[2]!);return true;}
-      const session=url.pathname.match(/^\/api\/v1\/sessions\/([^/]+)(?:\/(runs|events|turns|interrupt|untrust))?$/);
+      const session=url.pathname.match(/^\/api\/v1\/sessions\/([^/]+)(?:\/(runs|events|turns|interrupt|untrust|title))?$/);
       if(session){await this.sessionRoute(request,response,url,principal,decodeURIComponent(session[1]!),session[2]);return true;}
       // Remote targets a workspace may reach (granted by “允许类似的操作” on a call that reached them); the human takes one back with DELETE.
       if(url.pathname==="/api/v1/approval-remotes"&&request.method==="GET"){this.ok(response,{data:this.store.allApprovalRemotes()});return true;}
@@ -535,6 +537,18 @@ export class AgentControlApi {
     }
     if(request.method==="POST"&&action==="turns"){await this.submitTurn(request,response,principal,session);return;}
     if(request.method==="POST"&&action==="interrupt"){await this.interrupt(request,response,principal,session);return;}
+    // The human renames a session: `{title}` sets it, `{auto:true}` has it named again from the latest conversation, `{title:null}` takes it back.
+    if(request.method==="POST"&&action==="title"){
+      if(!principal.id.startsWith("control:"))throw new ApiProblem(403,"forbidden","only the human renames a session");
+      const body=await jsonBody(request);let title:string|null;
+      if(body.auto===true){
+        if(!this.options.retitle)throw new ApiProblem(503,"title_unavailable","no title model configured");
+        try{title=await this.options.retitle(String(session.sessionId));}catch(error){throw new ApiProblem(502,"title_failed",error instanceof Error?error.message:String(error),true);}
+      }else if(body.title===null)title=null;
+      else{title=string(body.title,"title",true)!.replace(/\s+/g," ").trim().slice(0,80);if(!title)throw new ApiProblem(400,"invalid_parameter","title is empty");this.store.setManualTitle(String(session.sessionId),title);}
+      if(title===null)this.store.setManualTitle(String(session.sessionId),null);
+      this.ok(response,this.store.session(String(session.sessionId)));return;
+    }
     // Take back “allow everything in this session” (granted by answering an approval with allow-session-all).
     if(request.method==="POST"&&action==="untrust"){
       if(!principal.write||!principal.id.startsWith("control:"))throw new ApiProblem(403,"forbidden","only the human changes a session's trust");

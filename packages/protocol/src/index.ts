@@ -273,6 +273,8 @@ export interface SessionState {
   historyCompleteness: "full" | "loaded-only" | "terminal-only";
   /** Memory seam: stable cross-machine project key (e.g. derived from git remote). */
   projectIdentity?: string;
+  /** Item ids of the tasks still running beside it (feature `task-inventory`); any other open task of the session is gone. */
+  openTaskItemIds?: string[];
 }
 
 /** A physical place where a presentation group can execute. */
