@@ -435,6 +435,25 @@ test("agent markdown renders GFM and CJK emphasis but keeps raw HTML as text", a
   assert.match(plain, /\*\*as typed\*\*/);
 });
 
+test("agent markdown links addresses in inline code, next to CJK text and bare hosts, but not file names", async () => {
+  const { createElement, renderToStaticMarkup } = await import("../apps/control-center/test/render.js");
+  const { MessageText } = await import("../apps/control-center/src/markdown.js");
+  const render = (text: string) => renderToStaticMarkup(createElement(MessageText, { markdown: true, text }));
+  const a = (href: string, inner: string) => `<a href="${href}" target="_blank" rel="noopener noreferrer">${inner}</a>`;
+  assert.equal(render("`https://ignis.example.com/` 和 `http://192.168.5.44:3002` 和 `dive.example.com`"), `<div class="message-text markdown"><p>`
+    + `${a("https://ignis.example.com/", "<code>https://ignis.example.com/</code>")} 和 ${a("http://192.168.5.44:3002", "<code>http://192.168.5.44:3002</code>")}`
+    + ` 和 ${a("https://dive.example.com", "<code>dive.example.com</code>")}</p></div>`);
+  assert.match(render("见https://example.com/a。"), new RegExp(`<p>见${a("https://example.com/a", "https://example.com/a")}。</p>`));
+  assert.match(render("地址：https://x.y/z，然后（https://x.y/w）"),
+    new RegExp(`<p>地址：${a("https://x.y/z", "https://x.y/z")}，然后（${a("https://x.y/w", "https://x.y/w")}）</p>`.replace(/[()]/g, "\\$&")));
+  assert.match(render("dive.example.com、jellyfin.example.com/web；192.168.5.44:3002。"), new RegExp(`<p>${a("https://dive.example.com", "dive.example.com")}、`
+    + `${a("https://jellyfin.example.com/web", "jellyfin.example.com/web")}；${a("http://192.168.5.44:3002", "192.168.5.44:3002")}。</p>`));
+  assert.match(render("(see https://a.com/x), www.foo.com and https://a.com/wiki/Foo_(bar)."), new RegExp(`\\(see ${a("https://a.com/x", "https://a.com/x")}\\), `
+    + `${a("https://www.foo.com", "www.foo.com")} and ${a("https://a.com/wiki/Foo_(bar)", "https://a.com/wiki/Foo_(bar)")}.`.replace(/_\(bar\)/g, "_\\(bar\\)")));
+  for (const text of ["v1.2.3 1.2.3 markdown.tsx package.json README.md foo.com.json 999.1.1.1", "`markdown.tsx` `v1.2.3` `see https://a.com`", "```\nhttps://a.com\n```"])
+    assert.doesNotMatch(render(text), /<a /, text);
+});
+
 test("the list asks for prompt order and shows the snapshot in it until the first page arrives", async t => {
   const older = { ...session, sessionId: "older", createdAt: 1, lastPromptAt: 50, updatedAt: 900 };
   const newer = { ...session, sessionId: "newer", createdAt: 2, lastPromptAt: 80, updatedAt: 100 };
