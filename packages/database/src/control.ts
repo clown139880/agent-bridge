@@ -1124,6 +1124,12 @@ export class AgentControlStore {
       size: Number(row.size), bytes: row.bytes as Uint8Array };
   }
 
+  /** The automation whose run started this session, if one did. */
+  automationOf(sessionId: string): string | undefined {
+    if (!this.automationRuns()) return undefined;
+    return (this.db.prepare("SELECT automation_id FROM automation_runs WHERE session_id=? LIMIT 1").get(sessionId) as { automation_id: string } | undefined)?.automation_id;
+  }
+
   private automationRunsTable = false;
   /** Whether automations keep their runs here (the table exists once Automations has started). */
   private automationRuns(): boolean {

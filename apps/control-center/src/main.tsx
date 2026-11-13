@@ -656,6 +656,8 @@ function Sessions({ control, state, banners }: { control: ControlState; state: V
         {state.workers.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}</select></label>
       <button type="button" className="sheet-item" onClick={() => { control.setFilters(state.query, state.workerFilter, !state.showAutomations); close(); void control.refresh(); }}>
         {state.showAutomations ? "隐藏定时任务开的会话" : "显示定时任务开的会话"}</button>
+      <button type="button" className="sheet-item" disabled={!sessions.some(s => !s.room && unreadCount(state, s) > 0)}
+        onClick={() => { close(); control.markSessionsRead(sessions.filter(s => !s.room)); }}>✓ 全部标为已读</button>
     </>} />
     {banners}
     <MemoryReviewPanel writable={state.writable} />
@@ -666,7 +668,8 @@ function Sessions({ control, state, banners }: { control: ControlState; state: V
       <div className="session-row-top"><Status status={s.status} /><span className="row-end">
         {s.automation && <span className="room-badge" title={`定时任务 ${s.automation} 开的会话`}>⏱ {s.automation}</span>}
         {s.room && <span className="room-badge" title={`回复发在 ${s.room.connector === "matrix" ? "Matrix" : s.room.connector} 房间「${s.room.name}」`}>#{s.room.name}</span>}
-        {unread > 0 && <span className="unread-badge" aria-label={`${unread} 条未读回复`}>{unread > 99 ? "99+" : unread}</span>}
+        {unread > 0 && <button type="button" className="unread-badge" title="标为已读" aria-label={`${unread} 条未读回复，点一下标为已读`}
+          onClick={e => { e.preventDefault(); e.stopPropagation(); haptic("tick"); control.markSessionsRead([s]); }}>{unread > 99 ? "99+" : unread}</button>}
         <time title="最后一条消息">{time(promptTime(s))}</time></span></div>
       <h2>{title(s)}</h2><p><Origin agent={s.agent} workerId={s.workerId} machineId={s.machineId}>{s.projectName}</Origin></p>
       {(s.pendingApprovalCount > 0 || s.pendingUserInputCount > 0) && <small className="pending-count">{s.pendingApprovalCount} 项审批 · {s.pendingUserInputCount} 项待答</small>}

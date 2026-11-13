@@ -154,12 +154,17 @@ export class ControlState {
   }
   /** The open conversation, while on screen, counts as read up to its current replies. */
   private markRead() {
-    const { route, session, reads } = this.state;
-    if (!this.visible || route.page !== "detail" || !session || session.sessionId !== route.id || session.messageCount === undefined
-      || reads[session.sessionId] === session.messageCount) return;
+    const { route, session } = this.state;
+    if (!this.visible || route.page !== "detail" || !session || session.sessionId !== route.id) return;
+    this.markSessionsRead([session]);
+  }
+  /** Count these sessions' replies as seen without opening them (read elsewhere, e.g. in the DSH client). */
+  markSessionsRead(sessions: Session[]) {
+    const reads = this.state.reads, fresh = sessions.filter(s => s.messageCount !== undefined && reads[s.sessionId] !== s.messageCount);
+    if (!fresh.length) return;
     const next = { ...reads };
-    delete next[session.sessionId]; // most recent last, so trimming drops the longest unseen
-    next[session.sessionId] = session.messageCount;
+    // most recent last, so trimming drops the longest unseen
+    for (const s of fresh) { delete next[s.sessionId]; next[s.sessionId] = s.messageCount!; }
     const keys = Object.keys(next);
     for (const key of keys.slice(0, Math.max(0, keys.length - MAX_READS))) delete next[key];
     this.state = { ...this.state, reads: next };

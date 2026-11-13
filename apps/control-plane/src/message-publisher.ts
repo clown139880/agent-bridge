@@ -164,7 +164,8 @@ export class AgentMessagePublisher {
         : detail && typeof detail === "object" && "message" in detail ? String(detail.message) : "";
       this.enqueue({ eventId: `ab:${item.eventId}`, type: `agent.${event.type}`,
         key: `agent:${session.id}:turn:${event.turnId ?? item.eventId}`, state: "message",
-        level: completed ? this.quiet(session.id, "notice") : "alert", title: `${completed ? "任务完成" : "任务失败"} · ${this.title(session.id)}`,
+        // An automation's own session reports through its run (deliveries, a failure alert): its turns stay quiet.
+        level: this.control.automationOf(session.id) ? "silent" : completed ? this.quiet(session.id, "notice") : "alert", title: `${completed ? "任务完成" : "任务失败"} · ${this.title(session.id)}`,
         body: summary, url: `/control/sessions/${encodeURIComponent(session.id)}`, createdAt: event.timestamp,
         expiresAt: event.timestamp + (completed ? 600_000 : 1_800_000),
         data: { sessionId: session.id, machineId: session.machineId, agent: session.agentType,
@@ -207,7 +208,8 @@ export class AgentMessagePublisher {
     const createdAt = active ? pending.requestedAt : pending.resolvedAt ?? this.now();
     this.enqueue({ eventId: `ab:${eventId}`, type: `agent.${approval ? "approval" : "input"}.${active ? "requested" : "resolved"}`,
       key: `agent:${session.id}:${approval ? "approval" : "input"}:${pending.id}`, state: active ? "active" : "resolved",
-      level: this.quiet(session.id, "alert"), title: `${active ? approval ? "需要审批" : "需要回答" : "已处理"} · ${this.title(session.id)}`,
+      // Only a request waiting for the human rings; its resolution just clears it.
+      level: active ? this.quiet(session.id, "alert") : "silent", title: `${active ? approval ? "需要审批" : "需要回答" : "已处理"} · ${this.title(session.id)}`,
       body: approval ? String(pending.request.summary ?? "") : (questions ?? []).map(q => q.question ?? "").join("\n"),
       url: `/control/sessions/${encodeURIComponent(session.id)}`, createdAt, expiresAt: createdAt + DAY,
       data: { sessionId: session.id, machineId: session.machineId, agent: session.agentType,
