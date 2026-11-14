@@ -28,7 +28,16 @@ export function reviewModel(options: ReviewModelOptions): ReviewModel {
     } catch (error) {
       if (!options.fallback) throw error;
       log.warn({ error: error instanceof Error ? error.message : String(error) }, "Reviewer model failed; trying the fallback");
-      return verdictOf(await tokensapi(options, options.fallback, system, user, maxTokens));
+      try {
+        return verdictOf(await tokensapi(options, options.fallback, system, user, maxTokens));
+      } catch (fallbackError) {
+        // Both failing to connect is a network blip, not a verdict: one more try before the human is asked,
+        // who may be away (an unattended run then waits out its timeout).
+        if (!/fetch failed|ECONNRESET|ETIMEDOUT|EAI_AGAIN|socket hang up/i.test(String((fallbackError as { cause?: unknown })?.cause ?? fallbackError))
+          && !/fetch failed/i.test(String(fallbackError))) throw fallbackError;
+        await new Promise((wake) => setTimeout(wake, 3_000));
+        return verdictOf(await tokensapi(options, options.model, system, user, maxTokens));
+      }
     }
   };
 }

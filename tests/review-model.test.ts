@@ -29,3 +29,20 @@ test("the reviewer asks its TokensAPI model, then the fallback when it fails or 
     await assert.rejects(reviewModel({ secrets, model: "deepseek-v4-flash", timeoutMs: 1_000 })("s", "u"), /no verdict/, "without a fallback the failure reaches the caller");
   } finally { globalThis.fetch = original; }
 });
+
+test("when both models fail to connect, the reviewer tries once more before giving up", async () => {
+  const original = globalThis.fetch, asked: string[] = [];
+  let down = 2;
+  globalThis.fetch = (async (_url: string | URL, init?: RequestInit) => {
+    asked.push(JSON.parse(String(init!.body)).model);
+    if (down-- > 0) throw new TypeError("fetch failed");
+    return reply('{"decision":"allow","reason":"只读"}');
+  }) as typeof fetch;
+  try {
+    const model = reviewModel({ secrets, model: "deepseek-v4-flash", fallback: "qwen3.8-flash-next", timeoutMs: 1_000 });
+    assert.deepEqual(await model("system", "user"), { decision: "allow", reason: "只读" });
+    assert.deepEqual(asked, ["deepseek-v4-flash", "qwen3.8-flash-next", "deepseek-v4-flash"]);
+    down = 3; asked.length = 0;
+    await assert.rejects(model("system", "user"), /fetch failed/, "still down: the human is asked");
+  } finally { globalThis.fetch = original; }
+});

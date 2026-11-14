@@ -47,7 +47,7 @@ claude 进程还会读取所在机器的 `~/.claude/settings.json`（Bridge 没�
 - 审批选项是 `allow` / `deny` / `allow-session` / `allow-always`。`allow-session` 把**工具名**加入 `session.sessionAllowedTools`：点一次之后，本会话里**所有** Bash 都不会再问，不区分具体命令。Control Center 点它不再弹确认框（clown 2026-10-24）。
 - `allow-always`（0.7.19 起，“永久允许”，只有 Claude 会话提供）：这台 Bridge 上的所有会话立刻放行这个工具名，并把同名规则追加进那台机器 `~/.claude/settings.json` 的 `permissions.allow`，之后启动的 claude 进程由原生规则放行。撤回就从那里删掉规则（Bridge 内存里的放行到重启为止）。会执行命令或改文件的工具（Bash、Monitor、Edit/Write/MultiEdit/NotebookEdit）不提供这个选项。`/mcp/bridge` 的 `approve` 不接受它：agent 不能替人做永久授权。
 - 非 Bash、非文件编辑的工具，审批摘要会带上调用参数（截到 400 字），不再只显示 “X requested”。
-- HAL 的 `/root/.claude/settings.json` 另外放行了只读工具 `Read`、`Grep`、`Glob`、`WebFetch`、`WebSearch` 和 `/mcp/bridge` 的只读工具 `mcp__bridge__sessions` / `session` / `pending` / `workers` / `wait`（clown 2026-10-24：读和回顾不需要逐个授权）。`create`、`turn`、`approve`、`answer`、`interrupt` 仍要审批。
+- HAL 的 `/root/.claude/settings.json` 另外放行了只读工具 `Read`、`Grep`、`Glob`、`WebFetch`、`WebSearch` 和 `/mcp/bridge` 的只读工具 `mcp__bridge__sessions` / `session` / `pending` / `workers` / `wait`，以及 `automation_list` / `automation_runs`（2026-11-14：crypto-invest-weekly 查自己上周的运行记录时审核员连不上模型，转给人后周六晚上没人回，40 分钟超时）（clown 2026-10-24：读和回顾不需要逐个授权）。`create`、`turn`、`approve`、`answer`、`interrupt` 仍要审批。
 - Codex app-server 的审批（`apps/bridge/src/app-server.ts`）由 Codex 自己的 approval policy 决定什么时候请求，Bridge 只负责转发。
   - 转发的请求：命令、文件改动、权限（`item/*/requestApproval`），以及 MCP 工具授权（`mcpServer/elicitation/request`，如 “Allow the memory MCP server to run tool …”）。0.7.30 之前 Bridge 不认 MCP 授权，它只出现在本地 TUI，远端看起来是工具一直在跑。
   - MCP 授权：`allow` 回 `accept`，`allow-session` 回 `accept` + `_meta.persist: "session"`（仅当 Codex 提供），`deny` 回 `decline`；Codex 的 “Always allow” 不经 Bridge 提供。要填表单字段或走 URL 的 elicitation 只能在 Codex 里完成，Bridge 只提供 `deny`。Codex Desktop 跟随会话的 MCP 授权仍需在 Desktop 里答。
@@ -138,3 +138,4 @@ Bridge 报上来的审批（Claude 的 Bash、MCP 工具等），在通知任何
 - 查看：`GET /api/v1/approval-remotes`；撤回（只有人的 token）：`DELETE /api/v1/approval-remotes?machineId=…&workspace=…&target=…`。
 - 会话页里的审批记录（0.7.75）：“请求审批”默认折叠成一行，点开看全文；审核员（或“本会话全部允许”、免确认的工具）放行的，“审批已处理”显示为“审核员通过”，附上它在干什么和理由（表 `approval_reviews`，留 30 天，控制面收到 Bridge 的 `approval.resolved` 时写进事件的 `review`）。
 - 会话在 Bridge 那边已经没了（比如在本机删掉了），或者审批在 Bridge 那边已经结束（0.7.77）：作答时 Bridge 回 “No adapter owns session …” 或 “… no longer pending”。之前控制面只放开锁，审批一直挂着，点多少次都失败，要等那台 Bridge 重连上报完整清单才清掉。现在收到这两种失败，就把这条审批记为 `expired`；会话没了时，该会话所有待处理一起过期。
+- 审核员模型（0.7.102）：主模型和备用模型都连不上（`fetch failed`、连接重置、超时）时，隔 3 秒再试一次主模型，再失败才转给人。没人值守的定时任务会话因此少等一次 40 分钟超时。
