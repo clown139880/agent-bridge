@@ -1,13 +1,18 @@
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
 import { AgentControlStore, ConversationMemoryStore, Store } from "../packages/database/src/index.js";
 import { ConversationMcpServer } from "../apps/control-plane/src/memory-mcp.js";
 
+// Every fixture's directory goes when the file's tests are done.
+const roots: string[] = [];
+after(() => { for (const root of roots) rmSync(root, { recursive: true, force: true }); });
+
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), "agent-bridge-memory-"));
+  roots.push(root);
   const store = new Store(join(root, "control.sqlite"));
   for (const id of ["windows", "hal"]) store.upsertMachine({ id, name: id, platform: "linux", hostname: id, capabilities: ["codex-cli"] });
   const now = Date.now() - 10_000;
