@@ -18,7 +18,7 @@ import type {
 } from "@agent-bridge/protocol";
 import { DEFAULT_EFFORT } from "@agent-bridge/protocol";
 import type { AgentAdapter, AdapterEmit, ResumeTarget } from "../agent-adapter.js";
-import type { AttachmentFetcher, FetchedAttachment } from "../attachments.js";
+import { attachedImages, fetchAttachments, withAttachedFiles, type AttachmentFetcher, type FetchedAttachment } from "../attachments.js";
 import { withSessionId, type MemoryBootstrapFetcher } from "../memory-bootstrap.js";
 import { resolveProjectPath, summarizePrompt } from "../app-server.js";
 import { deriveProjectIdentity } from "../path-utils.js";
@@ -202,12 +202,9 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     private readonly emit: AdapterEmit,
   ) {}
 
-  /** Non-image attachments fail explicitly; a partial batch must never run. */
-  private async materialize(attachments?: AttachmentRef[]): Promise<FetchedAttachment[]> {
-    if (!attachments?.length) return [];
-    if (!this.options.fetchAttachment) throw new Error("attachment_unavailable");
-    if (attachments.some(ref => !ref.mimeType.startsWith("image/"))) throw new Error("Claude currently accepts image attachments only");
-    return Promise.all(attachments.map(ref => this.options.fetchAttachment!(ref)));
+  /** Images go inline, other files by path (Read handles PDFs); a partial batch must never run. */
+  private materialize(attachments?: AttachmentRef[]): Promise<FetchedAttachment[]> {
+    return fetchAttachments(attachments, this.options.fetchAttachment);
   }
 
   async start(): Promise<void> {
@@ -1352,8 +1349,9 @@ export class ClaudeCodeAdapter implements AgentAdapter {
 
 // ---- module helpers ------------------------------------------------------
 
-function userMessage(text: string, images?: FetchedAttachment[]): SDKUserMessage {
-  if (!images?.length) return { type: "user", message: { role: "user", content: text } };
+function userMessage(prompt: string, attachments?: FetchedAttachment[]): SDKUserMessage {
+  const text = withAttachedFiles(prompt, attachments), images = attachedImages(attachments);
+  if (!images.length) return { type: "user", message: { role: "user", content: text } };
   const content = [
     ...(text ? [{ type: "text", text }] : []),
     ...images.map((image) => ({

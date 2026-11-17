@@ -76,8 +76,8 @@ SSE 直接派发到现有 node:http handler，不经过 Hono Response 或 fetch 
 | 新增 | `POST` | `/sessions/{sessionId}/turns` | 自动或显式 steer/start-new-turn |
 | 新增 | `POST` | `/sessions/{sessionId}/interrupt` | interrupt 当前 turn |
 | 新增 | `GET` | `/actions/{actionId}` | 查询异步写操作结果 |
-| 新增 | `POST` | `/attachments` | 上传受限图片并取得内容寻址引用 |
-| 新增 | `GET` | `/attachments/{attachmentId}` | 读取已上传图片；Bridge 也用注册 token 读取 |
+| 新增 | `POST` | `/attachments` | 上传附件（图片、PDF、文本、Office 文档、zip）并取得内容寻址引用 |
+| 新增 | `GET` | `/attachments/{attachmentId}` | 读取已上传附件；Bridge 也用注册 token 读取 |
 | 新增 | `GET` | `/runs` | 按关联字段查询历史 runs（只读） |
 | 新增 | `GET` | `/approvals` | 查询 pending/resolved approvals |
 | 新增 | `GET` | `/approvals/{approvalId}` | approval 详情 |
@@ -554,7 +554,7 @@ interface CreateSessionRequest {
   input?: string;            // optional; 非空时创建后立即 start turn
   model?: string;            // optional; only for the initial turn
   reasoningEffort?: string;  // optional; the session's starting effort
-  attachments?: AttachmentRef[]; // optional; images only
+  attachments?: AttachmentRef[]; // optional
   memoryScope?: string;      // optional (0.7.34); bootstrap this memory scope instead of resolving it from workspace
 }
 ```
@@ -637,7 +637,7 @@ interface SubmitTurnRequest {
   expectedTurnId?: string; // recommended for steer, forbidden for known-idle start
   model?: string; // optional; only for a new turn
   reasoningEffort?: string; // optional; only for a new turn
-  attachments?: AttachmentRef[]; // optional; images only
+  attachments?: AttachmentRef[]; // optional
 }
 ```
 
@@ -645,7 +645,9 @@ interface SubmitTurnRequest {
 effort 等级：Claude 接受 `low|medium|high|xhigh|max`（其他值以 `invalid_reasoning_effort` 失败），Codex 原样传给
 `turn/start.effort`。effort 在 session 内保持到下次修改；省略表示沿用当前 effort，`"default"` 表示恢复 agent 默认值
 （Claude 清除覆盖；Codex 没有清除覆盖的请求，`default` 等同于省略）。附件引用必须先由
-`POST /attachments` 创建；每条消息最多 8 张。DSH 原生 provider 支持没有可见文字的图片消息，但会为
+`POST /attachments` 创建；每条消息最多 8 个，单个不超过 15 MB。图片直接作为图片输入交给 agent；其他文件由 Bridge
+写入本机附件缓存（`~/.cache/agent-bridge/attachments/`），并在消息末尾附上路径，agent 用自己的工具读取（Claude 的
+Read 可读 PDF）。DSH 原生 provider 支持没有可见文字的图片消息，但会为
 Bridge 的非空 input 契约补入中性文本标记。
 
 服务端须在每 session 串行锁内，以 Bridge 返回的实时状态判定并执行：

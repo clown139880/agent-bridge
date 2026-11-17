@@ -90,7 +90,7 @@ Control Plane 主要变量：
 | `AGENT_SKILLS_REPO` | 共享技能库的 Git checkout（如 `/root/agent-skills`）；需要先启用 agent 记忆，不设则关闭。见 [`docs/agent-skills-design.zh.md`](docs/agent-skills-design.zh.md) |
 | `AGENT_SKILLS_LOCK` / `AGENT_SKILLS_ARCHIVE_DIR` / `AGENT_SKILLS_PUSH` | 技能库提交用的 flock 文件、归档目录（默认数据库旁的 `skills-archive`）、每次提交后是否后台推送（默认是，设 `false` 关闭） |
 | `CONTROL_ACTION_RETENTION_MS` | action/idempotency 保留期，默认 24 小时 |
-| `CONTROL_ATTACHMENT_RETENTION_MS` | 内容寻址图片附件保留期，默认 7 天 |
+| `CONTROL_ATTACHMENT_RETENTION_MS` | 内容寻址附件保留期，默认 7 天 |
 | `CONTROL_ACTION_TIMEOUT_MS` | Bridge action ack 超时，默认 30 秒 |
 | `CONTROL_SSE_KEEPALIVE_MS` / `CONTROL_SSE_POLL_MS` | SSE keepalive 与漏唤醒兜底轮询间隔（写入即唤醒，轮询默认 2 秒） |
 | `BRIDGE_LATEST_VERSION` | 可选覆盖；默认通告 Control Plane 自身版本（根 `package.json`）。需配置 `BRIDGE_UPDATE_SOURCE` 才会通告 |
@@ -199,7 +199,7 @@ CONTROL_API_WRITE_TOKEN=<读写长随机 token>
 | `POST /api/v1/sessions/:id/interrupt` | 按 `expectedTurnId` 中断当前 turn |
 | `GET/POST /api/v1/approvals*` | 查询并原子处理 approval |
 | `GET/POST /api/v1/user-input*` | 查询并提交结构化回答；secret input 必须在本机处理 |
-| `POST/GET /api/v1/attachments*` | 上传并读取受认证的内容寻址图片附件 |
+| `POST/GET /api/v1/attachments*` | 上传并读取受认证的内容寻址附件（图片、PDF、文档等） |
 | `GET /api/v1/stream` | 带 `Last-Event-ID` 补读的 SSE 状态流；`?sessionId=` 只推送该 session 的资源 |
 
 所有新增 POST 都必须发送 `Idempotency-Key`。异步响应为 ActionReceipt，可用

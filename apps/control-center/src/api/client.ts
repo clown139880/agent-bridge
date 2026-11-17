@@ -71,7 +71,7 @@ export function explain(error: unknown): string {
       approval_already_resolved: "该审批已被处理。", user_input_already_resolved: "该问题已被回答。",
       secret_input_unsupported: "保密输入请在本机回答。", invalid_choice: "该选项已不可用，请刷新。",
       model_not_applicable: "Agent 运行中不能切换模型或思考程度。", model_catalog_unavailable: "暂时读不到模型目录。",
-      unsupported_media_type: "仅支持 PNG、JPEG、WebP、GIF 图片。", body_too_large: "图片过大（上限 15 MB）。",
+      unsupported_media_type: "不支持此附件格式（支持图片、PDF、文本、Office 文档和 zip）。", body_too_large: "附件过大（上限 15 MB）。",
       capability_unavailable: "此 worker 不支持这项操作。", worker_offline: "Worker 已离线，请稍后刷新。",
     };
     return `${messages[error.code] ?? error.message}${error.requestId ? ` · ${error.requestId}` : ""}`;

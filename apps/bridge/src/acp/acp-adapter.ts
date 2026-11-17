@@ -15,7 +15,7 @@ import {
   type StructuredSessionEventType,
 } from "@agent-bridge/protocol";
 import type { AgentAdapter, AdapterEmit, ResumeTarget } from "../agent-adapter.js";
-import type { AttachmentFetcher, FetchedAttachment } from "../attachments.js";
+import { attachedImages, fetchAttachments, withAttachedFiles, type AttachmentFetcher, type FetchedAttachment } from "../attachments.js";
 import { resolveProjectPath, summarizePrompt } from "../app-server.js";
 import { deriveProjectIdentity } from "../path-utils.js";
 import { AcpConnection, AcpRpcError } from "./connection.js";
@@ -423,7 +423,8 @@ export class AcpAdapter implements AgentAdapter {
 
   // ---- turns -------------------------------------------------------------
 
-  private startPrompt(session: AcpSession, text: string, images: FetchedAttachment[]): string {
+  private startPrompt(session: AcpSession, prompted: string, attachments: FetchedAttachment[]): string {
+    const text = withAttachedFiles(prompted, attachments), images = attachedImages(attachments);
     if (images.length && !session.capabilities.promptCapabilities?.image) throw domainError("image_unsupported", "This worker does not support images; no input was sent");
     const turnId = this.startTurnEvents(session);
     const prompt: Array<Record<string, unknown>> = [{ type: "text", text }];
@@ -768,12 +769,9 @@ export class AcpAdapter implements AgentAdapter {
     });
   }
 
-  /** Fetch image attachments; whether they are sent depends on the agent's prompt capabilities. */
-  private async materialize(attachments?: AttachmentRef[]): Promise<FetchedAttachment[]> {
-    if (!attachments?.length) return [];
-    if (!this.options.fetchAttachment) throw new Error("attachment_unavailable");
-    if (attachments.some(ref => !ref.mimeType.startsWith("image/"))) throw new Error("This worker accepts image attachments only");
-    return Promise.all(attachments.map(ref => this.options.fetchAttachment!(ref)));
+  /** Images go inline when the agent accepts them, other files by path; a partial batch must never run. */
+  private materialize(attachments?: AttachmentRef[]): Promise<FetchedAttachment[]> {
+    return fetchAttachments(attachments, this.options.fetchAttachment);
   }
 
   private require(sessionId: string): AcpSession {

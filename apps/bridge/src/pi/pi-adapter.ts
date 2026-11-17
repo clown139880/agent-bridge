@@ -14,7 +14,7 @@ import type {
   StructuredSessionEventType,
 } from "@agent-bridge/protocol";
 import type { AgentAdapter, AdapterEmit, ResumeTarget } from "../agent-adapter.js";
-import type { AttachmentFetcher, FetchedAttachment } from "../attachments.js";
+import { attachedImages, fetchAttachments, withAttachedFiles, type AttachmentFetcher, type FetchedAttachment } from "../attachments.js";
 import { withSessionId, type MemoryBootstrapFetcher } from "../memory-bootstrap.js";
 import { resolveProjectPath, summarizePrompt } from "../app-server.js";
 import { deriveProjectIdentity } from "../path-utils.js";
@@ -524,7 +524,7 @@ export class PiAdapter implements AgentAdapter {
     if (session.activeTurnId) {
       // Active turn: steer instead of starting a parallel prompt. Model cannot
       // change mid-turn, matching the control-plane model_not_applicable guard.
-      this.sendCommand(session, { type: "steer", message: text, ...piImages(images) });
+      this.sendCommand(session, { type: "steer", ...piPrompt(text, images) });
       return;
     }
     this.applyModel(session, model);
@@ -533,7 +533,7 @@ export class PiAdapter implements AgentAdapter {
       // prompt still gets a turn id once get_state resolves.
       session.pendingTurnStart = true;
     }
-    this.sendCommand(session, { type: "prompt", message: text, ...piImages(images) });
+    this.sendCommand(session, { type: "prompt", ...piPrompt(text, images) });
   }
 
   /**
@@ -662,7 +662,7 @@ export class PiAdapter implements AgentAdapter {
     if (model) this.applyModel(session, model);
     if (!activeTurnId) this.startTurnEvents(session);
     const resolvedAction = activeTurnId ? "steer" : "start_turn";
-    this.sendCommand(session, { type: activeTurnId ? "steer" : "prompt", message: text, ...piImages(images) });
+    this.sendCommand(session, { type: activeTurnId ? "steer" : "prompt", ...piPrompt(text, images) });
     this.emitSessionEvent(session, "message.completed", `pi:${sessionId}:action:${actionId}:user`, { role: "user", text: truncate(text) });
     return { sessionId, turnId: session.activeTurnId, resolvedAction };
   }
@@ -700,12 +700,9 @@ export class PiAdapter implements AgentAdapter {
     return { sessionId };
   }
 
-  /** Fetch the image attachments pi can read; other files stay with the control plane. */
-  private async materialize(attachments?: AttachmentRef[]): Promise<FetchedAttachment[]> {
-    if (!attachments?.length) return [];
-    if (!this.options.fetchAttachment) throw new Error("attachment_unavailable");
-    if (attachments.some(ref => !ref.mimeType.startsWith("image/"))) throw new Error("This worker accepts image attachments only");
-    return Promise.all(attachments.map(ref => this.options.fetchAttachment!(ref)));
+  /** Images go inline, other files by path for pi's read tool; a partial batch must never run. */
+  private materialize(attachments?: AttachmentRef[]): Promise<FetchedAttachment[]> {
+    return fetchAttachments(attachments, this.options.fetchAttachment);
   }
 
   async approve(_sessionId: string, _approvalId: string, _choice: ApprovalChoice): Promise<void> {
@@ -921,9 +918,11 @@ function piToolSummary(name: string, args: Record<string, unknown>): string {
   return typeof target === "string" && target ? `${name} ${target}` : name;
 }
 
-/** pi's RPC `images` field: ImageContent blocks beside the prompt text. */
-function piImages(images?: FetchedAttachment[]): { images?: Array<{ type: "image"; data: string; mimeType: string }> } {
-  return images?.length ? { images: images.map((image) => ({ type: "image", data: image.base64, mimeType: image.mediaType })) } : {};
+/** pi's RPC prompt: the text with the paths of attached files, and ImageContent blocks in `images`. */
+function piPrompt(text: string, attachments?: FetchedAttachment[]): { message: string; images?: Array<{ type: "image"; data: string; mimeType: string }> } {
+  const images = attachedImages(attachments);
+  return { message: withAttachedFiles(text, attachments),
+    ...(images.length ? { images: images.map((image) => ({ type: "image" as const, data: image.base64, mimeType: image.mediaType })) } : {}) };
 }
 
 function truncate(text: string, limit = 4_000): string {
