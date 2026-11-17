@@ -24,6 +24,17 @@ metadata:
 
 不要擅自更换模型。拒绝违法、有害或明显不合规的生成请求。
 
+## 首选：中央工具库 `tokensapi.*`
+
+有 `tools` MCP（`tool_search` / `tool_call`）时，一律经它调用，不需要本机密钥；没有 `TOKENAPI_API_KEY` 不是不能生成的理由。
+
+- `tokensapi.generate_image`：`prompt`、`idempotency_key`（每次新生成用新值），可选 `aspect_ratio`、`n`、`reference_urls`（改图）。服务端默认等 45 秒，完成即返回 `urls`。
+- `tokensapi.generate_video`：`prompt`、`idempotency_key`，可选 `first_frame_url`、`last_frame_url`、`duration`（5/10）、`resolution`（480p/720p），立即返回 `task_id`。
+- `tokensapi.get_task`：`task_id`、`wait_seconds`（Codex 的 MCP 调用 60 秒超时，保持 45 以下），未完成就再调一次。
+- `tokensapi.create_upload`：本地参考图先拿预签名地址，按返回的 `required_headers` 把原始字节 PUT 到 `upload_url`，再把 `access_url` 当参考图。
+
+拿到 `urls` 立刻发给用户。只有在没有 `tools` MCP 的环境里，才按下面的 HTTP 流程直接调用（需要 `TOKENAPI_API_KEY`）。
+
 ## 工作流程
 
 **交付铁律：AIGC 生成成功的媒体，第一时间直接把结果 URL（S3 地址）发给用户，绝不下载到本地、绝不用 vision 模型去"分析/验证"后才交付。** Simon 明确纠正：不要"先看图再给"，要把生成结果第一时间给用户看。只有用户明确要求"先看看效果"或任务失败需诊断时，才去看图/落盘。

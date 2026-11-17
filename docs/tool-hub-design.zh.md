@@ -137,6 +137,21 @@ servers:
 - 失败（超时、HTTP 错误、缺密钥、参数不对）一律返回 `{unavailable: 原因}`，不猜；调用方按“没有判定”继续。
 - 用途：路由、过滤、门槛（例如定时任务里判断一条消息值不值得推送、agent 问人之前判断能不能自己查到）。按阈值行动，比如 0.8。
 
+## 4.8 出图与视频 tokensapi（0.7.103）
+
+内置工具 `tokensapi.*`，登记表里 `transport.builtin: tokensapi`。密钥只在 Control Plane（OpenBao `shared/tokensapi`），所以任何机器、任何运行时（Bridge 拉起的、桌面客户端自己开的）都能生成，不用各自配 `TOKENAPI_API_KEY`。起因：技能下发到了没有密钥的运行时，agent 看得到技能却用不了。
+
+| 工具 | 作用 |
+| --- | --- |
+| `generate_image` | `image2` 出图或改图（`reference_urls`），提交后在服务端等（默认 45 秒），完成就返回 `urls`，否则返回 `task_id` 和状态 |
+| `generate_video` | `minimax_h3` 文生视频或首尾帧生视频，固定带音频；要 1–11 分钟，默认立即返回 `task_id` |
+| `get_task` | 查询任务，可在服务端等 `wait_seconds`（最多 240） |
+| `create_upload` | 本地参考图的预签名上传地址；调用方自己 PUT 原始字节，不经 Control Plane 中转，地址里没有密钥 |
+
+- 默认等待 45 秒，是为了留在 Codex MCP 调用的 60 秒超时以内；Claude 等超时更长的客户端可以把 `wait_seconds` 调大。
+- `idempotency_key` 必填，原样作为 TokensAPI 的 `Idempotency-Key`，重试不会重复扣费。轮询中的 429、5xx 和网络错误按暂时失败重试，其他错误返回 TokensAPI 自己的错误类型（如 `TASK_NOT_FOUND`）。
+- 登记表配 `risk: { auto: ['*'] }`、`pinned: [_global]`（clown 2026-11-17：生成直接放行）。
+
 ## 5. 分期
 
 1. **`/mcp/tools` 与登记表**：代理调用、`tool_search`、风险档的确定性分类（auto 放行、human 问人，review 暂时也问人）。先接 comfyui、megumi-radio、Home Assistant 官方 MCP、call-bridge。

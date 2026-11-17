@@ -14,9 +14,9 @@
     },
     {
       "name": "tokensapi-aigc",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "files": {
-        "SKILL.md": "6c01b947ba8f2ba046e3e339525cb0d0e8693f6de9a4723d5f13b2d2f8915999",
+        "SKILL.md": "1940b245904d97f1ed08b0fc462d272b1201ce870be70951d51d873177e2f392",
         "agents/openai.yaml": "41a1cdd176e45db65a9c0e19717110537667067a0219d9f02c5b5bf3c684c323",
         "references/aspect-ratio-matching-2026-09-05.md": "7a5a7aba08cdcb563048cf4b7e5602afea82fb7e6ba3e27e2f69c5fa8c4799e5",
         "references/hermes-integration.md": "9bcb1bda848bff6ee4cd0fc870fada4df1eb46892d2809e756ec149106627f9e",

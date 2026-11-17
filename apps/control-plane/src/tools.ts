@@ -12,6 +12,7 @@ import { WEB_TOOLS, WebSearch, type SearchKind } from "./web-search.js";
 import { decide, DECIDE_TOOLS } from "./decide.js";
 import { CanvasError, type CanvasService } from "./canvas.js";
 import { CANVAS_TOOLS, canvasAuditArgs } from "./canvas-tools.js";
+import { TOKENSAPI_TOOLS, TokensApiError, tokensapiCall } from "./tokensapi-media.js";
 
 const log = pino({ name: "tools" });
 const IDLE_MS = 10 * 60_000;
@@ -150,6 +151,10 @@ export class ToolHub {
     if (canvas?.transport.builtin === "canvas" && this.options.canvas) tools.push(...CANVAS_TOOLS.map(tool => ({
       name: `canvas.${tool.tool}`, server: "canvas", tool: tool.tool, title: canvas.title,
       description: tool.description, inputSchema: tool.inputSchema, risk: riskOf(canvas, tool.tool) })));
+    const media = this.builtins.get("tokensapi");
+    if (media?.transport.builtin === "tokensapi") tools.push(...TOKENSAPI_TOOLS.map(tool => ({
+      name: `tokensapi.${tool.tool}`, server: "tokensapi", tool: tool.tool, title: media.title,
+      description: tool.description, inputSchema: tool.inputSchema, risk: riskOf(media, tool.tool) })));
     await Promise.all([...servers].map(async ([name, definition]) => {
       const cached = this.catalogs.get(name);
       if (cached && Date.now() - cached.at < CATALOG_MS) { tools.push(...cached.tools); return; }
@@ -194,9 +199,11 @@ export class ToolHub {
       return { content: [{ type: "text", text: JSON.stringify(await decide({ secrets: this.options.secrets, model: process.env.DECIDE_MODEL }, args)) }] };
     }
     const localCanvas = server === "canvas" && this.builtins.get(server)?.transport.builtin === "canvas" && this.options.canvas;
-    const definition = localCanvas ? this.builtins.get(server) : this.servers.get(server);
+    const localMedia = server === "tokensapi" && this.builtins.get(server)?.transport.builtin === "tokensapi";
+    const definition = localCanvas || localMedia ? this.builtins.get(server) : this.servers.get(server);
     if (!definition || !tool) throw new Error(`unknown tool ${name}; find tools with tool_search`);
     if (localCanvas && !CANVAS_TOOLS.some(item => item.tool === tool)) throw new Error(`unknown tool ${name}`);
+    if (localMedia && !TOKENSAPI_TOOLS.some(item => item.tool === tool)) throw new Error(`unknown tool ${name}`);
     const auditArgs = localCanvas ? canvasAuditArgs(args) : args;
     signal?.throwIfAborted();
     const execute = async () => {
@@ -208,13 +215,21 @@ export class ToolHub {
           return { isError: true, content: [{ type: "text", text: JSON.stringify({ error: error.code }) }] };
         }
       }
+      if (localMedia) {
+        try { return { content: [{ type: "text", text: JSON.stringify(await tokensapiCall({ secrets: this.options.secrets }, tool, args, signal)) }] }; }
+        catch (error) {
+          if (!(error instanceof TokensApiError)) throw error;
+          return { isError: true, content: [{ type: "text", text: JSON.stringify({ error: error.code, message: error.message }) }] };
+        }
+      }
       const { client } = await this.connect(server);
       return client.callTool({ name: tool, arguments: args }, undefined, { timeout: CALL_TIMEOUT_MS, signal });
     };
     const risk = riskOf(definition, tool);
     let advice: string | undefined;
     if (risk === "review" && this.options.reviewer) {
-      const described = localCanvas ? CANVAS_TOOLS.find(item => item.tool === tool) : this.catalogs.get(server)?.tools.find((item) => item.tool === tool);
+      const described = localCanvas ? CANVAS_TOOLS.find(item => item.tool === tool) : localMedia ? TOKENSAPI_TOOLS.find(item => item.tool === tool)
+        : this.catalogs.get(server)?.tools.find((item) => item.tool === tool);
       const verdict = await this.options.reviewer({ tool: name, title: definition.title, description: described?.description ?? "", args: auditArgs, caller })
         .catch((error: unknown) => ({ decision: "human" as const, reason: `审核失败：${error instanceof Error ? error.message : String(error)}` }));
       if (verdict.decision === "allow") {
