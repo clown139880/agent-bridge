@@ -1,0 +1,8 @@
+{
+  "targets": [
+    { "name": "wsl" },
+    { "name": "windows", "path": "/mnt/c/Users/<windows-user>/.codex/config.toml" },
+    { "name": "server", "ssh": "<server-ssh-alias>" },
+    { "name": "mac", "ssh": "<mac-ssh-alias>" }
+  ]
+}

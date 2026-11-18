@@ -267,6 +267,8 @@ codex --remote ws://127.0.0.1:4501
 source scripts/codex-remote.zsh
 ```
 
+从 WSL 一次更新多台机器的 Codex 默认模型，见[批量模型更新脚本](docs/codex-model-update.zh.md)。
+
 已经在没有 `--remote` 的情况下启动的 Codex 进程无法事后附加。
 
 ### Codex Desktop 完成后接力
