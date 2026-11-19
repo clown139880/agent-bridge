@@ -454,6 +454,10 @@ test("agent markdown links addresses in inline code, next to CJK text and bare h
     + `${a("https://www.foo.com", "www.foo.com")} and ${a("https://a.com/wiki/Foo_(bar)", "https://a.com/wiki/Foo_(bar)")}.`.replace(/_\(bar\)/g, "_\\(bar\\)")));
   for (const text of ["v1.2.3 1.2.3 markdown.tsx package.json README.md foo.com.json 999.1.1.1", "`markdown.tsx` `v1.2.3` `see https://a.com`", "```\nhttps://a.com\n```"])
     assert.doesNotMatch(render(text), /<a /, text);
+  const plain = renderToStaticMarkup(createElement(MessageText, { markdown: false,
+    text: "**出片** 🖼️ a.pnghttps://files.example.com/sd/x/a.png\n见192.168.5.44:3002。" }));
+  assert.equal(plain, `<div class="message-text">**出片** 🖼️ a.png<a class="message-link" href="https://files.example.com/sd/x/a.png" target="_blank" rel="noopener noreferrer">`
+    + `https://files.example.com/sd/x/a.png</a>\n见<a class="message-link" href="http://192.168.5.44:3002" target="_blank" rel="noopener noreferrer">192.168.5.44:3002</a>。</div>`);
 });
 
 test("the list asks for prompt order and shows the snapshot in it until the first page arrives", async t => {

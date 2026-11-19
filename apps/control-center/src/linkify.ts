@@ -9,8 +9,9 @@ const STOP = "\\s<>\"'`，。、；：！？（）【】《》「」『』“”
 const LABEL = "[a-z0-9](?:[a-z0-9-]*[a-z0-9])?";
 const PORT = "(?::\\d{1,5})?";
 const TAIL = `(?:[/?#][^${STOP}]*)?`;
-const END = "(?!\\.?[\\w-])"; // ends at a label boundary, not mid-word or before ".json"
-const ADDRESS = new RegExp(`(?<![\\w@./:-])(?:(https?://[^${STOP}]+)|((?:\\d{1,3}\\.){3}\\d{1,3})${PORT}${END}${TAIL}`
+const END = "(?!\\.?[\\w-]|://)"; // ends at a label boundary, not mid-word, before ".json" or inside "pnghttps://"
+// A scheme starts an address even when glued to the text before it ("a.pnghttps://..."); a bare host needs a boundary.
+const ADDRESS = new RegExp(`(https?://[^${STOP}]+)|(?<![\\w@./:-])(?:((?:\\d{1,3}\\.){3}\\d{1,3})${PORT}${END}${TAIL}`
   + `|(${LABEL}(?:\\.${LABEL})+)${PORT}${END}${TAIL})`, "giu");
 // Common TLDs; file extensions that are also TLDs (md, sh, rs, py, ...) are left out on purpose.
 const TLDS = new Set(["com", "net", "org", "io", "dev", "app", "ai", "co", "me", "cn", "xyz", "info", "site", "top",
