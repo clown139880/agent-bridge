@@ -691,6 +691,10 @@ export class AcpAdapter implements AgentAdapter {
   }
 
   /** Close the subprocess of sessions idle for `idleMs`; the next turn resumes them. Non-positive disables reaping. */
+  holdsSession(sessionId: string): boolean {
+    return this.sessions.has(sessionId);
+  }
+
   reapIdleSessions(idleMs: number): string[] {
     if (idleMs <= 0) return [];
     const now = Date.now();

@@ -1055,6 +1055,10 @@ export class ClaudeCodeAdapter implements AgentAdapter {
    * and must not be killed mid-task. A session with running background tasks is
    * never idle: killing its subprocess would kill them too.
    */
+  holdsSession(sessionId: string): boolean {
+    return this.sessions.has(sessionId);
+  }
+
   reapIdleSessions(idleMs: number): string[] {
     if (idleMs <= 0) return [];
     const now = Date.now();

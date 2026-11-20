@@ -73,6 +73,12 @@ export interface AgentAdapter {
    * its row and the next turn revives it via {@link resumeSession}.
    */
   reapIdleSessions?(idleMs: number): string[];
+  /**
+   * Whether the adapter still holds this session in memory. Per-session-process
+   * adapters drop a session when its process ends (interrupt kill, crash, reap),
+   * so a remembered owner can go stale; omitted means the owner is always right.
+   */
+  holdsSession?(sessionId: string): boolean;
 
   /** Full state snapshot for (re)connect. */
   stateSnapshot(): {

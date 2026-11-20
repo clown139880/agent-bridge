@@ -84,6 +84,20 @@ test("pi: a non-positive idle timeout disables reaping", async () => {
   assert.equal(adapter.stateSnapshot().sessions.length, 1);
 });
 
+test("pi: an idle process killed outside the Bridge drops its session so the next turn revives it", async () => {
+  const adapter = makePiAdapter();
+  const sessionId = await adapter.startSession("run-1", tmpdir());
+  await adapter.submitTurnAction("turn-1", sessionId, "hello", "start_turn");
+  await waitFor(() => emitMessages.some((m) => m.type === "agent.completed"));
+  assert.equal(adapter.holdsSession(sessionId), true);
+  const session = (adapter as unknown as { sessions: Map<string, { proc: { kill(signal: string): void } }> }).sessions.get(sessionId)!;
+  session.proc.kill("SIGKILL");
+  await waitFor(() => !adapter.holdsSession(sessionId));
+  assert.equal(adapter.stateSnapshot().sessions.length, 0);
+  await adapter.resumeSession(sessionId, tmpdir());
+  assert.equal(adapter.holdsSession(sessionId), true);
+});
+
 test("claude: reap closes idle sessions but spares active / waiting ones", () => {
   const events: BridgeToControlMessage[] = [];
   const adapter = new ClaudeCodeAdapter({ command: "", claudeHome: tmpdir(), allowedRoots: [tmpdir()], scanExisting: false }, (e) => events.push(e));

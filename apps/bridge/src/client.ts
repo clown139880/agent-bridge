@@ -209,7 +209,12 @@ export class BridgeClient {
   /** Adapter that genuinely holds this session in memory (owner map or snapshot scan), else undefined. */
   private ownedBy(sessionId: string): AgentAdapter | undefined {
     const owner = this.sessionOwner.get(sessionId);
-    if (owner && this.adapters.has(owner)) return this.adapters.get(owner)!;
+    const ownerAdapter = owner ? this.adapters.get(owner) : undefined;
+    if (ownerAdapter) {
+      if (ownerAdapter.holdsSession?.(sessionId) ?? true) return ownerAdapter;
+      // Its process ended and the adapter dropped it: forget the owner so a turn revives it.
+      this.sessionOwner.delete(sessionId);
+    }
     for (const [type, adapter] of this.adapters) {
       if (adapter.isReady() && adapter.stateSnapshot().sessions.some((s) => s.sessionId === sessionId)) {
         this.sessionOwner.set(sessionId, type);

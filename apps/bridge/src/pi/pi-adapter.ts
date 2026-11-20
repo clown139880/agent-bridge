@@ -609,10 +609,14 @@ export class PiAdapter implements AgentAdapter {
       session.rejectInit?.(new Error(`pi exited before the session initialized${output ? `: ${output}` : ""}`));
     }
     if (session.ended) return;
+    session.ended = true;
     if (session.activeTurnId) {
       const text = session.lastAssistantText;
       this.finishTurn(session, "failed", text ? truncate(text) : "pi process exited before the turn settled");
     }
+    // The process is gone, even when idle (killed outside the Bridge). Forget the
+    // session so the next turn revives it instead of writing into a dead stdin.
+    if (this.sessions.get(session.sessionId) === session) this.sessions.delete(session.sessionId);
   }
 
   private kill(session: PiSession): void {
@@ -801,6 +805,10 @@ export class PiAdapter implements AgentAdapter {
    * The pi session file survives, so a later turn revives it via resumeSession.
    * A non-positive `idleMs` disables reaping (keeps every process resident).
    */
+  holdsSession(sessionId: string): boolean {
+    return this.sessions.has(sessionId);
+  }
+
   reapIdleSessions(idleMs: number): string[] {
     if (idleMs <= 0) return [];
     const now = Date.now();
