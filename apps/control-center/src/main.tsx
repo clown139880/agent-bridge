@@ -4,6 +4,7 @@ import { ControlClient, explain } from "./api/client";
 import { BUILD_VERSION, newerBuild, runningEntry } from "./build";
 import { clearDetailStore, openDetailStore } from "./cache";
 import { haptic, SHARE_EVENT, takeShare } from "./native/uctw";
+import { softKeyboardShown, submitsOnEnter } from "./keys";
 import { MessageText } from "./markdown";
 import { AgentIcon, machineStyle, Origin } from "./identity";
 import { TOOL_TYPES } from "@agent-bridge/transcript";
@@ -83,8 +84,7 @@ const pasteImages = (control: ControlState, id: string) => (e: React.ClipboardEv
   if (files.length) { e.preventDefault(); control.addFiles(id, files); }
 };
 const submitWithKeyboard = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-  if (e.key !== "Enter" || !(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey
-    || e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
+  if (!submitsOnEnter(e.nativeEvent, softKeyboardShown())) return;
   e.preventDefault();
   if (e.repeat) return;
   const form = e.currentTarget.form, submit = form?.querySelector<HTMLButtonElement>('button[type="submit"]');
@@ -713,7 +713,7 @@ function NewSession({ control, state, banners }: { control: ControlState; state:
       <datalist id="recent-spaces">{allSpaces.map(s => <option key={s.path} value={s.path}>{s.name}</option>)}</datalist>
       {worker && quickSpaces.length > 0 && <div className="workspace-choices">{quickSpaces.slice(0, 6).map(s => <button type="button" key={s.path} onClick={() => setWorkspace(s.path)}>{s.name}</button>)}</div>}
       {workspace && !absolute && <p className="hint">请使用目标机器上的绝对路径。</p>}
-      <label htmlFor="first-message">第一条消息 <span className="muted">（可选）</span></label><textarea id="first-message" rows={6} value={input} onChange={e => control.setDraft("new", e.target.value)} onPaste={pasteImages(control, "new")} onKeyDown={submitWithKeyboard} aria-keyshortcuts="Control+Enter Meta+Enter" placeholder="想让 Agent 做什么？" />
+      <label htmlFor="first-message">第一条消息 <span className="muted">（可选）</span></label><textarea id="first-message" rows={6} value={input} onChange={e => control.setDraft("new", e.target.value)} onPaste={pasteImages(control, "new")} onKeyDown={submitWithKeyboard} aria-keyshortcuts="Enter Control+Enter Meta+Enter" placeholder="想让 Agent 做什么？" />
       <AttachmentList control={control} state={state} id="new" />
       <div><AttachButton control={control} id="new" disabled={!state.writable} /></div>
       {(state.uploads.new?.length ?? 0) > 0 && !input.trim() && <p className="hint">图片需随第一条消息发送。</p>}
@@ -881,7 +881,7 @@ function Detail({ control, state, id, banners }: { control: ControlState; state:
       <div className="composer-row">
         <AttachButton control={control} id={id} disabled={!state.writable} compact />
         <label className="sr-only" htmlFor="message">发送消息</label>
-        <textarea id="message" ref={message} rows={1} value={draft} onChange={e => control.setDraft(id, e.target.value)} onPaste={pasteImages(control, id)} onKeyDown={submitWithKeyboard} aria-keyshortcuts="Control+Enter Meta+Enter" title="Enter 换行 · Ctrl / ⌘ + Enter 发送" placeholder={blocked ? "请先处理审批或问题" : running ? "追加指令…" : "继续这段对话…"} />
+        <textarea id="message" ref={message} rows={1} value={draft} onChange={e => control.setDraft(id, e.target.value)} onPaste={pasteImages(control, id)} onKeyDown={submitWithKeyboard} aria-keyshortcuts="Enter Control+Enter Meta+Enter" title="外接键盘：Enter 发送 · Shift + Enter 换行；屏幕键盘：回车换行，点按钮发送" placeholder={blocked ? "请先处理审批或问题" : running ? "追加指令…" : "继续这段对话…"} />
         {running && <button type="button" className="interrupt icon-button" aria-label="中断当前回合" title="中断" disabled={!canInterrupt} onClick={interrupt}>■</button>}
         <button type="submit" className="primary send" disabled={!canOperate || !draft.trim() || blocked || uploading(state, id) || Boolean(running && session.activeTurnId && !caps.includes("turn-steer")) || !["idle", "active"].includes(session.status)}>{running ? "追加" : "发送"}</button>
       </div>

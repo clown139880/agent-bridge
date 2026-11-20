@@ -519,3 +519,19 @@ test("unread badges count Agent replies since this device last showed the sessio
   (state as unknown as { patch(v: object): void }).patch({ session: { ...listed, messageCount: 8 } });
   assert.equal(state.snapshot().reads.s, 6);
 });
+
+test("Enter sends from a hardware keyboard and adds a line from an on-screen one", async () => {
+  const { submitsOnEnter } = await import("../apps/control-center/src/keys.js");
+  const key = { key: "Enter", code: "Enter", keyCode: 13, isComposing: false, ctrlKey: false, metaKey: false, altKey: false, shiftKey: false };
+  assert.equal(submitsOnEnter(key, false), true);
+  assert.equal(submitsOnEnter({ ...key, code: "NumpadEnter" }, false), true);
+  assert.equal(submitsOnEnter({ ...key, shiftKey: true }, false), false);
+  assert.equal(submitsOnEnter({ ...key, code: "" }, false), false, "on-screen keyboards send no key code");
+  assert.equal(submitsOnEnter(key, true), false, "an on-screen keyboard is showing");
+  assert.equal(submitsOnEnter({ ...key, code: "", ctrlKey: true }, true), true);
+  assert.equal(submitsOnEnter({ ...key, metaKey: true }, false), true);
+  assert.equal(submitsOnEnter({ ...key, isComposing: true }, false), false);
+  assert.equal(submitsOnEnter({ ...key, keyCode: 229 }, false), false);
+  assert.equal(submitsOnEnter({ ...key, altKey: true }, false), false);
+  assert.equal(submitsOnEnter({ ...key, key: "a", code: "KeyA" }, false), false);
+});
