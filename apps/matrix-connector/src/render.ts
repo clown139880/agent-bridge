@@ -6,7 +6,7 @@ export const NUMBER_KEYS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣
 
 /** Markdown to a Matrix message, inside `threadId`'s thread when given. */
 export function message(text: string, threadId = "", msgtype: "m.text" | "m.notice" = "m.text", note?: string): Content {
-  let html = sanitize(marked.parse(text, { async: false, gfm: true }), {
+  let html = sanitize(marked.parse(text, { async: false, gfm: true, breaks: true }), {
     allowedTags: ["p", "br", "strong", "em", "del", "blockquote", "pre", "code", "ul", "ol", "li", "a", "h1", "h2", "h3", "h4",
       "table", "thead", "tbody", "tr", "th", "td", "hr"],
     allowedAttributes: { a: ["href", "title"], code: ["class"] }, allowedSchemes: ["http", "https", "mailto", "matrix"],

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { MatrixConnector } from "../apps/matrix-connector/src/connector.js";
 import { ControlError } from "../apps/matrix-connector/src/control.js";
-import { approvalParts, codeBlock, command, footer, withoutMention } from "../apps/matrix-connector/src/render.js";
+import { approvalParts, codeBlock, command, footer, message, withoutMention } from "../apps/matrix-connector/src/render.js";
 
 const config = { homeserver: "https://m.example", userId: "@bot:example.org", allowedUsers: ["@me:example.org"],
   controlUrl: "http://cp", controlToken: "t", stateFile: "/dev/null" };
@@ -52,6 +52,11 @@ function harness() {
     connector.receive("!room:example.org", { event_id: `$in${++eventIds}`, sender, type: "m.room.message", content: { msgtype: "m.text", body, ...extra } });
   return { connector, sent, calls, sessions, bindings, notices, text };
 }
+
+test("single line breaks stay line breaks, so a URL on its own line is not glued to the text above", () => {
+  const { formatted_body } = message("🖼️ a.png\nhttps://files.example.com/a.png\n\n```\nx\ny\n```");
+  assert.match(String(formatted_body), /^<p>🖼️ a.png<br \/><a href="https:\/\/files.example.com\/a.png">https:\/\/files.example.com\/a.png<\/a><\/p>\n<pre><code>x\ny\n<\/code><\/pre>/);
+});
 
 test("commands and mention text parse like the client sends them", () => {
   assert.deepEqual(command("!new claude"), { name: "new", args: ["claude"] });
