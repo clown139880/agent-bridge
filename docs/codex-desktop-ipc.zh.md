@@ -18,6 +18,8 @@
 
 已由本进程识别为桌面所有的会话，桌面断线后保持归属，不自动切换 writer。快照版本不兼容或缺少快照时拒绝发送。补丁序号不连续会重新订阅完整快照。写入后断线/超时报告 `desktop_outcome_unknown`，禁止自动重发；先查看会话，确认结果后再决定下一步。桌面会话删除暂需在 Codex Desktop 中操作。
 
+**Codex Desktop 26.1117 起不再提供 `codex-ipc`，本路由失效**：桌面已打开的会话回退到 App Server 后报 `already has an active writer`。现状、上游 issue 和同类项目见 [codex-desktop-ipc-community.zh.md](codex-desktop-ipc-community.zh.md)。
+
 这是桌面的内部 IPC 协议，当前验证版本为 Windows Codex 26.1021.3705.0，快照版本 11。桌面升级后应验证兼容性；`CODEX_DESKTOP_IPC=false` 可关闭此路由，但旧 App Server 仍无法写入桌面持有的会话。
 
 ## 验证
